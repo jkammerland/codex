@@ -1337,6 +1337,17 @@
       },
       "type": "object"
     },
+    "SecurityConfigToml": {
+      "additionalProperties": false,
+      "description": "Security settings loaded from config.toml. Fields are optional so we can apply defaults.",
+      "properties": {
+        "process_hardening_disable": {
+          "description": "When `true`, disables process hardening for this installation.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ServiceTier": {
       "enum": [
         "fast",
@@ -2146,6 +2157,15 @@
         }
       ],
       "description": "Sandbox configuration to apply if `sandbox` is `WorkspaceWrite`."
+    },
+    "security": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SecurityConfigToml"
+        }
+      ],
+      "default": null,
+      "description": "Security settings."
     },
     "service_tier": {
       "allOf": [

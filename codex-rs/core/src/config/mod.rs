@@ -42,6 +42,7 @@ use codex_config::types::OtelConfigToml;
 use codex_config::types::OtelExporterKind;
 use codex_config::types::PluginConfig;
 use codex_config::types::SandboxWorkspaceWrite;
+use codex_config::types::SecurityConfigToml;
 use codex_config::types::ShellEnvironmentPolicy;
 use codex_config::types::ShellEnvironmentPolicyToml;
 use codex_config::types::SkillsConfig;
@@ -1178,6 +1179,12 @@ pub struct ConfigToml {
     pub default_permissions: Option<String>,
 
     /// Named permissions profiles.
+
+    /// Security settings.
+    #[serde(default)]
+    pub security: Option<SecurityConfigToml>,
+
+    /// Nested permissions settings.
     #[serde(default)]
     pub permissions: Option<PermissionsToml>,
 

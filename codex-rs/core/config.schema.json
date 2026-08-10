@@ -3172,6 +3172,7 @@
         },
         "tool_timeout_sec": {
           "default": null,
+          "description": "Default timeout for MCP tool calls initiated via this server. Set to zero to disable the tool-call deadline for servers with long-running tools.",
           "format": "double",
           "type": "number"
         },

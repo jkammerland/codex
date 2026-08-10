@@ -4595,6 +4595,22 @@ fn mcp_init_error_display_includes_startup_timeout_hint() {
     }
 }
 
+#[test]
+fn configured_tool_timeout_supports_explicit_unbounded_mode() {
+    assert_eq!(
+        [
+            configured_tool_timeout(None),
+            configured_tool_timeout(Some(Duration::from_secs(17))),
+            configured_tool_timeout(Some(Duration::ZERO)),
+        ],
+        [
+            Some(DEFAULT_TOOL_TIMEOUT),
+            Some(Duration::from_secs(17)),
+            None,
+        ]
+    );
+}
+
 fn reusable_server_config(url: &str) -> McpServerConfig {
     McpServerConfig {
         auth: Default::default(),
@@ -4680,7 +4696,7 @@ async fn manager_with_reusable_ready_server(
             }),
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(config),
-            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
+            tool_timeout: configured_tool_timeout(config.tool_timeout_sec),
             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
         },
     );
@@ -4830,7 +4846,7 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
             }),
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(&config),
-            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
+            tool_timeout: configured_tool_timeout(config.tool_timeout_sec),
             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
         },
     );

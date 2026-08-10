@@ -245,7 +245,8 @@ pub struct McpServerConfig {
     )]
     pub startup_timeout_sec: Option<Duration>,
 
-    /// Default timeout for MCP tool calls initiated via this server.
+    /// Default timeout for MCP tool calls initiated via this server. Set to zero
+    /// to disable the tool-call deadline for servers with long-running tools.
     #[serde(default, with = "option_duration_secs")]
     pub tool_timeout_sec: Option<Duration>,
 
@@ -362,6 +363,8 @@ pub struct RawMcpServerConfig {
     pub startup_timeout_sec: Option<f64>,
     #[serde(default)]
     pub startup_timeout_ms: Option<u64>,
+    /// Default timeout for MCP tool calls initiated via this server. Set to zero
+    /// to disable the tool-call deadline for servers with long-running tools.
     #[serde(default, with = "option_duration_secs")]
     #[schemars(with = "Option<f64>")]
     pub tool_timeout_sec: Option<Duration>,

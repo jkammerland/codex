@@ -24,6 +24,7 @@ pub use tool_catalog::tool_is_model_visible;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -71,6 +72,7 @@ use tracing::warn;
 pub(crate) struct McpServerConnection {
     identity: Option<McpServerConnectionIdentity>,
     client: AsyncManagedClient,
+    shutdown_started: AtomicBool,
 }
 
 fn configured_tool_timeout(timeout: Option<Duration>) -> Option<Duration> {
@@ -82,6 +84,14 @@ fn configured_tool_timeout(timeout: Option<Duration>) -> Option<Duration> {
 }
 
 impl McpServerConnection {
+    fn new(identity: Option<McpServerConnectionIdentity>, client: AsyncManagedClient) -> Self {
+        Self {
+            identity,
+            client,
+            shutdown_started: AtomicBool::new(false),
+        }
+    }
+
     async fn reusable_client(
         &self,
         desired: &McpServerConnectionIdentity,
@@ -114,6 +124,9 @@ impl McpServerConnection {
     }
 
     async fn shutdown(&self) {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.client.shutdown().await;
     }
 
@@ -127,6 +140,20 @@ impl McpServerConnection {
 impl Drop for McpServerConnection {
     fn drop(&mut self) {
         self.client.cancel_token.cancel();
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let client = self.client.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!(
+                "dropping an MCP connection outside a Tokio runtime; transport cleanup is unproven"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            client.shutdown().await;
+        });
     }
 }
 
@@ -405,10 +432,10 @@ impl McpConnectionSet {
             servers.insert(
                 server_name.clone(),
                 McpServerView {
-                    connection: Arc::new(McpServerConnection {
-                        identity: Some(connection_identity),
-                        client: async_managed_client.clone(),
-                    }),
+                    connection: Arc::new(McpServerConnection::new(
+                        Some(connection_identity),
+                        async_managed_client.clone(),
+                    )),
                     metadata,
                     tool_filter: configured_tool_filter,
                     tool_timeout: configured_tool_timeout,

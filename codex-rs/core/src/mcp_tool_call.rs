@@ -548,6 +548,13 @@ async fn handle_approved_mcp_tool_call(
         },
     ))
     .await;
+    if result.is_err() && prepared_call.transport_is_closed().await {
+        // Do not retry an ambiguous tool call: the server may have executed it
+        // before the transport closed. Publish fresh connections for the next
+        // call instead, and let this call report its original failure.
+        sess.services.mcp_runtime.reconnect_on_next_refresh();
+        sess.request_mcp_runtime_refresh();
+    }
     if let Err(error) = &result {
         tracing::warn!("MCP tool call error: {error:?}");
     }

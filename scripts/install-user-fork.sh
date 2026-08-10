@@ -5,7 +5,6 @@ set -eu
 FORK_MARKER="+jkammerland.mcp.1"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-CARGO_MANIFEST="$REPO_ROOT/codex-rs/Cargo.toml"
 BUILT_CODEX="$REPO_ROOT/codex-rs/target/release/codex"
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -31,7 +30,10 @@ if [ ! -x "$INSTALLED_CODEX" ]; then
   exit 1
 fi
 
-cargo build --manifest-path "$CARGO_MANIFEST" --release --bin codex
+(
+  cd "$REPO_ROOT/codex-rs"
+  cargo build --release --bin codex
+)
 
 if [ ! -x "$BUILT_CODEX" ]; then
   echo "Release build did not produce: $BUILT_CODEX" >&2

@@ -24,6 +24,7 @@ pub use tool_catalog::tool_is_model_visible;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -80,6 +81,7 @@ pub(crate) struct McpServerConnection {
     identity: Option<McpServerConnectionIdentity>,
     client: AsyncManagedClient,
     startup_trigger: Option<watch::Sender<bool>>,
+    shutdown_started: AtomicBool,
     _diagnostics_guard: GaugeGuard,
 }
 
@@ -137,6 +139,9 @@ impl McpServerConnection {
     }
 
     async fn shutdown(&self) {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.client.shutdown().await;
     }
 
@@ -156,6 +161,20 @@ impl McpServerConnection {
 impl Drop for McpServerConnection {
     fn drop(&mut self) {
         self.client.cancel_token.cancel();
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let client = self.client.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!(
+                "dropping an MCP connection outside a Tokio runtime; transport cleanup is unproven"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            client.shutdown().await;
+        });
     }
 }
 
@@ -542,6 +561,7 @@ impl McpConnectionSet {
                         identity: Some(connection_identity),
                         client: async_managed_client.clone(),
                         startup_trigger,
+                        shutdown_started: AtomicBool::new(false),
                         _diagnostics_guard: LIVE_CONNECTIONS.track(),
                     }),
                     metadata,

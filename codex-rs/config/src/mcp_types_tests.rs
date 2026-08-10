@@ -538,6 +538,24 @@ fn serialize_round_trips_server_config_with_parallel_tool_calls() {
 }
 
 #[test]
+fn serialize_round_trips_zero_tool_timeout() {
+    let cfg: McpServerConfig = toml::from_str(
+        r#"
+            command = "echo"
+            tool_timeout_sec = 0.0
+        "#,
+    )
+    .expect("should deserialize an unbounded MCP tool timeout");
+
+    assert_eq!(cfg.tool_timeout_sec, Some(Duration::ZERO));
+    let serialized = toml::to_string(&cfg).expect("should serialize MCP config");
+    assert!(serialized.contains("tool_timeout_sec = 0.0"));
+    let round_tripped: McpServerConfig =
+        toml::from_str(&serialized).expect("should deserialize serialized MCP config");
+    assert_eq!(round_tripped, cfg);
+}
+
+#[test]
 fn deserialize_ignores_unknown_server_fields() {
     let cfg: McpServerConfig = toml::from_str(
         r#"

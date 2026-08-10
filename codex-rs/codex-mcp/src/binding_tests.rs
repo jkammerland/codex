@@ -266,8 +266,10 @@ async fn prepared_call_does_not_reroute_after_captured_connection_closes() {
     )
     .await;
     assert!(!Arc::ptr_eq(&old.client, &new.client));
+    assert!(!old_call.transport_is_closed().await);
 
     old.client.shutdown().await;
+    assert!(old_call.transport_is_closed().await);
 
     let error = old_call
         .call(

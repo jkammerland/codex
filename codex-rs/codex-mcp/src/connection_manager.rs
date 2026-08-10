@@ -90,6 +90,14 @@ pub(crate) struct McpServerConnection {
     _diagnostics_guard: GaugeGuard,
 }
 
+fn configured_tool_timeout(timeout: Option<Duration>) -> Option<Duration> {
+    match timeout {
+        Some(timeout) if timeout.is_zero() => None,
+        Some(timeout) => Some(timeout),
+        None => Some(DEFAULT_TOOL_TIMEOUT),
+    }
+}
+
 impl McpServerConnection {
     async fn reusable_client(
         &self,
@@ -315,11 +323,8 @@ impl McpConnectionSet {
             let startup_timeout = configured_config
                 .startup_timeout_sec
                 .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
-            let configured_tool_timeout = Some(
-                configured_config
-                    .tool_timeout_sec
-                    .unwrap_or(DEFAULT_TOOL_TIMEOUT),
-            );
+            let configured_tool_timeout =
+                configured_tool_timeout(configured_config.tool_timeout_sec);
             let resolved_environment =
                 runtime_context.resolve_server_environment(&server_name, &configured_config);
             // For built-in Codex Apps, `CODEX_CONNECTORS_TOKEN` is a debug

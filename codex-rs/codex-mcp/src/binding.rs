@@ -292,6 +292,11 @@ impl PreparedMcpCall {
         Ok(self.client.server_supports_sandbox_state_meta_capability)
     }
 
+    /// Returns whether the exact transport captured for this call has closed.
+    pub async fn transport_is_closed(&self) -> bool {
+        self.client.client.is_closed().await
+    }
+
     pub async fn call(
         &self,
         arguments: Option<JsonValue>,

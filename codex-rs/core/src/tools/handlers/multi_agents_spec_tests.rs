@@ -390,17 +390,13 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
 }
 
 #[test]
-fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
+fn wait_agent_tool_v2_uses_event_only_summary_output() {
     let ToolSpec::Function(ResponsesApiTool {
         description,
         parameters,
         output_schema,
         ..
-    }) = create_wait_agent_tool_v2(WaitAgentTimeoutOptions {
-        default_timeout_ms: 30_000,
-        min_timeout_ms: 10_000,
-        max_timeout_ms: 3_600_000,
-    })
+    }) = create_wait_agent_tool_v2()
     else {
         panic!("wait_agent should be a function tool");
     };
@@ -413,23 +409,18 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
         .as_ref()
         .expect("wait_agent should use object params");
     assert!(!properties.contains_key("targets"));
-    assert!(properties.contains_key("timeout_ms"));
-    assert!(description.contains(
-        "Does not return the content; returns either a summary of which agents have updates (if any)"
-    ));
-    assert_eq!(
-        properties
-            .get("timeout_ms")
-            .and_then(|schema| schema.description.as_deref()),
-        Some("Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.")
+    assert!(properties.is_empty());
+    assert!(
+        description
+            .contains("Does not return the content; returns a short summary when activity arrives")
     );
     assert_eq!(parameters.required.as_ref(), None);
+    let output_schema = output_schema.expect("wait output schema");
     assert_eq!(
-        output_schema.expect("wait output schema")["properties"]["message"]["description"],
-        json!(
-            "Brief wait summary without the agent's final content, including any timeout adjustment."
-        )
+        output_schema["properties"]["message"]["description"],
+        json!("Brief wait summary without the agent's final content.")
     );
+    assert_eq!(output_schema["required"], json!(["message"]));
 }
 
 #[test]

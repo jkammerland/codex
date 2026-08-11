@@ -16,6 +16,7 @@ use crate::RuntimeResponse;
 use crate::ToolDefinition;
 use crate::WaitOutcome;
 use crate::WaitRequest;
+use crate::YieldReason;
 
 /// The per-cell execution limits carried by a V1 session-open request.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -318,6 +319,8 @@ pub enum WireRuntimeResponse {
     Yielded {
         cell_id: WireCellId,
         content_items: Vec<WireContentItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        yield_reason: Option<YieldReason>,
     },
     Terminated {
         cell_id: WireCellId,
@@ -332,13 +335,35 @@ pub enum WireRuntimeResponse {
 
 impl From<RuntimeResponse> for WireRuntimeResponse {
     fn from(value: RuntimeResponse) -> Self {
+        Self::from_runtime_response(value, YieldReasonEncoding::Omit)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum YieldReasonEncoding {
+    Omit,
+    Include,
+}
+
+impl WireRuntimeResponse {
+    /// Converts a runtime response while retaining the negotiated yield reason field.
+    pub fn from_runtime_response_with_yield_reason(value: RuntimeResponse) -> Self {
+        Self::from_runtime_response(value, YieldReasonEncoding::Include)
+    }
+
+    fn from_runtime_response(value: RuntimeResponse, encoding: YieldReasonEncoding) -> Self {
         match value {
             RuntimeResponse::Yielded {
                 cell_id,
                 content_items,
+                reason,
             } => Self::Yielded {
                 cell_id: cell_id.into(),
                 content_items: content_items.into_iter().map(Into::into).collect(),
+                yield_reason: match encoding {
+                    YieldReasonEncoding::Omit => None,
+                    YieldReasonEncoding::Include => Some(reason),
+                },
             },
             RuntimeResponse::Terminated {
                 cell_id,
@@ -366,9 +391,11 @@ impl From<WireRuntimeResponse> for RuntimeResponse {
             WireRuntimeResponse::Yielded {
                 cell_id,
                 content_items,
+                yield_reason,
             } => Self::Yielded {
                 cell_id: cell_id.into(),
                 content_items: content_items.into_iter().map(Into::into).collect(),
+                reason: yield_reason.unwrap_or_default(),
             },
             WireRuntimeResponse::Terminated {
                 cell_id,
@@ -403,6 +430,20 @@ impl From<WaitOutcome> for WireWaitOutcome {
         match value {
             WaitOutcome::LiveCell(response) => Self::LiveCell(response.into()),
             WaitOutcome::MissingCell(response) => Self::MissingCell(response.into()),
+        }
+    }
+}
+
+impl WireWaitOutcome {
+    /// Converts a wait outcome while retaining the negotiated yield reason field.
+    pub fn from_wait_outcome_with_yield_reason(value: WaitOutcome) -> Self {
+        match value {
+            WaitOutcome::LiveCell(response) => Self::LiveCell(
+                WireRuntimeResponse::from_runtime_response_with_yield_reason(response),
+            ),
+            WaitOutcome::MissingCell(response) => Self::MissingCell(
+                WireRuntimeResponse::from_runtime_response_with_yield_reason(response),
+            ),
         }
     }
 }

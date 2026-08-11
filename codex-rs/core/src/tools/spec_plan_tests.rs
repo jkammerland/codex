@@ -983,8 +983,8 @@ async fn shell_family_registers_only_unified_exec_tools() {
     })
     .await;
 
-    plan.assert_visible_contains(&["exec_command", "write_stdin"]);
-    plan.assert_registered_contains(&["exec_command", "write_stdin"]);
+    plan.assert_visible_contains(&["exec_command", "wait_process", "write_stdin"]);
+    plan.assert_registered_contains(&["exec_command", "wait_process", "write_stdin"]);
     assert!(plan.has_terminal_controls);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
 }
@@ -1121,8 +1121,8 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
         );
     })
     .await;
-    remote_environment.assert_visible_lacks(&["exec_command", "write_stdin"]);
-    remote_environment.assert_registered_lacks(&["exec_command", "write_stdin"]);
+    remote_environment.assert_visible_lacks(&["exec_command", "wait_process", "write_stdin"]);
+    remote_environment.assert_registered_lacks(&["exec_command", "wait_process", "write_stdin"]);
     assert!(!remote_environment.has_terminal_controls);
 
     let multiple_local_environments = probe(|turn| {
@@ -1133,8 +1133,16 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
         duplicate_primary_environment(turn);
     })
     .await;
-    multiple_local_environments.assert_visible_lacks(&["exec_command", "write_stdin"]);
-    multiple_local_environments.assert_registered_lacks(&["exec_command", "write_stdin"]);
+    multiple_local_environments.assert_visible_lacks(&[
+        "exec_command",
+        "wait_process",
+        "write_stdin",
+    ]);
+    multiple_local_environments.assert_registered_lacks(&[
+        "exec_command",
+        "wait_process",
+        "write_stdin",
+    ]);
 }
 
 #[tokio::test]
@@ -1177,8 +1185,8 @@ async fn shell_zsh_fork_keeps_unified_exec_available() {
     })
     .await;
 
-    without_composition.assert_visible_contains(&["exec_command", "write_stdin"]);
-    without_composition.assert_registered_contains(&["exec_command", "write_stdin"]);
+    without_composition.assert_visible_contains(&["exec_command", "wait_process", "write_stdin"]);
+    without_composition.assert_registered_contains(&["exec_command", "wait_process", "write_stdin"]);
 
     let composed = probe(|turn| {
         set_features(
@@ -1195,8 +1203,8 @@ async fn shell_zsh_fork_keeps_unified_exec_available() {
     })
     .await;
 
-    composed.assert_visible_contains(&["exec_command", "write_stdin"]);
-    composed.assert_registered_contains(&["exec_command", "write_stdin"]);
+    composed.assert_visible_contains(&["exec_command", "wait_process", "write_stdin"]);
+    composed.assert_registered_contains(&["exec_command", "wait_process", "write_stdin"]);
 }
 
 #[tokio::test]
@@ -1219,7 +1227,7 @@ async fn zsh_fork_unified_exec_hides_shell_parameter() {
     })
     .await;
 
-    plan.assert_visible_contains(&["exec_command", "write_stdin"]);
+    plan.assert_visible_contains(&["exec_command", "wait_process", "write_stdin"]);
     assert!(!has_parameter(plan.visible_spec("exec_command"), "shell"));
 }
 
@@ -1287,7 +1295,7 @@ async fn zsh_fork_unified_exec_keeps_shell_parameter_when_remote_environment_ava
     })
     .await;
 
-    plan.assert_visible_contains(&["exec_command", "write_stdin"]);
+    plan.assert_visible_contains(&["exec_command", "wait_process", "write_stdin"]);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
     assert!(has_parameter(
         plan.visible_spec("exec_command"),
@@ -1309,6 +1317,7 @@ async fn environment_count_controls_environment_backed_tools() {
     .await;
     no_environment.assert_visible_lacks(&[
         "exec_command",
+        "wait_process",
         "write_stdin",
         "apply_patch",
         "view_image",
@@ -1316,6 +1325,7 @@ async fn environment_count_controls_environment_backed_tools() {
     ]);
     no_environment.assert_registered_lacks(&[
         "exec_command",
+        "wait_process",
         "write_stdin",
         "apply_patch",
         "view_image",
@@ -1335,6 +1345,7 @@ async fn environment_count_controls_environment_backed_tools() {
     .await;
     multiple_environments.assert_visible_contains(&[
         "exec_command",
+        "wait_process",
         "apply_patch",
         "view_image",
         "request_permissions",
@@ -1383,7 +1394,12 @@ async fn environment_tools_follow_the_step_context() {
         &Default::default(),
     ));
 
-    plan.assert_visible_contains(&["exec_command", "apply_patch", "view_image"]);
+    plan.assert_visible_contains(&[
+        "exec_command",
+        "wait_process",
+        "apply_patch",
+        "view_image",
+    ]);
 }
 
 #[tokio::test]

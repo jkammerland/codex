@@ -10,7 +10,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::sandboxing::ToolError;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
-use crate::unified_exec::WriteStdinInteractionEvent;
+use crate::unified_exec::UnifiedExecInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
@@ -97,7 +97,7 @@ impl WriteStdinHandler {
                         .model_info
                         .truncation_policy
                         .into(),
-                    interaction_event: Some(WriteStdinInteractionEvent {
+                    interaction_event: Some(UnifiedExecInteractionEvent {
                         session: &session,
                         turn: &turn,
                     }),

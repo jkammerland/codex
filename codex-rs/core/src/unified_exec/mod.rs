@@ -36,9 +36,11 @@ use codex_utils_path_uri::PathUri;
 use rand::Rng;
 use rand::rng;
 use tokio::sync::Mutex;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::sandboxing::SandboxPermissions;
+use crate::session::InputQueueActivity;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
@@ -132,17 +134,27 @@ pub(crate) struct WriteStdinRequest<'a> {
     pub yield_time_ms: u64,
     pub max_output_tokens: Option<usize>,
     pub truncation_policy: TruncationPolicy,
-    pub interaction_event: Option<WriteStdinInteractionEvent<'a>>,
+    pub interaction_event: Option<UnifiedExecInteractionEvent<'a>>,
 }
 
-pub(crate) struct WriteStdinInteractionEvent<'a> {
+#[derive(Debug)]
+pub(crate) struct WaitProcessRequest<'a> {
+    pub process_id: i32,
+    pub max_output_tokens: Option<usize>,
+    pub truncation_policy: TruncationPolicy,
+    pub interaction_event: Option<UnifiedExecInteractionEvent<'a>>,
+    pub activity_rx: &'a mut watch::Receiver<InputQueueActivity>,
+    pub pending_activity: Option<InputQueueActivity>,
+}
+
+pub(crate) struct UnifiedExecInteractionEvent<'a> {
     pub session: &'a Arc<Session>,
     pub turn: &'a Arc<TurnContext>,
 }
 
-impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+impl std::fmt::Debug for UnifiedExecInteractionEvent<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("WriteStdinInteractionEvent")
+        formatter.write_str("UnifiedExecInteractionEvent")
     }
 }
 

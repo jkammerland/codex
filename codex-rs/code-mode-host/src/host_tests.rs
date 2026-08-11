@@ -593,6 +593,7 @@ async fn request_task_panic_disconnects_host() {
         request_tasks: TaskTracker::new(),
         request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
         active_cell_permits: Arc::new(Semaphore::new(MAX_ACTIVE_CELLS)),
+        wait_yield_reason: false,
         closing: AtomicBool::new(false),
         peer: Arc::clone(&peer),
     };
@@ -622,6 +623,7 @@ async fn execute_request_id_remains_active_until_initial_response() {
         request_tasks: TaskTracker::new(),
         request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
         active_cell_permits: Arc::new(Semaphore::new(MAX_ACTIVE_CELLS)),
+        wait_yield_reason: false,
         closing: AtomicBool::new(false),
         peer,
     });
@@ -684,6 +686,7 @@ async fn active_cell_limit_rejects_execute_without_disconnecting() {
         request_tasks: TaskTracker::new(),
         request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
         active_cell_permits: Arc::new(Semaphore::new(/*permits*/ 0)),
+        wait_yield_reason: false,
         closing: AtomicBool::new(false),
         peer: Arc::clone(&peer),
     };

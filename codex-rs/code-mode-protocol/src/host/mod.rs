@@ -19,6 +19,9 @@ pub const DUAL_WEBSOCKET_CAPABILITY: &str = "dual-websocket-v1";
 /// Negotiated support for cell execution resource limits on `session/open`.
 pub const SESSION_RESOURCE_LIMITS_CAPABILITY: &str = "session-cell-execution-resource-limits";
 
+/// Negotiated support for reporting why a running cell yielded from `wait`.
+pub const WAIT_YIELD_REASON_CAPABILITY: &str = "wait-yield-reason-v1";
+
 /// Selects one socket of a negotiated dual-WebSocket connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransportLane {

@@ -28,6 +28,7 @@ use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SessionId;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
 use codex_code_mode_protocol::host::TransportLane;
+use codex_code_mode_protocol::host::WAIT_YIELD_REASON_CAPABILITY;
 use codex_code_mode_runtime::InProcessCodeModeSession;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -59,8 +60,13 @@ const BULK_PAIRING_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum NegotiatedConnection {
     Rejected,
-    Single,
-    Dual(BulkConnectionRegistration),
+    Single {
+        wait_yield_reason: bool,
+    },
+    Dual {
+        registration: BulkConnectionRegistration,
+        wait_yield_reason: bool,
+    },
 }
 
 struct HostLimits {
@@ -109,20 +115,21 @@ async fn run_connection(
     bulk_connections: Option<BulkConnectionRegistry>,
 ) -> Result<()> {
     let negotiated = negotiate(&mut reader, &mut writer, bulk_connections.as_ref()).await?;
-    let bulk_connection = match negotiated {
+    let (bulk_connection, wait_yield_reason) = match negotiated {
         NegotiatedConnection::Rejected => return Ok(()),
-        NegotiatedConnection::Single => None,
-        NegotiatedConnection::Dual(mut registration) => {
-            match tokio::time::timeout(BULK_PAIRING_TIMEOUT, registration.receive()).await {
-                Ok(Ok(connection)) => Some(connection),
-                Ok(Err(_)) => {
-                    anyhow::bail!("code-mode host bulk websocket pairing was abandoned");
-                }
-                Err(_) => {
-                    anyhow::bail!("timed out pairing code-mode host bulk websocket");
-                }
+        NegotiatedConnection::Single { wait_yield_reason } => (None, wait_yield_reason),
+        NegotiatedConnection::Dual {
+            mut registration,
+            wait_yield_reason,
+        } => match tokio::time::timeout(BULK_PAIRING_TIMEOUT, registration.receive()).await {
+            Ok(Ok(connection)) => (Some(connection), wait_yield_reason),
+            Ok(Err(_)) => {
+                anyhow::bail!("code-mode host bulk websocket pairing was abandoned");
             }
-        }
+            Err(_) => {
+                anyhow::bail!("timed out pairing code-mode host bulk websocket");
+            }
+        },
     };
     let (mut bulk_reader, bulk_writer) = match bulk_connection {
         Some(connection) => (Some(connection.reader), Some(connection.writer)),
@@ -146,6 +153,7 @@ async fn run_connection(
         request_tasks: TaskTracker::new(),
         request_permits: Arc::clone(&limits.request_permits),
         active_cell_permits: Arc::clone(&limits.active_cell_permits),
+        wait_yield_reason,
         closing: AtomicBool::new(false),
         peer: Arc::clone(&peer),
     });
@@ -323,10 +331,18 @@ async fn negotiate(
         || client_hello
             .optional_capabilities()
             .contains(&resource_limits_capability);
+    let wait_yield_reason_capability = Capability::new(WAIT_YIELD_REASON_CAPABILITY)?;
+    let wait_yield_reason = client_hello
+        .required_capabilities()
+        .contains(&wait_yield_reason_capability)
+        || client_hello
+            .optional_capabilities()
+            .contains(&wait_yield_reason_capability);
     let host_capabilities = CapabilitySet::try_new(
         [
             registration.is_some().then_some(dual_capability),
             resource_limits_requested.then_some(resource_limits_capability),
+            wait_yield_reason.then_some(wait_yield_reason_capability),
         ]
         .into_iter()
         .flatten(),
@@ -351,12 +367,15 @@ async fn negotiate(
         (
             HostHello::new(ProtocolVersion::V1, host_capabilities)
                 .with_bulk_connection_token(registration.token().to_string()),
-            NegotiatedConnection::Dual(registration),
+            NegotiatedConnection::Dual {
+                registration,
+                wait_yield_reason,
+            },
         )
     } else {
         (
             HostHello::new(ProtocolVersion::V1, host_capabilities),
-            NegotiatedConnection::Single,
+            NegotiatedConnection::Single { wait_yield_reason },
         )
     };
     writer
@@ -373,6 +392,7 @@ struct HostState {
     request_tasks: TaskTracker,
     request_permits: Arc<Semaphore>,
     active_cell_permits: Arc<Semaphore>,
+    wait_yield_reason: bool,
     closing: AtomicBool,
     peer: Arc<HostPeer>,
 }
@@ -511,7 +531,7 @@ impl HostState {
                             }
                             result = session.wait(request.into()) => result.map(|outcome| {
                                 HostResponse::WaitCompleted {
-                                    outcome: outcome.into(),
+                                    outcome: self.wire_wait_outcome(outcome),
                                 }
                             }),
                         }
@@ -527,7 +547,7 @@ impl HostState {
                 let result = match self.session(&session_id) {
                     Ok(session) => session.terminate(cell_id.into()).await.map(|outcome| {
                         HostResponse::WaitCompleted {
-                            outcome: outcome.into(),
+                            outcome: self.wire_wait_outcome(outcome),
                         }
                     }),
                     Err(err) => Err(err),
@@ -598,6 +618,19 @@ impl HostState {
             ),
         );
         Ok(())
+    }
+
+    fn wire_wait_outcome(
+        &self,
+        outcome: codex_code_mode_protocol::WaitOutcome,
+    ) -> codex_code_mode_protocol::host::WireWaitOutcome {
+        if self.wait_yield_reason {
+            codex_code_mode_protocol::host::WireWaitOutcome::from_wait_outcome_with_yield_reason(
+                outcome,
+            )
+        } else {
+            outcome.into()
+        }
     }
 
     fn session(&self, session_id: &SessionId) -> Result<Arc<InProcessCodeModeSession>, String> {

@@ -38,6 +38,8 @@ use super::WireWaitOutcome;
 use super::WireWaitRequest;
 use crate::CodeModeSessionCellExecutionLimits;
 use crate::ExecuteRequest;
+use crate::RuntimeResponse;
+use crate::YieldReason;
 
 fn session_id() -> SessionId {
     SessionId::new("session-1").expect("valid session ID")
@@ -590,6 +592,7 @@ fn host_to_client_v1_variants_are_pinned() {
                 outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Yielded {
                     cell_id: cell_id("cell-1"),
                     content_items: content_items(),
+                    yield_reason: None,
                 }),
             },
             json!({
@@ -769,6 +772,44 @@ fn host_to_client_v1_variants_are_pinned() {
             "sessionId": "session-1",
             "cellId": "cell-1",
         }),
+    );
+}
+
+#[test]
+fn yielded_response_reason_is_negotiated_additively() {
+    let response = RuntimeResponse::Yielded {
+        cell_id: crate::CellId::new("cell-1".to_string()),
+        content_items: Vec::new(),
+        reason: YieldReason::DeadlineElapsed,
+    };
+
+    assert_eq!(
+        WireRuntimeResponse::from(response.clone()),
+        WireRuntimeResponse::Yielded {
+            cell_id: cell_id("cell-1"),
+            content_items: Vec::new(),
+            yield_reason: None,
+        }
+    );
+    assert_eq!(
+        WireRuntimeResponse::from_runtime_response_with_yield_reason(response),
+        WireRuntimeResponse::Yielded {
+            cell_id: cell_id("cell-1"),
+            content_items: Vec::new(),
+            yield_reason: Some(YieldReason::DeadlineElapsed),
+        }
+    );
+    assert_eq!(
+        RuntimeResponse::from(WireRuntimeResponse::Yielded {
+            cell_id: cell_id("cell-1"),
+            content_items: Vec::new(),
+            yield_reason: None,
+        }),
+        RuntimeResponse::Yielded {
+            cell_id: crate::CellId::new("cell-1".to_string()),
+            content_items: Vec::new(),
+            reason: YieldReason::Requested,
+        }
     );
 }
 

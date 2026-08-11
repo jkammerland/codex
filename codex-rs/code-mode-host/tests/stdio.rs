@@ -25,6 +25,7 @@ use codex_code_mode::ToolDefinition;
 use codex_code_mode::ToolInvocationFuture;
 use codex_code_mode::WaitOutcome;
 use codex_code_mode::WaitRequest;
+use codex_code_mode::YieldReason;
 use codex_code_mode::host::MAX_FRAME_BYTES;
 use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
@@ -299,6 +300,7 @@ async fn session_execution_limits_are_isolated_on_a_shared_process_host() {
         RuntimeResponse::Yielded {
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
     assert_eq!(
@@ -315,6 +317,7 @@ async fn session_execution_limits_are_isolated_on_a_shared_process_host() {
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
 
@@ -398,6 +401,7 @@ text(result.value);
         RuntimeResponse::Yielded {
             cell_id: cell_id("3"),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
     assert_eq!(
@@ -411,6 +415,7 @@ text(result.value);
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
             cell_id: cell_id("3"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     assert_eq!(
@@ -449,6 +454,7 @@ async fn dropping_long_wait_releases_observer_before_next_wait() {
         RuntimeResponse::Yielded {
             cell_id: running_cell_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
 
@@ -480,6 +486,7 @@ async fn dropping_long_wait_releases_observer_before_next_wait() {
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
             cell_id: running_cell_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     session
@@ -541,6 +548,7 @@ return;
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "hello world".to_string(),
             }],
+            reason: YieldReason::Requested,
         }
     );
 
@@ -804,6 +812,7 @@ async fn child_process_loss_cleans_up_and_rebuilds_the_shared_host() {
         RuntimeResponse::Yielded {
             cell_id: cell_a.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
     assert_eq!(
@@ -826,6 +835,7 @@ async fn child_process_loss_cleans_up_and_rebuilds_the_shared_host() {
         RuntimeResponse::Yielded {
             cell_id: cell_b.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
 

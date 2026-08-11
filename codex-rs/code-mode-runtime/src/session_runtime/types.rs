@@ -2,6 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
+use codex_code_mode_protocol::YieldReason;
 use serde_json::Value as JsonValue;
 use tokio_util::sync::CancellationToken;
 
@@ -37,6 +38,7 @@ pub(crate) enum ObserveMode {
 pub(crate) enum CellEvent {
     Yielded {
         content_items: Vec<OutputItem>,
+        reason: YieldReason,
     },
     Pending {
         content_items: Vec<OutputItem>,

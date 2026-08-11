@@ -7,7 +7,7 @@ maintained separately from upstream releases.
 
 - Branch: `maint/mcp-unbounded-waits`
 - Upstream base: `rust-v0.147.0`
-- User-visible suffix: `+jkammerland.mcp.2`
+- User-visible suffix: `+jkammerland.mcp.3`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal
@@ -26,6 +26,8 @@ not prompt for an npm update that would overwrite the fork.
    returning on a polling timeout.
 6. Code-mode waits preserve yield reasons and absorb empty deadline yields
    without returning control to the model.
+7. Unified exec provides a no-timeout `wait_process` that wakes on completion,
+   queued input, or TTY output while retaining explicit bounded polling.
 
 ## Validate
 

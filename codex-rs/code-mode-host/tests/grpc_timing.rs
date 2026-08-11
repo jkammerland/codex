@@ -14,6 +14,7 @@ use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
 use codex_code_mode::RuntimeResponse;
 use codex_code_mode::WaitOutcome;
 use codex_code_mode::WaitRequest;
+use codex_code_mode::YieldReason;
 use codex_code_mode_protocol::grpc;
 use codex_code_mode_protocol::grpc::code_mode_host_client::CodeModeHostClient;
 use pretty_assertions::assert_eq;
@@ -209,6 +210,7 @@ async fn observation_timing_excludes_previous_requests_and_background_time() -> 
         let yielded = RuntimeResponse::Yielded {
             cell_id: cell_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
             code_mode_host_duration: Some(duration),
         };
         assert_eq!(initial, yielded);
@@ -236,6 +238,7 @@ async fn observation_timing_excludes_previous_requests_and_background_time() -> 
                 WaitOutcome::LiveCell(RuntimeResponse::Yielded {
                     cell_id: cell_id.clone(),
                     content_items: Vec::new(),
+                    reason: YieldReason::DeadlineElapsed,
                     code_mode_host_duration: Some(duration),
                 })
             );

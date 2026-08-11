@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::FunctionCallOutputContentItem;
+use codex_code_mode_protocol::YieldReason;
 use pretty_assertions::assert_eq;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
@@ -238,6 +239,7 @@ async fn yield_timer_preempts_buffered_runtime_output() {
         harness.initial_event_rx.await.unwrap(),
         Ok(CellEvent::Yielded {
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
 
@@ -316,6 +318,7 @@ async fn observation_dropped_before_dequeue_does_not_consume_output() {
             content_items: vec![OutputItem::Text {
                 text: "survives pre-dequeue cancellation".to_string(),
             }],
+            reason: YieldReason::DeadlineElapsed,
         })
     );
 
@@ -378,6 +381,7 @@ async fn dropped_yield_observer_preserves_output_for_the_next_observation() {
             content_items: vec![OutputItem::Text {
                 text: "survives active cancellation".to_string(),
             }],
+            reason: YieldReason::DeadlineElapsed,
         })
     );
 
@@ -583,6 +587,7 @@ fn buffered_initial_yield_precedes_buffered_completion_for_yield_observer() {
             content_items: vec![OutputItem::Text {
                 text: "before".to_string(),
             }],
+            reason: YieldReason::Requested,
         }))
     );
 
@@ -680,6 +685,7 @@ fn dropped_pending_observation_preserves_the_initial_yield_boundary() {
             content_items: vec![OutputItem::Text {
                 text: "before".to_string(),
             }],
+            reason: YieldReason::Requested,
         }))
     );
 

@@ -18,6 +18,7 @@ use crate::RuntimeResponse;
 use crate::ToolDefinition;
 use crate::WaitOutcome;
 use crate::WaitRequest;
+use crate::YieldReason;
 
 /// The per-cell execution limits carried by a V1 session-open request.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -324,6 +325,8 @@ pub enum WireRuntimeResponse {
         cell_id: WireCellId,
         content_items: Vec<WireContentItem>,
         code_mode_host_duration_ns: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        yield_reason: Option<YieldReason>,
     },
     Terminated {
         cell_id: WireCellId,
@@ -343,10 +346,33 @@ impl TryFrom<RuntimeResponse> for WireRuntimeResponse {
 
     /// Preserves the response's timing; the host handler must record it first.
     fn try_from(value: RuntimeResponse) -> Result<Self, Self::Error> {
+        Self::try_from_runtime_response(value, YieldReasonEncoding::Omit)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum YieldReasonEncoding {
+    Omit,
+    Include,
+}
+
+impl WireRuntimeResponse {
+    /// Converts a runtime response while retaining the negotiated yield reason field.
+    pub fn try_from_runtime_response_with_yield_reason(
+        value: RuntimeResponse,
+    ) -> Result<Self, MissingCodeModeHostDuration> {
+        Self::try_from_runtime_response(value, YieldReasonEncoding::Include)
+    }
+
+    fn try_from_runtime_response(
+        value: RuntimeResponse,
+        encoding: YieldReasonEncoding,
+    ) -> Result<Self, MissingCodeModeHostDuration> {
         Ok(match value {
             RuntimeResponse::Yielded {
                 cell_id,
                 content_items,
+                reason,
                 code_mode_host_duration,
             } => {
                 let code_mode_host_duration =
@@ -356,6 +382,10 @@ impl TryFrom<RuntimeResponse> for WireRuntimeResponse {
                     content_items: content_items.into_iter().map(Into::into).collect(),
                     code_mode_host_duration_ns: u64::try_from(code_mode_host_duration.as_nanos())
                         .unwrap_or(u64::MAX),
+                    yield_reason: match encoding {
+                        YieldReasonEncoding::Omit => None,
+                        YieldReasonEncoding::Include => Some(reason),
+                    },
                 }
             }
             RuntimeResponse::Terminated {
@@ -399,9 +429,11 @@ impl From<WireRuntimeResponse> for RuntimeResponse {
                 cell_id,
                 content_items,
                 code_mode_host_duration_ns,
+                yield_reason,
             } => Self::Yielded {
                 cell_id: cell_id.into(),
                 content_items: content_items.into_iter().map(Into::into).collect(),
+                reason: yield_reason.unwrap_or_default(),
                 code_mode_host_duration: Some(Duration::from_nanos(code_mode_host_duration_ns)),
             },
             WireRuntimeResponse::Terminated {
@@ -443,6 +475,22 @@ impl TryFrom<WaitOutcome> for WireWaitOutcome {
         Ok(match value {
             WaitOutcome::LiveCell(response) => Self::LiveCell(response.try_into()?),
             WaitOutcome::MissingCell(response) => Self::MissingCell(response.try_into()?),
+        })
+    }
+}
+
+impl WireWaitOutcome {
+    /// Converts a wait outcome while retaining the negotiated yield reason field.
+    pub fn try_from_wait_outcome_with_yield_reason(
+        value: WaitOutcome,
+    ) -> Result<Self, MissingCodeModeHostDuration> {
+        Ok(match value {
+            WaitOutcome::LiveCell(response) => Self::LiveCell(
+                WireRuntimeResponse::try_from_runtime_response_with_yield_reason(response)?,
+            ),
+            WaitOutcome::MissingCell(response) => Self::MissingCell(
+                WireRuntimeResponse::try_from_runtime_response_with_yield_reason(response)?,
+            ),
         })
     }
 }

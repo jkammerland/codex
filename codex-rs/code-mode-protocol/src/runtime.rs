@@ -16,6 +16,17 @@ pub const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 10_000;
 pub const DEFAULT_WAIT_YIELD_TIME_MS: u64 = 10_000;
 pub const DEFAULT_MAX_OUTPUT_TOKENS_PER_EXEC_CALL: usize = 10_000;
 
+/// Explains why observation of a live code-mode cell returned to its caller.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum YieldReason {
+    /// The running script explicitly called `yield_control()`.
+    #[default]
+    Requested,
+    /// The observation deadline elapsed while the script remained live.
+    DeadlineElapsed,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ExecuteRequest {
     pub tool_call_id: String,
@@ -100,6 +111,7 @@ pub enum RuntimeResponse {
     Yielded {
         cell_id: CellId,
         content_items: Vec<FunctionCallOutputContentItem>,
+        reason: YieldReason,
         #[serde(skip_serializing_if = "Option::is_none")]
         code_mode_host_duration: Option<Duration>,
     },

@@ -211,7 +211,15 @@ message ExecutionOutcome {
   }
 }
 
-message ExecutionYielded {}
+message ExecutionYielded {
+  YieldReason reason = 1;
+}
+
+enum YieldReason {
+  YIELD_REASON_UNSPECIFIED = 0;
+  YIELD_REASON_REQUESTED = 1;
+  YIELD_REASON_DEADLINE_ELAPSED = 2;
+}
 
 message ExecutionTerminated {}
 

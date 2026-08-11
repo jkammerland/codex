@@ -103,11 +103,23 @@ pub(super) fn runtime_response(outcome: grpc::ExecutionOutcome) -> Result<Runtim
         .outcome
         .ok_or_else(|| "code-mode execution omitted its outcome".to_string())?
     {
-        grpc::execution_outcome::Outcome::Yielded(_) => RuntimeResponse::Yielded {
-            cell_id,
-            content_items,
-            code_mode_host_duration,
-        },
+        grpc::execution_outcome::Outcome::Yielded(yielded) => {
+            let reason = match grpc::YieldReason::try_from(yielded.reason) {
+                Ok(grpc::YieldReason::Unspecified | grpc::YieldReason::Requested) => {
+                    codex_code_mode_protocol::YieldReason::Requested
+                }
+                Ok(grpc::YieldReason::DeadlineElapsed) => {
+                    codex_code_mode_protocol::YieldReason::DeadlineElapsed
+                }
+                Err(_) => return Err("code-mode execution has an invalid yield reason".to_string()),
+            };
+            RuntimeResponse::Yielded {
+                cell_id,
+                content_items,
+                reason,
+                code_mode_host_duration,
+            }
+        }
         grpc::execution_outcome::Outcome::Terminated(_) => RuntimeResponse::Terminated {
             cell_id,
             content_items,

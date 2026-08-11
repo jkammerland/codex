@@ -344,9 +344,13 @@ fn runtime_response(
     event: runtime::CellEvent,
 ) -> Result<RuntimeResponse, String> {
     match event {
-        runtime::CellEvent::Yielded { content_items } => Ok(RuntimeResponse::Yielded {
+        runtime::CellEvent::Yielded {
+            content_items,
+            reason,
+        } => Ok(RuntimeResponse::Yielded {
             cell_id: cell_id.clone(),
             content_items: content_items.into_iter().map(output_item).collect(),
+            reason,
             code_mode_host_duration: None,
         }),
         runtime::CellEvent::Completed {

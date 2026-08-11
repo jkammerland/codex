@@ -96,12 +96,11 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         name: "exec_command".to_string(),
         description: if include_windows_shell_guidance {
             format!(
-                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
+                "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll.\n\n{}",
                 windows_shell_guidance()
             )
         } else {
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-                .to_string()
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll.".to_string()
         },
         strict: false,
         defer_loading: None,
@@ -110,7 +109,9 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
             Some(vec!["cmd".to_string()]),
             Some(false.into()),
         ),
-        output_schema: Some(unified_exec_output_schema()),
+        output_schema: Some(unified_exec_output_schema(
+            UnifiedExecOutputSchemaKind::Command,
+        )),
     })
 }
 
@@ -125,7 +126,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
         (
             "chars".to_string(),
             JsonSchema::string(Some(
-                "Bytes to write to stdin. Defaults to empty, which polls without writing.".to_string(),
+                "Bytes to write to stdin. Defaults to empty, which performs an explicit bounded poll without writing.".to_string(),
             )),
         ),
         (
@@ -144,9 +145,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "write_stdin".to_string(),
-        description:
-            "Writes characters to an existing unified exec session and returns recent output."
-                .to_string(),
+        description: "Writes characters to an existing unified exec session and returns recent output. Use this to send input; use wait_process for event-driven waiting. An empty chars value remains supported for explicit bounded polling.".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
@@ -154,7 +153,41 @@ pub fn create_write_stdin_tool() -> ToolSpec {
             Some(vec!["session_id".to_string()]),
             Some(false.into()),
         ),
-        output_schema: Some(unified_exec_output_schema()),
+        output_schema: Some(unified_exec_output_schema(
+            UnifiedExecOutputSchemaKind::Command,
+        )),
+    })
+}
+
+pub fn create_wait_process_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "session_id".to_string(),
+            JsonSchema::number(Some(
+                "Identifier of the running unified exec session.".to_string(),
+            )),
+        ),
+        (
+            "max_output_tokens".to_string(),
+            JsonSchema::number(Some(
+                "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "wait_process".to_string(),
+        description: "Waits on a running unified exec session until a meaningful event occurs, without polling. Non-TTY sessions wake on process completion/failure or queued user/agent input; TTY sessions also wake on new output. Use this instead of shell sleep or status-check loops.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["session_id".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(unified_exec_output_schema(
+            UnifiedExecOutputSchemaKind::Wait,
+        )),
     })
 }
 
@@ -195,8 +228,14 @@ pub fn request_permissions_tool_description() -> String {
         .to_string()
 }
 
-fn unified_exec_output_schema() -> Value {
-    json!({
+#[derive(Clone, Copy)]
+enum UnifiedExecOutputSchemaKind {
+    Command,
+    Wait,
+}
+
+fn unified_exec_output_schema(kind: UnifiedExecOutputSchemaKind) -> Value {
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "chunk_id": {
@@ -213,7 +252,7 @@ fn unified_exec_output_schema() -> Value {
             },
             "session_id": {
                 "type": "number",
-                "description": "Session identifier to pass to write_stdin when the process is still running."
+                "description": "Session identifier to pass to wait_process or write_stdin when the process is still running."
             },
             "original_token_count": {
                 "type": "number",
@@ -226,7 +265,18 @@ fn unified_exec_output_schema() -> Value {
         },
         "required": ["wall_time_seconds", "output"],
         "additionalProperties": false
-    })
+    });
+    if matches!(kind, UnifiedExecOutputSchemaKind::Wait) {
+        schema["properties"]["reason"] = json!({
+            "type": "string",
+            "enum": ["completed", "output", "input"],
+            "description": "Event that ended the wait."
+        });
+        if let Some(required) = schema["required"].as_array_mut() {
+            required.push(json!("reason"));
+        }
+    }
+    schema
 }
 
 fn create_approval_parameters(

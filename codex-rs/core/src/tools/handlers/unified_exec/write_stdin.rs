@@ -7,7 +7,7 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
-use crate::unified_exec::WriteStdinInteractionEvent;
+use crate::unified_exec::UnifiedExecInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
@@ -79,7 +79,7 @@ impl WriteStdinHandler {
                 yield_time_ms: args.yield_time_ms,
                 max_output_tokens: args.max_output_tokens,
                 truncation_policy: turn.model_info.truncation_policy.into(),
-                interaction_event: Some(WriteStdinInteractionEvent {
+                interaction_event: Some(UnifiedExecInteractionEvent {
                     session: &session,
                     turn: &turn,
                 }),

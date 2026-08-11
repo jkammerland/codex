@@ -43,8 +43,8 @@ use crate::unified_exec::ProcessEntry;
 use crate::unified_exec::ProcessStore;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
+use crate::unified_exec::UnifiedExecInteractionEvent;
 use crate::unified_exec::UnifiedExecProcessManager;
-use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
 use crate::unified_exec::async_watcher::emit_exec_end_for_unified_exec;
 use crate::unified_exec::async_watcher::emit_failed_exec_end_for_unified_exec;
@@ -654,6 +654,7 @@ impl UnifiedExecProcessManager {
             max_output_tokens: request.max_output_tokens,
             process_id: response_process_id,
             exit_code,
+            wait_reason: None,
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
             hook_command: Some(request.hook_command.clone()),
@@ -817,6 +818,7 @@ impl UnifiedExecProcessManager {
             max_output_tokens: request.max_output_tokens,
             process_id,
             exit_code,
+            wait_reason: None,
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
             hook_command: Some(hook_command),
@@ -824,7 +826,7 @@ impl UnifiedExecProcessManager {
 
         let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
         if should_emit_interaction
-            && let Some(WriteStdinInteractionEvent { session, turn }) = request.interaction_event
+            && let Some(UnifiedExecInteractionEvent { session, turn }) = request.interaction_event
         {
             let interaction = TerminalInteractionEvent {
                 call_id: response.event_call_id.clone(),
@@ -1514,3 +1516,5 @@ enum ProcessStatus {
 #[cfg(test)]
 #[path = "process_manager_tests.rs"]
 mod tests;
+
+mod wait_process;

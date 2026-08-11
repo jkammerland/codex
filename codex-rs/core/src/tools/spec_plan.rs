@@ -32,6 +32,7 @@ use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WaitForEnvironmentHandler;
+use crate::tools::handlers::WaitProcessHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
@@ -801,8 +802,8 @@ fn code_mode_namespace_descriptions(
 
 #[instrument(level = "trace", skip_all)]
 fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistry) {
-    // Guardian reviewers receive only `exec_command`, `write_stdin`, and `view_image`
-    // when an environment is available; all general tool sources stay excluded.
+    // Guardian reviewers receive only unified exec, its interaction tools, and
+    // `view_image` when an environment is available; all general sources stay excluded.
     if crate::guardian::is_guardian_reviewer_source(&context.turn_context.session_source) {
         let turn_context = context.turn_context;
         let environment_mode = tool_environment_mode(context.environments);
@@ -817,6 +818,7 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                     context.environments,
                 ),
             }));
+            registry.add(WaitProcessHandler);
             registry.add(WriteStdinHandler);
             if turn_context.config.features.enabled(Feature::ViewImage) {
                 registry.add(ViewImageHandler::new(ViewImageToolOptions {
@@ -887,6 +889,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
                     context.environments,
                 ),
             }));
+            registry.add(WaitProcessHandler);
             registry.add(WriteStdinHandler);
 
             if supports_shell_command {

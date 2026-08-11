@@ -15,6 +15,9 @@ pub const MAX_PENDING_DELEGATE_CALLS: usize = 1_024;
 /// Negotiated support for cell execution resource limits on `session/open`.
 pub const SESSION_RESOURCE_LIMITS_CAPABILITY: &str = "session-cell-execution-resource-limits";
 
+/// Negotiated support for reporting why a running cell yielded from `wait`.
+pub const WAIT_YIELD_REASON_CAPABILITY: &str = "wait-yield-reason-v1";
+
 pub use codec::EncodedFrame;
 pub use codec::FramedReader;
 pub use codec::FramedWriter;

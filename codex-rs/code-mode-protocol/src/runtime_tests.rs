@@ -9,6 +9,7 @@ use super::RuntimeResponse;
 use super::WaitOutcome;
 use crate::CellId;
 use crate::FunctionCallOutputContentItem;
+use crate::YieldReason;
 use crate::host::WireRuntimeResponse;
 use crate::host::WireWaitOutcome;
 
@@ -23,6 +24,7 @@ fn code_mode_host_duration_survives_runtime_and_stdio_serialization() {
         RuntimeResponse::Yielded {
             cell_id: CellId::new("yielded-cell".to_string()),
             content_items: content_items.clone(),
+            reason: YieldReason::Requested,
             code_mode_host_duration: None,
         },
         RuntimeResponse::Terminated {

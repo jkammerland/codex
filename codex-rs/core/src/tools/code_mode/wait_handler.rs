@@ -9,6 +9,7 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 
@@ -102,19 +103,85 @@ impl CodeModeWaitHandler {
                         .code_mode_service
                         .terminate(cell_id)
                         .await
+                        .map_err(FunctionCallError::RespondToModel)
                 } else {
-                    exec.session
-                        .services
-                        .code_mode_service
-                        .wait(codex_code_mode::WaitRequest {
-                            cell_id,
-                            yield_time_ms: args.yield_time_ms,
-                        })
-                        .await
+                    let turn_state = exec
+                        .session
+                        .input_queue
+                        .turn_state_for_sub_id(&exec.session.active_turn, &exec.turn.sub_id)
+                        .await;
+                    let (mut activity_rx, mut pending_activity) = exec
+                        .session
+                        .input_queue
+                        .subscribe_activity(turn_state.as_deref())
+                        .await;
+                    let mut yield_time_ms = args.yield_time_ms;
+                    loop {
+                        let (observation, input_wake) = if pending_activity.take().is_some() {
+                            (
+                                exec.session
+                                    .services
+                                    .code_mode_service
+                                    .wait(codex_code_mode::WaitRequest {
+                                        cell_id: cell_id.clone(),
+                                        yield_time_ms: 0,
+                                    })
+                                    .await
+                                    .map_err(FunctionCallError::RespondToModel),
+                                true,
+                            )
+                        } else {
+                            let wait = exec.session.services.code_mode_service.wait(
+                                codex_code_mode::WaitRequest {
+                                    cell_id: cell_id.clone(),
+                                    yield_time_ms,
+                                },
+                            );
+                            tokio::pin!(wait);
+                            tokio::select! {
+                                biased;
+                                result = &mut wait => {
+                                    (result.map_err(FunctionCallError::RespondToModel), false)
+                                }
+                                changed = activity_rx.changed() => {
+                                    (match changed {
+                                        Ok(()) => exec.session.services.code_mode_service
+                                            .wait(codex_code_mode::WaitRequest {
+                                                cell_id: cell_id.clone(),
+                                                yield_time_ms: 0,
+                                            })
+                                            .await
+                                            .map_err(FunctionCallError::RespondToModel),
+                                        Err(_) => Err(FunctionCallError::Fatal(
+                                            "code-mode input activity channel closed".to_string(),
+                                        )),
+                                    }, true)
+                                }
+                            }
+                        };
+                        let observation = observation.inspect_err(|_error| {
+                            telemetry.finish(/*success*/ false);
+                        })?;
+                        if !input_wake
+                            && matches!(
+                                &observation,
+                                codex_code_mode::WaitOutcome::LiveCell(
+                                    codex_code_mode::RuntimeResponse::Yielded {
+                                        content_items,
+                                        reason: codex_code_mode::YieldReason::DeadlineElapsed,
+                                        ..
+                                    }
+                                ) if content_items.is_empty()
+                            )
+                        {
+                            yield_time_ms = args.yield_time_ms.max(MIN_EMPTY_YIELD_TIME_MS);
+                            continue;
+                        }
+                        break Ok(observation);
+                    }
                 }
-                .map_err(|error| {
+                .inspect_err(|_error| {
                     telemetry.finish(/*success*/ false);
-                    FunctionCallError::RespondToModel(error)
                 })?;
                 if let codex_code_mode::WaitOutcome::LiveCell(response) = &wait_response {
                     let runtime_cell_id = match response {

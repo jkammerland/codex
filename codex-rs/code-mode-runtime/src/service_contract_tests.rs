@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use codex_code_mode_protocol::NotificationFuture;
 use codex_code_mode_protocol::ToolInvocationFuture;
+use codex_code_mode_protocol::YieldReason;
 use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
 use tokio::sync::Notify;
@@ -278,6 +279,7 @@ async fn yields_and_resumes() {
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "before".to_string(),
             }],
+            reason: YieldReason::Requested,
         }
     );
     assert_eq!(
@@ -368,6 +370,7 @@ async fn observed_natural_completion_wins_over_termination() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -435,6 +438,7 @@ async fn termination_cancels_pending_callbacks_before_responding() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
     assert_eq!(
@@ -508,6 +512,7 @@ async fn repeated_termination_is_rejected_while_callback_cleanup_is_pending() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -557,6 +562,7 @@ async fn second_observer_is_rejected_without_displacing_the_first() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 

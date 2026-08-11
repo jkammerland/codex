@@ -21,6 +21,7 @@ use codex_code_mode::ToolDefinition;
 use codex_code_mode::ToolInvocationFuture;
 use codex_code_mode::WaitOutcome;
 use codex_code_mode::WaitRequest;
+use codex_code_mode::YieldReason;
 #[cfg(unix)]
 use codex_code_mode_host::GrpcCodeModeHost;
 use codex_code_mode_protocol::grpc;
@@ -639,6 +640,7 @@ async fn concurrent_wait_rejects_without_displacing_the_active_observer() -> Res
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: running_cell.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -675,6 +677,7 @@ async fn concurrent_wait_rejects_without_displacing_the_active_observer() -> Res
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: running_cell.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     let actual = session
@@ -719,6 +722,7 @@ async fn dropping_a_wait_retires_its_observer_before_the_next_wait() -> Result<(
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: running_cell.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -749,6 +753,7 @@ async fn dropping_a_wait_retires_its_observer_before_the_next_wait() -> Result<(
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: running_cell.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     let actual = session
@@ -785,6 +790,7 @@ async fn dropping_a_session_off_runtime_retires_its_active_cells() -> Result<()>
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -967,6 +973,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
     let actual = timeout(
@@ -985,6 +992,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     let actual = execute(
@@ -1021,6 +1029,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: cell_id("2"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
     limited.shutdown().await.map_err(anyhow::Error::msg)?;
@@ -1239,6 +1248,7 @@ async fn cached_session_recovers_after_a_remote_host_restarts() -> Result<()> {
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: replacement_cell_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
     let actual = session
@@ -1254,6 +1264,7 @@ async fn cached_session_recovers_after_a_remote_host_restarts() -> Result<()> {
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: replacement_cell_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     let actual = session

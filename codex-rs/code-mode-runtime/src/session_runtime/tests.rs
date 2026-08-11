@@ -6,6 +6,7 @@ use std::task::Poll;
 use std::task::Waker;
 use std::time::Duration;
 
+use codex_code_mode_protocol::YieldReason;
 use pretty_assertions::assert_eq;
 use serde_json::Value as JsonValue;
 use tokio_util::sync::CancellationToken;
@@ -250,6 +251,7 @@ async fn drop_terminates_cells_when_the_registry_is_locked() {
         started.initial_event().await,
         Ok(CellEvent::Yielded {
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
 

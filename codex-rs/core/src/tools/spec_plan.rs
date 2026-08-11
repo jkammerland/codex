@@ -30,6 +30,7 @@ use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WaitForEnvironmentHandler;
+use crate::tools::handlers::WaitProcessHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
@@ -963,7 +964,8 @@ fn code_mode_namespace_descriptions(
 
 #[instrument(level = "trace", skip_all)]
 fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistry) {
-    // Guardian reviewers receive only `exec_command`, `write_stdin`, and `view_image`
+    // Guardian reviewers receive only unified exec, its interaction tools, and
+    // `view_image`
     // when a managed sandbox can enforce the parent's filesystem restrictions;
     // all general tool sources stay excluded.
     if crate::guardian::is_basic_session_source(&context.turn_context.session_source) {
@@ -998,6 +1000,7 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                         context.environments,
                     ),
                 }));
+                registry.add(WaitProcessHandler);
                 registry.add(WriteStdinHandler);
             }
             if turn_context.config.features.enabled(Feature::ViewImage) {
@@ -1088,6 +1091,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         ),
         include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
     }));
+    registry.add(WaitProcessHandler);
     registry.add(WriteStdinHandler);
 }
 

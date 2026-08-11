@@ -4,10 +4,14 @@ use crate::environment_selection::TurnEnvironmentState;
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
 use crate::sandboxing::ExecRequest;
+use crate::session::InputQueueActivity;
 use crate::session::session::Session;
 use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::ExecCommandToolOutput;
+use crate::tools::context::ProcessWaitReason;
+use crate::tools::context::ToolOutput;
+use crate::tools::context::ToolPayload;
 use crate::unified_exec::WriteStdinRequest;
 use codex_exec_server::ExecProcess;
 use codex_exec_server::ExecProcessEventReceiver;
@@ -206,10 +210,103 @@ async fn exec_command_with_tty(
         max_output_tokens: None,
         process_id: response_process_id,
         exit_code,
+        wait_reason: None,
         original_token_count: Some(original_token_count),
         output_omitted_bytes,
         hook_command: Some(cmd.to_string()),
     })
+}
+
+async fn wait_process_for_test(
+    session: &Arc<Session>,
+    process_id: i32,
+    activity_rx: &mut watch::Receiver<InputQueueActivity>,
+) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+    session
+        .services
+        .unified_exec_manager
+        .wait_process(WaitProcessRequest {
+            process_id,
+            max_output_tokens: None,
+            truncation_policy: TruncationPolicy::Tokens(10_000),
+            interaction_event: None,
+            activity_rx,
+            pending_activity: None,
+        })
+        .await
+}
+
+#[tokio::test]
+async fn wait_process_non_tty_ignores_output_until_nonzero_exit() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let started = exec_command_with_tty(
+        &session,
+        &turn,
+        "sleep 0.2; printf 'still running'; sleep 0.25; exit 7",
+        /*yield_time_ms*/ 10,
+        /*workdir*/ None,
+        /*tty*/ false,
+    )
+    .await?;
+    let process_id = started.process_id.expect("command should remain running");
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+
+    let waited = wait_process_for_test(&session, process_id, &mut activity_rx).await?;
+
+    assert_eq!(waited.wait_reason, Some(ProcessWaitReason::Completed));
+    assert_eq!(waited.exit_code, Some(7));
+    assert_eq!(waited.process_id, None);
+    assert_eq!(String::from_utf8_lossy(&waited.raw_output), "still running");
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_process_tty_wakes_on_output_then_completion() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let started = exec_command_with_tty(
+        &session,
+        &turn,
+        "sleep 0.2; printf 'ready'; sleep 0.3",
+        /*yield_time_ms*/ 10,
+        /*workdir*/ None,
+        /*tty*/ true,
+    )
+    .await?;
+    let process_id = started.process_id.expect("command should remain running");
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+
+    let output = wait_process_for_test(&session, process_id, &mut activity_rx).await?;
+    assert_eq!(output.wait_reason, Some(ProcessWaitReason::Output));
+    assert_eq!(output.process_id, Some(process_id));
+    assert!(String::from_utf8_lossy(&output.raw_output).contains("ready"));
+    let payload = ToolPayload::Function {
+        arguments: r#"{"session_id":1000}"#.to_string(),
+    };
+    assert_eq!(
+        output
+            .code_mode_result(&payload)
+            .get("reason")
+            .and_then(serde_json::Value::as_str),
+        Some("output")
+    );
+    let completed = wait_process_for_test(&session, process_id, &mut activity_rx).await?;
+    assert_eq!(completed.wait_reason, Some(ProcessWaitReason::Completed));
+    assert_eq!(completed.exit_code, Some(0));
+    assert_eq!(completed.process_id, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_process_rejects_unknown_session() {
+    let (session, _) = test_session_and_turn().await;
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+
+    let result = wait_process_for_test(&session, /*process_id*/ 404, &mut activity_rx).await;
+
+    assert!(matches!(
+        result,
+        Err(UnifiedExecError::UnknownProcessId { process_id: 404 })
+    ));
 }
 
 #[derive(Debug)]

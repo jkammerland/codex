@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use super::TRAILING_OUTPUT_GRACE;
 use super::spawn_exit_watcher;
 use super::split_valid_utf8_prefix_with_max;
 use super::start_streaming_output;
@@ -64,7 +63,7 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
 }
 
 #[tokio::test]
-async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyhow::Result<()> {
+async fn streaming_output_drains_late_output_after_exit_before_close() -> anyhow::Result<()> {
     let StreamingOutputHarness {
         process,
         stdout_tx,
@@ -80,7 +79,7 @@ async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyho
     let exited_at = Instant::now();
     exit_tx.send(0).expect("send exit");
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
         stdout_tx
             .send(b"LATE-OUTPUT-MARKER".to_vec())
             .expect("send late output");
@@ -91,8 +90,8 @@ async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyho
     tokio::time::resume();
 
     assert!(
-        elapsed >= Duration::from_millis(50) && elapsed < TRAILING_OUTPUT_GRACE,
-        "output close should finish before the grace fallback: {elapsed:?}"
+        elapsed >= Duration::from_millis(150),
+        "output close should wait for the late output: {elapsed:?}"
     );
     assert_eq!(
         transcript.lock().await.to_bytes_with_omission_marker(),
@@ -103,29 +102,27 @@ async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyho
 }
 
 #[tokio::test]
-async fn streaming_output_keeps_grace_as_fallback_without_close() -> anyhow::Result<()> {
+async fn streaming_output_waits_for_close_without_a_timer() -> anyhow::Result<()> {
     let StreamingOutputHarness {
         process,
-        stdout_tx: _stdout_tx,
+        stdout_tx,
         exit_tx,
         ..
     } = streaming_output_harness().await?;
     let output_drained = process.output_drained_notify();
-    let drained = output_drained.notified();
-    tokio::pin!(drained);
 
     tokio::time::pause();
-    let exited_at = Instant::now();
+    let drained = tokio::spawn(async move { output_drained.notified().await });
+    tokio::task::yield_now().await;
     exit_tx.send(0).expect("send exit");
-    (&mut drained).await;
-    let elapsed = Instant::now().saturating_duration_since(exited_at);
-    tokio::time::resume();
-
+    tokio::time::advance(Duration::from_secs(1)).await;
     assert!(
-        elapsed >= TRAILING_OUTPUT_GRACE
-            && elapsed <= TRAILING_OUTPUT_GRACE + Duration::from_millis(10),
-        "missing output close should use the grace fallback: {elapsed:?}"
+        !drained.is_finished(),
+        "streaming output must not finish merely because time elapsed"
     );
+    drop(stdout_tx);
+    drained.await.expect("output drainer should not panic");
+    tokio::time::resume();
 
     Ok(())
 }
@@ -195,8 +192,8 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
         )
     );
     assert!(
-        elapsed >= Duration::from_millis(10) && elapsed < TRAILING_OUTPUT_GRACE,
-        "completion should wait for denial without falling back to the output grace: {elapsed:?}"
+        elapsed >= Duration::from_millis(10),
+        "completion should wait for the late denial: {elapsed:?}"
     );
 
     Ok(())

@@ -346,6 +346,47 @@ async fn output_collection_preserves_omissions_from_drained_buffer() {
 }
 
 #[tokio::test]
+async fn completed_wait_drains_late_output_until_closed() {
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let output_notify = Arc::new(Notify::new());
+    let output_closed = Arc::new(AtomicBool::new(false));
+    let output_closed_notify = Arc::new(Notify::new());
+    let cancellation_token = CancellationToken::new();
+    let output = OutputHandles {
+        output_buffer: Arc::clone(&output_buffer),
+        output_notify: Arc::clone(&output_notify),
+        output_closed: Arc::clone(&output_closed),
+        output_closed_notify: Arc::clone(&output_closed_notify),
+        cancellation_token: cancellation_token.clone(),
+    };
+
+    tokio::time::pause();
+    cancellation_token.cancel();
+    let collector_output = output.clone();
+    let collector = tokio::spawn(async move {
+        UnifiedExecProcessManager::collect_output_until_closed(&collector_output).await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(
+        !collector.is_finished(),
+        "completed waits must not return until output closes"
+    );
+
+    output_buffer
+        .lock()
+        .await
+        .push_chunk(b"late output".to_vec());
+    output_notify.notify_waiters();
+    output_closed.store(true, Ordering::Release);
+    output_closed_notify.notify_waiters();
+
+    let collected = collector.await.expect("collector task should not panic");
+    tokio::time::resume();
+    assert_eq!(collected.to_bytes_with_omission_marker(), b"late output");
+}
+
+#[tokio::test]
 async fn network_denial_fallback_message_names_sandbox_network_proxy() {
     let message = network_denial_message_for_session(/*session*/ None, /*deferred*/ None).await;
 

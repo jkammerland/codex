@@ -1,12 +1,10 @@
 use std::collections::VecDeque;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tokio::time::Instant;
-use tokio::time::Sleep;
 
 use super::UnifiedExecContext;
 use super::process::OutputHandles;
@@ -27,8 +25,6 @@ use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ExecOutputStream;
 use codex_utils_path_uri::PathUri;
-
-pub(crate) const TRAILING_OUTPUT_GRACE: Duration = Duration::from_millis(100);
 
 /// Upper bound for a single ExecCommandOutputDelta chunk emitted by unified exec.
 ///
@@ -65,35 +61,24 @@ pub(crate) fn start_streaming_output(
         let mut pending = VecDeque::<u8>::new();
         let mut emitted_deltas: usize = 0;
 
-        let mut grace_sleep: Option<Pin<Box<Sleep>>> = None;
         let output_closed_notified = output_closed_notify.notified();
         tokio::pin!(output_closed_notified);
-        let mut output_complete = false;
+        let mut process_exited = false;
 
         loop {
             // Register before checking the atomic so a close between the check
             // and the select cannot miss the notification.
             output_closed_notified.as_mut().enable();
-            if grace_sleep.is_some() && output_closed.load(Ordering::Acquire) {
-                output_complete = true;
+            if process_exited && output_closed.load(Ordering::Acquire) {
                 break;
             }
 
             tokio::select! {
-                _ = exit_token.cancelled(), if grace_sleep.is_none() => {
-                    let deadline = Instant::now() + TRAILING_OUTPUT_GRACE;
-                    grace_sleep.replace(Box::pin(tokio::time::sleep_until(deadline)));
+                _ = exit_token.cancelled(), if !process_exited => {
+                    process_exited = true;
                 }
 
-                _ = async {
-                    if let Some(sleep) = grace_sleep.as_mut() {
-                        sleep.as_mut().await;
-                    }
-                }, if grace_sleep.is_some() => {
-                    break;
-                }
-
-                _ = &mut output_closed_notified, if grace_sleep.is_some() => {
+                _ = &mut output_closed_notified, if process_exited => {
                     output_closed_notified.set(output_closed_notify.notified());
                 }
 
@@ -103,10 +88,7 @@ pub(crate) fn start_streaming_output(
                         Err(RecvError::Lagged(_)) => {
                             continue;
                         },
-                        Err(RecvError::Closed) => {
-                            output_complete = true;
-                            break;
-                        }
+                        Err(RecvError::Closed) => break,
                     };
 
                     process_chunk(
@@ -122,8 +104,7 @@ pub(crate) fn start_streaming_output(
             }
         }
 
-        output_complete |= output_closed.load(Ordering::Acquire);
-        if output_complete {
+        if output_closed.load(Ordering::Acquire) {
             // Output producers publish all chunks before setting output_closed
             // with Release ordering, so the Acquire above makes this a final
             // safe drain.

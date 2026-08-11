@@ -7,7 +7,7 @@ maintained separately from upstream releases.
 
 - Branch: `maint/mcp-unbounded-waits`
 - Upstream base: `rust-v0.147.0`
-- User-visible suffix: `+jkammerland.mcp.3`
+- User-visible suffix: `+jkammerland.mcp.4`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal
@@ -28,6 +28,8 @@ not prompt for an npm update that would overwrite the fork.
    without returning control to the model.
 7. Unified exec provides a no-timeout `wait_process` that wakes on completion,
    queued input, or TTY output while retaining explicit bounded polling.
+8. Completed unified-exec waits drain through the terminal output-close event,
+   preserving final output that arrives after process exit.
 
 ## Validate
 

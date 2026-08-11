@@ -8,7 +8,7 @@ fn version_identifies_maintained_fork() -> Result<()> {
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(contains("+jkammerland.mcp.3"));
+        .stdout(contains("+jkammerland.mcp.4"));
 
     Ok(())
 }

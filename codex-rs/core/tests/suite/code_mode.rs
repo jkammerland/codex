@@ -2519,6 +2519,122 @@ text("phase 3");
 
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_wait_coalesces_quiet_deadlines_without_resampling() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        let _ = config.features.enable(Feature::CodeMode);
+    });
+    let test = builder.build(&server).await?;
+    let completion_gate = test.workspace_path("code-mode-wait-completion.ready");
+    let completion_wait = wait_for_file_source(&completion_gate)?;
+    let code = format!(
+        r#"
+yield_control();
+{completion_wait}
+text("finished after quiet deadlines");
+"#
+    );
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-coalesce-exec"),
+            ev_custom_tool_call("call-coalesce-exec", "exec", &code),
+            ev_completed("resp-coalesce-exec"),
+        ]),
+    )
+    .await;
+    let first_completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-coalesce-waiting", "waiting"),
+            ev_completed("resp-coalesce-waiting"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn("start a cell that will become quiet")
+        .await?;
+    let first_request = first_completion.single_request();
+    let first_items = custom_tool_output_items(&first_request, "call-coalesce-exec");
+    let cell_id = extract_running_cell_id(text_item(&first_items, /*index*/ 0));
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-coalesce-wait"),
+            responses::ev_function_call(
+                "call-coalesce-wait",
+                "wait",
+                &serde_json::to_string(&serde_json::json!({
+                    "cell_id": cell_id,
+                    "yield_time_ms": 1,
+                }))?,
+            ),
+            ev_completed("resp-coalesce-wait"),
+        ]),
+    )
+    .await;
+    let completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-coalesce-done", "done"),
+            ev_completed("resp-coalesce-done"),
+        ]),
+    )
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "wait for the quiet cell".to_string(),
+                text_elements: Vec::new(),
+            }]))
+        .await?;
+    wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RawResponseItem(raw) => match &raw.item {
+            ResponseItem::FunctionCall { call_id, .. } if call_id == "call-coalesce-wait" => {
+                Some(())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 100)).await;
+    assert!(
+        completion.requests().is_empty(),
+        "quiet deadline wakes must not trigger another model request"
+    );
+
+    fs::write(&completion_gate, "ready")?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let completion_request = completion.single_request();
+    let completion_items = function_tool_output_items(&completion_request, "call-coalesce-wait");
+    assert_eq!(completion_items.len(), 2);
+    assert_regex_match(
+        concat!(
+            r"(?s)\A",
+            r"Script completed\nWall time \d+\.\d seconds\nOutput:\n\z"
+        ),
+        text_item(&completion_items, /*index*/ 0),
+    );
+    assert_eq!(
+        text_item(&completion_items, /*index*/ 1),
+        "finished after quiet deadlines"
+    );
+
+    Ok(())
+}
+
+#[cfg_attr(windows, ignore = "no exec_command on Windows")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_yield_and_termination_are_not_starved_by_runtime_output() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

@@ -342,6 +342,24 @@ impl ToolOutput for AbortedToolOutput {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProcessWaitReason {
+    Completed,
+    Output,
+    Input,
+}
+
+impl std::fmt::Display for ProcessWaitReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Completed => "completed",
+            Self::Output => "output",
+            Self::Input => "input",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecCommandToolOutput {
     pub event_call_id: String,
@@ -353,6 +371,7 @@ pub struct ExecCommandToolOutput {
     pub max_output_tokens: Option<usize>,
     pub process_id: Option<i32>,
     pub exit_code: Option<i32>,
+    pub(crate) wait_reason: Option<ProcessWaitReason>,
     pub original_token_count: Option<usize>,
     /// Bytes omitted by the output collection cap before model-facing truncation.
     pub output_omitted_bytes: Option<NonZeroUsize>,
@@ -422,6 +441,8 @@ impl ToolOutput for ExecCommandToolOutput {
             #[serde(skip_serializing_if = "Option::is_none")]
             session_id: Option<i32>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            reason: Option<ProcessWaitReason>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             original_token_count: Option<usize>,
             output: String,
         }
@@ -431,6 +452,7 @@ impl ToolOutput for ExecCommandToolOutput {
             wall_time_seconds: self.wall_time.as_secs_f64(),
             exit_code: self.exit_code,
             session_id: self.process_id,
+            reason: self.wait_reason,
             original_token_count: self.original_token_count,
             output: match self.max_output_tokens {
                 Some(max_tokens) => self.truncated_output(max_tokens),
@@ -497,12 +519,20 @@ impl ExecCommandToolOutput {
         let wall_time_seconds = self.wall_time.as_secs_f64();
         sections.push(format!("Wall time: {wall_time_seconds:.4} seconds"));
 
+        if let Some(reason) = self.wait_reason {
+            sections.push(format!("Wait reason: {reason}"));
+        }
+
         if let Some(exit_code) = self.exit_code {
             sections.push(format!("Process exited with code {exit_code}"));
         }
 
         if let Some(process_id) = &self.process_id {
             sections.push(format!("Process running with session ID {process_id}"));
+            sections.push(
+                "Use wait_process for event-driven waiting; use write_stdin to send input or explicitly request a bounded poll."
+                    .to_string(),
+            );
         }
 
         if let Some(original_token_count) = self.original_token_count {

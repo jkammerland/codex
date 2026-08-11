@@ -7,7 +7,7 @@ maintained separately from upstream releases.
 
 - Branch: `maint/mcp-unbounded-waits`
 - Upstream base: `rust-v0.147.0`
-- User-visible suffix: `+jkammerland.mcp.1`
+- User-visible suffix: `+jkammerland.mcp.2`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal
@@ -22,6 +22,10 @@ not prompt for an npm update that would overwrite the fork.
 3. A failed call that proves its transport closed schedules a fresh transport
    for the next call without replaying the ambiguous failed request.
 4. CLI and TUI version output identify this maintained build.
+5. Multi-agent v2 waits sleep until mailbox or user-input activity instead of
+   returning on a polling timeout.
+6. Code-mode waits preserve yield reasons and absorb empty deadline yields
+   without returning control to the model.
 
 ## Validate
 
@@ -50,10 +54,11 @@ After committing a clean, tested tree:
 codex --version
 ```
 
-The installer builds `codex` in release mode, verifies the fork suffix, preserves
-the first upstream executable for that upstream version, stages and optionally
-strips the new executable, and atomically replaces only npm's platform-native
-binary. The npm JavaScript launcher and helper binaries remain untouched.
+The installer builds `codex` and `codex-code-mode-host` in release mode, verifies
+the fork suffix, preserves the first upstream executables for that upstream
+version, stages and optionally strips the new executables, and atomically
+replaces each npm platform-native binary. The npm JavaScript launcher and other
+helper binaries remain untouched.
 
 ## Rebase onto a later upstream release
 

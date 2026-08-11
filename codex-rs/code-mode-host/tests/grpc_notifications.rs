@@ -17,6 +17,7 @@ use codex_code_mode::RuntimeResponse;
 use codex_code_mode::ToolInvocationFuture;
 use codex_code_mode::WaitOutcome;
 use codex_code_mode::WaitRequest;
+use codex_code_mode::YieldReason;
 use pretty_assertions::assert_eq;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -199,6 +200,7 @@ async fn completed_waits_drain_pending_notifications_before_returning() -> Resul
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
 
@@ -266,6 +268,7 @@ async fn termination_cancels_pending_notifications() -> Result<()> {
             code_mode_host_duration: actual.code_mode_host_duration(),
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
     let actual = session

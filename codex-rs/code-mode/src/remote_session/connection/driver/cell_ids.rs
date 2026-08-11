@@ -60,10 +60,12 @@ pub(super) fn public_runtime_response(
         RuntimeResponse::Yielded {
             cell_id,
             content_items,
+            reason,
             code_mode_host_duration,
         } => RuntimeResponse::Yielded {
             cell_id: public_cell_id_from_protocol(generation, &cell_id),
             content_items,
+            reason,
             code_mode_host_duration,
         },
         RuntimeResponse::Terminated {

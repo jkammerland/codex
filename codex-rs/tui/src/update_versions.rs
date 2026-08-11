@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn source_build_version_is_not_checked() {
         assert!(is_source_build_version("0.0.0"));
-        assert!(is_source_build_version("0.147.0+jkammerland.mcp.3"));
+        assert!(is_source_build_version("0.147.0+jkammerland.mcp.4"));
         assert!(!is_source_build_version("0.1.0"));
     }
 

@@ -7,6 +7,7 @@ use codex_code_mode_protocol::ImageDetail;
 use codex_code_mode_protocol::RuntimeResponse;
 use codex_code_mode_protocol::ToolDefinition;
 use codex_code_mode_protocol::WaitOutcome;
+use codex_code_mode_protocol::YieldReason;
 use codex_code_mode_protocol::grpc;
 use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
@@ -173,7 +174,9 @@ fn oversized_response_cell_ids_are_rejected() {
         cell_id: "x".repeat(grpc::MAX_IDENTIFIER_BYTES + 1),
         content_items: Vec::new(),
         outcome: Some(grpc::execution_outcome::Outcome::Yielded(
-            grpc::ExecutionYielded {},
+            grpc::ExecutionYielded {
+                reason: grpc::YieldReason::Unspecified.into(),
+            },
         )),
     };
 
@@ -198,12 +201,47 @@ fn invalid_output_enums_and_missing_oneofs_are_rejected() {
             })),
         }],
         outcome: Some(grpc::execution_outcome::Outcome::Yielded(
-            grpc::ExecutionYielded {},
+            grpc::ExecutionYielded {
+                reason: grpc::YieldReason::Requested.into(),
+            },
         )),
     };
 
     assert!(runtime_response(invalid_image).is_err());
+    assert_eq!(
+        runtime_response(grpc::ExecutionOutcome {
+            code_mode_host_duration_ns: 0,
+            cell_id: "cell".to_string(),
+            content_items: Vec::new(),
+            outcome: Some(grpc::execution_outcome::Outcome::Yielded(
+                grpc::ExecutionYielded { reason: i32::MAX },
+            )),
+        }),
+        Err("code-mode execution has an invalid yield reason".to_string())
+    );
     assert!(wait_outcome(grpc::WaitResponse { state: None }).is_err());
+}
+
+#[test]
+fn unspecified_grpc_yield_reason_uses_the_legacy_requested_default() {
+    assert_eq!(
+        runtime_response(grpc::ExecutionOutcome {
+            code_mode_host_duration_ns: 0,
+            cell_id: "cell".to_string(),
+            content_items: Vec::new(),
+            outcome: Some(grpc::execution_outcome::Outcome::Yielded(
+                grpc::ExecutionYielded {
+                    reason: grpc::YieldReason::Unspecified.into(),
+                },
+            )),
+        }),
+        Ok(RuntimeResponse::Yielded {
+            cell_id: CellId::new("cell".to_string()),
+            content_items: Vec::new(),
+            reason: YieldReason::Requested,
+            code_mode_host_duration: Some(Duration::ZERO),
+        })
+    );
 }
 
 /// Zero is a valid measurement, and decoding must not round nanoseconds to
@@ -216,12 +254,15 @@ fn host_timing_preserves_zero_and_nanosecond_precision() {
             content_items: Vec::new(),
             code_mode_host_duration_ns,
             outcome: Some(grpc::execution_outcome::Outcome::Yielded(
-                grpc::ExecutionYielded {},
+                grpc::ExecutionYielded {
+                    reason: grpc::YieldReason::DeadlineElapsed.into(),
+                },
             )),
         };
         let expected = RuntimeResponse::Yielded {
             cell_id: CellId::new("cell".to_string()),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
             code_mode_host_duration: Some(Duration::from_nanos(code_mode_host_duration_ns)),
         };
         assert_eq!(runtime_response(outcome.clone()).as_ref(), Ok(&expected));

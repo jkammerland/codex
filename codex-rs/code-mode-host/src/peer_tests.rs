@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::HostPeer;
 use super::MAX_PENDING_DELEGATE_CALLS;
+use super::YieldReasonEncoding;
 
 fn session_id(value: &str) -> SessionId {
     SessionId::new(value).expect("session ID")
@@ -39,6 +40,7 @@ async fn start_cell_reports_when_initial_response_is_enqueued() {
         RequestId::new(/*value*/ 1),
         started,
         active_cell_permit,
+        YieldReasonEncoding::Omit,
         Instant::now(),
     );
     assert_eq!(initial_response_sent.try_recv(), Err(TryRecvError::Empty));

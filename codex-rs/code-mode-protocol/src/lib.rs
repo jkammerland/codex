@@ -36,6 +36,7 @@ pub use runtime::WaitOutcome;
 pub use runtime::WaitRequest;
 pub use runtime::WaitToPendingOutcome;
 pub use runtime::WaitToPendingRequest;
+pub use runtime::YieldReason;
 pub use session::CellId;
 pub use session::CodeModeSession;
 pub use session::CodeModeSessionCellExecutionLimits;

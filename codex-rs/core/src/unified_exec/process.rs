@@ -188,6 +188,10 @@ impl UnifiedExecProcess {
         Arc::clone(&self.interaction_lock)
     }
 
+    pub(super) fn subscribe_state(&self) -> watch::Receiver<ProcessState> {
+        self.state_rx.clone()
+    }
+
     pub(super) fn has_exited(&self) -> bool {
         let state = self.state_rx.borrow().clone();
         match &self.process_handle {

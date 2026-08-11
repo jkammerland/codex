@@ -1,7 +1,6 @@
 use super::*;
 use crate::tools::context::ProcessWaitReason;
 use crate::unified_exec::WaitProcessRequest;
-use crate::unified_exec::async_watcher::TRAILING_OUTPUT_GRACE;
 
 impl UnifiedExecProcessManager {
     pub(crate) async fn wait_process(
@@ -92,19 +91,11 @@ impl UnifiedExecProcessManager {
             }
         };
 
-        // Event-driven waiting ends above. A completed process gets only the
-        // existing bounded grace period to flush output already in flight.
-        let collection_deadline = if wait_reason == ProcessWaitReason::Completed {
-            Instant::now() + TRAILING_OUTPUT_GRACE
+        let collected_output = if wait_reason == ProcessWaitReason::Completed {
+            Self::collect_output_until_closed(&output).await
         } else {
-            Instant::now()
+            Self::collect_output_until_deadline(&output, /*pause_state*/ None, Instant::now()).await
         };
-        let collected_output = Self::collect_output_until_deadline(
-            &output,
-            /*pause_state*/ None,
-            collection_deadline,
-        )
-        .await;
         let wall_time = Instant::now().saturating_duration_since(start);
         let original_token_count = usize::try_from(approx_tokens_from_byte_count(
             collected_output.total_bytes(),
@@ -181,5 +172,49 @@ impl UnifiedExecProcessManager {
             output_omitted_bytes,
             hook_command: Some(hook_command),
         })
+    }
+
+    /// Drains all process output through the terminal `Closed` event.
+    ///
+    /// `Exited` can precede final output from remote executors, so completion
+    /// must not be represented by a timer. Producers publish each chunk before
+    /// setting `output_closed`, making the close state an acquire/release final
+    /// drain boundary.
+    pub(super) async fn collect_output_until_closed(output: &OutputHandles) -> HeadTailBuffer {
+        let OutputHandles {
+            output_buffer,
+            output_notify,
+            output_closed,
+            output_closed_notify,
+            ..
+        } = output;
+        let mut collected = HeadTailBuffer::default();
+
+        loop {
+            // Register notifications before checking output so no chunk or
+            // close event can be lost between the check and the await.
+            let output_notified = output_notify.notified();
+            let output_closed_notified = output_closed_notify.notified();
+            tokio::pin!(output_notified);
+            tokio::pin!(output_closed_notified);
+            output_notified.as_mut().enable();
+            output_closed_notified.as_mut().enable();
+
+            let drained_output = output_buffer.lock().await.drain();
+            if drained_output.retained_bytes() > 0 || drained_output.omitted_bytes() > 0 {
+                collected.push_buffer(drained_output);
+                continue;
+            }
+            if output_closed.load(Ordering::Acquire) {
+                break;
+            }
+
+            tokio::select! {
+                _ = &mut output_notified => {}
+                _ = &mut output_closed_notified => {}
+            }
+        }
+
+        collected
     }
 }

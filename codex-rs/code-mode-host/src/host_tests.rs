@@ -592,6 +592,7 @@ async fn request_task_panic_disconnects_host() {
         seen_session_ids: Mutex::new(SeenSessionIds::default()),
         requests: Mutex::new(RequestRegistry::default()),
         request_tasks: TaskTracker::new(),
+        wait_yield_reason: false,
         closing: AtomicBool::new(false),
         peer: Arc::clone(&peer),
     };
@@ -620,6 +621,7 @@ async fn execute_request_id_remains_active_until_initial_response() {
         seen_session_ids: Mutex::new(SeenSessionIds::default()),
         requests: Mutex::new(RequestRegistry::default()),
         request_tasks: TaskTracker::new(),
+        wait_yield_reason: false,
         closing: AtomicBool::new(false),
         peer,
     });
@@ -684,6 +686,7 @@ async fn active_cell_limit_rejects_execute_without_disconnecting() {
         seen_session_ids: Mutex::new(SeenSessionIds::default()),
         requests: Mutex::new(RequestRegistry::default()),
         request_tasks: TaskTracker::new(),
+        wait_yield_reason: false,
         closing: AtomicBool::new(false),
         peer: Arc::clone(&peer),
     };

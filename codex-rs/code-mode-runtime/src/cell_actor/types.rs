@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use codex_code_mode_protocol::YieldReason;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -279,7 +280,10 @@ impl CellState {
                 pending_initial_yield_items: Some(content_items),
                 event,
             } if matches!(mode, ObserveMode::YieldAfter(_)) => {
-                match response_tx.send(Ok(CellEvent::Yielded { content_items })) {
+                match response_tx.send(Ok(CellEvent::Yielded {
+                    content_items,
+                    reason: YieldReason::Requested,
+                })) {
                     Ok(()) => {
                         *phase = CellPhase::Completed {
                             pending_initial_yield_items: None,
@@ -287,7 +291,7 @@ impl CellState {
                         };
                         ObservationDelivery::Buffered
                     }
-                    Err(Ok(CellEvent::Yielded { content_items })) => {
+                    Err(Ok(CellEvent::Yielded { content_items, .. })) => {
                         *phase = CellPhase::Completed {
                             pending_initial_yield_items: Some(content_items),
                             event,
@@ -389,10 +393,14 @@ fn prepend_initial_yield(
         return event;
     };
     match event {
-        CellEvent::Yielded { mut content_items } => {
+        CellEvent::Yielded {
+            mut content_items,
+            reason,
+        } => {
             pending_initial_yield_items.append(&mut content_items);
             CellEvent::Yielded {
                 content_items: pending_initial_yield_items,
+                reason,
             }
         }
         CellEvent::Pending {

@@ -32,6 +32,7 @@ use codex_code_mode_protocol::host::RequestId;
 use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
 use codex_code_mode_protocol::host::TransportLane;
+use codex_code_mode_protocol::host::WAIT_YIELD_REASON_CAPABILITY;
 use codex_http_client::HttpClientFactory;
 use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
 use codex_websocket_client::WebSocketConnector;
@@ -292,11 +293,17 @@ impl Connection {
                 Capability::new(DUAL_WEBSOCKET_CAPABILITY).map_err(|error| error.to_string())?;
             let session_limits_capability = Capability::new(SESSION_RESOURCE_LIMITS_CAPABILITY)
                 .map_err(|error| error.to_string())?;
+            let wait_yield_reason_capability =
+                Capability::new(WAIT_YIELD_REASON_CAPABILITY).map_err(|error| error.to_string())?;
             let optional_capabilities = if bulk_connection_options.is_some() {
-                CapabilitySet::try_new([dual_capability.clone(), session_limits_capability])
-                    .map_err(|error| error.to_string())?
+                CapabilitySet::try_new([
+                    dual_capability.clone(),
+                    session_limits_capability,
+                    wait_yield_reason_capability,
+                ])
+                .map_err(|error| error.to_string())?
             } else {
-                CapabilitySet::try_new([session_limits_capability])
+                CapabilitySet::try_new([session_limits_capability, wait_yield_reason_capability])
                     .map_err(|error| error.to_string())?
             };
             let hello = ClientHello::new(

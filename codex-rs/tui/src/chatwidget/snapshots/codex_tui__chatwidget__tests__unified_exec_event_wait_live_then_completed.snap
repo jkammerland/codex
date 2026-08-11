@@ -1,0 +1,17 @@
+---
+source: tui/src/chatwidget/tests/exec_flow.rs
+expression: "format!(\"LIVE\\n{live}\\nCOMPLETED\\n{completed}\")"
+---
+LIVE
+• Waiting for background terminal (0s • esc to inte…
+  └ just test -p codex-core
+
+
+› Ask Codex to do anything
+
+  gpt-5.6-sol default · /tmp/project
+COMPLETED
+• Waited for background terminal · just test -p codex-core
+
+• Ran just test -p codex-core
+  └ finished

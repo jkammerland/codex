@@ -1,23 +1,11 @@
 use super::*;
 use crate::session::InputQueueActivity;
-use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
 use codex_tools::ToolSpec;
 use std::collections::HashMap;
-use std::time::Duration;
-use tokio::time::Instant;
-use tokio::time::timeout_at;
 
 #[derive(Default)]
-pub(crate) struct Handler {
-    options: WaitAgentTimeoutOptions,
-}
-
-impl Handler {
-    pub(crate) fn new(options: WaitAgentTimeoutOptions) -> Self {
-        Self { options }
-    }
-}
+pub(crate) struct Handler;
 
 impl ToolExecutor<ToolInvocation> for Handler {
     fn tool_name(&self) -> ToolName {
@@ -25,7 +13,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_wait_agent_tool_v2(self.options)
+        create_wait_agent_tool_v2()
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
@@ -46,20 +34,7 @@ impl Handler {
             ..
         } = invocation;
         let arguments = function_arguments(payload)?;
-        let args: WaitArgs = parse_arguments(&arguments)?;
-        let min_timeout_ms = turn.config.multi_agent_v2.min_wait_timeout_ms;
-        let max_timeout_ms = turn.config.multi_agent_v2.max_wait_timeout_ms;
-        let default_timeout_ms = turn.config.multi_agent_v2.default_wait_timeout_ms;
-        let requested_timeout_ms = args.timeout_ms;
-        let timeout_ms = match requested_timeout_ms {
-            Some(ms) if ms > max_timeout_ms => {
-                return Err(FunctionCallError::RespondToModel(format!(
-                    "timeout_ms must be at most {max_timeout_ms}"
-                )));
-            }
-            Some(ms) => ms.max(min_timeout_ms),
-            None => default_timeout_ms,
-        };
+        let _: WaitArgs = parse_arguments(&arguments)?;
 
         let turn_state = session
             .input_queue
@@ -88,9 +63,36 @@ impl Handler {
             )
             .await;
 
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        let outcome = wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
-        let result = WaitAgentResult::from_outcome(outcome, requested_timeout_ms, timeout_ms);
+        session
+            .services
+            .agent_control
+            .register_session_root(session.thread_id, turn.parent_thread_id);
+        let current_agent_name = turn
+            .session_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root)
+            .to_string();
+        let has_waitable_agent = if pending_activity.is_some() {
+            true
+        } else {
+            session
+                .services
+                .agent_control
+                .list_agents(&turn.session_source, /*path_prefix*/ None)
+                .await
+                .map_err(collab_spawn_error)?
+                .iter()
+                .any(|agent| {
+                    agent.agent_name != current_agent_name
+                        && !crate::agent::status::is_final(&agent.agent_status)
+                })
+        };
+        let outcome = if has_waitable_agent {
+            wait_for_activity(&mut activity_rx, pending_activity).await?
+        } else {
+            WaitOutcome::NoLiveAgents
+        };
+        let result = WaitAgentResult::from_outcome(outcome);
 
         session
             .emit_turn_item_completed(
@@ -122,36 +124,22 @@ impl CoreToolRuntime for Handler {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WaitArgs {
-    timeout_ms: Option<i64>,
-}
+struct WaitArgs {}
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct WaitAgentResult {
     pub(crate) message: String,
-    pub(crate) timed_out: bool,
 }
 
 impl WaitAgentResult {
-    fn from_outcome(
-        outcome: WaitOutcome,
-        requested_timeout_ms: Option<i64>,
-        timeout_ms: i64,
-    ) -> Self {
+    fn from_outcome(outcome: WaitOutcome) -> Self {
         let message = match outcome {
             WaitOutcome::MailboxActivity => "Wait completed.",
             WaitOutcome::Steered => "Wait interrupted by new input.",
-            WaitOutcome::TimedOut => "Wait timed out.",
-        };
-        let message = match requested_timeout_ms {
-            Some(requested_timeout_ms) if requested_timeout_ms < timeout_ms => format!(
-                "{message}\n\nRequested timeout of {requested_timeout_ms}ms was clamped to the minimum of {timeout_ms}ms."
-            ),
-            Some(_) | None => message.to_string(),
+            WaitOutcome::NoLiveAgents => "No live agents to wait for.",
         };
         Self {
-            message,
-            timed_out: outcome == WaitOutcome::TimedOut,
+            message: message.to_string(),
         }
     }
 }
@@ -178,25 +166,25 @@ impl ToolOutput for WaitAgentResult {
 enum WaitOutcome {
     MailboxActivity,
     Steered,
-    TimedOut,
+    NoLiveAgents,
 }
 
 async fn wait_for_activity(
     activity_rx: &mut tokio::sync::watch::Receiver<InputQueueActivity>,
     pending_activity: Option<InputQueueActivity>,
-    deadline: Instant,
-) -> WaitOutcome {
+) -> Result<WaitOutcome, FunctionCallError> {
     if let Some(activity) = pending_activity {
-        return match activity {
+        return Ok(match activity {
             InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
             InputQueueActivity::Steer => WaitOutcome::Steered,
-        };
+        });
     }
-    match timeout_at(deadline, activity_rx.changed()).await {
-        Ok(Ok(())) => match *activity_rx.borrow_and_update() {
-            InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
-            InputQueueActivity::Steer => WaitOutcome::Steered,
-        },
-        Ok(Err(_)) | Err(_) => WaitOutcome::TimedOut,
-    }
+    activity_rx
+        .changed()
+        .await
+        .map_err(|_| FunctionCallError::Fatal("wait_agent activity channel closed".to_string()))?;
+    Ok(match *activity_rx.borrow_and_update() {
+        InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
+        InputQueueActivity::Steer => WaitOutcome::Steered,
+    })
 }

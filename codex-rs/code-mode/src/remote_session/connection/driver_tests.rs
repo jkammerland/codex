@@ -13,6 +13,7 @@ use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::NotificationFuture;
 use codex_code_mode_protocol::ToolInvocationFuture;
 use codex_code_mode_protocol::WaitRequest;
+use codex_code_mode_protocol::YieldReason;
 use codex_code_mode_protocol::host::CapabilitySet;
 use codex_code_mode_protocol::host::ClientToHost;
 use codex_code_mode_protocol::host::DelegateRequest;
@@ -1239,6 +1240,7 @@ async fn mismatched_initial_response_fails_connection_and_closes_cell_once() {
                     code_mode_host_duration_ns: 0,
                     cell_id: CellId::new("2".to_string()).into(),
                     content_items: Vec::new(),
+                    yield_reason: None,
                 },
             },
         }))
@@ -1293,6 +1295,7 @@ async fn mismatched_wait_response_fails_connection() {
                         code_mode_host_duration_ns: 0,
                         cell_id: CellId::new("2".to_string()).into(),
                         content_items: Vec::new(),
+                        yield_reason: None,
                     }),
                 },
             },
@@ -1400,6 +1403,7 @@ async fn remote_wait_accepts_durations_longer_than_five_minutes() {
                         code_mode_host_duration_ns: 0,
                         cell_id: CellId::new("1".to_string()).into(),
                         content_items: Vec::new(),
+                        yield_reason: Some(YieldReason::DeadlineElapsed),
                     }),
                 },
             },
@@ -1414,6 +1418,7 @@ async fn remote_wait_accepts_durations_longer_than_five_minutes() {
                 code_mode_host_duration: Some(Duration::ZERO),
                 cell_id: CellId::new("1".to_string()),
                 content_items: Vec::new(),
+                reason: YieldReason::DeadlineElapsed,
             }
         ))
     );
@@ -1591,6 +1596,7 @@ async fn cancelled_wait_is_retired_before_next_wait_is_sent() {
                         code_mode_host_duration_ns: 0,
                         cell_id: CellId::new("1".to_string()).into(),
                         content_items: Vec::new(),
+                        yield_reason: None,
                     }),
                 },
             },
@@ -1605,6 +1611,7 @@ async fn cancelled_wait_is_retired_before_next_wait_is_sent() {
                 code_mode_host_duration: Some(Duration::ZERO),
                 cell_id: CellId::new("1".to_string()),
                 content_items: Vec::new(),
+                reason: YieldReason::Requested,
             }
         ))
     );
@@ -1843,6 +1850,7 @@ async fn session_accepts_more_than_4096_cells_without_growing_a_tombstone_set() 
                         code_mode_host_duration_ns: 0,
                         cell_id: CellId::new(cell_id.clone()).into(),
                         content_items: Vec::new(),
+                        yield_reason: None,
                     },
                 },
             }))

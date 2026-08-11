@@ -29,6 +29,12 @@ use tokio_util::sync::CancellationToken;
 
 const CELL_MESSAGE_CAPACITY: usize = 128;
 
+#[derive(Clone, Copy)]
+pub(super) enum YieldReasonEncoding {
+    Omit,
+    Include,
+}
+
 pub(super) struct HostPeer {
     outgoing_tx: mpsc::Sender<EncodedFrame>,
     pending: Mutex<HashMap<DelegateRequestId, PendingDelegate>>,
@@ -216,6 +222,7 @@ impl HostPeer {
         request_id: RequestId,
         started: StartedCell,
         active_cell_permit: OwnedSemaphorePermit,
+        yield_reason_encoding: YieldReasonEncoding,
         received_at: Instant,
     ) -> oneshot::Receiver<()> {
         let (initial_response_sent_tx, initial_response_sent_rx) = oneshot::channel();
@@ -254,6 +261,7 @@ impl HostPeer {
                 messages_rx,
                 initial_response_sent_tx,
                 active_cell_permit,
+                yield_reason_encoding,
             )
             .await;
         });
@@ -423,6 +431,7 @@ async fn drive_cell(
     mut messages_rx: mpsc::Receiver<CellMessage>,
     initial_response_sent_tx: oneshot::Sender<()>,
     _active_cell_permit: OwnedSemaphorePermit,
+    yield_reason_encoding: YieldReasonEncoding,
 ) {
     let mut initial_response_sent_tx = Some(initial_response_sent_tx);
     let initial_response = started.initial_response();
@@ -437,7 +446,7 @@ async fn drive_cell(
                     request.id,
                     result.and_then(|response| {
                         let response = response.with_code_mode_host_duration(code_mode_host_duration);
-                        WireRuntimeResponse::try_from(response).map_err(|error| error.to_string())
+                        wire_runtime_response(response, yield_reason_encoding)
                     }),
                 );
                 if let Some(initial_response_sent_tx) = initial_response_sent_tx.take() {
@@ -469,7 +478,7 @@ async fn drive_cell(
             request.id,
             result.and_then(|response| {
                 let response = response.with_code_mode_host_duration(code_mode_host_duration);
-                WireRuntimeResponse::try_from(response).map_err(|error| error.to_string())
+                wire_runtime_response(response, yield_reason_encoding)
             }),
         );
         if let Some(initial_response_sent_tx) = initial_response_sent_tx.take() {
@@ -513,6 +522,19 @@ impl HostPeer {
             self.cell_routes_changed.notify_waiters();
         }
     }
+}
+
+fn wire_runtime_response(
+    response: codex_code_mode_protocol::RuntimeResponse,
+    encoding: YieldReasonEncoding,
+) -> Result<WireRuntimeResponse, String> {
+    match encoding {
+        YieldReasonEncoding::Omit => WireRuntimeResponse::try_from(response),
+        YieldReasonEncoding::Include => {
+            WireRuntimeResponse::try_from_runtime_response_with_yield_reason(response)
+        }
+    }
+    .map_err(|error| error.to_string())
 }
 
 pub(super) enum PeerSendError {

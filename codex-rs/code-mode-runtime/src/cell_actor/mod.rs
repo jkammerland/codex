@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
+use codex_code_mode_protocol::YieldReason;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -264,6 +265,7 @@ async fn run_cell<H: CellHost>(
                         observer.take(),
                         CellEvent::Yielded {
                             content_items: std::mem::take(&mut content_items),
+                            reason: YieldReason::DeadlineElapsed,
                         },
                     ),
                     &mut content_items,
@@ -405,6 +407,7 @@ async fn run_cell<H: CellHost>(
                                     observer.take(),
                                     CellEvent::Yielded {
                                         content_items: std::mem::take(&mut content_items),
+                                        reason: YieldReason::Requested,
                                     },
                                 ),
                                 &mut content_items,
@@ -562,6 +565,7 @@ fn restore_undelivered_yield(delivery: Result<(), CellEvent>, content_items: &mu
         Ok(()) => {}
         Err(CellEvent::Yielded {
             content_items: mut undelivered_items,
+            ..
         }) => {
             undelivered_items.append(content_items);
             *content_items = undelivered_items;

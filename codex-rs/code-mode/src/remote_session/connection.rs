@@ -28,6 +28,7 @@ use codex_code_mode_protocol::host::ProtocolVersion;
 use codex_code_mode_protocol::host::RequestId;
 use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
+use codex_code_mode_protocol::host::WAIT_YIELD_REASON_CAPABILITY;
 use codex_code_mode_protocol::host::YIELD_OBSERVATION_CAPABILITY;
 use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
 use tokio::io::AsyncBufReadExt;
@@ -207,10 +208,9 @@ impl Connection {
         let handshake = async {
             let session_limits_capability = Capability::new(SESSION_RESOURCE_LIMITS_CAPABILITY)
                 .map_err(|error| error.to_string())?;
-            let yield_capability =
-                Capability::new(YIELD_OBSERVATION_CAPABILITY).map_err(|error| error.to_string())?;
-            let optional_capabilities =
-                CapabilitySet::try_new([session_limits_capability, yield_capability])
+            let yield_capability = Capability::new(YIELD_OBSERVATION_CAPABILITY).map_err(|error| error.to_string())?;
+            let wait_yield_reason_capability = Capability::new(WAIT_YIELD_REASON_CAPABILITY).map_err(|error| error.to_string())?;
+            let optional_capabilities = CapabilitySet::try_new([session_limits_capability, yield_capability, wait_yield_reason_capability])
                     .map_err(|error| error.to_string())?;
             let hello = ClientHello::new(
                 SupportedProtocolVersions::try_new([ProtocolVersion::V1])

@@ -998,6 +998,31 @@ async fn unified_exec_wait_status_renders_command_in_single_details_row_snapshot
 }
 
 #[tokio::test]
+async fn unified_exec_event_wait_shows_live_status_then_one_summary() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.on_task_started();
+    let exec = begin_unified_exec_startup(
+        &mut chat,
+        "call-event-wait",
+        "proc-event-wait",
+        "just test -p codex-core",
+    );
+
+    terminal_interaction(&mut chat, "call-event-wait", "proc-event-wait", "");
+    let live = normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 52));
+
+    end_exec(&mut chat, exec, "finished\n", "", /*exit_code*/ 0);
+    let completed = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert_chatwidget_snapshot!(
+        "unified_exec_event_wait_live_then_completed",
+        format!("LIVE\n{live}\nCOMPLETED\n{completed}")
+    );
+}
+
+#[tokio::test]
 async fn unified_exec_empty_then_non_empty_snapshot() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.on_task_started();

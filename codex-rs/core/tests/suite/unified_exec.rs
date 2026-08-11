@@ -94,8 +94,10 @@ fn parse_unified_exec_output(raw: &str) -> Result<ParsedUnifiedExecOutput> {
             r#"(?s)^(?:Warning: truncated output \(original token count: \d+\)\n)?(?:Total output lines: \d+\n\n)?"#,
             r#"(?:Chunk ID: (?P<chunk_id>[^\n]+)\n)?"#,
             r#"Wall time: (?P<wall_time>-?\d+(?:\.\d+)?) seconds\n"#,
+            r#"(?:Wait reason: (?:completed|output|input)\n)?"#,
             r#"(?:Process exited with code (?P<exit_code>-?\d+)\n)?"#,
             r#"(?:Process running with session ID (?P<process_id>-?\d+)\n)?"#,
+            r#"(?:Use wait_process for event-driven waiting; use write_stdin to send input or explicitly request a bounded poll\.\n)?"#,
             r#"(?:Original token count: (?P<original_token_count>\d+)\n)?"#,
             r#"Output:\n?(?P<output>.*)$"#,
         ))
@@ -2394,6 +2396,87 @@ async fn write_stdin_returns_exit_metadata_and_clears_session() -> Result<()> {
         "chunk id should be hexadecimal: {exit_chunk}"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_process_blocks_without_model_polling_and_wakes_for_input() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX sleep command");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("test config should allow feature update");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("r1"),
+                ev_function_call(
+                    "exec",
+                    "exec_command",
+                    r#"{"cmd":"sleep 2","yield_time_ms":250,"tty":false}"#,
+                ),
+                ev_completed("r1"),
+            ]),
+            sse(vec![
+                ev_response_created("r2"),
+                ev_function_call("wait", "wait_process", r#"{"session_id":1000}"#),
+                ev_completed("r2"),
+            ]),
+            sse(vec![
+                ev_response_created("r3"),
+                ev_assistant_message("msg", "input received"),
+                ev_completed("r3"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(&test, "wait without polling", PermissionProfile::Disabled).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::TerminalInteraction(interaction)
+                if interaction.call_id == "exec" && interaction.stdin.is_empty()
+        )
+    })
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        response_mock.requests().len(),
+        2,
+        "an event-driven process wait must not trigger another model request"
+    );
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "new direction".to_string(),
+                text_elements: Vec::new(),
+            }]))
+        .await
+        .expect("steer input should interrupt wait_process");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    let wait_output_item = requests[2].function_call_output("wait");
+    let wait_output = wait_output_item["output"]
+        .as_str()
+        .expect("wait_process output should be text");
+    assert!(wait_output.contains("Wait reason: input"));
+    assert!(wait_output.contains("Process running with session ID 1000"));
+    assert!(wait_output.contains("Use wait_process for event-driven waiting"));
     Ok(())
 }
 

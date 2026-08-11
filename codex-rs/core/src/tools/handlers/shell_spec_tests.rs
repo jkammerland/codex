@@ -22,12 +22,11 @@ fn exec_command_tool_matches_expected_spec() {
 
     let description = if cfg!(windows) {
         format!(
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.{}",
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll.{}",
             windows_shell_guidance_description()
         )
     } else {
-        "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-            .to_string()
+        "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll.".to_string()
     };
     let yield_time_ms_description = if cfg!(windows) {
         "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
@@ -93,7 +92,9 @@ fn exec_command_tool_matches_expected_spec() {
                 Some(vec!["cmd".to_string()]),
                 Some(false.into())
             ),
-            output_schema: Some(unified_exec_output_schema()),
+            output_schema: Some(unified_exec_output_schema(
+                UnifiedExecOutputSchemaKind::Command
+            )),
         })
     );
 }
@@ -128,7 +129,7 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "chars".to_string(),
             JsonSchema::string(Some(
-                "Bytes to write to stdin. Defaults to empty, which polls without writing.".to_string(),
+                "Bytes to write to stdin. Defaults to empty, which performs an explicit bounded poll without writing.".to_string(),
             )),
         ),
         (
@@ -149,9 +150,7 @@ fn write_stdin_tool_matches_expected_spec() {
         tool,
         ToolSpec::Function(ResponsesApiTool {
             name: "write_stdin".to_string(),
-            description:
-                "Writes characters to an existing unified exec session and returns recent output."
-                    .to_string(),
+            description: "Writes characters to an existing unified exec session and returns recent output. Use this to send input; use wait_process for event-driven waiting. An empty chars value remains supported for explicit bounded polling.".to_string(),
             strict: false,
             defer_loading: None,
             parameters: JsonSchema::object(
@@ -159,8 +158,35 @@ fn write_stdin_tool_matches_expected_spec() {
                 Some(vec!["session_id".to_string()]),
                 Some(false.into())
             ),
-            output_schema: Some(unified_exec_output_schema()),
+            output_schema: Some(unified_exec_output_schema(
+                UnifiedExecOutputSchemaKind::Command
+            )),
         })
+    );
+}
+
+#[test]
+fn wait_process_tool_matches_expected_no_timeout_spec() {
+    let ToolSpec::Function(spec) = create_wait_process_tool() else {
+        panic!("wait_process should be a function tool");
+    };
+    let Some(properties) = spec.parameters.properties else {
+        panic!("wait_process should define parameters");
+    };
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["max_output_tokens", "session_id"]
+    );
+    assert_eq!(
+        spec.parameters.required,
+        Some(vec!["session_id".to_string()])
+    );
+    let Some(output_schema) = spec.output_schema else {
+        panic!("wait_process should define an output schema");
+    };
+    assert_eq!(
+        output_schema.pointer("/properties/reason/enum"),
+        Some(&serde_json::json!(["completed", "output", "input"]))
     );
 }
 

@@ -88,11 +88,21 @@ pub(super) fn execution_outcome(
         RuntimeResponse::Yielded {
             cell_id,
             content_items,
+            reason,
             code_mode_host_duration,
         } => (
             cell_id,
             content_items,
-            proto::execution_outcome::Outcome::Yielded(proto::ExecutionYielded {}),
+            proto::execution_outcome::Outcome::Yielded(proto::ExecutionYielded {
+                reason: match reason {
+                    codex_code_mode_protocol::YieldReason::Requested => {
+                        proto::YieldReason::Requested.into()
+                    }
+                    codex_code_mode_protocol::YieldReason::DeadlineElapsed => {
+                        proto::YieldReason::DeadlineElapsed.into()
+                    }
+                },
+            }),
             code_mode_host_duration,
         ),
         RuntimeResponse::Terminated {

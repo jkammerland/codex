@@ -14,6 +14,7 @@ use codex_code_mode_protocol::RuntimeResponse;
 use codex_code_mode_protocol::StartedCell;
 use codex_code_mode_protocol::ToolInvocationFuture;
 use codex_code_mode_protocol::WaitOutcome;
+use codex_code_mode_protocol::YieldReason;
 use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -211,6 +212,7 @@ fn reconnected_wait_maps_live_and_missing_outcomes() {
         code_mode_host_duration: None,
         cell_id: CellId::new("42".to_string()),
         content_items: Vec::new(),
+        reason: YieldReason::DeadlineElapsed,
     };
     let terminated = RuntimeResponse::Terminated {
         code_mode_host_duration: None,
@@ -224,6 +226,7 @@ fn reconnected_wait_maps_live_and_missing_outcomes() {
             code_mode_host_duration: None,
             cell_id: public_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     assert_eq!(
@@ -245,6 +248,7 @@ async fn cell_id_remapping_preserves_code_mode_host_duration() {
     let response = RuntimeResponse::Yielded {
         cell_id: cell_id.clone(),
         content_items: Vec::new(),
+        reason: YieldReason::DeadlineElapsed,
         code_mode_host_duration,
     };
     let initial = response.clone();
@@ -252,6 +256,7 @@ async fn cell_id_remapping_preserves_code_mode_host_duration() {
     let expected = RuntimeResponse::Yielded {
         cell_id: CellId::new("g2:42".to_string()),
         content_items: Vec::new(),
+        reason: YieldReason::DeadlineElapsed,
         code_mode_host_duration,
     };
     assert_eq!(

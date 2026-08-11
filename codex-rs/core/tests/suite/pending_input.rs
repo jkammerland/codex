@@ -494,10 +494,9 @@ async fn queue_only_agent_mail_wakes_sleeping_root_and_persists_message() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
+async fn wait_agent_without_live_agents_returns_immediately() {
     const WAIT_CALL_ID: &str = "wait-call";
     const INITIAL_PROMPT: &str = "wait for an agent";
-    const STEER_PROMPT: &str = "stop waiting and continue";
     const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
     let first_chunks = vec![
@@ -506,13 +505,13 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
             WAIT_CALL_ID,
             MULTI_AGENT_V2_NAMESPACE,
             "wait_agent",
-            r#"{"timeout_ms":10000}"#,
+            "{}",
         )),
         chunk(ev_completed("resp-1")),
     ];
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
-    let codex = test_codex()
+    let test = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
             config
@@ -522,35 +521,20 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
         })
         .build_with_streaming_server(&server)
         .await
-        .expect("build Codex test session")
-        .codex;
+        .expect("build Codex test session");
+    let codex = Arc::clone(&test.codex);
 
     submit_user_input(&codex, INITIAL_PROMPT).await;
-    wait_for_event(&codex, |event| {
-        matches!(event, EventMsg::CollabWaitingBegin(_))
-    })
-    .await;
-
-    steer_user_input(&codex, STEER_PROMPT).await;
     wait_for_turn_complete(&codex).await;
 
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
     let second: Value = from_slice(&requests[1]).expect("parse second request");
-    let relevant_user_input = message_input_texts(&second, "user")
-        .into_iter()
-        .filter(|text| text == INITIAL_PROMPT || text == STEER_PROMPT)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        relevant_user_input,
-        vec![INITIAL_PROMPT.to_string(), STEER_PROMPT.to_string()]
-    );
     let wait_output = function_call_output_text(&second, WAIT_CALL_ID).expect("wait_agent output");
     assert_eq!(
         serde_json::from_str::<Value>(wait_output).expect("parse wait_agent output"),
         json!({
-            "message": "Wait interrupted by new input.",
-            "timed_out": false,
+            "message": "No live agents to wait for.",
         })
     );
 

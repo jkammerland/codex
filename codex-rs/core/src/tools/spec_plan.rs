@@ -39,9 +39,6 @@ use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
 use crate::tools::handlers::multi_agents::SpawnAgentHandler;
 use crate::tools::handlers::multi_agents::WaitAgentHandler;
-use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
-use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
-use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
@@ -137,7 +134,7 @@ pub(crate) fn build_tool_router(
         tool_suggest_candidates,
         wait_for_environment_tool_config: wait_for_environment_tool_config.as_ref(),
         default_agent_type_description: &default_agent_type_description,
-        wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        wait_agent_timeouts: wait_agent_timeout_options(),
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -263,7 +260,7 @@ pub(crate) fn build_core_tool_registry(
         tool_suggest_candidates,
         wait_for_environment_tool_config,
         default_agent_type_description: &default_agent_type_description,
-        wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        wait_agent_timeouts: wait_agent_timeout_options(),
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -586,20 +583,8 @@ fn image_generation_available(turn_context: &TurnContext) -> bool {
                 .is_some_and(AuthManager::current_auth_uses_codex_backend))
 }
 
-fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOptions {
-    if multi_agent_v2_enabled(turn_context) {
-        return WaitAgentTimeoutOptions {
-            default_timeout_ms: turn_context.config.multi_agent_v2.default_wait_timeout_ms,
-            min_timeout_ms: turn_context.config.multi_agent_v2.min_wait_timeout_ms,
-            max_timeout_ms: turn_context.config.multi_agent_v2.max_wait_timeout_ms,
-        };
-    }
-
-    WaitAgentTimeoutOptions {
-        default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
-        min_timeout_ms: MIN_WAIT_TIMEOUT_MS,
-        max_timeout_ms: MAX_WAIT_TIMEOUT_MS,
-    }
+fn wait_agent_timeout_options() -> WaitAgentTimeoutOptions {
+    WaitAgentTimeoutOptions::default()
 }
 
 fn agent_type_description(
@@ -1084,10 +1069,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             );
             if turn_context.config.multi_agent_v2.wait_agent_enabled {
                 registry.register_trusted_with_exposure(
-                    multi_agent_v2_handler(
-                        WaitAgentHandlerV2::new(context.wait_agent_timeouts),
-                        tool_namespace,
-                    ),
+                    multi_agent_v2_handler(WaitAgentHandlerV2, tool_namespace),
                     exposure,
                 );
             }

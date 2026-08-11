@@ -359,9 +359,6 @@ mod tests {
             FeatureToml::Config(MultiAgentV2ConfigToml {
                 enabled: Some(false),
                 max_concurrent_threads_per_session: Some(_),
-                min_wait_timeout_ms: Some(_),
-                max_wait_timeout_ms: Some(_),
-                default_wait_timeout_ms: Some(_),
                 subagent_developer_instructions: Some(instructions),
                 hide_spawn_agent_metadata: Some(_),
                 ..

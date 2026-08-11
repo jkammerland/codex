@@ -2905,7 +2905,24 @@ async fn wait_agent_rejects_empty_targets() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
+async fn multi_agent_v2_wait_agent_rejects_timeout_argument() {
+    let (session, turn) = make_session_and_context().await;
+    let Err(FunctionCallError::RespondToModel(message)) = WaitAgentHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 1})),
+        ))
+        .await
+    else {
+        panic!("v2 wait_agent should reject the removed timeout argument");
+    };
+    assert!(message.contains("unknown field `timeout_ms`"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_returns_on_mailbox_activity() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -2953,12 +2970,12 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
         let session = session.clone();
         let turn = turn.clone();
         async move {
-            WaitAgentHandlerV2::default()
+            WaitAgentHandlerV2
                 .handle(invocation(
                     session,
                     turn,
                     "wait_agent",
-                    function_payload(json!({"timeout_ms": 10_000})),
+                    function_payload(json!({})),
                 ))
                 .await
         }
@@ -2982,7 +2999,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
     let output = wait_task
         .await
         .expect("wait task should join")
-        .expect("timeout-only args should be accepted in v2 mode");
+        .expect("wait should return after mailbox activity");
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
@@ -2990,232 +3007,6 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
-    assert_eq!(success, None);
-}
-
-#[tokio::test]
-async fn multi_agent_v2_wait_agent_rejects_timeout_below_configured_min() {
-    let (session, mut turn) = make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    config.multi_agent_v2.min_wait_timeout_ms = 50;
-    config.multi_agent_v2.max_wait_timeout_ms = 1_000;
-    config.multi_agent_v2.default_wait_timeout_ms = 50;
-    set_turn_config(&mut turn, config);
-
-    let Err(err) = WaitAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "wait_agent",
-            function_payload(json!({"timeout_ms": 1})),
-        ))
-        .await
-    else {
-        panic!("timeout below configured minimum should be rejected");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel("timeout_ms must be at least 50".to_string())
-    );
-}
-
-#[tokio::test]
-async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min() {
-    let (session, mut turn) = make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    config.multi_agent_v2.min_wait_timeout_ms = 1;
-    config.multi_agent_v2.max_wait_timeout_ms = 1_000;
-    config.multi_agent_v2.default_wait_timeout_ms = 50;
-    set_turn_config(&mut turn, config);
-
-    let output = WaitAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "wait_agent",
-            function_payload(json!({"timeout_ms": 1})),
-        ))
-        .await
-        .expect("wait_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
-    assert_eq!(success, None);
-}
-
-#[tokio::test]
-async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
-    let (session, mut turn) = make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    config.multi_agent_v2.min_wait_timeout_ms = 1;
-    config.multi_agent_v2.max_wait_timeout_ms = 1_000;
-    config.multi_agent_v2.default_wait_timeout_ms = 50;
-    set_turn_config(&mut turn, config);
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let early = timeout(
-        Duration::from_millis(/*millis*/ 20),
-        WaitAgentHandlerV2::default().handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "wait_agent",
-            function_payload(json!({})),
-        )),
-    )
-    .await;
-    assert!(
-        early.is_err(),
-        "wait_agent should not return before the configured default timeout"
-    );
-
-    let output = timeout(
-        Duration::from_secs(/*secs*/ 1),
-        WaitAgentHandlerV2::default().handle(invocation(
-            session,
-            turn,
-            "wait_agent",
-            function_payload(json!({})),
-        )),
-    )
-    .await
-    .expect("configured default should be shorter than the test timeout")
-    .expect("wait_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
-    assert_eq!(success, None);
-}
-
-#[tokio::test]
-async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
-    let (session, mut turn) = make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    config.multi_agent_v2.min_wait_timeout_ms = 0;
-    config.multi_agent_v2.max_wait_timeout_ms = 0;
-    config.multi_agent_v2.default_wait_timeout_ms = 0;
-    set_turn_config(&mut turn, config);
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let output = timeout(
-        Duration::from_secs(/*secs*/ 1),
-        WaitAgentHandlerV2::default().handle(invocation(
-            session,
-            turn,
-            "wait_agent",
-            function_payload(json!({})),
-        )),
-    )
-    .await
-    .expect("zero timeout should complete immediately")
-    .expect("wait_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
-    assert_eq!(success, None);
-}
-
-#[tokio::test]
-async fn multi_agent_v2_wait_agent_rejects_timeout_above_configured_max() {
-    let (session, mut turn) = make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    config.multi_agent_v2.min_wait_timeout_ms = 1;
-    config.multi_agent_v2.max_wait_timeout_ms = 50;
-    config.multi_agent_v2.default_wait_timeout_ms = 1;
-    set_turn_config(&mut turn, config);
-
-    let Err(err) = WaitAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "wait_agent",
-            function_payload(json!({"timeout_ms": 500})),
-        ))
-        .await
-    else {
-        panic!("timeout above configured maximum should be rejected");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel("timeout_ms must be at most 50".to_string())
-    );
-}
-
-#[tokio::test]
-async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max() {
-    let (session, mut turn) = make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    config.multi_agent_v2.min_wait_timeout_ms = 1;
-    config.multi_agent_v2.max_wait_timeout_ms = 1;
-    config.multi_agent_v2.default_wait_timeout_ms = 1;
-    set_turn_config(&mut turn, config);
-
-    let output = WaitAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "wait_agent",
-            function_payload(json!({"timeout_ms": 1})),
-        ))
-        .await
-        .expect("wait_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
         }
     );
     assert_eq!(success, None);
@@ -3440,12 +3231,12 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
         let session = session.clone();
         let turn = turn.clone();
         async move {
-            WaitAgentHandlerV2::default()
+            WaitAgentHandlerV2
                 .handle(invocation(
                     session,
                     turn,
                     "wait_agent",
-                    function_payload(json!({"timeout_ms": 10_000})),
+                    function_payload(json!({})),
                 ))
                 .await
         }
@@ -3477,7 +3268,6 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
-            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3544,11 +3334,11 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
 
     let output = timeout(
         Duration::from_millis(500),
-        WaitAgentHandlerV2::default().handle(invocation(
+        WaitAgentHandlerV2.handle(invocation(
             session,
             turn,
             "wait_agent",
-            function_payload(json!({"timeout_ms": 10_000})),
+            function_payload(json!({})),
         )),
     )
     .await
@@ -3561,7 +3351,6 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
-            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3618,12 +3407,12 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
         let session = session.clone();
         let turn = turn.clone();
         async move {
-            WaitAgentHandlerV2::default()
+            WaitAgentHandlerV2
                 .handle(invocation(
                     session,
                     turn,
                     "wait_agent",
-                    function_payload(json!({"timeout_ms": 10_000})),
+                    function_payload(json!({})),
                 ))
                 .await
         }
@@ -3655,7 +3444,6 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
-            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3709,12 +3497,12 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
         let session = session.clone();
         let turn = turn.clone();
         async move {
-            WaitAgentHandlerV2::default()
+            WaitAgentHandlerV2
                 .handle(invocation(
                     session,
                     turn,
                     "wait_agent",
-                    function_payload(json!({"timeout_ms": 10_000})),
+                    function_payload(json!({})),
                 ))
                 .await
         }
@@ -3746,7 +3534,6 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
-            timed_out: false,
         }
     );
     assert!(!content.contains("sensitive child output"));

@@ -454,9 +454,6 @@ fn multi_agent_v2_feature_config_deserializes_table() {
 [multi_agent_v2]
 enabled = true
 max_concurrent_threads_per_session = 4
-min_wait_timeout_ms = 2500
-max_wait_timeout_ms = 120000
-default_wait_timeout_ms = 30000
 usage_hint_enabled = false
 usage_hint_text = "Custom delegation guidance."
 root_agent_usage_hint_text = "Root guidance."
@@ -481,9 +478,6 @@ non_code_mode_only = true
         Some(crate::FeatureToml::Config(crate::MultiAgentV2ConfigToml {
             enabled: Some(true),
             max_concurrent_threads_per_session: Some(4),
-            min_wait_timeout_ms: Some(2500),
-            max_wait_timeout_ms: Some(120000),
-            default_wait_timeout_ms: Some(30000),
             usage_hint_enabled: Some(false),
             usage_hint_text: Some("Custom delegation guidance.".to_string()),
             root_agent_usage_hint_text: Some("Root guidance.".to_string()),
@@ -559,7 +553,6 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
         })),
         multi_agent_v2: Some(FeatureToml::Config(crate::MultiAgentV2ConfigToml {
             enabled: Some(false),
-            min_wait_timeout_ms: Some(2500),
             subagent_developer_instructions: Some("Delegate carefully.".to_string()),
             ..Default::default()
         })),
@@ -607,7 +600,6 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
         features_toml.multi_agent_v2,
         Some(FeatureToml::Config(crate::MultiAgentV2ConfigToml {
             enabled: Some(true),
-            min_wait_timeout_ms: Some(2500),
             subagent_developer_instructions: Some("Delegate carefully.".to_string()),
             ..Default::default()
         }))

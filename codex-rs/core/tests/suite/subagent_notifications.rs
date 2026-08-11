@@ -1752,6 +1752,172 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_agent_v2_wait_stays_pending_until_steered() -> Result<()> {
+    const WAIT_CALL_ID: &str = "wait-agent-steer-call";
+    const WAIT_PROMPT: &str = "wait indefinitely for the worker";
+    const STEER_PROMPT: &str = "stop waiting and continue";
+
+    let server = start_mock_server().await;
+    let spawn_args = serde_json::to_string(&json!({
+        "message": "keep working until interrupted",
+        "task_name": "worker",
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        sse(vec![
+            ev_response_created("resp-wait-steer-parent-1"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                MULTI_AGENT_V2_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
+            ev_completed("resp-wait-steer-parent-1"),
+        ]),
+    )
+    .await;
+    let child_request = mount_response_once_match(
+        &server,
+        |req: &wiremock::Request| request_has_input_type(req, "agent_message"),
+        sse_response(sse(vec![ev_response_created("resp-wait-steer-child")]))
+            .set_delay(Duration::from_secs(30)),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, SPAWN_CALL_ID) && !request_has_input_type(req, "agent_message")
+        },
+        sse(vec![
+            ev_response_created("resp-wait-steer-parent-2"),
+            ev_assistant_message("msg-wait-steer-parent-2", "parent ready"),
+            ev_completed("resp-wait-steer-parent-2"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, WAIT_PROMPT) && !body_contains(req, STEER_PROMPT)
+        },
+        sse(vec![
+            ev_response_created("resp-wait-steer-parent-3"),
+            ev_function_call_with_namespace(
+                WAIT_CALL_ID,
+                MULTI_AGENT_V2_NAMESPACE,
+                "wait_agent",
+                "{}",
+            ),
+            ev_completed("resp-wait-steer-parent-3"),
+        ]),
+    )
+    .await;
+    let follow_up = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, WAIT_CALL_ID)
+                && body_contains(req, WAIT_PROMPT)
+                && body_contains(req, STEER_PROMPT)
+        },
+        sse(vec![
+            ev_response_created("resp-wait-steer-parent-4"),
+            ev_assistant_message("msg-wait-steer-parent-4", "continued"),
+            ev_completed("resp-wait-steer-parent-4"),
+        ]),
+    )
+    .await;
+    let test = test_codex()
+        .with_model("koffing")
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_turn(TURN_1_PROMPT).await?;
+    let _ = wait_for_requests(&child_request).await?;
+    let child_id = wait_for_spawned_thread_id(&test).await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: WAIT_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event_match(&test.codex, |event| {
+        matches!(event, EventMsg::CollabWaitingBegin(_)).then_some(())
+    })
+    .await;
+
+    sleep(Duration::from_millis(/*millis*/ 100)).await;
+    assert!(
+        follow_up.requests().is_empty(),
+        "an event-driven wait must not trigger a polling model request"
+    );
+
+    test.codex
+        .steer_input(
+            vec![UserInput::Text {
+                text: STEER_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }],
+            /*additional_context*/ Default::default(),
+            /*expected_turn_id*/ None,
+            /*client_user_message_id*/ None,
+            /*responsesapi_client_metadata*/ None,
+        )
+        .await
+        .expect("steer input should interrupt wait_agent");
+    wait_for_event_match(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_)).then_some(())
+    })
+    .await;
+
+    let request = follow_up.single_request();
+    assert_eq!(
+        request
+            .message_input_texts("user")
+            .into_iter()
+            .filter(|text| text == WAIT_PROMPT || text == STEER_PROMPT)
+            .collect::<Vec<_>>(),
+        vec![WAIT_PROMPT.to_string(), STEER_PROMPT.to_string()]
+    );
+    let wait_output_item = request.function_call_output(WAIT_CALL_ID);
+    let wait_output = wait_output_item["output"]
+        .as_str()
+        .expect("wait_agent output should be text");
+    assert_eq!(
+        serde_json::from_str::<Value>(wait_output)?,
+        json!({"message": "Wait interrupted by new input."})
+    );
+
+    let child = test
+        .thread_manager
+        .get_thread(ThreadId::from_string(&child_id)?)
+        .await?;
+    child.shutdown_and_wait().await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

@@ -2,7 +2,7 @@
 
 set -eu
 
-FORK_MARKER="+jkammerland.mcp.2"
+FORK_MARKER="+jkammerland.mcp.3"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 BUILT_CODEX="$REPO_ROOT/codex-rs/target/release/codex"

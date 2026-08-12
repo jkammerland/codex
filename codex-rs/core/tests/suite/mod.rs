@@ -89,6 +89,7 @@ mod mcp_startup_refresh_http_proxy;
 mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;
+mod mcp_unbounded_waits;
 mod model_overrides;
 mod model_runtime_selectors;
 mod model_switching;

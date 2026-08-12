@@ -7,6 +7,7 @@ use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_protocol::protocol::Op;
+use core_test_support::fs_wait::wait_for_path_exists;
 use core_test_support::process::process_is_alive;
 use core_test_support::process::wait_for_pid_file;
 use core_test_support::process::wait_for_process_exit;
@@ -23,6 +24,8 @@ async fn refresh_keeps_superseded_mcp_server_alive_for_in_flight_calls() -> anyh
     let server = responses::start_mock_server().await;
     let temp_dir = tempfile::tempdir()?;
     let pid_file = temp_dir.path().join("mcp.pid");
+    let call_started_file = temp_dir.path().join("mcp-call.started");
+    let call_release_file = temp_dir.path().join("mcp-call.release");
     let pid_file_for_config = pid_file.clone();
     let command = stdio_server_bin()?;
     let fixture = test_codex()
@@ -49,7 +52,7 @@ async fn refresh_keeps_superseded_mcp_server_alive_for_in_flight_calls() -> anyh
                     omit_tools_from: None,
                     disabled_reason: None,
                     startup_timeout_sec: Some(Duration::from_secs(10)),
-                    tool_timeout_sec: None,
+                    tool_timeout_sec: Some(Duration::ZERO),
                     default_tools_approval_mode: None,
                     enabled_tools: None,
                     disabled_tools: None,
@@ -71,37 +74,25 @@ async fn refresh_keeps_superseded_mcp_server_alive_for_in_flight_calls() -> anyh
     let superseded_pid = wait_for_pid_file(&pid_file).await?;
     assert!(process_is_alive(&superseded_pid)?);
 
-    let barrier = serde_json::json!({
-        "id": "mcp-refresh-cleanup",
-        "participants": 2,
-        "timeout_ms": 1_000
-    });
     let long_call = tokio::spawn({
         let codex = Arc::clone(&fixture.codex);
-        let barrier = barrier.clone();
+        let call_started_file = call_started_file.clone();
+        let call_release_file = call_release_file.clone();
         async move {
             codex
                 .call_mcp_tool(
                     "refresh_cleanup",
                     "sync",
                     Some(serde_json::json!({
-                        "barrier": barrier,
-                        "sleep_after_ms": 300_000
+                        "started_file": call_started_file,
+                        "release_file": call_release_file,
                     })),
                     /*meta*/ None,
                 )
                 .await
         }
     });
-    fixture
-        .codex
-        .call_mcp_tool(
-            "refresh_cleanup",
-            "sync",
-            Some(serde_json::json!({ "barrier": barrier })),
-            /*meta*/ None,
-        )
-        .await?;
+    wait_for_path_exists(&call_started_file, Duration::from_secs(5)).await?;
     fs::remove_file(&pid_file)?;
 
     responses::mount_sse_once(
@@ -119,13 +110,8 @@ async fn refresh_keeps_superseded_mcp_server_alive_for_in_flight_calls() -> anyh
     let replacement_pid = wait_for_pid_file(&pid_file).await?;
     assert_ne!(replacement_pid, superseded_pid);
     assert!(process_is_alive(&superseded_pid)?);
-    long_call.abort();
-    assert!(
-        long_call
-            .await
-            .expect_err("call should be aborted")
-            .is_cancelled()
-    );
+    fs::write(&call_release_file, "release")?;
+    long_call.await??;
     wait_for_process_exit(&superseded_pid).await?;
     assert!(process_is_alive(&replacement_pid)?);
 

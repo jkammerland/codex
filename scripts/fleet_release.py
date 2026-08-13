@@ -419,7 +419,7 @@ foreach ($line in $checksumLines) {{
 $env:RUSTY_V8_ARCHIVE = Join-Path $v8Directory $v8ArchiveName
 $env:RUSTY_V8_SRC_BINDING_PATH = Join-Path $v8Directory $v8BindingName
 $cargo = Join-Path $env:USERPROFILE '.cargo\\bin\\cargo.exe'
-$command = 'call "{{0}}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{{1}}\\codex-rs" && "{{2}}" +{{3}} build --release --bin codex --bin codex-code-mode-host' -f $vs, $build, $cargo, {quote_ps(host.rust_toolchain)}
+$command = 'call "{{0}}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{{1}}\\codex-rs" && "{{2}}" +{{3}} build --locked --release --bin codex --bin codex-code-mode-host' -f $vs, $build, $cargo, {quote_ps(host.rust_toolchain)}
 cmd.exe /d /s /c $command; if ($LASTEXITCODE -ne 0) {{ throw 'Cargo build failed' }}
 $version = & {quote_ps(host.build_binary("codex"))} --version
 if ($version -notmatch {quote_ps(re.escape(release.marker))}) {{ throw "Unexpected fork version: $version" }}
@@ -464,7 +464,7 @@ toolchain_bin=$(dirname "$rustc")
 RUSTY_V8_ARCHIVE="$v8_directory/$v8_archive_name" \\
 RUSTY_V8_SRC_BINDING_PATH="$v8_directory/$v8_binding_name" \\
 PATH="$toolchain_bin:$PATH" \\
-  "$toolchain_bin/cargo" build --release --bin codex --bin codex-code-mode-host
+  "$toolchain_bin/cargo" build --locked --release --bin codex --bin codex-code-mode-host
 version=$(target/release/codex --version)
 case "$version" in *{release.marker}*) ;; *) echo "Unexpected fork version: $version" >&2; exit 1 ;; esac
 printf 'build-version=%s\\n' "$version"

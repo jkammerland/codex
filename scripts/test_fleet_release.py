@@ -90,7 +90,7 @@ class FleetReleaseTest(unittest.TestCase):
         windows_script = fleet_release.build_script(self.hosts[1], self.release, True)
         self.assertIn(self.release.fork_commit, mac_script)
         self.assertIn(self.release.fork_commit, windows_script)
-        self.assertIn('"$toolchain_bin/cargo" build --release', mac_script)
+        self.assertIn('"$toolchain_bin/cargo" build --locked --release', mac_script)
         self.assertIn("refs/remotes/fleet/", mac_script)
         self.assertIn("rustup which --toolchain", mac_script)
         self.assertIn('if [ -e "$build" ]', mac_script)
@@ -117,6 +117,7 @@ class FleetReleaseTest(unittest.TestCase):
             windows_script,
         )
         self.assertNotIn(r'''call "0\Common7''', windows_script)
+        self.assertIn("build --locked --release", windows_script)
         self.assertIn(
             "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz",
             windows_script,

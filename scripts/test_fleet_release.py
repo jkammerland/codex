@@ -111,6 +111,12 @@ class FleetReleaseTest(unittest.TestCase):
             "Existing build root is not the clean release worktree", windows_script
         )
         self.assertIn("cargo.exe", windows_script)
+        self.assertIn("$ProgressPreference = 'SilentlyContinue'", windows_script)
+        self.assertIn(
+            r'''$command = 'call "{0}\Common7\Tools\VsDevCmd.bat"''',
+            windows_script,
+        )
+        self.assertNotIn(r'''call "0\Common7''', windows_script)
         self.assertIn(
             "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz",
             windows_script,

@@ -376,6 +376,7 @@ def build_script(host: Host, release: Release, use_bundle: bool) -> str:
             else f"git -C $source fetch fork {quote_ps(release.fork_ref)}:{staged_ref}"
         )
         return f"""$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $source = {quote_ps(source)}; $build = {quote_ps(build)}
 if (Test-Path -LiteralPath $source) {{
   if (-not (Test-Path -LiteralPath (Join-Path $source '.git')) -or -not [string]::IsNullOrEmpty((git -C $source status --porcelain))) {{ throw 'Source root must be a clean Git checkout' }}
@@ -418,7 +419,7 @@ foreach ($line in $checksumLines) {{
 $env:RUSTY_V8_ARCHIVE = Join-Path $v8Directory $v8ArchiveName
 $env:RUSTY_V8_SRC_BINDING_PATH = Join-Path $v8Directory $v8BindingName
 $cargo = Join-Path $env:USERPROFILE '.cargo\\bin\\cargo.exe'
-$command = 'call "{0}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{1}\\codex-rs" && "{2}" +{3} build --release --bin codex --bin codex-code-mode-host' -f $vs, $build, $cargo, {quote_ps(host.rust_toolchain)}
+$command = 'call "{{0}}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{{1}}\\codex-rs" && "{{2}}" +{{3}} build --release --bin codex --bin codex-code-mode-host' -f $vs, $build, $cargo, {quote_ps(host.rust_toolchain)}
 cmd.exe /d /s /c $command; if ($LASTEXITCODE -ne 0) {{ throw 'Cargo build failed' }}
 $version = & {quote_ps(host.build_binary("codex"))} --version
 if ($version -notmatch {quote_ps(re.escape(release.marker))}) {{ throw "Unexpected fork version: $version" }}

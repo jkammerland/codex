@@ -50,6 +50,8 @@ mod client;
 mod client_websockets;
 mod code_mode;
 mod code_mode_elicitation;
+#[cfg(not(target_os = "windows"))]
+mod code_mode_live_exec_sessions;
 mod codex_delegate;
 mod collaboration_instructions;
 mod compact;

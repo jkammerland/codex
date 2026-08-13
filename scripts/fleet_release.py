@@ -18,6 +18,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "fleet" / "release.json"
 COMMIT = re.compile(r"[0-9a-f]{40}")
+SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 SSH_OPTIONS = (
     "-T",
     "-o",
@@ -47,6 +48,7 @@ class Release:
     fork_remote: str
     cli_version: str
     server_commit: str
+    rusty_v8_version: str
 
     @property
     def marker(self) -> str:
@@ -71,6 +73,7 @@ class Host:
     cli_binary: str
     code_mode_host_binary: str
     rust_toolchain: str
+    rust_target: str
     rustup: str | None
 
     @property
@@ -161,6 +164,14 @@ def host_from_raw(raw: Any) -> Host:
         absolute(platform, "rustup", rustup)
     if platform == "darwin" and rustup is None:
         raise FleetError("darwin hosts require rustup")
+    rust_target = required(raw, "rustTarget")
+    expected_target_suffix = (
+        "-pc-windows-msvc" if platform == "windows" else "-apple-darwin"
+    )
+    if not rust_target.endswith(expected_target_suffix):
+        raise FleetError(
+            f"rustTarget for {platform} must end with {expected_target_suffix}"
+        )
     return Host(
         name=required(raw, "name"),
         platform=platform,
@@ -171,6 +182,7 @@ def host_from_raw(raw: Any) -> Host:
         cli_binary=paths["cliBinary"],
         code_mode_host_binary=paths["codeModeHostBinary"],
         rust_toolchain=required(raw, "rustToolchain"),
+        rust_target=rust_target,
         rustup=rustup,
     )
 
@@ -192,6 +204,9 @@ def load_manifest(path: Path) -> tuple[Release, tuple[Host, ...]]:
     }
     if any(COMMIT.fullmatch(commit) is None for commit in commits.values()):
         raise FleetError("release commits must be 40-character lowercase Git commits")
+    rusty_v8_version = required(release_raw, "rustyV8Version")
+    if SEMVER.fullmatch(rusty_v8_version) is None:
+        raise FleetError("rustyV8Version must contain three numeric components")
     release = Release(
         name=required(release_raw, "name"),
         fork_commit=commits["forkCommit"],
@@ -199,6 +214,7 @@ def load_manifest(path: Path) -> tuple[Release, tuple[Host, ...]]:
         fork_remote=required(release_raw, "forkRemote"),
         cli_version=required(release_raw, "expectedCliVersion"),
         server_commit=commits["mcpServerCommit"],
+        rusty_v8_version=rusty_v8_version,
     )
     release.upstream_version
     hosts_raw = raw.get("hosts")
@@ -336,6 +352,18 @@ def build_script(host: Host, release: Release, use_bundle: bool) -> str:
     source = host.source_root
     build = host.build_root
     staged_ref = f"refs/remotes/fleet/{release.fork_ref}"
+    v8_profile = "ptrcomp_sandbox_release"
+    v8_archive = (
+        f"rusty_v8_{v8_profile}_{host.rust_target}.lib.gz"
+        if host.windows
+        else f"librusty_v8_{v8_profile}_{host.rust_target}.a.gz"
+    )
+    v8_binding = f"src_binding_{v8_profile}_{host.rust_target}.rs"
+    v8_checksums = f"rusty_v8_{v8_profile}_{host.rust_target}.sha256"
+    v8_base_url = (
+        "https://github.com/openai/codex/releases/download/"
+        f"rusty-v8-v{release.rusty_v8_version}"
+    )
     fetch = (
         f"git -C {shlex.quote(source)} fetch {shlex.quote(host.bundle_path(release))} refs/heads/{release.fork_ref}:{staged_ref}"
         if use_bundle
@@ -361,6 +389,34 @@ if (Test-Path -LiteralPath $build) {{
 $vswhere = Join-Path ${"{"}env:ProgramFiles(x86){"}"} 'Microsoft Visual Studio\\Installer\\vswhere.exe'
 $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if ([string]::IsNullOrEmpty($vs)) {{ throw 'No x64 MSVC toolchain found' }}
+$v8Directory = Join-Path ($build + '.fleet') 'rusty-v8'
+New-Item -ItemType Directory -Force -Path $v8Directory | Out-Null
+$v8BaseUrl = {quote_ps(v8_base_url)}
+$v8ArchiveName = {quote_ps(v8_archive)}
+$v8BindingName = {quote_ps(v8_binding)}
+$v8ChecksumsName = {quote_ps(v8_checksums)}
+foreach ($name in @($v8ArchiveName, $v8BindingName, $v8ChecksumsName)) {{
+  $destination = Join-Path $v8Directory $name
+  $partial = "$destination.partial-$PID-$([guid]::NewGuid().ToString('N'))"
+  try {{
+    Invoke-WebRequest -UseBasicParsing -Uri "$v8BaseUrl/$name" -OutFile $partial
+    Move-Item -Force -LiteralPath $partial -Destination $destination
+  }} finally {{
+    if (Test-Path -LiteralPath $partial) {{ Remove-Item -Force -LiteralPath $partial }}
+  }}
+}}
+$checksumLines = @(Get-Content -LiteralPath (Join-Path $v8Directory $v8ChecksumsName) | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }})
+if ($checksumLines.Count -ne 2) {{ throw 'Expected exactly two rusty_v8 checksums' }}
+foreach ($line in $checksumLines) {{
+  if ($line -notmatch '^([0-9a-fA-F]{{64}})\\s+\\*?(.+)$') {{ throw "Invalid rusty_v8 checksum line: $line" }}
+  $expectedHash = $Matches[1]
+  $artifactPath = Join-Path $v8Directory $Matches[2]
+  if (-not (Test-Path -LiteralPath $artifactPath)) {{ throw "Missing rusty_v8 checksum target: $artifactPath" }}
+  $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash
+  if ($actualHash -ne $expectedHash) {{ throw "rusty_v8 checksum mismatch: $artifactPath" }}
+}}
+$env:RUSTY_V8_ARCHIVE = Join-Path $v8Directory $v8ArchiveName
+$env:RUSTY_V8_SRC_BINDING_PATH = Join-Path $v8Directory $v8BindingName
 $cargo = Join-Path $env:USERPROFILE '.cargo\\bin\\cargo.exe'
 $command = 'call "{0}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{1}\\codex-rs" && "{2}" +{3} build --release --bin codex --bin codex-code-mode-host' -f $vs, $build, $cargo, {quote_ps(host.rust_toolchain)}
 cmd.exe /d /s /c $command; if ($LASTEXITCODE -ne 0) {{ throw 'Cargo build failed' }}
@@ -382,9 +438,32 @@ else
   git -C "$source" worktree add --detach "$build" {release.fork_commit}
 fi
 cd "$build/codex-rs"
+v8_directory="$build.fleet/rusty-v8"
+v8_base_url={shlex.quote(v8_base_url)}
+v8_archive_name={shlex.quote(v8_archive)}
+v8_binding_name={shlex.quote(v8_binding)}
+v8_checksums_name={shlex.quote(v8_checksums)}
+mkdir -p "$v8_directory"
+cleanup_v8_downloads() {{ rm -f "$v8_directory"/*.partial.$$; }}
+trap cleanup_v8_downloads EXIT HUP INT TERM
+download_v8_artifact() {{
+  destination="$v8_directory/$1"
+  partial="$destination.partial.$$"
+  rm -f "$partial"
+  curl -fsSL "$v8_base_url/$1" -o "$partial"
+  mv -f "$partial" "$destination"
+}}
+download_v8_artifact "$v8_archive_name"
+download_v8_artifact "$v8_binding_name"
+download_v8_artifact "$v8_checksums_name"
+[ "$(grep -cve '^[[:space:]]*$' "$v8_directory/$v8_checksums_name")" -eq 2 ]
+(cd "$v8_directory" && tr -d '\\r' < "$v8_checksums_name" | shasum -a 256 -c -)
 rustc=$({shlex.quote(host.rustup)} which --toolchain {shlex.quote(host.rust_toolchain)} rustc)
 toolchain_bin=$(dirname "$rustc")
-PATH="$toolchain_bin:$PATH" "$toolchain_bin/cargo" build --release --bin codex --bin codex-code-mode-host
+RUSTY_V8_ARCHIVE="$v8_directory/$v8_archive_name" \\
+RUSTY_V8_SRC_BINDING_PATH="$v8_directory/$v8_binding_name" \\
+PATH="$toolchain_bin:$PATH" \\
+  "$toolchain_bin/cargo" build --release --bin codex --bin codex-code-mode-host
 version=$(target/release/codex --version)
 case "$version" in *{release.marker}*) ;; *) echo "Unexpected fork version: $version" >&2; exit 1 ;; esac
 printf 'build-version=%s\\n' "$version"
@@ -394,8 +473,8 @@ printf 'build-version=%s\\n' "$version"
 def activation_script(host: Host, release: Release) -> str:
     source_cli = host.build_binary("codex")
     source_host = host.build_binary("codex-code-mode-host")
-    backup_cli = f"{host.cli_binary}.{release.upstream_version}-upstream"
-    backup_host = f"{host.code_mode_host_binary}.{release.upstream_version}-upstream"
+    backup_cli = f"{host.cli_binary}.{release.name}-previous"
+    backup_host = f"{host.code_mode_host_binary}.{release.name}-previous"
     if host.windows:
         return f"""$ErrorActionPreference = 'Stop'
 Add-Type @'

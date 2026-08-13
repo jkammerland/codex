@@ -335,16 +335,17 @@ def copy_bundle(host: Host, release: Release, bundle: Path) -> None:
 def build_script(host: Host, release: Release, use_bundle: bool) -> str:
     source = host.source_root
     build = host.build_root
+    staged_ref = f"refs/remotes/fleet/{release.fork_ref}"
     fetch = (
-        f"git -C {shlex.quote(source)} fetch {shlex.quote(host.bundle_path(release))} refs/heads/{release.fork_ref}:refs/heads/{release.fork_ref}"
+        f"git -C {shlex.quote(source)} fetch {shlex.quote(host.bundle_path(release))} refs/heads/{release.fork_ref}:{staged_ref}"
         if use_bundle
-        else f"git -C {shlex.quote(source)} fetch fork {shlex.quote(release.fork_ref)}:refs/heads/{release.fork_ref}"
+        else f"git -C {shlex.quote(source)} fetch fork {shlex.quote(release.fork_ref)}:{staged_ref}"
     )
     if host.windows:
         ps_fetch = (
-            f"git -C $source fetch {quote_ps(host.bundle_path(release))} refs/heads/{release.fork_ref}:refs/heads/{release.fork_ref}"
+            f"git -C $source fetch {quote_ps(host.bundle_path(release))} refs/heads/{release.fork_ref}:{staged_ref}"
             if use_bundle
-            else f"git -C $source fetch fork {quote_ps(release.fork_ref)}:refs/heads/{release.fork_ref}"
+            else f"git -C $source fetch fork {quote_ps(release.fork_ref)}:{staged_ref}"
         )
         return f"""$ErrorActionPreference = 'Stop'
 $source = {quote_ps(source)}; $build = {quote_ps(build)}
@@ -352,10 +353,11 @@ if (Test-Path -LiteralPath $source) {{
   if (-not (Test-Path -LiteralPath (Join-Path $source '.git')) -or -not [string]::IsNullOrEmpty((git -C $source status --porcelain))) {{ throw 'Source root must be a clean Git checkout' }}
 }} else {{ git clone --origin fork {quote_ps(release.fork_remote)} $source; if ($LASTEXITCODE -ne 0) {{ throw 'Clone failed' }} }}
 {ps_fetch}; if ($LASTEXITCODE -ne 0) {{ throw 'Fetch failed' }}
-git -C $source switch {quote_ps(release.fork_ref)}; if ($LASTEXITCODE -ne 0) {{ throw 'Switch failed' }}
+git -C $source switch -C {quote_ps(release.fork_ref)} {quote_ps(staged_ref)}; if ($LASTEXITCODE -ne 0) {{ throw 'Switch failed' }}
 if ((git -C $source rev-parse HEAD) -ne {quote_ps(release.fork_commit)}) {{ throw 'Source commit does not match manifest' }}
-if (Test-Path -LiteralPath $build) {{ throw "Refusing to overwrite existing build worktree: $build" }}
-git -C $source worktree add --detach $build {quote_ps(release.fork_commit)}; if ($LASTEXITCODE -ne 0) {{ throw 'Worktree creation failed' }}
+if (Test-Path -LiteralPath $build) {{
+  if (-not (Test-Path -LiteralPath (Join-Path $build '.git')) -or -not [string]::IsNullOrEmpty((git -C $build status --porcelain)) -or (git -C $build rev-parse HEAD) -ne {quote_ps(release.fork_commit)}) {{ throw 'Existing build root is not the clean release worktree' }}
+}} else {{ git -C $source worktree add --detach $build {quote_ps(release.fork_commit)}; if ($LASTEXITCODE -ne 0) {{ throw 'Worktree creation failed' }} }}
 $vswhere = Join-Path ${"{"}env:ProgramFiles(x86){"}"} 'Microsoft Visual Studio\\Installer\\vswhere.exe'
 $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if ([string]::IsNullOrEmpty($vs)) {{ throw 'No x64 MSVC toolchain found' }}
@@ -371,12 +373,18 @@ Write-Output "build-version=$version"
 source={shlex.quote(source)}; build={shlex.quote(build)}
 if [ -e "$source" ]; then [ -d "$source/.git" ] && [ -z "$(git -C "$source" status --porcelain)" ]; else git clone --origin fork {shlex.quote(release.fork_remote)} "$source"; fi
 {fetch}
-git -C "$source" switch {shlex.quote(release.fork_ref)}
+git -C "$source" switch -C {shlex.quote(release.fork_ref)} {shlex.quote(staged_ref)}
 [ "$(git -C "$source" rev-parse HEAD)" = {release.fork_commit} ]
-[ -z "$(git -C "$source" status --porcelain)" ] && [ ! -e "$build" ]
-git -C "$source" worktree add --detach "$build" {release.fork_commit}
+[ -z "$(git -C "$source" status --porcelain)" ]
+if [ -e "$build" ]; then
+  [ -e "$build/.git" ] && [ -z "$(git -C "$build" status --porcelain)" ] && [ "$(git -C "$build" rev-parse HEAD)" = {release.fork_commit} ]
+else
+  git -C "$source" worktree add --detach "$build" {release.fork_commit}
+fi
 cd "$build/codex-rs"
-{shlex.quote(host.rustup)} run {shlex.quote(host.rust_toolchain)} cargo build --release --bin codex --bin codex-code-mode-host
+rustc=$({shlex.quote(host.rustup)} which --toolchain {shlex.quote(host.rust_toolchain)} rustc)
+toolchain_bin=$(dirname "$rustc")
+PATH="$toolchain_bin:$PATH" "$toolchain_bin/cargo" build --release --bin codex --bin codex-code-mode-host
 version=$(target/release/codex --version)
 case "$version" in *{release.marker}*) ;; *) echo "Unexpected fork version: $version" >&2; exit 1 ;; esac
 printf 'build-version=%s\\n' "$version"

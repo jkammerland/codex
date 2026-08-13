@@ -66,7 +66,12 @@ class FleetReleaseTest(unittest.TestCase):
         windows_script = fleet_release.build_script(self.hosts[1], self.release, True)
         self.assertIn(self.release.fork_commit, mac_script)
         self.assertIn(self.release.fork_commit, windows_script)
-        self.assertIn("cargo build --release", mac_script)
+        self.assertIn('"$toolchain_bin/cargo" build --release', mac_script)
+        self.assertIn("refs/remotes/fleet/", mac_script)
+        self.assertIn("rustup which --toolchain", mac_script)
+        self.assertIn('if [ -e "$build" ]', mac_script)
+        self.assertIn("refs/remotes/fleet/", windows_script)
+        self.assertIn("Existing build root is not the clean release worktree", windows_script)
         self.assertIn("cargo.exe", windows_script)
 
 

@@ -377,6 +377,16 @@ def build_script(host: Host, release: Release, use_bundle: bool) -> str:
         )
         return f"""$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+function Normalize-ReleaseLock($Path) {{
+  $status = @(& git -C $Path status --short --untracked-files=all)
+  if ($status.Count -eq 0) {{ return }}
+  if ($status.Count -ne 1 -or $status[0].Trim() -ne 'M codex-rs/Cargo.lock') {{ throw 'Build root contains changes other than the generated release lockfile' }}
+  $changedLines = @(& git -C $Path diff --unified=0 -- codex-rs/Cargo.lock | Where-Object {{ ($_ -match '^[+-]') -and ($_ -notmatch '^(---|\\+\\+\\+)') }})
+  $invalidLines = @($changedLines | Where-Object {{ $_ -notmatch '^[+-]version = "(0\\.0\\.0|{re.escape(release.upstream_version)})"$' }})
+  if ($changedLines.Count -eq 0 -or $invalidLines.Count -ne 0) {{ throw 'Build root Cargo.lock contains unexpected changes' }}
+  & git -C $Path restore --worktree -- codex-rs/Cargo.lock
+  if ($LASTEXITCODE -ne 0) {{ throw 'Could not normalize the generated release lockfile' }}
+}}
 $source = {quote_ps(source)}; $build = {quote_ps(build)}
 if (Test-Path -LiteralPath $source) {{
   if (-not (Test-Path -LiteralPath (Join-Path $source '.git')) -or -not [string]::IsNullOrEmpty((git -C $source status --porcelain))) {{ throw 'Source root must be a clean Git checkout' }}
@@ -385,6 +395,7 @@ if (Test-Path -LiteralPath $source) {{
 git -C $source switch -C {quote_ps(release.fork_ref)} {quote_ps(staged_ref)}; if ($LASTEXITCODE -ne 0) {{ throw 'Switch failed' }}
 if ((git -C $source rev-parse HEAD) -ne {quote_ps(release.fork_commit)}) {{ throw 'Source commit does not match manifest' }}
 if (Test-Path -LiteralPath $build) {{
+  Normalize-ReleaseLock $build
   if (-not (Test-Path -LiteralPath (Join-Path $build '.git')) -or -not [string]::IsNullOrEmpty((git -C $build status --porcelain)) -or (git -C $build rev-parse HEAD) -ne {quote_ps(release.fork_commit)}) {{ throw 'Existing build root is not the clean release worktree' }}
 }} else {{ git -C $source worktree add --detach $build {quote_ps(release.fork_commit)}; if ($LASTEXITCODE -ne 0) {{ throw 'Worktree creation failed' }} }}
 $vswhere = Join-Path ${"{"}env:ProgramFiles(x86){"}"} 'Microsoft Visual Studio\\Installer\\vswhere.exe'
@@ -419,14 +430,25 @@ foreach ($line in $checksumLines) {{
 $env:RUSTY_V8_ARCHIVE = Join-Path $v8Directory $v8ArchiveName
 $env:RUSTY_V8_SRC_BINDING_PATH = Join-Path $v8Directory $v8BindingName
 $cargo = Join-Path $env:USERPROFILE '.cargo\\bin\\cargo.exe'
-$command = 'call "{{0}}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{{1}}\\codex-rs" && "{{2}}" +{{3}} build --locked --release --bin codex --bin codex-code-mode-host' -f $vs, $build, $cargo, {quote_ps(host.rust_toolchain)}
+$command = 'call "{{0}}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{{1}}\\codex-rs" && "{{2}}" +{{3}} build --release --bin codex --bin codex-code-mode-host' -f $vs, $build, $cargo, {quote_ps(host.rust_toolchain)}
 cmd.exe /d /s /c $command; if ($LASTEXITCODE -ne 0) {{ throw 'Cargo build failed' }}
+Normalize-ReleaseLock $build
 $version = & {quote_ps(host.build_binary("codex"))} --version
 if ($version -notmatch {quote_ps(re.escape(release.marker))}) {{ throw "Unexpected fork version: $version" }}
 Write-Output "build-version=$version"
 """
     assert host.rustup is not None
     return f"""set -eu
+normalize_release_lock() {{
+  status=$(git -C "$1" status --short --untracked-files=all)
+  [ -z "$status" ] && return
+  [ "$status" = ' M codex-rs/Cargo.lock' ] || {{ echo 'Build root contains changes other than the generated release lockfile' >&2; exit 1; }}
+  changed_lines=$(git -C "$1" diff --unified=0 -- codex-rs/Cargo.lock | sed -n -e '/^---/d' -e '/^+++/d' -e '/^[+-]/p')
+  [ -n "$changed_lines" ] || {{ echo 'Build root Cargo.lock has no recoverable release-version changes' >&2; exit 1; }}
+  invalid_lines=$(printf '%s\\n' "$changed_lines" | grep -Ev '^[+-]version = "(0\\.0\\.0|{re.escape(release.upstream_version)})"$' || true)
+  [ -z "$invalid_lines" ] || {{ echo 'Build root Cargo.lock contains unexpected changes' >&2; exit 1; }}
+  git -C "$1" restore --worktree -- codex-rs/Cargo.lock
+}}
 source={shlex.quote(source)}; build={shlex.quote(build)}
 if [ -e "$source" ]; then [ -d "$source/.git" ] && [ -z "$(git -C "$source" status --porcelain)" ]; else git clone --origin fork {shlex.quote(release.fork_remote)} "$source"; fi
 {fetch}
@@ -434,6 +456,7 @@ git -C "$source" switch -C {shlex.quote(release.fork_ref)} {shlex.quote(staged_r
 [ "$(git -C "$source" rev-parse HEAD)" = {release.fork_commit} ]
 [ -z "$(git -C "$source" status --porcelain)" ]
 if [ -e "$build" ]; then
+  normalize_release_lock "$build"
   [ -e "$build/.git" ] && [ -z "$(git -C "$build" status --porcelain)" ] && [ "$(git -C "$build" rev-parse HEAD)" = {release.fork_commit} ]
 else
   git -C "$source" worktree add --detach "$build" {release.fork_commit}
@@ -464,7 +487,8 @@ toolchain_bin=$(dirname "$rustc")
 RUSTY_V8_ARCHIVE="$v8_directory/$v8_archive_name" \\
 RUSTY_V8_SRC_BINDING_PATH="$v8_directory/$v8_binding_name" \\
 PATH="$toolchain_bin:$PATH" \\
-  "$toolchain_bin/cargo" build --locked --release --bin codex --bin codex-code-mode-host
+  "$toolchain_bin/cargo" build --release --bin codex --bin codex-code-mode-host
+normalize_release_lock "$build"
 version=$(target/release/codex --version)
 case "$version" in *{release.marker}*) ;; *) echo "Unexpected fork version: $version" >&2; exit 1 ;; esac
 printf 'build-version=%s\\n' "$version"

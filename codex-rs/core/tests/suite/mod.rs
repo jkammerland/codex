@@ -59,6 +59,8 @@ mod cloud_config;
 mod code_mode;
 mod code_mode_elicitation;
 mod code_mode_model_messages;
+#[cfg(not(target_os = "windows"))]
+mod code_mode_live_exec_sessions;
 mod codex_apps_protocol;
 mod codex_delegate;
 mod collaboration_instructions;

@@ -7,7 +7,7 @@ maintained separately from upstream releases.
 
 - Branch: `maint/mcp-unbounded-waits`
 - Upstream base: `rust-v0.147.0`
-- User-visible suffix: `+jkammerland.mcp.4`
+- User-visible suffix: `+jkammerland.mcp.5`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal

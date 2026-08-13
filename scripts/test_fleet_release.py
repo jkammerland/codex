@@ -18,7 +18,7 @@ class FleetReleaseTest(unittest.TestCase):
         )
 
     def test_checked_in_manifest_is_valid(self) -> None:
-        self.assertEqual(self.release.marker, "+jkammerland.mcp.4")
+        self.assertEqual(self.release.marker, "+jkammerland.mcp.5")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
 
     def test_manifest_rejects_relative_host_paths(self) -> None:

@@ -22,11 +22,11 @@ fn exec_command_tool_matches_expected_spec() {
 
     let description = if cfg!(windows) {
         format!(
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll.{}",
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll. In code mode, preserve session_id and continue the original session instead of projecting only output or starting a surrogate watcher.{}",
             windows_shell_guidance_description()
         )
     } else {
-        "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll.".to_string()
+        "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll. In code mode, preserve session_id and continue the original session instead of projecting only output or starting a surrogate watcher.".to_string()
     };
     let yield_time_ms_description = if cfg!(windows) {
         "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."

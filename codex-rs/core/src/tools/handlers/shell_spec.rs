@@ -96,11 +96,11 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         name: "exec_command".to_string(),
         description: if include_windows_shell_guidance {
             format!(
-                "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll.\n\n{}",
+                "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll. In code mode, preserve session_id and continue the original session instead of projecting only output or starting a surrogate watcher.\n\n{}",
                 windows_shell_guidance()
             )
         } else {
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll.".to_string()
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll. In code mode, preserve session_id and continue the original session instead of projecting only output or starting a surrogate watcher.".to_string()
         },
         strict: false,
         defer_loading: None,

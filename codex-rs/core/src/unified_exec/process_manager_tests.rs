@@ -405,10 +405,7 @@ async fn completed_wait_drains_late_output_until_closed() {
         "completed waits must not return until output closes"
     );
 
-    output_buffer
-        .lock()
-        .await
-        .push_chunk(b"late output".to_vec());
+    output_buffer.lock().await.push_chunk(b"late output");
     output_notify.notify_waiters();
     output_closed.store(true, Ordering::Release);
     output_closed_notify.notify_waiters();

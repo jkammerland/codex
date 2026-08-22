@@ -2185,16 +2185,10 @@ async fn multi_agent_v2_wait_stays_pending_until_steered() -> Result<()> {
     let child_id = wait_for_spawned_thread_id(&test).await?;
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: WAIT_PROMPT.to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: WAIT_PROMPT.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event_match(&test.codex, |event| {
         matches!(event, EventMsg::CollabWaitingBegin(_)).then_some(())
@@ -2208,16 +2202,10 @@ async fn multi_agent_v2_wait_stays_pending_until_steered() -> Result<()> {
     );
 
     test.codex
-        .steer_input(
-            vec![UserInput::Text {
-                text: STEER_PROMPT.to_string(),
-                text_elements: Vec::new(),
-            }],
-            /*additional_context*/ Default::default(),
-            /*expected_turn_id*/ None,
-            /*client_user_message_id*/ None,
-            /*responsesapi_client_metadata*/ None,
-        )
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: STEER_PROMPT.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("steer input should interrupt wait_agent");
     wait_for_event_match(&test.codex, |event| {

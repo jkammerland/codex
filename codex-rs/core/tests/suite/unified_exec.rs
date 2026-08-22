@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use anyhow::Context;
 use anyhow::Result;
 use codex_exec_server::CreateDirectoryOptions;
+use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::EnvironmentVariablePattern;
 use codex_protocol::config_types::ModeKind;
@@ -2383,16 +2384,10 @@ async fn wait_process_blocks_without_model_polling_and_wakes_for_input() -> Resu
     );
 
     test.codex
-        .steer_input(
-            vec![UserInput::Text {
-                text: "new direction".to_string(),
-                text_elements: Vec::new(),
-            }],
-            /*additional_context*/ Default::default(),
-            /*expected_turn_id*/ None,
-            /*client_user_message_id*/ None,
-            /*responsesapi_client_metadata*/ None,
-        )
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "new direction".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("steer input should interrupt wait_process");
     wait_for_event(&test.codex, |event| {

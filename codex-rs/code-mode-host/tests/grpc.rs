@@ -21,6 +21,7 @@ use codex_code_mode::ToolDefinition;
 use codex_code_mode::ToolInvocationFuture;
 use codex_code_mode::WaitOutcome;
 use codex_code_mode::WaitRequest;
+use codex_code_mode::YieldReason;
 #[cfg(unix)]
 use codex_code_mode_host::GrpcCodeModeHost;
 use codex_code_mode_protocol::grpc;
@@ -557,6 +558,7 @@ async fn concurrent_wait_rejects_without_displacing_the_active_observer() -> Res
         RuntimeResponse::Yielded {
             cell_id: running_cell.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -591,6 +593,7 @@ async fn concurrent_wait_rejects_without_displacing_the_active_observer() -> Res
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
             cell_id: running_cell.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     assert_eq!(
@@ -628,6 +631,7 @@ async fn dropping_a_wait_retires_its_observer_before_the_next_wait() -> Result<(
         RuntimeResponse::Yielded {
             cell_id: running_cell.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -656,6 +660,7 @@ async fn dropping_a_wait_retires_its_observer_before_the_next_wait() -> Result<(
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
             cell_id: running_cell.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     assert_eq!(
@@ -688,6 +693,7 @@ async fn dropping_a_session_off_runtime_retires_its_active_cells() -> Result<()>
         RuntimeResponse::Yielded {
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -840,6 +846,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
         RuntimeResponse::Yielded {
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
     assert_eq!(
@@ -856,6 +863,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     assert_eq!(
@@ -881,6 +889,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
         RuntimeResponse::Yielded {
             cell_id: cell_id("2"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
     limited.shutdown().await.map_err(anyhow::Error::msg)?;
@@ -1080,6 +1089,7 @@ async fn cached_session_recovers_after_a_remote_host_restarts() -> Result<()> {
         Ok(RuntimeResponse::Yielded {
             cell_id: replacement_cell_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     assert_eq!(
@@ -1093,6 +1103,7 @@ async fn cached_session_recovers_after_a_remote_host_restarts() -> Result<()> {
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
             cell_id: replacement_cell_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     assert_eq!(

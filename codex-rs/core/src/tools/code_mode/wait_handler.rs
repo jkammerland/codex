@@ -126,32 +126,45 @@ impl CodeModeWaitHandler {
                                 true,
                             )
                         } else {
-                            let wait = exec.session.services.code_mode_service.wait(
-                                codex_code_mode::WaitRequest {
-                                    cell_id: cell_id.clone(),
-                                    yield_time_ms,
-                                },
-                            );
-                            tokio::pin!(wait);
-                            tokio::select! {
-                                biased;
-                                result = &mut wait => {
+                            let (wait_result, activity_result) = {
+                                let wait = exec.session.services.code_mode_service.wait(
+                                    codex_code_mode::WaitRequest {
+                                        cell_id: cell_id.clone(),
+                                        yield_time_ms,
+                                    },
+                                );
+                                tokio::pin!(wait);
+                                tokio::select! {
+                                    biased;
+                                    result = &mut wait => (Some(result), None),
+                                    changed = activity_rx.changed() => (None, Some(changed)),
+                                }
+                            };
+                            match (wait_result, activity_result) {
+                                (Some(result), None) => {
                                     (result.map_err(FunctionCallError::RespondToModel), false)
                                 }
-                                changed = activity_rx.changed() => {
-                                    (match changed {
-                                        Ok(()) => exec.session.services.code_mode_service
-                                            .wait(codex_code_mode::WaitRequest {
-                                                cell_id: cell_id.clone(),
-                                                yield_time_ms: 0,
-                                            })
-                                            .await
-                                            .map_err(FunctionCallError::RespondToModel),
-                                        Err(_) => Err(FunctionCallError::Fatal(
-                                            "code-mode input activity channel closed".to_string(),
-                                        )),
-                                    }, true)
-                                }
+                                (None, Some(Ok(()))) => (
+                                    exec.session
+                                        .services
+                                        .code_mode_service
+                                        .wait(codex_code_mode::WaitRequest {
+                                            cell_id: cell_id.clone(),
+                                            yield_time_ms: 0,
+                                        })
+                                        .await
+                                        .map_err(FunctionCallError::RespondToModel),
+                                    true,
+                                ),
+                                (None, Some(Err(_))) => (
+                                    Err(FunctionCallError::Fatal(
+                                        "code-mode input activity channel closed".to_string(),
+                                    )),
+                                    true,
+                                ),
+                                (Some(_), Some(_)) | (None, None) => unreachable!(
+                                    "code-mode wait selects exactly one completion source"
+                                ),
                             }
                         };
                         let observation = observation.inspect_err(|_error| {

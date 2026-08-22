@@ -11555,7 +11555,9 @@ max_concurrent_threads_per_session = 17
             let hint = hint.expect("default usage hints should be present").body();
             assert!(hint.contains(concurrency_guidance));
             assert_eq!(
-                hint.contains("When calling `wait_agent`, prefer longer waits"),
+                hint.contains(
+                    "Use `wait_agent` when blocked on agent activity. It sleeps until agent mail or new user input arrives, so do not poll with `list_agents` while it is pending.",
+                ),
                 wait_agent_enabled
             );
         }

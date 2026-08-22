@@ -1214,6 +1214,7 @@ async fn unified_exec_event_wait_shows_live_status_then_one_summary() {
     let live = normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 52));
 
     end_exec(&mut chat, exec, "finished\n", "", /*exit_code*/ 0);
+    chat.flush_active_cell();
     let completed = drain_insert_history(&mut rx)
         .iter()
         .map(|lines| lines_to_single_string(lines))

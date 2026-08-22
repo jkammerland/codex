@@ -103,7 +103,9 @@ async fn execute_stream_starts_immediately_and_wait_preserves_missing_cells() {
                         })),
                     }],
                     outcome: Some(proto::execution_outcome::Outcome::Yielded(
-                        proto::ExecutionYielded {},
+                        proto::ExecutionYielded {
+                            reason: proto::YieldReason::Requested as i32,
+                        },
                     )),
                 }
             )),

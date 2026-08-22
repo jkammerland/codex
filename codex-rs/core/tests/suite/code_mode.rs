@@ -64,6 +64,7 @@ use core_test_support::apps_test_server::DIRECT_CALENDAR_APP_ONLY_TOOL;
 use core_test_support::apps_test_server::recorded_apps_tool_calls;
 use core_test_support::apps_test_server::search_capable_apps_builder;
 use core_test_support::assert_regex_match;
+use core_test_support::fs_wait;
 use core_test_support::responses;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
@@ -2433,16 +2434,10 @@ text("finished after quiet deadlines");
     .await;
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "wait for the quiet cell".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait for the quiet cell".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event_match(&test.codex, |event| match event {
         EventMsg::RawResponseItem(raw) => match &raw.item {
@@ -3206,7 +3201,30 @@ text("session b done");
     )
     .await;
 
-    test.submit_turn("wait session b").await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait session b".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RawResponseItem(raw) => match &raw.item {
+            ResponseItem::FunctionCall { call_id, .. } if call_id == "call-3" => Some(()),
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wake the quiet wait".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
 
     let third_request = third_completion.single_request();
     let third_items = function_tool_output_items(&third_request, "call-3");
@@ -3223,13 +3241,7 @@ text("session b done");
         session_b_id
     );
 
-    for _ in 0..100 {
-        if session_a_done_marker.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(session_a_done_marker.exists());
+    fs_wait::wait_for_path_exists(&session_a_done_marker, Duration::from_secs(30)).await?;
 
     responses::mount_sse_once(
         &server,

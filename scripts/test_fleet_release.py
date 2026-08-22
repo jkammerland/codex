@@ -118,9 +118,9 @@ class FleetReleaseTest(unittest.TestCase):
             r'''$command = 'call "{0}\Common7\Tools\VsDevCmd.bat"''',
             windows_script,
         )
-        self.assertNotIn(r'''call "0\Common7''', windows_script)
+        self.assertNotIn(r"""call "0\Common7""", windows_script)
         self.assertIn("Normalize-ReleaseLock $build", windows_script)
-        self.assertIn('0\\.0\\.0|0\\.147\\.0', windows_script)
+        self.assertIn("0\\.0\\.0|0\\.147\\.0", windows_script)
         self.assertIn(
             "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz",
             windows_script,

@@ -434,7 +434,7 @@ $command = 'call "{{0}}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{{1
 cmd.exe /d /s /c $command; if ($LASTEXITCODE -ne 0) {{ throw 'Cargo build failed' }}
 Normalize-ReleaseLock $build
 $version = & {quote_ps(host.build_binary("codex"))} --version
-if ($version -notmatch {quote_ps(re.escape(release.marker))}) {{ throw "Unexpected fork version: $version" }}
+if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
 Write-Output "build-version=$version"
 """
     assert host.rustup is not None
@@ -490,7 +490,7 @@ PATH="$toolchain_bin:$PATH" \\
   "$toolchain_bin/cargo" build --release --bin codex --bin codex-code-mode-host
 normalize_release_lock "$build"
 version=$(target/release/codex --version)
-case "$version" in *{release.marker}*) ;; *) echo "Unexpected fork version: $version" >&2; exit 1 ;; esac
+[ "$version" = {shlex.quote(release.cli_version)} ] || {{ echo "Unexpected fork version: $version" >&2; exit 1; }}
 printf 'build-version=%s\\n' "$version"
 """
 
@@ -528,7 +528,7 @@ if ((Hash $targetCli) -ne (Hash $sourceCli) -or (Hash $targetHost) -ne (Hash $so
   }}
 }}
 $version = & $targetCli --version
-if ($version -notmatch {quote_ps(re.escape(release.marker))}) {{ throw "Unexpected fork version: $version" }}
+if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
 Write-Output "activated-version=$version"
 """
     return f"""set -eu
@@ -552,7 +552,7 @@ if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")"
 fi
 [ "$(sha "$target_cli")" = "$source_cli_hash" ] && [ "$(sha "$target_host")" = "$source_host_hash" ]
 version=$($target_cli --version)
-case "$version" in *{release.marker}*) ;; *) echo "Unexpected fork version: $version" >&2; exit 1 ;; esac
+[ "$version" = {shlex.quote(release.cli_version)} ] || {{ echo "Unexpected fork version: $version" >&2; exit 1; }}
 printf 'activated-version=%s\\n' "$version"
 """
 
@@ -578,7 +578,7 @@ def print_status(statuses: list[Status], release: Release) -> bool:
     return clean
 
 
-def apply_rollout(host: Host, release: Release, bundle: Path | None) -> None:
+def apply_stage(host: Host, release: Release, bundle: Path | None) -> None:
     require_server(host, release)
     if bundle:
         copy_bundle(host, release, bundle)
@@ -586,6 +586,10 @@ def apply_rollout(host: Host, release: Release, bundle: Path | None) -> None:
     if result.returncode:
         raise FleetError(f"{host.name}: {error_message('building fork', result)}")
     print(f"{host.name}: {result.stdout.strip()}")
+
+
+def apply_rollout(host: Host, release: Release, bundle: Path | None) -> None:
+    apply_stage(host, release, bundle)
     result = remote(host, activation_script(host, release))
     if result.returncode:
         raise FleetError(f"{host.name}: {error_message('activating fork', result)}")
@@ -599,11 +603,11 @@ def args() -> argparse.Namespace:
     for command in ("status", "plan"):
         child = commands.add_parser(command)
         child.add_argument("--host", action="append")
-    for command in ("activate", "rollout"):
+    for command in ("activate", "stage", "rollout"):
         child = commands.add_parser(command)
         child.add_argument("--host", action="append", required=True)
         child.add_argument("--apply", action="store_true")
-        if command == "rollout":
+        if command in {"stage", "rollout"}:
             child.add_argument("--bundle", type=Path)
     return parser.parse_args()
 
@@ -627,12 +631,17 @@ def main() -> int:
             raise FleetError(
                 f"{parsed.command} changes remote state; re-run with --apply"
             )
-        if parsed.command == "rollout":
+        if parsed.command in {"stage", "rollout"}:
             bundle = parsed.bundle
             if bundle and not bundle.is_file():
                 raise FleetError(f"release bundle does not exist: {bundle}")
             for host in hosts:
-                apply_rollout(host, release, bundle)
+                if parsed.command == "stage":
+                    apply_stage(host, release, bundle)
+                else:
+                    apply_rollout(host, release, bundle)
+            if parsed.command == "stage":
+                return 0
         else:
             for host in hosts:
                 result = remote(host, activation_script(host, release))

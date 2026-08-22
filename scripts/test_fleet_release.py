@@ -5,6 +5,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -129,6 +131,33 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn("RUSTY_V8_SRC_BINDING_PATH", windows_script)
         self.assertIn("Get-FileHash", windows_script)
         self.assertIn("Join-Path ($build + '.fleet') 'rusty-v8'", windows_script)
+
+    @mock.patch("fleet_release.activation_script")
+    @mock.patch("fleet_release.build_script", return_value="build script")
+    @mock.patch("fleet_release.remote")
+    @mock.patch("fleet_release.copy_bundle")
+    @mock.patch("fleet_release.require_server")
+    def test_stage_builds_without_activation(
+        self,
+        require_server: mock.Mock,
+        copy_bundle: mock.Mock,
+        remote: mock.Mock,
+        build_script: mock.Mock,
+        activation_script: mock.Mock,
+    ) -> None:
+        host = self.hosts[0]
+        bundle = Path("release.bundle")
+        remote.return_value = CompletedProcess(
+            args=[], returncode=0, stdout="build-version=expected\n", stderr=""
+        )
+
+        fleet_release.apply_stage(host, self.release, bundle)
+
+        require_server.assert_called_once_with(host, self.release)
+        copy_bundle.assert_called_once_with(host, self.release, bundle)
+        build_script.assert_called_once_with(host, self.release, True)
+        remote.assert_called_once_with(host, "build script")
+        activation_script.assert_not_called()
 
 
 if __name__ == "__main__":

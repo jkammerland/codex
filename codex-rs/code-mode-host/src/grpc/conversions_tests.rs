@@ -2,6 +2,7 @@ use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::FunctionCallOutputContentItem;
 use codex_code_mode_protocol::ImageDetail;
 use codex_code_mode_protocol::RuntimeResponse;
+use codex_code_mode_protocol::YieldReason;
 use codex_code_mode_protocol::grpc as proto;
 use pretty_assertions::assert_eq;
 use tonic::Code;
@@ -110,4 +111,32 @@ fn maps_text_image_audio_and_terminal_error_without_losing_details() {
             )),
         }
     );
+}
+
+#[test]
+fn maps_yield_reasons_without_losing_details() {
+    for (reason, encoded) in [
+        (YieldReason::Requested, proto::YieldReason::Requested),
+        (
+            YieldReason::DeadlineElapsed,
+            proto::YieldReason::DeadlineElapsed,
+        ),
+    ] {
+        assert_eq!(
+            execution_outcome(RuntimeResponse::Yielded {
+                cell_id: CellId::new("cell".to_string()),
+                content_items: Vec::new(),
+                reason,
+            }),
+            proto::ExecutionOutcome {
+                cell_id: "cell".to_string(),
+                content_items: Vec::new(),
+                outcome: Some(proto::execution_outcome::Outcome::Yielded(
+                    proto::ExecutionYielded {
+                        reason: encoded as i32,
+                    },
+                )),
+            }
+        );
+    }
 }

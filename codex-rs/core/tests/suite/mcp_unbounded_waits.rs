@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
+use codex_core::TurnInputRequest;
 use codex_features::Feature;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -212,16 +213,10 @@ async fn wait_for_code_mode_cell(
     .await;
     fixture
         .codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "collect the nested MCP result".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "collect the nested MCP result".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&fixture.codex, |event| {
         matches!(
@@ -464,16 +459,10 @@ async fn explicit_turn_interrupt_aborts_an_unbounded_mcp_call_without_a_follow_u
 
     fixture
         .codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "start an unbounded MCP call".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "start an unbounded MCP call".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&fixture.codex, |event| {
         matches!(

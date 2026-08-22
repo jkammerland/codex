@@ -200,7 +200,10 @@ impl UnifiedExecProcessManager {
             output_notified.as_mut().enable();
             output_closed_notified.as_mut().enable();
 
-            let drained_output = output_buffer.lock().await.drain();
+            let drained_output = {
+                let mut guard = output_buffer.lock().await;
+                std::mem::take(&mut *guard)
+            };
             if drained_output.retained_bytes() > 0 || drained_output.omitted_bytes() > 0 {
                 collected.push_buffer(drained_output);
                 continue;

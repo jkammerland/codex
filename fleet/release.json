@@ -6,7 +6,7 @@
     "forkRef": "release/jkammerland.mcp.6",
     "forkRemote": "https://github.com/jkammerland/codex.git",
     "expectedCliVersion": "codex-cli 0.0.0+jkammerland.mcp.6",
-    "mcpServerCommit": "f0024196934ebd4e571872cf5b731499e18ca8f9",
+    "mcpServerCommit": "9129009ca8e25df2ca1a07fdd5c0c04aecc28c6b",
     "rustyV8Version": "150.4.0"
   },
   "hosts": [

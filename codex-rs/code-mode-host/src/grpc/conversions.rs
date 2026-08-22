@@ -6,6 +6,7 @@ use codex_code_mode_protocol::ImageDetail;
 use codex_code_mode_protocol::RuntimeResponse;
 use codex_code_mode_protocol::ToolDefinition;
 use codex_code_mode_protocol::WaitOutcome;
+use codex_code_mode_protocol::YieldReason;
 use codex_code_mode_protocol::grpc as proto;
 use codex_protocol::ToolName;
 use serde_json::Value as JsonValue;
@@ -84,10 +85,16 @@ pub(super) fn execution_outcome(response: RuntimeResponse) -> proto::ExecutionOu
         RuntimeResponse::Yielded {
             cell_id,
             content_items,
+            reason,
         } => (
             cell_id,
             content_items,
-            proto::execution_outcome::Outcome::Yielded(proto::ExecutionYielded {}),
+            proto::execution_outcome::Outcome::Yielded(proto::ExecutionYielded {
+                reason: match reason {
+                    YieldReason::Requested => proto::YieldReason::Requested as i32,
+                    YieldReason::DeadlineElapsed => proto::YieldReason::DeadlineElapsed as i32,
+                },
+            }),
         ),
         RuntimeResponse::Terminated {
             cell_id,

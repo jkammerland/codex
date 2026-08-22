@@ -85,9 +85,11 @@ fn public_runtime_response(generation: u64, response: RuntimeResponse) -> Runtim
         RuntimeResponse::Yielded {
             cell_id,
             content_items,
+            reason,
         } => RuntimeResponse::Yielded {
             cell_id: public_cell_id(generation, &cell_id),
             content_items,
+            reason,
         },
         RuntimeResponse::Terminated {
             cell_id,

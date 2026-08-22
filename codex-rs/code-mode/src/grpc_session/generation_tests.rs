@@ -13,6 +13,7 @@ use codex_code_mode_protocol::RuntimeResponse;
 use codex_code_mode_protocol::StartedCell;
 use codex_code_mode_protocol::ToolInvocationFuture;
 use codex_code_mode_protocol::WaitOutcome;
+use codex_code_mode_protocol::YieldReason;
 use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -207,6 +208,7 @@ fn reconnected_wait_maps_live_and_missing_outcomes() {
     let yielded = RuntimeResponse::Yielded {
         cell_id: CellId::new("42".to_string()),
         content_items: Vec::new(),
+        reason: YieldReason::DeadlineElapsed,
     };
     let terminated = RuntimeResponse::Terminated {
         cell_id: CellId::new("42".to_string()),
@@ -218,6 +220,7 @@ fn reconnected_wait_maps_live_and_missing_outcomes() {
         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
             cell_id: public_id.clone(),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
     assert_eq!(

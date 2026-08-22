@@ -7,6 +7,7 @@ use codex_code_mode_protocol::ImageDetail;
 use codex_code_mode_protocol::RuntimeResponse;
 use codex_code_mode_protocol::ToolDefinition;
 use codex_code_mode_protocol::WaitOutcome;
+use codex_code_mode_protocol::YieldReason;
 use codex_code_mode_protocol::grpc;
 use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
@@ -138,6 +139,37 @@ fn runtime_response_decodes_mixed_content_items() {
 }
 
 #[test]
+fn runtime_response_preserves_yield_reasons_and_defaults_legacy_values() {
+    for (encoded, reason) in [
+        (grpc::YieldReason::Requested as i32, YieldReason::Requested),
+        (
+            grpc::YieldReason::DeadlineElapsed as i32,
+            YieldReason::DeadlineElapsed,
+        ),
+        (
+            grpc::YieldReason::Unspecified as i32,
+            YieldReason::Requested,
+        ),
+        (i32::MAX, YieldReason::Requested),
+    ] {
+        assert_eq!(
+            runtime_response(grpc::ExecutionOutcome {
+                cell_id: "cell".to_string(),
+                content_items: Vec::new(),
+                outcome: Some(grpc::execution_outcome::Outcome::Yielded(
+                    grpc::ExecutionYielded { reason: encoded },
+                )),
+            }),
+            Ok(RuntimeResponse::Yielded {
+                cell_id: CellId::new("cell".to_string()),
+                content_items: Vec::new(),
+                reason,
+            })
+        );
+    }
+}
+
+#[test]
 fn wait_outcome_preserves_missing_cell_state() {
     let response = grpc::WaitResponse {
         state: Some(grpc::wait_response::State::MissingCell(
@@ -166,7 +198,9 @@ fn oversized_response_cell_ids_are_rejected() {
         cell_id: "x".repeat(grpc::MAX_IDENTIFIER_BYTES + 1),
         content_items: Vec::new(),
         outcome: Some(grpc::execution_outcome::Outcome::Yielded(
-            grpc::ExecutionYielded {},
+            grpc::ExecutionYielded {
+                reason: grpc::YieldReason::Unspecified as i32,
+            },
         )),
     };
 
@@ -190,7 +224,9 @@ fn invalid_output_enums_and_missing_oneofs_are_rejected() {
             })),
         }],
         outcome: Some(grpc::execution_outcome::Outcome::Yielded(
-            grpc::ExecutionYielded {},
+            grpc::ExecutionYielded {
+                reason: grpc::YieldReason::Unspecified as i32,
+            },
         )),
     };
 

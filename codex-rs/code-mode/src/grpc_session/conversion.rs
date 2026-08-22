@@ -7,6 +7,7 @@ use codex_code_mode_protocol::ImageDetail;
 use codex_code_mode_protocol::RuntimeResponse;
 use codex_code_mode_protocol::ToolDefinition;
 use codex_code_mode_protocol::WaitOutcome;
+use codex_code_mode_protocol::YieldReason;
 use codex_code_mode_protocol::grpc;
 use codex_protocol::ToolName;
 
@@ -100,10 +101,19 @@ pub(super) fn runtime_response(outcome: grpc::ExecutionOutcome) -> Result<Runtim
         .outcome
         .ok_or_else(|| "code-mode execution omitted its outcome".to_string())?
     {
-        grpc::execution_outcome::Outcome::Yielded(_) => Ok(RuntimeResponse::Yielded {
-            cell_id,
-            content_items,
-        }),
+        grpc::execution_outcome::Outcome::Yielded(yielded) => {
+            let reason = match grpc::YieldReason::try_from(yielded.reason) {
+                Ok(grpc::YieldReason::DeadlineElapsed) => YieldReason::DeadlineElapsed,
+                Ok(grpc::YieldReason::Requested | grpc::YieldReason::Unspecified) | Err(_) => {
+                    YieldReason::Requested
+                }
+            };
+            Ok(RuntimeResponse::Yielded {
+                cell_id,
+                content_items,
+                reason,
+            })
+        }
         grpc::execution_outcome::Outcome::Terminated(_) => Ok(RuntimeResponse::Terminated {
             cell_id,
             content_items,

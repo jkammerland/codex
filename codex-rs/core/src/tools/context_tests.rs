@@ -470,6 +470,7 @@ fn exec_command_tool_output_reserves_metadata_budget_and_preserves_policy_units(
             max_output_tokens: None,
             process_id: None,
             exit_code: Some(0),
+            wait_reason: None,
             original_token_count: Some(123),
             output_omitted_bytes: None,
             hook_command: None,

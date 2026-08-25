@@ -65,9 +65,7 @@ const OUTGOING_CHANNEL_CAPACITY: usize = 128;
 
 enum NegotiatedConnection {
     Rejected,
-    Accepted {
-        wait_yield_reason: bool,
-    },
+    Accepted { wait_yield_reason: bool },
 }
 
 struct HostLimits {

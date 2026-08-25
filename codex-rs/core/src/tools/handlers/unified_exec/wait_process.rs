@@ -68,7 +68,7 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
                 .wait_process(WaitProcessRequest {
                     process_id: args.session_id,
                     max_output_tokens: args.max_output_tokens,
-                    truncation_policy: turn.model_info.truncation_policy.into(),
+                    truncation_policy: turn.model_info().truncation_policy.into(),
                     interaction_event: Some(UnifiedExecInteractionEvent {
                         session: &session,
                         turn: &turn,

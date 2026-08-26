@@ -5,9 +5,9 @@ maintained separately from upstream releases.
 
 ## Identity
 
-- Branch: `release/jkammerland.mcp.6`
-- Upstream base: `dbe9dac1ae0050dc14097d7e30d23109a2744121` (`origin/main`)
-- User-visible suffix: `+jkammerland.mcp.6`
+- Branch: `release/jkammerland.mcp.7`
+- Upstream base: `4213b38f3c555049bf6f494065698a3dfe587c16` (`origin/main`)
+- User-visible suffix: `+jkammerland.mcp.7`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal
@@ -30,6 +30,8 @@ not prompt for an npm update that would overwrite the fork.
    queued input, or TTY output while retaining explicit bounded polling.
 8. Completed unified-exec waits drain through the terminal output-close event,
    preserving final output that arrives after process exit.
+9. Code mode surfaces recoverable metadata for live unified-exec sessions even
+   when JavaScript emits only a projection of the nested tool result.
 
 ## Validate
 

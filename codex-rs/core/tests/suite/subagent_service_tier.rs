@@ -15,8 +15,10 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_once_match;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::test_codex;
@@ -24,6 +26,7 @@ use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::time::Duration;
 use test_case::test_case;
 
 const ROOT_PROMPT: &str = "spawn the service-tier worker";
@@ -34,6 +37,8 @@ const FRESH_CHILD_PROMPT: &str = "finish the new service-tier worker";
 const SPAWN_CALL_ID: &str = "spawn-service-tier-worker";
 const FRESH_SPAWN_CALL_ID: &str = "spawn-fresh-service-tier-worker";
 const PAUSE_CALL_ID: &str = "pause-service-tier-worker";
+const SPAWN_BLOCKER_CALL_ID: &str = "spawn-service-tier-blocker";
+const BLOCKER_PROMPT: &str = "keep the service-tier worker waitable";
 const PRIORITY_ROLE: &str = "priority-worker";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
@@ -187,17 +192,49 @@ async fn root_service_tier_change_updates_existing_subagent(
         |request: &wiremock::Request| {
             body_contains(request, CHILD_PROMPT)
                 && !body_contains(request, ROOT_PROMPT)
-                && !body_contains(request, PAUSE_CALL_ID)
+                && !body_contains(request, SPAWN_BLOCKER_CALL_ID)
         },
         sse(vec![
             ev_response_created("child-paused"),
             ev_function_call_with_namespace(
-                PAUSE_CALL_ID,
+                SPAWN_BLOCKER_CALL_ID,
                 "collaboration",
-                "wait_agent",
-                &json!({ "timeout_ms": 30_000 }).to_string(),
+                "spawn_agent",
+                &json!({
+                    "message": BLOCKER_PROMPT,
+                    "task_name": "blocker",
+                    "fork_turns": "none",
+                })
+                .to_string(),
             ),
             ev_completed("child-paused"),
+        ]),
+    )
+    .await;
+    mount_response_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, BLOCKER_PROMPT) && !body_contains(request, CHILD_PROMPT)
+        },
+        sse_response(sse(vec![
+            ev_response_created("blocker-finished"),
+            ev_assistant_message("blocker-finished-message", "blocker finished"),
+            ev_completed("blocker-finished"),
+        ]))
+        .set_delay(Duration::from_secs(30)),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, SPAWN_BLOCKER_CALL_ID)
+                && !body_contains(request, ROOT_PROMPT)
+                && !body_contains(request, PAUSE_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("child-waiting"),
+            ev_function_call_with_namespace(PAUSE_CALL_ID, "collaboration", "wait_agent", "{}"),
+            ev_completed("child-waiting"),
         ]),
     )
     .await;
@@ -215,6 +252,7 @@ async fn root_service_tier_change_updates_existing_subagent(
     .await;
     test.submit_text_turn(ROOT_PROMPT).await?;
     let child_thread_id = created_threads.recv().await?;
+    let _blocker_thread_id = created_threads.recv().await?;
     let child = test.thread_manager.get_thread(child_thread_id).await?;
     let original_child_service_tier = child.config_snapshot().await.service_tier;
     assert_eq!(original_child_service_tier.as_deref(), initial_service_tier);

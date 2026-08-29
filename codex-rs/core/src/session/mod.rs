@@ -264,6 +264,12 @@ use self::turn_context::TurnContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentStatusUpdate {
+    Apply,
+    Defer,
+}
+
 /// Notes from the previous real user turn.
 ///
 /// Conceptually this is the same role that `previous_model` used to fill, but
@@ -2008,6 +2014,18 @@ impl Session {
             id: turn_context.sub_id.clone(),
             msg,
         };
+        let defer_v2_child_terminal_status = turn_context.multi_agent_version
+            == MultiAgentVersion::V2
+            && matches!(
+                (&legacy_source, &turn_context.session_source),
+                (
+                    EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_),
+                    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                        agent_path: Some(_),
+                        ..
+                    })
+                )
+            );
         // Private reviewers have no app-server listener; publicly resumed Guardian threads do.
         if matches!(
             &turn_context.session_source,
@@ -2026,9 +2044,22 @@ impl Session {
                 .analytics_events_client
                 .track_guardian_session_event(self.thread_id, &event);
         }
-        self.send_event_raw(event).await;
-        self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
+        if defer_v2_child_terminal_status {
+            self.send_event_raw_with_persistence(
+                event,
+                /*persist*/ true,
+                AgentStatusUpdate::Defer,
+            )
             .await;
+        } else {
+            self.send_event_raw(event).await;
+        }
+        let deferred_agent_status = self
+            .maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
+            .await;
+        if defer_v2_child_terminal_status && let Some(status) = deferred_agent_status {
+            self.agent_status.send_replace(status);
+        }
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
             .await;
         self.maybe_clear_realtime_handoff_for_event(&legacy_source)
@@ -2052,13 +2083,13 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
-    ) {
+    ) -> Option<AgentStatus> {
         if turn_context.multi_agent_version != MultiAgentVersion::V2 {
-            return;
+            return None;
         }
 
         if !matches!(msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) {
-            return;
+            return None;
         }
 
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -2067,33 +2098,25 @@ impl Session {
             ..
         }) = &turn_context.session_source
         else {
-            return;
+            return None;
         };
 
         let status = match turn_context.terminal_error.lock().await.take() {
-            Some(error) => {
-                let status = AgentStatus::Errored(error.message);
-                self.agent_status.send_replace(status.clone());
-                status
-            }
-            None => {
-                let Some(status) = agent_status_from_event(msg) else {
-                    return;
-                };
-                status
-            }
+            Some(error) => AgentStatus::Errored(error.message),
+            None => agent_status_from_event(msg)?,
         };
         if !is_final(&status) {
-            return;
+            return None;
         }
 
         self.forward_child_completion_to_parent(
             turn_context,
             *parent_thread_id,
             child_agent_path,
-            status,
+            status.clone(),
         )
         .await;
+        Some(status)
     }
 
     /// Sends the standard completion envelope from a spawned MultiAgentV2 child to its parent.
@@ -2265,8 +2288,12 @@ impl Session {
     }
 
     pub(crate) async fn send_event_raw(&self, event: Event) {
-        self.send_event_raw_with_persistence(event, /*persist*/ true)
-            .await;
+        self.send_event_raw_with_persistence(
+            event,
+            /*persist*/ true,
+            AgentStatusUpdate::Apply,
+        )
+        .await;
     }
 
     /// Delivers an event without creating a local rollout for a thread that has not materialized.
@@ -2279,10 +2306,16 @@ impl Session {
                 true
             }
         };
-        self.send_event_raw_with_persistence(event, persist).await;
+        self.send_event_raw_with_persistence(event, persist, AgentStatusUpdate::Apply)
+            .await;
     }
 
-    async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+    async fn send_event_raw_with_persistence(
+        &self,
+        event: Event,
+        persist: bool,
+        agent_status_update: AgentStatusUpdate,
+    ) {
         self.services.mcp_runtime.observe_event(&event.msg);
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
@@ -2292,12 +2325,24 @@ impl Session {
         self.services
             .rollout_thread_trace
             .record_protocol_event(&event.msg);
-        self.deliver_event_raw(event).await;
+        self.deliver_event_raw_with_status_update(event, agent_status_update)
+            .await;
     }
 
     async fn deliver_event_raw(&self, event: Event) {
+        self.deliver_event_raw_with_status_update(event, AgentStatusUpdate::Apply)
+            .await;
+    }
+
+    async fn deliver_event_raw_with_status_update(
+        &self,
+        event: Event,
+        agent_status_update: AgentStatusUpdate,
+    ) {
         // Record the last known agent status.
-        if let Some(status) = agent_status_from_event(&event.msg) {
+        if agent_status_update == AgentStatusUpdate::Apply
+            && let Some(status) = agent_status_from_event(&event.msg)
+        {
             self.agent_status.send_replace(status);
         }
         if let Err(e) = self.tx_event.send(event).await {

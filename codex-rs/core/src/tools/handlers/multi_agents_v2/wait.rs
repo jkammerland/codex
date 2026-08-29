@@ -218,6 +218,20 @@ async fn wait_for_activity(
             }
         }
         if status_receivers.is_empty() {
+            match activity_rx.has_changed() {
+                Ok(true) => {
+                    return Ok(match *activity_rx.borrow_and_update() {
+                        InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
+                        InputQueueActivity::Steer => WaitOutcome::Steered,
+                    });
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    return Err(FunctionCallError::Fatal(
+                        "wait_agent activity channel closed".to_string(),
+                    ));
+                }
+            }
             return Ok(WaitOutcome::NoLiveAgents);
         }
 
@@ -226,6 +240,7 @@ async fn wait_for_activity(
             .map(tokio::sync::watch::Receiver::changed)
             .collect::<FuturesUnordered<_>>();
         tokio::select! {
+            biased;
             activity = activity_rx.changed() => {
                 activity.map_err(|_| {
                     FunctionCallError::Fatal("wait_agent activity channel closed".to_string())

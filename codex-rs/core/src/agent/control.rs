@@ -63,6 +63,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -83,6 +84,13 @@ pub(crate) enum SpawnAgentForkMode {
     LastNTurns(usize),
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct InitialSubmissionBarrier {
+    pub(crate) started: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
@@ -93,8 +101,11 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
+    pub(crate) cancellation_token: CancellationToken,
     #[cfg(test)]
     pub(crate) remove_thread_before_initial_submission: bool,
+    #[cfg(test)]
+    pub(crate) initial_submission_barrier: Option<InitialSubmissionBarrier>,
 }
 
 #[derive(Clone, Debug)]

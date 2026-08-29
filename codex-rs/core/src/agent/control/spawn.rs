@@ -589,6 +589,9 @@ impl AgentControl {
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
         let state = self.upgrade()?;
+        let spawn_cancellation = options.cancellation_token.clone();
+        #[cfg(test)]
+        let initial_submission_barrier = options.initial_submission_barrier.clone();
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(
                 &InitialHistory::New,
@@ -704,24 +707,54 @@ impl AgentControl {
             cyber_access_program: options.cyber_access_program,
             ..Default::default()
         };
-        let submission_result = match initial_input {
-            SpawnInitialInput::UserInput(input) => {
-                self.send_input(new_thread.thread_id, input, start_options)
-                    .await
+        let initial_submission = async {
+            #[cfg(test)]
+            if let Some(barrier) = initial_submission_barrier {
+                barrier.started.notify_one();
+                barrier.release.notified().await;
             }
-            SpawnInitialInput::InterAgentCommunication(communication, context) => {
-                self.send_inter_agent_communication_after_capacity_check(
-                    new_thread.thread_id,
-                    &state,
-                    communication,
-                    context,
-                    start_options,
-                )
-                .await
+            match initial_input {
+                SpawnInitialInput::UserInput(input) => {
+                    self.send_input(new_thread.thread_id, input, start_options)
+                        .await
+                }
+                SpawnInitialInput::InterAgentCommunication(communication, context) => {
+                    self.send_inter_agent_communication_after_capacity_check(
+                        new_thread.thread_id,
+                        &state,
+                        communication,
+                        context,
+                        start_options,
+                    )
+                    .await
+                }
+            }
+        };
+        tokio::pin!(initial_submission);
+        let submission_result = tokio::select! {
+            biased;
+            result = &mut initial_submission => result,
+            _ = spawn_cancellation.cancelled() => {
+                if let Some(thread) = state.remove_thread(&new_thread.thread_id).await
+                    && let Err(err) = thread.shutdown_and_wait().await
+                {
+                    warn!(
+                        thread_id = %new_thread.thread_id,
+                        "failed to shut down cancelled spawned agent: {err}"
+                    );
+                }
+                return Err(CodexErr::Interrupted);
             }
         };
         if let Err(error) = submission_result {
-            let _ = state.remove_thread(&new_thread.thread_id).await;
+            if let Some(thread) = state.remove_thread(&new_thread.thread_id).await
+                && let Err(err) = thread.shutdown_and_wait().await
+            {
+                warn!(
+                    thread_id = %new_thread.thread_id,
+                    "failed to shut down spawned agent after initial submission failed: {err}"
+                );
+            }
             return Err(error);
         }
 

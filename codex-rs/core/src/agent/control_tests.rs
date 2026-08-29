@@ -626,6 +626,86 @@ async fn failed_initial_submission_does_not_publish_spawned_agent() {
 }
 
 #[tokio::test]
+async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, parent) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
+    let child_source = || {
+        thread_spawn_source(
+            parent_thread_id,
+            &parent.session_source,
+            next_thread_spawn_depth(&parent.session_source),
+            /*agent_role*/ None,
+            Some("worker".to_string()),
+        )
+        .expect("child source")
+    };
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let spawn = tokio::spawn({
+        let control = harness.control.clone();
+        let config = harness.config.clone();
+        let source = child_source();
+        let cancellation_token = cancellation_token.clone();
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        async move {
+            control
+                .spawn_agent_with_metadata(
+                    config,
+                    text_input("initial child task"),
+                    Some(source),
+                    SpawnAgentOptions {
+                        parent_thread_id: Some(parent_thread_id),
+                        cancellation_token,
+                        initial_submission_barrier: Some(
+                            crate::agent::control::InitialSubmissionBarrier { started, release },
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }
+    });
+
+    started.notified().await;
+    assert_eq!(harness.manager.list_thread_ids().await.len(), 2);
+    cancellation_token.cancel();
+    let error = spawn
+        .await
+        .expect("spawn task should join")
+        .expect_err("cancelled initial submission should fail");
+    assert!(matches!(error.details(), CodexErrorDetails::Interrupted));
+    assert_eq!(
+        harness.manager.list_thread_ids().await,
+        vec![parent_thread_id]
+    );
+
+    let spawned = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("retry child task"),
+            Some(child_source()),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("cancelled spawn should release the task path and capacity");
+    assert_eq!(spawned.metadata.agent_path, child_source().get_agent_path());
+}
+
+#[tokio::test]
 async fn resume_agent_errors_when_manager_dropped() {
     let control = AgentControl::default();
     let (_home, config) = test_config().await;

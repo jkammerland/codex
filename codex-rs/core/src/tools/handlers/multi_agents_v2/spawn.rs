@@ -107,6 +107,7 @@ async fn handle_spawn_agent(
         payload,
         call_id,
         source,
+        cancellation_token,
         ..
     } = invocation;
     let turn = &step_context.turn;
@@ -218,8 +219,11 @@ async fn handle_spawn_agent(
                     environments: Some(step_context.environments.to_selections()),
                     multi_agent_v2_usage_hints,
                     cyber_access_program: turn.cyber_access_program,
+                    cancellation_token,
                     #[cfg(test)]
                     remove_thread_before_initial_submission: false,
+                    #[cfg(test)]
+                    initial_submission_barrier: None,
                 },
             ),
     )
@@ -268,6 +272,10 @@ async fn handle_spawn_agent(
 }
 
 impl CoreToolRuntime for Handler {
+    fn handles_cancellation_cooperatively(&self) -> bool {
+        true
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

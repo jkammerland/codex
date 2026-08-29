@@ -128,6 +128,46 @@ async fn wait_for_recorded_user_input(thread: &crate::CodexThread, expected: &[U
     .expect("timed out waiting for recorded user input");
 }
 
+async fn wait_for_recorded_inter_agent_communication(
+    thread: &crate::CodexThread,
+    expected: &InterAgentCommunication,
+) {
+    let ResponseItem::AgentMessage {
+        author: expected_author,
+        recipient: expected_recipient,
+        content: expected_content,
+        ..
+    } = expected.to_model_input_item()
+    else {
+        unreachable!("inter-agent communication should produce an agent message");
+    };
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = thread
+                .next_event()
+                .await
+                .expect("event stream should stay open");
+            if let EventMsg::RawResponseItem(raw) = event.msg
+                && matches!(
+                    raw.item,
+                    ResponseItem::AgentMessage {
+                        author,
+                        recipient,
+                        content,
+                        ..
+                    } if author == expected_author
+                        && recipient == expected_recipient
+                        && content == expected_content
+                )
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for recorded inter-agent communication");
+}
+
 fn thread_manager() -> ThreadManager {
     ThreadManager::with_models_provider_for_tests(
         CodexAuth::from_api_key("dummy"),
@@ -858,11 +898,13 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
     turn.config = Arc::new(config);
     turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
     let parent_provider_id = turn.config.model_provider_id.clone();
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
 
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
+            session.clone(),
+            turn.clone(),
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
@@ -877,12 +919,12 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
     let result: serde_json::Value =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
     assert_eq!(result["task_name"], "/root/partial_fork");
-    let agent_id = manager
-        .captured_ops()
-        .into_iter()
-        .map(|(thread_id, _)| thread_id)
-        .find(|thread_id| *thread_id != root.thread_id)
-        .expect("spawned agent should receive an op");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "partial_fork")
+        .await
+        .expect("spawned task name should resolve");
     let snapshot = manager
         .get_thread(agent_id)
         .await
@@ -1069,19 +1111,18 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         child_snapshot.session_source.get_agent_path().as_deref(),
         Some("/root/test_process")
     );
-    assert!(manager.captured_ops().iter().any(|(id, op)| {
-        *id == child_thread_id
-            && matches!(
-                op,
-                Op::InterAgentCommunication { communication, .. }
-                    if communication.author == AgentPath::root()
-                        && communication.recipient.as_str() == "/root/test_process"
-                        && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-spawn-message")
-                        && communication.trigger_turn
-            )
-    }));
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let initial_communication = InterAgentCommunication::new_encrypted(
+        AgentPath::root(),
+        AgentPath::try_from("/root/test_process").expect("child path"),
+        Vec::new(),
+        "encrypted-spawn-message".to_string(),
+        /*trigger_turn*/ true,
+    );
+    wait_for_recorded_inter_agent_communication(&child_thread, &initial_communication).await;
 
     SendMessageHandlerV2
         .handle(invocation(
@@ -1096,19 +1137,23 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         .await
         .expect("send_message should accept v2 path");
 
-    assert!(manager.captured_ops().iter().any(|(id, op)| {
-        *id == child_thread_id
-            && matches!(
-                op,
-                Op::InterAgentCommunication { communication, .. }
-                    if communication.author == AgentPath::root()
-                        && communication.recipient.as_str() == "/root/test_process"
-                        && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-send-message")
-                        && !communication.trigger_turn
+    let (mailbox, _) = child_thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(
+        mailbox,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            InterAgentCommunication::new_encrypted(
+                AgentPath::root(),
+                AgentPath::try_from("/root/test_process").expect("child path"),
+                Vec::new(),
+                "encrypted-send-message".to_string(),
+                /*trigger_turn*/ false,
             )
-    }));
+        )]
+    );
 }
 
 #[tokio::test]
@@ -1292,19 +1337,24 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         .await
         .expect("send_message should accept the root agent path");
 
-    assert!(manager.captured_ops().iter().any(|(id, op)| {
-        *id == root.thread_id
-            && matches!(
-                op,
-                Op::InterAgentCommunication { communication, .. }
-                    if communication.author == child_path
-                        && communication.recipient == AgentPath::root()
-                        && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-done")
-                        && !communication.trigger_turn
+    let (mailbox, _) = root
+        .thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(
+        mailbox,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            InterAgentCommunication::new_encrypted(
+                child_path,
+                AgentPath::root(),
+                Vec::new(),
+                "encrypted-done".to_string(),
+                /*trigger_turn*/ false,
             )
-    }));
+        )]
+    );
 }
 
 #[tokio::test]
@@ -1893,17 +1943,14 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .await
         .expect("followup_task should succeed");
 
-    assert!(manager.captured_ops().iter().any(|(id, op)| {
-        *id == agent_id
-            && matches!(
-                op,
-                Op::InterAgentCommunication { communication, .. }
-                    if communication.author == AgentPath::root()
-                        && communication.recipient == worker_path
-                        && communication.encrypted_content.as_deref() == Some("continue")
-                        && communication.trigger_turn
-            )
-    }));
+    let followup_communication = InterAgentCommunication::new_encrypted(
+        AgentPath::root(),
+        worker_path.clone(),
+        Vec::new(),
+        "continue".to_string(),
+        /*trigger_turn*/ true,
+    );
+    wait_for_recorded_inter_agent_communication(&thread, &followup_communication).await;
 
     let second_turn = thread.session.new_default_turn().await;
     thread
@@ -1935,45 +1982,31 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
     )
     .expect("completed status should render");
 
-    let notifications = timeout(Duration::from_secs(5), async {
-        loop {
-            let notifications = manager
-                .captured_ops()
-                .into_iter()
-                .filter_map(|(id, op)| {
-                    (id == root.thread_id)
-                        .then_some(op)
-                        .and_then(|op| match op {
-                            Op::InterAgentCommunication { communication, .. }
-                                if communication.author == worker_path
-                                    && communication.recipient == AgentPath::root()
-                                    && communication.other_recipients.is_empty()
-                                    && !communication.trigger_turn =>
-                            {
-                                Some(communication.content)
-                            }
-                            _ => None,
-                        })
-                })
-                .collect::<Vec<_>>();
-            let first_count = notifications
-                .iter()
-                .filter(|message| **message == first_notification)
-                .count();
-            let second_count = notifications
-                .iter()
-                .filter(|message| **message == second_notification)
-                .count();
-            if first_count == 1 && second_count == 1 {
-                break notifications;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("parent should receive one completion notification per child turn");
-
-    assert_eq!(notifications.len(), 2);
+    let (notifications, _) = root
+        .thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(
+        notifications,
+        vec![
+            crate::session::TurnInput::InterAgentCommunication(InterAgentCommunication::new(
+                worker_path.clone(),
+                AgentPath::root(),
+                Vec::new(),
+                first_notification,
+                /*trigger_turn*/ false,
+            )),
+            crate::session::TurnInput::InterAgentCommunication(InterAgentCommunication::new(
+                worker_path,
+                AgentPath::root(),
+                Vec::new(),
+                second_notification,
+                /*trigger_turn*/ false,
+            )),
+        ]
+    );
 }
 
 #[tokio::test]

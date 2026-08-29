@@ -1995,11 +1995,10 @@ impl Session {
         if let EventMsg::Error(error) = &legacy_source
             && error.affects_turn_status()
         {
-            turn_context
-                .terminal_error
-                .lock()
-                .await
-                .replace(error.clone());
+            let mut terminal_error = turn_context.terminal_error.lock().await;
+            if terminal_error.is_none() {
+                *terminal_error = Some(error.clone());
+            }
         }
         self.services
             .rollout_thread_trace
@@ -2101,14 +2100,17 @@ impl Session {
             Some(error) => AgentStatus::Errored(error.message),
             None => agent_status_from_event(msg)?,
         };
-        if is_final(&status) {
-            self.forward_child_completion_to_parent(
-                turn_context,
-                *parent_thread_id,
-                child_agent_path,
-                status.clone(),
-            )
-            .await;
+        if is_final(&status)
+            && !self
+                .forward_child_completion_to_parent(
+                    turn_context,
+                    *parent_thread_id,
+                    child_agent_path,
+                    status.clone(),
+                )
+                .await
+        {
+            return None;
         }
         Some(status)
     }
@@ -2120,13 +2122,13 @@ impl Session {
         parent_thread_id: ThreadId,
         child_agent_path: &codex_protocol::AgentPath,
         status: AgentStatus,
-    ) {
+    ) -> bool {
         let Some(parent_agent_path) = child_agent_path
             .as_str()
             .rsplit_once('/')
             .and_then(|(parent, _)| codex_protocol::AgentPath::try_from(parent).ok())
         else {
-            return;
+            return false;
         };
 
         if matches!(status, AgentStatus::Completed(_))
@@ -2180,7 +2182,7 @@ impl Session {
             child_agent_path.clone(),
             &status,
         ) else {
-            return;
+            return false;
         };
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
@@ -2210,7 +2212,7 @@ impl Session {
             .await
         {
             debug!("failed to notify parent thread {parent_thread_id}: {err}");
-            return;
+            return false;
         }
         if let Some(message) = trace_message {
             self.services
@@ -2225,6 +2227,7 @@ impl Session {
                     },
                 );
         }
+        true
     }
 
     async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {
@@ -2286,6 +2289,26 @@ impl Session {
             event,
             /*persist*/ true,
             AgentStatusUpdate::Apply,
+        )
+        .await;
+    }
+
+    /// Persists and delivers an auxiliary event without changing the enclosing turn or agent
+    /// status. Auxiliary commands share a turn context but do not own its terminal lifecycle.
+    pub(crate) async fn send_nonterminal_event(&self, turn_context: &TurnContext, msg: EventMsg) {
+        self.services
+            .rollout_thread_trace
+            .record_codex_turn_event(&turn_context.sub_id, &msg);
+        self.services
+            .rollout_thread_trace
+            .record_tool_call_event(turn_context.sub_id.clone(), &msg);
+        self.send_event_raw_with_persistence(
+            Event {
+                id: turn_context.sub_id.clone(),
+                msg,
+            },
+            /*persist*/ true,
+            AgentStatusUpdate::Defer,
         )
         .await;
     }

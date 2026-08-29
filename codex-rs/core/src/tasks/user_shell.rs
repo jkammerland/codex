@@ -142,6 +142,7 @@ pub(crate) async fn execute_user_shell_command(
             &session,
             turn_context.as_ref(),
             "shell is unavailable in this session",
+            mode,
         )
         .await;
         return;
@@ -159,6 +160,7 @@ pub(crate) async fn execute_user_shell_command(
             &session,
             turn_context.as_ref(),
             "shell working directory is not native to the Codex host",
+            mode,
         )
         .await;
         return;
@@ -374,17 +376,23 @@ pub(crate) async fn execute_user_shell_command(
     }
 }
 
-async fn send_user_shell_error(session: &Session, turn_context: &TurnContext, message: &str) {
-    session
-        .send_event(
-            turn_context,
-            EventMsg::Error(ErrorEvent {
-                misalignment: None,
-                message: message.to_string(),
-                codex_error_info: None,
-            }),
-        )
-        .await;
+async fn send_user_shell_error(
+    session: &Session,
+    turn_context: &TurnContext,
+    message: &str,
+    mode: UserShellCommandMode,
+) {
+    let event = EventMsg::Error(ErrorEvent {
+        misalignment: None,
+        message: message.to_string(),
+        codex_error_info: None,
+    });
+    match mode {
+        UserShellCommandMode::StandaloneTurn => session.send_event(turn_context, event).await,
+        UserShellCommandMode::ActiveTurnAuxiliary => {
+            session.send_nonterminal_event(turn_context, event).await;
+        }
+    }
 }
 
 fn prepare_user_shell_exec_command(

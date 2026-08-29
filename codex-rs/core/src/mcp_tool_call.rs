@@ -558,6 +558,7 @@ async fn handle_approved_mcp_tool_call(
         }
         result = &mut call => result,
     };
+    drop(call);
     if result.is_err() && prepared_call.transport_is_closed().await {
         // Do not retry an ambiguous tool call: the server may have executed it
         // before the transport closed. Publish fresh connections for the next

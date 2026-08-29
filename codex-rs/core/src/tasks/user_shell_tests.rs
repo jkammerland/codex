@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::tests::make_session_and_context_with_rx;
 use crate::shell::Shell;
 use crate::shell::ShellType;
 use core_test_support::PathExt;
@@ -59,4 +60,23 @@ fn user_shell_snapshot_preserves_package_path_prepend() {
         String::from_utf8_lossy(&output.stdout),
         format!("{}:/snapshot/bin", package_path_dir.display())
     );
+}
+
+#[tokio::test]
+async fn auxiliary_user_shell_failure_is_a_nonterminal_warning() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+
+    send_user_shell_error(
+        session.as_ref(),
+        turn_context.as_ref(),
+        "auxiliary command failed",
+        UserShellCommandMode::ActiveTurnAuxiliary,
+    )
+    .await;
+
+    let event = rx.recv().await.expect("warning should be delivered");
+    let EventMsg::Warning(WarningEvent { message }) = event.msg else {
+        panic!("auxiliary failure should emit a warning");
+    };
+    assert_eq!(message, "auxiliary command failed");
 }

@@ -37,6 +37,7 @@ use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::WarningEvent;
 use codex_sandboxing::SandboxType;
 use codex_shell_command::parse_command::parse_command;
 use codex_thread_store::PersistContext;
@@ -382,15 +383,28 @@ async fn send_user_shell_error(
     message: &str,
     mode: UserShellCommandMode,
 ) {
-    let event = EventMsg::Error(ErrorEvent {
-        misalignment: None,
-        message: message.to_string(),
-        codex_error_info: None,
-    });
     match mode {
-        UserShellCommandMode::StandaloneTurn => session.send_event(turn_context, event).await,
+        UserShellCommandMode::StandaloneTurn => {
+            session
+                .send_event(
+                    turn_context,
+                    EventMsg::Error(ErrorEvent {
+                        misalignment: None,
+                        message: message.to_string(),
+                        codex_error_info: None,
+                    }),
+                )
+                .await;
+        }
         UserShellCommandMode::ActiveTurnAuxiliary => {
-            session.send_nonterminal_event(turn_context, event).await;
+            session
+                .send_event(
+                    turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: message.to_string(),
+                    }),
+                )
+                .await;
         }
     }
 }

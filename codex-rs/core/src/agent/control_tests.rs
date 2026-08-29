@@ -554,6 +554,78 @@ async fn spawn_agent_errors_when_manager_dropped() {
 }
 
 #[tokio::test]
+async fn failed_initial_submission_does_not_publish_spawned_agent() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, parent) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
+    let child_source = || {
+        thread_spawn_source(
+            parent_thread_id,
+            &parent.session_source,
+            next_thread_spawn_depth(&parent.session_source),
+            /*agent_role*/ None,
+            Some("worker".to_string()),
+        )
+        .expect("child source")
+    };
+    let options = SpawnAgentOptions {
+        parent_thread_id: Some(parent_thread_id),
+        remove_thread_before_initial_submission: true,
+        ..Default::default()
+    };
+
+    harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("initial child task"),
+            Some(child_source()),
+            options.clone(),
+        )
+        .await
+        .expect_err("initial submission should fail after thread construction");
+
+    assert_eq!(
+        harness.manager.list_thread_ids().await,
+        vec![parent_thread_id]
+    );
+    assert_eq!(
+        harness
+            .control
+            .list_agents(&parent.session_source, /*path_prefix*/ None)
+            .await
+            .expect("agent listing should succeed"),
+        vec![ListedAgent {
+            thread_id: parent_thread_id,
+            agent_name: AgentPath::root().to_string(),
+            agent_status: parent.agent_status().await,
+        }]
+    );
+
+    let spawned = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("retry child task"),
+            Some(child_source()),
+            SpawnAgentOptions {
+                remove_thread_before_initial_submission: false,
+                ..options
+            },
+        )
+        .await
+        .expect("failed spawn should release the task path and capacity");
+    assert_eq!(spawned.metadata.agent_path, child_source().get_agent_path());
+}
+
+#[tokio::test]
 async fn resume_agent_errors_when_manager_dropped() {
     let control = AgentControl::default();
     let (_home, config) = test_config().await;

@@ -127,6 +127,8 @@ async fn handle_spawn_agent(
             environments: Some(step_context.environments.to_selections()),
             multi_agent_v2_usage_hints: None,
             cyber_access_program: turn.cyber_access_program,
+            #[cfg(test)]
+            remove_thread_before_initial_submission: false,
         },
     ))
     .await

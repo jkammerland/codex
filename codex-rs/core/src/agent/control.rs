@@ -93,6 +93,8 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
+    #[cfg(test)]
+    pub(crate) remove_thread_before_initial_submission: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +106,8 @@ pub(crate) struct LiveAgent {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
+    #[serde(skip)]
+    pub(crate) thread_id: ThreadId,
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
 }
@@ -534,6 +538,7 @@ impl AgentControl {
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
             agents.push(ListedAgent {
+                thread_id: root_thread_id,
                 agent_name: root_path.to_string(),
                 agent_status: root_thread.agent_status().await,
             });
@@ -559,6 +564,7 @@ impl AgentControl {
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
             agents.push(ListedAgent {
+                thread_id,
                 agent_name,
                 agent_status: thread.agent_status().await,
             });

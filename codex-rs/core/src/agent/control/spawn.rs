@@ -694,6 +694,37 @@ impl AgentControl {
             (None, _, _) => Box::pin(state.spawn_new_thread(config.clone(), self.clone())).await?,
         };
         agent_metadata.agent_id = Some(new_thread.thread_id);
+        #[cfg(test)]
+        if options.remove_thread_before_initial_submission {
+            let _ = state.remove_thread(&new_thread.thread_id).await;
+        }
+        let start_options = TurnStartOptions {
+            parent_turn_id: options.parent_turn_id,
+            root_turn_id: options.root_turn_id,
+            cyber_access_program: options.cyber_access_program,
+            ..Default::default()
+        };
+        let submission_result = match initial_input {
+            SpawnInitialInput::UserInput(input) => {
+                self.send_input(new_thread.thread_id, input, start_options)
+                    .await
+            }
+            SpawnInitialInput::InterAgentCommunication(communication, context) => {
+                self.send_inter_agent_communication_after_capacity_check(
+                    new_thread.thread_id,
+                    &state,
+                    communication,
+                    context,
+                    start_options,
+                )
+                .await
+            }
+        };
+        if let Err(error) = submission_result {
+            let _ = state.remove_thread(&new_thread.thread_id).await;
+            return Err(error);
+        }
+
         reservation.commit(agent_metadata.clone());
         if let Some(residency_slot) = residency_slot {
             residency_slot.commit(new_thread.thread_id);
@@ -732,11 +763,8 @@ impl AgentControl {
             );
         }
 
-        // Notify a new thread has been created. This notification will be processed by clients
-        // to subscribe or drain this newly created thread.
-        // TODO(jif) add helper for drain
+        // Publish the thread only after its initial turn has been accepted.
         state.notify_thread_created(new_thread.thread_id);
-
         self.persist_thread_spawn_edge_for_source(
             new_thread.thread.as_ref(),
             new_thread.thread_id,
@@ -744,28 +772,6 @@ impl AgentControl {
         )
         .await;
 
-        let start_options = TurnStartOptions {
-            parent_turn_id: options.parent_turn_id,
-            root_turn_id: options.root_turn_id,
-            cyber_access_program: options.cyber_access_program,
-            ..Default::default()
-        };
-        match initial_input {
-            SpawnInitialInput::UserInput(input) => {
-                self.send_input(new_thread.thread_id, input, start_options)
-                    .await?;
-            }
-            SpawnInitialInput::InterAgentCommunication(communication, context) => {
-                self.send_inter_agent_communication_after_capacity_check(
-                    new_thread.thread_id,
-                    &state,
-                    communication,
-                    context,
-                    start_options,
-                )
-                .await?;
-            }
-        }
         if multi_agent_version != MultiAgentVersion::V2 {
             let child_reference = agent_metadata
                 .agent_path

@@ -1,7 +1,10 @@
 use super::*;
 use crate::session::InputQueueActivity;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
+use codex_protocol::protocol::SessionSource;
 use codex_tools::ToolSpec;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -75,26 +78,14 @@ impl Handler {
             .get_agent_path()
             .unwrap_or_else(AgentPath::root)
             .to_string();
-        let has_waitable_agent = if pending_activity.is_some() {
-            true
-        } else {
-            session
-                .services
-                .agent_control
-                .list_agents(&turn.session_source, /*path_prefix*/ None)
-                .await
-                .map_err(collab_spawn_error)?
-                .iter()
-                .any(|agent| {
-                    agent.agent_name != current_agent_name
-                        && !crate::agent::status::is_final(&agent.agent_status)
-                })
-        };
-        let outcome = if has_waitable_agent {
-            wait_for_activity(&mut activity_rx, pending_activity).await?
-        } else {
-            WaitOutcome::NoLiveAgents
-        };
+        let outcome = wait_for_activity(
+            &session.services.agent_control,
+            &turn.session_source,
+            &current_agent_name,
+            &mut activity_rx,
+            pending_activity,
+        )
+        .await?;
         let result = WaitAgentResult::from_outcome(outcome);
 
         session
@@ -173,6 +164,9 @@ enum WaitOutcome {
 }
 
 async fn wait_for_activity(
+    agent_control: &crate::agent::control::AgentControl,
+    session_source: &SessionSource,
+    current_agent_name: &str,
     activity_rx: &mut tokio::sync::watch::Receiver<InputQueueActivity>,
     pending_activity: Option<InputQueueActivity>,
 ) -> Result<WaitOutcome, FunctionCallError> {
@@ -182,12 +176,52 @@ async fn wait_for_activity(
             InputQueueActivity::Steer => WaitOutcome::Steered,
         });
     }
-    activity_rx
-        .changed()
-        .await
-        .map_err(|_| FunctionCallError::Fatal("wait_agent activity channel closed".to_string()))?;
-    Ok(match *activity_rx.borrow_and_update() {
-        InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
-        InputQueueActivity::Steer => WaitOutcome::Steered,
-    })
+    loop {
+        let agents = agent_control
+            .list_agents(session_source, /*path_prefix*/ None)
+            .await
+            .map_err(collab_spawn_error)?;
+        let mut status_receivers = Vec::new();
+        for agent in agents {
+            if agent.agent_name == current_agent_name
+                || !matches!(
+                    agent.agent_status,
+                    AgentStatus::PendingInit | AgentStatus::Running
+                )
+            {
+                continue;
+            }
+            let Ok(status_rx) = agent_control.subscribe_status(agent.thread_id).await else {
+                continue;
+            };
+            if status_rx.has_changed().is_ok()
+                && matches!(
+                    *status_rx.borrow(),
+                    AgentStatus::PendingInit | AgentStatus::Running
+                )
+            {
+                status_receivers.push(status_rx);
+            }
+        }
+        if status_receivers.is_empty() {
+            return Ok(WaitOutcome::NoLiveAgents);
+        }
+
+        let mut status_changes = status_receivers
+            .iter_mut()
+            .map(tokio::sync::watch::Receiver::changed)
+            .collect::<FuturesUnordered<_>>();
+        tokio::select! {
+            activity = activity_rx.changed() => {
+                activity.map_err(|_| {
+                    FunctionCallError::Fatal("wait_agent activity channel closed".to_string())
+                })?;
+                return Ok(match *activity_rx.borrow_and_update() {
+                    InputQueueActivity::Mailbox => WaitOutcome::MailboxActivity,
+                    InputQueueActivity::Steer => WaitOutcome::Steered,
+                });
+            }
+            _ = status_changes.next() => {}
+        }
+    }
 }

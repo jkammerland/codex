@@ -48,6 +48,7 @@ use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
@@ -133,6 +134,72 @@ fn thread_manager() -> ThreadManager {
         CodexAuth::from_api_key("dummy"),
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone(),
     )
+}
+
+async fn spawn_v2_wait_test_worker() -> (
+    Arc<crate::session::session::Session>,
+    Arc<TurnContext>,
+    ThreadManager,
+    Arc<crate::CodexThread>,
+) {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "wait for interruption",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker should resolve");
+    let worker = manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker thread should be resident");
+
+    (session, turn, manager, worker)
+}
+
+async fn interrupt_v2_wait_test_worker(worker: &crate::CodexThread) {
+    worker
+        .session
+        .send_event_raw(Event {
+            id: "interrupted-turn".to_string(),
+            msg: EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id: Some("interrupted-turn".to_string()),
+                started_at: None,
+                reason: TurnAbortReason::Interrupted,
+                completed_at: None,
+                duration_ms: None,
+            }),
+        })
+        .await;
+    assert_eq!(worker.agent_status().await, AgentStatus::Interrupted);
 }
 
 async fn install_role_with_model_override(turn: &mut TurnContext) -> String {
@@ -3269,6 +3336,73 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_ignores_already_interrupted_worker() {
+    let (session, turn, _manager, worker) = spawn_v2_wait_test_worker().await;
+    interrupt_v2_wait_test_worker(worker.as_ref()).await;
+
+    let output = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2.handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({})),
+        )),
+    )
+    .await
+    .expect("an interrupted worker should not keep wait_agent pending")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "No live agents to wait for.".to_string(),
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_wakes_when_last_worker_is_interrupted() {
+    let (session, turn, _manager, worker) = spawn_v2_wait_test_worker().await;
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandlerV2
+                .handle(invocation(
+                    session,
+                    turn,
+                    "wait_agent",
+                    function_payload(json!({})),
+                ))
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+
+    interrupt_v2_wait_test_worker(worker.as_ref()).await;
+
+    let output = timeout(Duration::from_millis(500), wait_task)
+        .await
+        .expect("worker status transition should wake wait_agent")
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "No live agents to wait for.".to_string(),
         }
     );
     assert_eq!(success, None);

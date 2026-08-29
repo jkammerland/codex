@@ -84,7 +84,9 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
                 })
                 .await
                 .map_err(|err| match err {
-                    UnifiedExecError::Cancelled => FunctionCallError::Cancelled,
+                    UnifiedExecError::Cancelled => {
+                        FunctionCallError::RespondToModel("wait_process was cancelled".to_string())
+                    }
                     err => FunctionCallError::RespondToModel(format!("wait_process failed: {err}")),
                 })?;
 
@@ -94,6 +96,10 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
 }
 
 impl CoreToolRuntime for WaitProcessHandler {
+    fn handles_cancellation_cooperatively(&self) -> bool {
+        true
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

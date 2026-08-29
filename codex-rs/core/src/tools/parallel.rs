@@ -166,7 +166,6 @@ impl ToolCallRuntime {
                 if let Some(execution_started_at) = execution_started_at {
                     let _ = execution_started_at.set(Instant::now());
                 }
-                dispatch_handler_started.store(true, Ordering::Release);
 
                 router
                     .dispatch_tool_call_with_terminal_outcome(
@@ -177,6 +176,7 @@ impl ToolCallRuntime {
                         dispatch_call,
                         source,
                         dispatch_terminal_outcome_reached,
+                        dispatch_handler_started,
                     )
                     .instrument(dispatch_span.clone())
                     .await
@@ -186,19 +186,20 @@ impl ToolCallRuntime {
             let _tool_call_timing_guard = tool_call_timing_guard;
             tokio::select! {
                 res = &mut dispatch_handle => {
-                    match res.map_err(Self::tool_task_join_error)? {
-                        Err(FunctionCallError::Cancelled) => {
-                            Ok(Self::finish_aborted_call(
-                                &call,
-                                started,
-                                abort_session.as_ref(),
-                                abort_turn.as_ref(),
-                                abort_source,
-                                &abort_dispatch_span,
-                            ).await)
-                        }
-                        result => result,
-                    }
+                    let result = res.map_err(Self::tool_task_join_error)?;
+                    Self::finish_cooperative_cancellation(
+                        result,
+                        &call,
+                        started,
+                        abort_session.as_ref(),
+                        abort_turn.as_ref(),
+                        &abort_source,
+                        &abort_dispatch_span,
+                        &terminal_outcome_reached,
+                        handles_cancellation_cooperatively,
+                        handler_started.load(Ordering::Acquire),
+                        cancellation_token.is_cancelled(),
+                    ).await
                 },
                 _ = cancellation_token.cancelled() => {
                     if terminal_outcome_reached.load(Ordering::Acquire)
@@ -206,24 +207,29 @@ impl ToolCallRuntime {
                         || handles_cancellation_cooperatively
                             && handler_started.load(Ordering::Acquire)
                     {
-                        match dispatch_handle.await.map_err(Self::tool_task_join_error)? {
-                            Err(FunctionCallError::Cancelled) => {
-                                Ok(Self::finish_aborted_call(
-                                    &call,
-                                    started,
-                                    abort_session.as_ref(),
-                                    abort_turn.as_ref(),
-                                    abort_source,
-                                    &abort_dispatch_span,
-                                ).await)
-                            }
-                            result => result,
-                        }
+                        let result = dispatch_handle.await.map_err(Self::tool_task_join_error)?;
+                        Self::finish_cooperative_cancellation(
+                            result,
+                            &call,
+                            started,
+                            abort_session.as_ref(),
+                            abort_turn.as_ref(),
+                            &abort_source,
+                            &abort_dispatch_span,
+                            &terminal_outcome_reached,
+                            handles_cancellation_cooperatively,
+                            handler_started.load(Ordering::Acquire),
+                            /*cancelled*/ true,
+                        ).await
+                    } else if terminal_outcome_reached
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                    {
+                        dispatch_handle.await.map_err(Self::tool_task_join_error)?
                     } else {
                         dispatch_handle.abort();
                         match dispatch_handle.await {
-                            Ok(Err(FunctionCallError::Cancelled)) => {}
-                            Ok(result) => return result,
+                            Ok(_) => {}
                             Err(err) if err.is_cancelled() => {}
                             Err(err) => return Err(Self::tool_task_join_error(err)),
                         }
@@ -232,7 +238,7 @@ impl ToolCallRuntime {
                             started,
                             abort_session.as_ref(),
                             abort_turn.as_ref(),
-                            abort_source,
+                            &abort_source,
                             &abort_dispatch_span,
                         ).await)
                     }
@@ -244,6 +250,41 @@ impl ToolCallRuntime {
 }
 
 impl ToolCallRuntime {
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_cooperative_cancellation(
+        result: Result<AnyToolResult, FunctionCallError>,
+        call: &ToolCall,
+        started: Instant,
+        session: &Session,
+        turn: &TurnContext,
+        source: &ToolCallSource,
+        dispatch_span: &Span,
+        terminal_outcome_reached: &AtomicBool,
+        handles_cancellation_cooperatively: bool,
+        handler_started: bool,
+        cancelled: bool,
+    ) -> Result<AnyToolResult, FunctionCallError> {
+        if cancelled
+            && handles_cancellation_cooperatively
+            && handler_started
+            && terminal_outcome_reached
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            return Ok(Self::finish_aborted_call(
+                call,
+                started,
+                session,
+                turn,
+                source,
+                dispatch_span,
+            )
+            .await);
+        }
+
+        result
+    }
+
     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
     }
@@ -253,7 +294,7 @@ impl ToolCallRuntime {
         started: Instant,
         session: &Session,
         turn: &TurnContext,
-        source: ToolCallSource,
+        source: &ToolCallSource,
         dispatch_span: &Span,
     ) -> AnyToolResult {
         let secs = started.elapsed().as_secs_f32().max(0.1);
@@ -263,7 +304,7 @@ impl ToolCallRuntime {
             turn,
             call.call_id.as_str(),
             &call.tool_name,
-            source,
+            source.clone(),
         )
         .await;
         Self::aborted_response(call, secs)
@@ -614,6 +655,54 @@ mod tests {
 
     impl CoreToolRuntime for ImmediateHandler {}
 
+    struct CooperativeCancellationHandler {
+        tool_name: codex_tools::ToolName,
+        handler_started: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    impl ToolExecutor<ToolInvocation> for CooperativeCancellationHandler {
+        fn tool_name(&self) -> codex_tools::ToolName {
+            self.tool_name.clone()
+        }
+
+        fn spec(&self) -> codex_tools::ToolSpec {
+            codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+                name: self.tool_name.name.clone(),
+                description: "Cancellation-aware test tool.".to_string(),
+                strict: false,
+                defer_loading: None,
+                parameters: codex_tools::JsonSchema::default(),
+                output_schema: None,
+            })
+        }
+
+        fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+        where
+            ToolInvocation: 'a,
+        {
+            let handler_started = self
+                .handler_started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            Box::pin(async move {
+                if let Some(handler_started) = handler_started {
+                    let _ = handler_started.send(());
+                }
+                invocation.cancellation_token.cancelled().await;
+                Err(FunctionCallError::RespondToModel(
+                    "test tool was cancelled".to_string(),
+                ))
+            })
+        }
+    }
+
+    impl CoreToolRuntime for CooperativeCancellationHandler {
+        fn handles_cancellation_cooperatively(&self) -> bool {
+            true
+        }
+    }
+
     struct BlockingFinishContributor {
         records: Arc<std::sync::Mutex<Vec<ToolCallOutcome>>>,
         finish_started: std::sync::Mutex<Option<oneshot::Sender<()>>>,
@@ -644,6 +733,80 @@ mod tests {
                     .push(outcome);
             })
         }
+    }
+
+    #[tokio::test]
+    async fn cooperative_cancellation_emits_one_aborted_lifecycle() -> anyhow::Result<()> {
+        let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let records = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let allow_finish = Arc::new(Notify::new());
+        allow_finish.notify_one();
+        let mut builder =
+            codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+        builder.tool_lifecycle_contributor(Arc::new(BlockingFinishContributor {
+            records: Arc::clone(&records),
+            finish_started: std::sync::Mutex::new(None),
+            allow_finish,
+        }));
+        session.services.extensions = Arc::new(builder.build());
+
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let tool_name = codex_tools::ToolName::plain("test_tool");
+        let (handler_started_tx, handler_started_rx) = oneshot::channel();
+        let handler = Arc::new(CooperativeCancellationHandler {
+            tool_name: tool_name.clone(),
+            handler_started: std::sync::Mutex::new(Some(handler_started_tx)),
+        }) as Arc<dyn CoreToolRuntime>;
+        let step_context = StepContext::for_test(Arc::clone(&turn_context));
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::from_tools([handler]),
+            Vec::new(),
+            ToolMode::Direct,
+            BTreeMap::new(),
+            /*tool_namespaces_info*/ None,
+            &[],
+        ));
+        let step_context = step_context.with_tool_router_for_test(router);
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let runtime = ToolCallRuntime::new(session, step_context, tracker);
+        let cancellation_token = CancellationToken::new();
+        let call = ToolCall {
+            tool_name,
+            call_id: "call-1".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: None,
+        };
+
+        let response_task =
+            tokio::spawn(runtime.handle_tool_call(call, cancellation_token.clone()));
+        handler_started_rx
+            .await
+            .expect("cooperative handler should start");
+        cancellation_token.cancel();
+
+        let response = response_task
+            .await
+            .expect("tool response task should join")?;
+        let expected_response = ResponseInputItem::FunctionCallOutput {
+            call_id: "call-1".to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("aborted by user after 0.1s".to_string()),
+                success: None,
+            },
+        };
+        assert_eq!(response, expected_response);
+        assert_eq!(
+            records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[ToolCallOutcome::Aborted]
+        );
+
+        Ok(())
     }
 
     #[tokio::test]

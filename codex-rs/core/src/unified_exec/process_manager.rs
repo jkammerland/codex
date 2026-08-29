@@ -576,11 +576,19 @@ impl UnifiedExecProcessManager {
         // (via start_streaming_output above) and collect a snapshot here for
         // the tool response body.
         let deadline = start + Duration::from_millis(yield_time_ms);
+        let completed_process_cancellation = CancellationToken::new();
+        let initial_collection_cancellation = if process_started_alive {
+            &context.cancellation_token
+        } else {
+            // The process already exited, so finish the bounded close-drain and
+            // balance its terminal event and process ID before observing a turn interrupt.
+            &completed_process_cancellation
+        };
         let collected_output = Self::collect_output_until_deadline(
             process.output_handles(),
             Some(context.session.subscribe_elicitation_pause_state()),
             deadline,
-            &context.cancellation_token,
+            initial_collection_cancellation,
         )
         .await?;
         let wall_time = Instant::now().saturating_duration_since(start);
@@ -1446,10 +1454,6 @@ impl UnifiedExecProcessManager {
                 &mut post_exit_deadline,
             )
             .await;
-            if invocation_cancellation.is_cancelled() {
-                Self::restore_collected_output(output, collected).await;
-                return Err(UnifiedExecError::Cancelled);
-            }
             let output_notified = output_notify.notified();
             tokio::pin!(output_notified);
             output_notified.as_mut().enable();
@@ -1467,6 +1471,10 @@ impl UnifiedExecProcessManager {
                 if exit_signal_received && output_closed.load(std::sync::atomic::Ordering::Acquire)
                 {
                     break;
+                }
+                if invocation_cancellation.is_cancelled() {
+                    Self::restore_collected_output(output, collected).await;
+                    return Err(UnifiedExecError::Cancelled);
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining == Duration::ZERO {
@@ -1486,12 +1494,12 @@ impl UnifiedExecProcessManager {
                     closed.as_mut().enable();
                     tokio::select! {
                         biased;
+                        _ = &mut output_notified => {}
+                        _ = &mut closed => {}
                         _ = invocation_cancellation.cancelled() => {
                             Self::restore_collected_output(output, collected).await;
                             return Err(UnifiedExecError::Cancelled);
                         }
-                        _ = &mut output_notified => {}
-                        _ = &mut closed => {}
                         _ = tokio::time::sleep(close_wait_remaining) => break,
                         _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
                     }
@@ -1502,12 +1510,12 @@ impl UnifiedExecProcessManager {
                 tokio::pin!(exit_notified);
                 tokio::select! {
                     biased;
+                    _ = &mut output_notified => {}
+                    _ = &mut exit_notified => exit_signal_received = true,
                     _ = invocation_cancellation.cancelled() => {
                         Self::restore_collected_output(output, collected).await;
                         return Err(UnifiedExecError::Cancelled);
                     }
-                    _ = &mut output_notified => {}
-                    _ = &mut exit_notified => exit_signal_received = true,
                     _ = tokio::time::sleep(remaining) => break,
                     _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
                 }
@@ -1517,6 +1525,13 @@ impl UnifiedExecProcessManager {
             collected.push_buffer(drained_output);
 
             exit_signal_received |= cancellation_token.is_cancelled();
+            if exit_signal_received && output_closed.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            if invocation_cancellation.is_cancelled() {
+                Self::restore_collected_output(output, collected).await;
+                return Err(UnifiedExecError::Cancelled);
+            }
             if Instant::now() >= deadline {
                 break;
             }

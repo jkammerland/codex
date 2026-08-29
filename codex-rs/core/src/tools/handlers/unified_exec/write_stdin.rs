@@ -100,7 +100,9 @@ impl WriteStdinHandler {
             )
             .await
             .map_err(|err| match err {
-                UnifiedExecError::Cancelled => FunctionCallError::Cancelled,
+                UnifiedExecError::Cancelled => {
+                    FunctionCallError::RespondToModel("write_stdin was cancelled".to_string())
+                }
                 UnifiedExecError::StdinApproval(ToolError::Rejected(reason)) => {
                     FunctionCallError::RespondToModel(format!("write_stdin rejected: {reason}"))
                 }
@@ -115,6 +117,10 @@ impl WriteStdinHandler {
 }
 
 impl CoreToolRuntime for WriteStdinHandler {
+    fn handles_cancellation_cooperatively(&self) -> bool {
+        true
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

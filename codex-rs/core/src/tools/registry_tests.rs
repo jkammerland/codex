@@ -674,6 +674,7 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
                 codex_tools::ToolName::namespaced(DEFAULT_FUNCTION_NAMESPACE, "ok_tool"),
             ),
             /*terminal_outcome_reached*/ None,
+            /*handler_started*/ None,
         )
         .await?;
     turn.turn_metadata_state.mark_root_turn_ambiguous();
@@ -686,6 +687,7 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
                 failing_tool.clone(),
             ),
             /*terminal_outcome_reached*/ None,
+            /*handler_started*/ None,
         )
         .await
     {

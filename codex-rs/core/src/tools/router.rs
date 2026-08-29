@@ -316,6 +316,7 @@ impl ToolRouter {
             call,
             source,
             /*terminal_outcome_reached*/ None,
+            /*handler_started*/ None,
         )
         .await
     }
@@ -331,6 +332,7 @@ impl ToolRouter {
         call: ToolCall,
         source: ToolCallSource,
         terminal_outcome_reached: Arc<AtomicBool>,
+        handler_started: Arc<AtomicBool>,
     ) -> Result<AnyToolResult, FunctionCallError> {
         self.dispatch_tool_call_with_code_mode_result_inner(
             session,
@@ -340,6 +342,7 @@ impl ToolRouter {
             call,
             source,
             Some(terminal_outcome_reached),
+            Some(handler_started),
         )
         .await
     }
@@ -354,6 +357,7 @@ impl ToolRouter {
         call: ToolCall,
         source: ToolCallSource,
         terminal_outcome_reached: Option<Arc<AtomicBool>>,
+        handler_started: Option<Arc<AtomicBool>>,
     ) -> Result<AnyToolResult, FunctionCallError> {
         let ToolCall {
             tool_name,
@@ -377,7 +381,11 @@ impl ToolRouter {
         };
 
         self.registry
-            .dispatch_any_with_terminal_outcome(invocation, terminal_outcome_reached)
+            .dispatch_any_with_terminal_outcome(
+                invocation,
+                terminal_outcome_reached,
+                handler_started,
+            )
             .await
     }
 }

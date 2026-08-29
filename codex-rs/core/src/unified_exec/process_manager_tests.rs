@@ -384,6 +384,35 @@ async fn output_collection_preserves_omissions_from_drained_buffer() {
 }
 
 #[tokio::test]
+async fn output_collection_prefers_published_close_over_invocation_cancellation() {
+    let mut expected = HeadTailBuffer::<64>::default();
+    expected.push_chunk(b"completed output");
+    let mut buffered_output = HeadTailBuffer::<64>::default();
+    buffered_output.push_chunk(b"completed output");
+    let output = OutputHandles {
+        output_buffer: Arc::new(tokio::sync::Mutex::new(buffered_output)),
+        output_notify: Arc::new(Notify::new()),
+        output_closed: Arc::new(AtomicBool::new(true)),
+        output_closed_notify: Arc::new(Notify::new()),
+        cancellation_token: CancellationToken::new(),
+    };
+    output.cancellation_token.cancel();
+    let invocation_cancellation = CancellationToken::new();
+    invocation_cancellation.cancel();
+
+    let collected = UnifiedExecProcessManager::collect_output_until_deadline(
+        &output,
+        /*pause_state*/ None,
+        Instant::now() + Duration::from_secs(1),
+        &invocation_cancellation,
+    )
+    .await
+    .expect("a published process close should win a simultaneous turn interrupt");
+
+    assert_eq!(collected, expected);
+}
+
+#[tokio::test]
 async fn completed_wait_drains_late_output_until_closed() {
     let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
     let output_notify = Arc::new(Notify::new());

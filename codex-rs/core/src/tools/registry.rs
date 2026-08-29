@@ -486,6 +486,7 @@ impl ToolRegistry {
         &self,
         mut invocation: ToolInvocation,
         terminal_outcome_reached: Option<Arc<AtomicBool>>,
+        handler_started: Option<Arc<AtomicBool>>,
     ) -> Result<AnyToolResult, FunctionCallError> {
         let tool_name = invocation.tool_name.clone();
         let call_id_owned = invocation.call_id.clone();
@@ -650,6 +651,10 @@ impl ToolRegistry {
 
         let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
 
+        if let Some(handler_started) = handler_started {
+            handler_started.store(true, Ordering::Release);
+        }
+
         let result = otel
             .log_tool_result_with_tags(
                 &tool_name,
@@ -711,13 +716,22 @@ impl ToolRegistry {
             .await;
         }
 
+        // A cooperatively cancelled handler leaves terminal ownership to ToolCallRuntime. A
+        // successful result still wins a simultaneous cancellation and completes normally.
+        let cooperatively_cancelled = terminal_outcome_reached.is_some()
+            && tool.handles_cancellation_cooperatively()
+            && invocation.cancellation_token.is_cancelled()
+            && !success;
         // A PostToolUse block rejects the result, not the already-completed tool execution.
-        let lifecycle_outcome = match &result {
-            Ok(_) => Some(ToolCallOutcome::Completed { success }),
-            Err(FunctionCallError::Cancelled) => None,
-            Err(_) => Some(ToolCallOutcome::Failed {
-                handler_executed: true,
-            }),
+        let lifecycle_outcome = if cooperatively_cancelled {
+            None
+        } else {
+            Some(match &result {
+                Ok(_) => ToolCallOutcome::Completed { success },
+                Err(_) => ToolCallOutcome::Failed {
+                    handler_executed: true,
+                },
+            })
         };
         if let Some(lifecycle_outcome) = lifecycle_outcome {
             notify_tool_finish_if_unclaimed(

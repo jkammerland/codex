@@ -100,6 +100,7 @@ use tracing::warn;
 
 const IN_PROCESS_CONNECTION_ID: ConnectionId = ConnectionId(0);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(1);
 // Covers both bounded runtime drains plus the analytics client's 25-second best-effort flush.
 const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(35);
 /// Default bounded channel capacity for in-process runtime queues.
@@ -203,6 +204,10 @@ enum InProcessClientMessage {
     },
     Shutdown {
         done_tx: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
+    InjectGuaranteedNotificationBackpressure {
+        second_send_started: oneshot::Sender<()>,
     },
 }
 
@@ -337,15 +342,27 @@ impl InProcessClientHandle {
     pub async fn shutdown(self) -> IoResult<()> {
         let mut runtime_handle = self.runtime_handle;
         let (done_tx, done_rx) = oneshot::channel();
-
-        if self
-            .client
-            .client_tx
-            .send(InProcessClientMessage::Shutdown { done_tx })
-            .await
-            .is_ok()
-        {
+        let shutdown = InProcessClientMessage::Shutdown { done_tx };
+        let enqueued = match self.client.client_tx.try_send(shutdown) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Err(mpsc::error::TrySendError::Full(shutdown)) => {
+                matches!(
+                    timeout(
+                        SHUTDOWN_ENQUEUE_TIMEOUT,
+                        self.client.client_tx.send(shutdown)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                )
+            }
+        };
+        if enqueued {
             let _ = timeout(SHUTDOWN_ACK_TIMEOUT, done_rx).await;
+        } else if !runtime_handle.is_finished() {
+            runtime_handle.abort();
+            let _ = runtime_handle.await;
+            return Ok(());
         }
 
         if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut runtime_handle).await {
@@ -664,6 +681,32 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                         Some(InProcessClientMessage::Shutdown { done_tx }) => {
                             shutdown_ack = Some(done_tx);
                             break;
+                        }
+                        #[cfg(test)]
+                        Some(InProcessClientMessage::InjectGuaranteedNotificationBackpressure {
+                            second_send_started,
+                        }) => {
+                            let first = InProcessServerEvent::ServerNotification(Box::new(
+                                ServerNotification::ThreadQueueChanged(
+                                    codex_app_server_protocol::ThreadQueueChangedNotification {
+                                        thread_id: "backpressure-first".to_string(),
+                                    },
+                                ),
+                            ));
+                            match event_tx.try_send(first) {
+                                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            }
+                            let _ = second_send_started.send(());
+                            let _ = event_tx
+                                .send(InProcessServerEvent::ServerNotification(Box::new(
+                                    ServerNotification::ThreadQueueChanged(
+                                        codex_app_server_protocol::ThreadQueueChangedNotification {
+                                            thread_id: "backpressure-second".to_string(),
+                                        },
+                                    ),
+                                )))
+                                .await;
                         }
                         None => {
                             break;
@@ -998,6 +1041,52 @@ mod tests {
             Err(error) => panic!("pending request escaped runtime failure handling: {error}"),
             Ok(Ok(_)) => panic!("request unexpectedly succeeded after processor failure"),
         }
+    }
+
+    #[tokio::test]
+    async fn in_process_shutdown_is_bounded_when_both_runtime_queues_are_full() {
+        let mut client =
+            start_test_client_with_capacity(SessionSource::Cli, /*channel_capacity*/ 1).await;
+        while client.event_rx.try_recv().is_ok() {}
+
+        let (second_send_started, second_send_started_rx) = oneshot::channel();
+        timeout(
+            Duration::from_secs(2),
+            client.client.client_tx.send(
+                InProcessClientMessage::InjectGuaranteedNotificationBackpressure {
+                    second_send_started,
+                },
+            ),
+        )
+        .await
+        .expect("runtime should drain startup messages")
+        .expect("backpressure injection should reach the runtime");
+        timeout(Duration::from_secs(2), second_send_started_rx)
+            .await
+            .expect("runtime should attempt the second guaranteed event")
+            .expect("runtime should retain the backpressure signal");
+
+        let mut queued = 0;
+        loop {
+            match client
+                .client
+                .client_tx
+                .try_send(InProcessClientMessage::Notification {
+                    notification: ClientNotification::Initialized,
+                }) {
+                Ok(()) => queued += 1,
+                Err(mpsc::error::TrySendError::Full(_)) => break,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    panic!("runtime closed before the shutdown queue was saturated")
+                }
+            }
+        }
+        assert_eq!(queued, 1);
+
+        timeout(Duration::from_secs(2), client.shutdown())
+            .await
+            .expect("shutdown enqueue timeout must bound a backpressured runtime")
+            .expect("forced in-process shutdown should succeed");
     }
 
     #[tokio::test]

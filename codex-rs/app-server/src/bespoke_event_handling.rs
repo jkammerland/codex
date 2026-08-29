@@ -1677,7 +1677,9 @@ async fn handle_error(
     thread_state: &Arc<Mutex<ThreadState>>,
 ) {
     let mut state = thread_state.lock().await;
-    state.turn_summary.last_error = Some(error);
+    if state.turn_summary.last_error.is_none() {
+        state.turn_summary.last_error = Some(error);
+    }
 }
 
 async fn handle_error_notification(
@@ -3357,6 +3359,17 @@ mod tests {
                 misalignment: None,
                 message: "boom".to_string(),
                 codex_error_info: Some(V2CodexErrorInfo::InternalServerError),
+                additional_details: None,
+            },
+            &thread_state,
+        )
+        .await;
+        handle_error(
+            conversation_id,
+            TurnError {
+                misalignment: None,
+                message: "later".to_string(),
+                codex_error_info: Some(V2CodexErrorInfo::Other),
                 additional_details: None,
             },
             &thread_state,

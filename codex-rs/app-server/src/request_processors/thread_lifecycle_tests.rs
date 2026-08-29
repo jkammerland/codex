@@ -141,3 +141,63 @@ async fn event_stream_failure_closes_and_fails_transactional_commands() {
         "failure cleanup should reject commands from stale sender clones"
     );
 }
+
+#[tokio::test]
+async fn listener_replacement_fails_pending_transactions_and_leaves_replacement_usable() {
+    let (cancel_tx, mut cancel_rx) = oneshot::channel();
+    let (stale_tx, mut stale_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (resolve_tx, resolve_rx) = oneshot::channel();
+    let (seal_tx, seal_rx) = oneshot::channel();
+    let mut pending_command = Some(ThreadListenerCommand::ResolveServerRequest {
+        request_id: RequestId::Integer(7),
+        completion_tx: resolve_tx,
+    });
+    stale_tx
+        .send(ThreadListenerCommand::SealRealtimeUserInput {
+            input: Vec::new(),
+            completion_tx: seal_tx,
+        })
+        .expect("stale listener should accept command before replacement");
+    cancel_tx
+        .send(())
+        .expect("replacement should cancel the stale listener");
+    let input = next_thread_listener_input(
+        &mut cancel_rx,
+        &mut stale_rx,
+        &mut pending_command,
+        future::pending::<()>(),
+        future::pending(),
+        ThreadListenerPriority::Commands,
+    )
+    .await;
+    assert!(matches!(input, ThreadListenerInput::Cancelled));
+
+    let (outgoing_tx, _outgoing_rx) = tokio::sync::mpsc::channel(1);
+    let outgoing = OutgoingMessageSender::new(
+        outgoing_tx,
+        codex_analytics::AnalyticsEventsClient::disabled(),
+    );
+    fail_pending_listener_commands(
+        &mut pending_command,
+        &mut stale_rx,
+        &outgoing,
+        "thread listener was replaced before the request completed",
+    )
+    .await;
+    assert!(resolve_rx.await.is_err());
+    assert_eq!(
+        seal_rx.await,
+        Ok(Err(
+            "thread listener was replaced before the request completed".to_string()
+        ))
+    );
+
+    let (replacement_tx, mut replacement_rx) = tokio::sync::mpsc::unbounded_channel();
+    replacement_tx
+        .send(ThreadListenerCommand::EmitThreadQueueChanged)
+        .expect("replacement listener should remain usable");
+    assert!(matches!(
+        replacement_rx.recv().await,
+        Some(ThreadListenerCommand::EmitThreadQueueChanged)
+    ));
+}

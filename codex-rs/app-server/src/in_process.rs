@@ -495,12 +495,18 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
             let mut listen_for_threads = true;
+            #[cfg(test)]
+            let mut initialized_notification_received = false;
 
             loop {
                 tokio::select! {
                     command = processor_rx.recv() => {
                         match command {
                             Some(ProcessorCommand::Request(request)) => {
+                                #[cfg(test)]
+                                if fail_processor_after_initialized && initialized_notification_received {
+                                    panic!("injected in-process processor failure");
+                                }
                                 let was_initialized = session.initialized();
                                 processor
                                     .process_client_request(
@@ -533,13 +539,10 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                             }
                             Some(ProcessorCommand::Notification(notification)) => {
                                 #[cfg(test)]
-                                let should_fail = fail_processor_after_initialized
-                                    && matches!(&notification, ClientNotification::Initialized);
-                                processor.process_client_notification(notification).await;
-                                #[cfg(test)]
-                                if should_fail {
-                                    panic!("injected in-process processor failure");
+                                if matches!(&notification, ClientNotification::Initialized) {
+                                    initialized_notification_received = true;
                                 }
+                                processor.process_client_notification(notification).await;
                             }
                             None => {
                                 break;
@@ -586,7 +589,6 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
 
         loop {
             tokio::select! {
-                biased;
                 result = &mut processor_handle => {
                     processor_task_result = Some(result);
                     break;
@@ -949,7 +951,7 @@ mod tests {
         .expect("a failed processor must not leave an in-process request pending");
         match result {
             Ok(Err(error)) => assert!(error.message.contains("processor")),
-            Err(error) => assert_eq!(error.kind(), ErrorKind::BrokenPipe),
+            Err(error) => panic!("pending request escaped runtime failure handling: {error}"),
             Ok(Ok(_)) => panic!("request unexpectedly succeeded after processor failure"),
         }
     }

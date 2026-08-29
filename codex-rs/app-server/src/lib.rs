@@ -45,7 +45,7 @@ use crate::transport::prepare_control_socket_path;
 use crate::transport::route_outgoing_envelope;
 use crate::transport::start_control_socket_acceptor;
 use crate::transport::start_remote_control;
-use crate::transport::start_stdio_connection;
+use crate::transport::start_stdio_connection_with_shutdown;
 use crate::transport::start_websocket_acceptor;
 use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::ConfigWarningNotification;
@@ -722,10 +722,11 @@ pub async fn run_main_with_transport_options(
         AppServerTransport::Stdio => {
             let (stdio_client_name_tx, stdio_client_name_rx) = oneshot::channel::<String>();
             app_server_client_name_rx = Some(stdio_client_name_rx);
-            start_stdio_connection(
+            start_stdio_connection_with_shutdown(
                 transport_event_tx.clone(),
                 &mut transport_accept_handles,
                 stdio_client_name_tx,
+                transport_shutdown_token.clone(),
             )
             .await?;
         }

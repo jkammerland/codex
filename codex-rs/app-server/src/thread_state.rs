@@ -281,6 +281,25 @@ mod tests {
         assert_eq!(results, vec![true, false, true, false]);
     }
 
+    #[test]
+    fn stale_listener_cannot_unregister_replacement_sender() {
+        let manager = ThreadStateManager::new();
+        let thread_id = ThreadId::new();
+        let (stale_tx, _stale_rx) = mpsc::unbounded_channel();
+        let (replacement_tx, _replacement_rx) = mpsc::unbounded_channel();
+        manager.register_listener_command_tx(thread_id, stale_tx.clone());
+        manager.register_listener_command_tx(thread_id, replacement_tx.clone());
+
+        manager.unregister_listener_command_tx_if_matches(thread_id, &stale_tx);
+        let current = manager
+            .current_listener_command_tx(thread_id)
+            .expect("replacement listener sender should remain registered");
+        assert!(current.same_channel(&replacement_tx));
+
+        manager.unregister_listener_command_tx_if_matches(thread_id, &replacement_tx);
+        assert!(manager.current_listener_command_tx(thread_id).is_none());
+    }
+
     fn thread_settings(model: &str) -> ThreadSettings {
         ThreadSettings {
             cwd: AbsolutePathBuf::from_absolute_path("/tmp").expect("absolute path"),
@@ -451,6 +470,23 @@ impl ThreadStateManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&thread_id);
+    }
+
+    pub(crate) fn unregister_listener_command_tx_if_matches(
+        &self,
+        thread_id: ThreadId,
+        expected: &mpsc::UnboundedSender<ThreadListenerCommand>,
+    ) {
+        let mut listener_commands = self
+            .listener_commands
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if listener_commands
+            .get(&thread_id)
+            .is_some_and(|current| current.same_channel(expected))
+        {
+            listener_commands.remove(&thread_id);
+        }
     }
 
     pub(crate) async fn remove_thread_state(&self, thread_id: ThreadId) {

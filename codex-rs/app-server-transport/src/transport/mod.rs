@@ -42,6 +42,7 @@ pub use remote_control::RemoteControlUnavailable;
 pub use remote_control::start_remote_control;
 pub use remote_control::take_remote_control_disabled_env;
 pub use stdio::start_stdio_connection;
+pub use stdio::start_stdio_connection_with_shutdown;
 pub use unix_socket::AppServerStartupLock;
 pub use unix_socket::acquire_app_server_startup_lock;
 pub use unix_socket::prepare_control_socket_path;

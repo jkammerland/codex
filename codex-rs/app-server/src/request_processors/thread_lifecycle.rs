@@ -19,9 +19,11 @@ enum ThreadListenerInput<EventResult> {
     UnloadingWatchers(bool),
 }
 
+#[derive(Clone, Copy)]
 enum ThreadListenerPriority {
     Commands,
-    Events,
+    FairEvent,
+    EventDue,
 }
 
 async fn next_thread_listener_input<EventResult>(
@@ -51,20 +53,20 @@ async fn next_thread_listener_input<EventResult>(
         }
     };
     match (priority, pending_command_is_transactional) {
-        (ThreadListenerPriority::Events, true) => {
+        (ThreadListenerPriority::FairEvent, true) => {
             tokio::select! {
                 biased;
                 _ = cancel_rx => ThreadListenerInput::Cancelled,
-                event = event => ThreadListenerInput::Event(event),
                 listener_command = command => {
                     ThreadListenerInput::Command(listener_command)
                 }
+                event = event => ThreadListenerInput::Event(event),
                 unloading_watchers_open = unloading_watchers => {
                     ThreadListenerInput::UnloadingWatchers(unloading_watchers_open)
                 }
             }
         }
-        (ThreadListenerPriority::Events, false) => {
+        (ThreadListenerPriority::FairEvent, false) | (ThreadListenerPriority::EventDue, false) => {
             tokio::select! {
                 biased;
                 _ = cancel_rx => ThreadListenerInput::Cancelled,
@@ -74,6 +76,19 @@ async fn next_thread_listener_input<EventResult>(
                 }
                 listener_command = command => {
                     ThreadListenerInput::Command(listener_command)
+                }
+            }
+        }
+        (ThreadListenerPriority::EventDue, true) => {
+            tokio::select! {
+                biased;
+                _ = cancel_rx => ThreadListenerInput::Cancelled,
+                event = event => ThreadListenerInput::Event(event),
+                listener_command = command => {
+                    ThreadListenerInput::Command(listener_command)
+                }
+                unloading_watchers_open = unloading_watchers => {
+                    ThreadListenerInput::UnloadingWatchers(unloading_watchers_open)
                 }
             }
         }
@@ -89,6 +104,46 @@ async fn next_thread_listener_input<EventResult>(
                     ThreadListenerInput::UnloadingWatchers(unloading_watchers_open)
                 }
             }
+        }
+    }
+}
+
+async fn fail_pending_listener_commands(
+    pending_command: &mut Option<ThreadListenerCommand>,
+    listener_command_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ThreadListenerCommand>,
+    outgoing: &OutgoingMessageSender,
+    message: &str,
+) {
+    listener_command_rx.close();
+    loop {
+        let command = match pending_command.take() {
+            Some(command) => Some(command),
+            None => match listener_command_rx.try_recv() {
+                Ok(command) => Some(command),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
+            },
+        };
+        let Some(command) = command else {
+            break;
+        };
+        match command {
+            ThreadListenerCommand::SendThreadResumeResponse(pending) => {
+                outgoing
+                    .send_error(pending.request_id, internal_error(message))
+                    .await;
+            }
+            ThreadListenerCommand::SealRealtimeUserInput { completion_tx, .. } => {
+                let _ = completion_tx.send(Err(message.to_string()));
+            }
+            ThreadListenerCommand::ResolveServerRequest { completion_tx, .. } => {
+                drop(completion_tx);
+            }
+            ThreadListenerCommand::EmitThreadGoalUpdated { .. }
+            | ThreadListenerCommand::EmitThreadQueueChanged
+            | ThreadListenerCommand::EmitWarning { .. }
+            | ThreadListenerCommand::EmitThreadGoalCleared
+            | ThreadListenerCommand::EmitThreadGoalSnapshot { .. } => {}
         }
     }
 }
@@ -333,7 +388,7 @@ pub(super) async fn ensure_listener_task_running(
     let realtime_history_enabled =
         matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated);
     let thread_settings_baseline = thread_settings_from_config_snapshot(&config_snapshot);
-    let (mut listener_command_rx, listener_generation) = {
+    let (mut listener_command_rx, listener_command_tx, listener_generation) = {
         let mut thread_state = thread_state.lock().await;
         if thread_state.listener_matches(&conversation) {
             return Ok(());
@@ -352,8 +407,12 @@ pub(super) async fn ensure_listener_task_running(
         };
         listener_task_context
             .thread_state_manager
-            .register_listener_command_tx(conversation_id, listener_command_tx);
-        (listener_command_rx, listener_generation)
+            .register_listener_command_tx(conversation_id, listener_command_tx.clone());
+        (
+            listener_command_rx,
+            listener_command_tx,
+            listener_generation,
+        )
     };
     let ListenerTaskContext {
         outgoing,
@@ -371,9 +430,12 @@ pub(super) async fn ensure_listener_task_running(
     tokio::spawn(async move {
         let mut consecutive_listener_commands = 0_usize;
         let mut pending_listener_command = None;
+        let mut event_due = false;
         loop {
-            let priority = if consecutive_listener_commands >= MAX_CONSECUTIVE_LISTENER_COMMANDS {
-                ThreadListenerPriority::Events
+            let priority = if event_due {
+                ThreadListenerPriority::EventDue
+            } else if consecutive_listener_commands >= MAX_CONSECUTIVE_LISTENER_COMMANDS {
+                ThreadListenerPriority::FairEvent
             } else {
                 ThreadListenerPriority::Commands
             };
@@ -395,6 +457,11 @@ pub(super) async fn ensure_listener_task_running(
                     let Some(listener_command) = listener_command else {
                         break;
                     };
+                    if matches!(priority, ThreadListenerPriority::FairEvent)
+                        && listener_command.is_transactional()
+                    {
+                        event_due = true;
+                    }
                     consecutive_listener_commands = consecutive_listener_commands.saturating_add(1);
                     handle_thread_listener_command(
                         conversation_id,
@@ -410,11 +477,27 @@ pub(super) async fn ensure_listener_task_running(
                     .await;
                 }
                 ThreadListenerInput::Event(event) => {
+                    event_due = false;
                     consecutive_listener_commands = 0;
                     let event = match event {
                         Ok(event) => event,
                         Err(err) => {
-                            tracing::warn!("thread.next_event() failed with: {err}");
+                            let message = format!("thread event stream failed: {err}");
+                            tracing::warn!("{message}");
+                            if thread_state.lock().await.listener_generation == listener_generation
+                            {
+                                thread_state_manager.unregister_listener_command_tx_if_matches(
+                                    conversation_id,
+                                    &listener_command_tx,
+                                );
+                            }
+                            fail_pending_listener_commands(
+                                &mut pending_listener_command,
+                                &mut listener_command_rx,
+                                outgoing_for_task.as_ref(),
+                                &message,
+                            )
+                            .await;
                             break;
                         }
                     };
@@ -525,7 +608,8 @@ pub(super) async fn ensure_listener_task_running(
 
         let mut thread_state = thread_state.lock().await;
         if thread_state.listener_generation == listener_generation {
-            thread_state_manager.unregister_listener_command_tx(conversation_id);
+            thread_state_manager
+                .unregister_listener_command_tx_if_matches(conversation_id, &listener_command_tx);
             thread_state.clear_listener();
         }
     });

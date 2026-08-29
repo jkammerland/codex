@@ -93,7 +93,18 @@ pub struct McpEventStream {
 
 impl McpEventStream {
     /// Receives the next raw lifecycle notification for this subscription.
-    pub async fn recv(&mut self) -> Result<McpEventStreamItem> {
+    ///
+    /// Returns `None` when the subscription ends for any reason. Call [`Self::recv_item`] when the
+    /// caller needs to distinguish server completion, connection replacement, and transport loss.
+    pub async fn recv(&mut self) -> Result<Option<McpEventNotification>> {
+        match self.recv_item().await? {
+            McpEventStreamItem::Notification(notification) => Ok(Some(notification)),
+            McpEventStreamItem::Ended(_) => Ok(None),
+        }
+    }
+
+    /// Receives the next notification or its typed subscription termination reason.
+    pub async fn recv_item(&mut self) -> Result<McpEventStreamItem> {
         enum Next {
             RuntimeChanged,
             Notification(McpEventNotification),

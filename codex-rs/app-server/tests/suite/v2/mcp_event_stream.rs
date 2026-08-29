@@ -84,6 +84,7 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                 .into_response(),
                 Some("events/stream") => {
                     let stream_number = stream_count.fetch_add(1, Ordering::AcqRel);
+                    let quiet_after_active = uri.path().contains("/quiet");
                     stream_started_tx
                         .send((uri.path().to_string(), message.clone()))
                         .expect("stream-start receiver must remain open");
@@ -114,6 +115,9 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                         )
                     })
                     .chain(stream::once(async move {
+                        if quiet_after_active {
+                            return std::future::pending::<Result<Event, Infallible>>().await;
+                        }
                         Ok::<_, Infallible>(
                             Event::default().event("message").data(event.to_string()),
                         )
@@ -129,7 +133,11 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
     let router = Router::new()
         .route("/api/codex/ps/mcp", handler.clone())
         .route("/changed/api/codex/ps/mcp", handler.clone())
-        .route("/changed2/api/codex/ps/mcp", handler);
+        .route("/changed2/api/codex/ps/mcp", handler.clone())
+        .route("/quiet1/api/codex/ps/mcp", handler.clone())
+        .route("/quiet2/api/codex/ps/mcp", handler.clone())
+        .route("/quiet3/api/codex/ps/mcp", handler.clone())
+        .route("/quiet4/api/codex/ps/mcp", handler);
     let mcp_server = tokio::spawn(async move { axum::serve(listener, router).await });
 
     let codex_home = TempDir::new()?;
@@ -338,6 +346,51 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
             }),
         }
     );
+
+    let mut previous_url = format!("{apps_url}/changed2");
+    for replacement_index in 1..=4 {
+        let replacement_url = format!("{apps_url}/quiet{replacement_index}");
+        let config = std::fs::read_to_string(&config_path)?;
+        std::fs::write(
+            &config_path,
+            config.replace(&previous_url, &replacement_url),
+        )?;
+        let reload_request_id = app_server
+            .send_raw_request("config/mcpServer/reload", /*params*/ None)
+            .await?;
+        let _: McpServerRefreshResponse = timeout(
+            Duration::from_secs(5),
+            app_server.read_response(reload_request_id),
+        )
+        .await??;
+        let (replacement_stream_path, replacement_stream_request) =
+            timeout(Duration::from_secs(5), stream_started_rx.recv())
+                .await?
+                .with_context(|| {
+                    format!("quiet replacement {replacement_index} did not start a new stream")
+                })?;
+        assert_eq!(
+            replacement_stream_path,
+            format!("/quiet{replacement_index}/api/codex/ps/mcp")
+        );
+        let replacement_metadata = json!({
+            "io.modelcontextprotocol/subscriptionId": replacement_stream_request["id"],
+            "provider": "event-test-server",
+        });
+        let replacement_active: McpServerEventStreamNotification = timeout(
+            Duration::from_secs(5),
+            app_server.read_notification("mcpServer/event/stream/notification"),
+        )
+        .await??;
+        assert_eq!(
+            replacement_active.notification,
+            McpServerEventNotification {
+                method: "notifications/events/active".to_string(),
+                params: json!({ "_meta": replacement_metadata, "status": "active" }),
+            }
+        );
+        previous_url = replacement_url;
+    }
 
     let _: McpServerEventStreamStopResponse = app_server
         .request(|request_id| ClientRequest::McpServerEventStreamStop {

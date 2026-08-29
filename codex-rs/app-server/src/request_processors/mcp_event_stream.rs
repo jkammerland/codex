@@ -194,6 +194,7 @@ async fn forward_events(
     let mut ready = Some(ready);
     let mut reconnect_attempts = 0;
     let mut reconnect_deadline = None;
+    let mut pending_end_reason = None;
     let send = |notification| {
         outgoing.send_server_notification_to_connection_and_wait(
             connection_id,
@@ -208,7 +209,12 @@ async fn forward_events(
             biased;
             () = auth_changes.changed() => break,
             () = thread.wait_until_terminated() => break,
-            result = stream.recv() => match result {
+            result = async {
+                match pending_end_reason.take() {
+                    Some(end_reason) => Ok(McpEventStreamItem::Ended(end_reason)),
+                    None => stream.recv_item().await,
+                }
+            } => match result {
                 Ok(McpEventStreamItem::Notification(notification)) => notification,
                 Ok(McpEventStreamItem::Ended(end_reason)) => {
                     if end_reason == McpEventStreamEnd::TransportClosed {
@@ -246,18 +252,18 @@ async fn forward_events(
                                     params.meta.clone(),
                                 )
                                 .await?;
-                            let item = stream.recv().await?;
+                            let item = stream.recv_item().await?;
                             Ok::<_, anyhow::Error>((stream, item))
                         }) => match result {
                             Ok(Ok((reconnected, McpEventStreamItem::Notification(notification)))) => {
                                 stream = reconnected;
                                 notification
                             }
-                            Ok(Ok((reconnected, McpEventStreamItem::Ended(end_reason)))) => {
-                                stream = reconnected;
+                            Ok(Ok((_reconnected, McpEventStreamItem::Ended(end_reason)))) => {
                                 if end_reason == McpEventStreamEnd::TransportClosed {
                                     thread.request_mcp_transport_reconnect();
                                 }
+                                pending_end_reason = Some(end_reason);
                                 continue;
                             }
                             Ok(Err(_)) => continue,
@@ -285,15 +291,15 @@ async fn forward_events(
         {
             break;
         }
-        if active && let Some(ready) = ready.take() {
-            let _ = ready.send(Ok(()));
+        if active {
+            reconnect_attempts = 0;
+            reconnect_deadline = None;
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Ok(()));
+            }
         }
         if terminated {
             return;
-        }
-        if !active {
-            reconnect_attempts = 0;
-            reconnect_deadline = None;
         }
     }
     if let Some(ready) = ready {

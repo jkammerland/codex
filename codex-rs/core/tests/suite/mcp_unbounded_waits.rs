@@ -376,8 +376,7 @@ async fn direct_mcp_positive_timeout_reports_a_timeout() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn direct_mcp_transport_loss_returns_an_error_without_replaying_the_tool_call() -> Result<()>
-{
+async fn mcp_transport_loss_returns_an_error_without_replaying_the_tool_call() -> Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "requires a Windows test_stdio_server in the Wine-exec environment"
@@ -385,31 +384,79 @@ async fn direct_mcp_transport_loss_returns_an_error_without_replaying_the_tool_c
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let fixture = build_fixture(&server, Some(Duration::ZERO), DispatchPath::Direct).await?;
     let temp_dir = tempfile::tempdir()?;
     let started_file = temp_dir.path().join("transport-loss.started");
     let exit_file = temp_dir.path().join("transport-loss.exit");
     let call_count_file = temp_dir.path().join("transport-loss.calls");
-    let call = tokio::spawn({
-        let codex = Arc::clone(&fixture.codex);
-        let arguments = json!({
-            "started_file": started_file,
-            "exit_file": exit_file,
-            "call_count_file": call_count_file,
-        });
-        async move {
-            codex
-                .call_mcp_tool(MCP_SERVER, TOOL, Some(arguments), /*meta*/ None)
-                .await
-        }
+    let arguments = json!({
+        "started_file": started_file,
+        "exit_file": exit_file,
+        "call_count_file": call_count_file,
     });
+    let first_response = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_response_created("resp-transport-loss"),
+            responses::ev_function_call_with_namespace(
+                "call-transport-loss",
+                &format!("mcp__{MCP_SERVER}"),
+                "sync_readonly",
+                &serde_json::to_string(&arguments)?,
+            ),
+            responses::ev_completed("resp-transport-loss"),
+        ]),
+    )
+    .await;
+    let fixture = build_fixture(&server, Some(Duration::ZERO), DispatchPath::Direct).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "start a transport-loss MCP call".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(
+            event,
+            EventMsg::McpToolCallBegin(begin) if begin.call_id == "call-transport-loss"
+        )
+    })
+    .await;
     wait_for_path_exists(&started_file, Duration::from_secs(5)).await?;
+    let completion_response = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_response_created("resp-after-transport-loss"),
+            responses::ev_completed("resp-after-transport-loss"),
+        ]),
+    )
+    .await;
     std::fs::write(&exit_file, "exit")?;
 
-    let error = call
-        .await?
-        .expect_err("closing the stdio server must fail the active MCP call");
-    let error_text = format!("{error:#}");
+    let terminal_item = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match fixture.codex.next_event().await?.msg {
+                EventMsg::ItemCompleted(event)
+                    if matches!(
+                        &event.item,
+                        TurnItem::McpToolCall(item) if item.id == "call-transport-loss"
+                    ) =>
+                {
+                    break Ok::<_, anyhow::Error>(event.item);
+                }
+                _ => {}
+            }
+        }
+    })
+    .await??;
+    let TurnItem::McpToolCall(terminal_item) = terminal_item else {
+        anyhow::bail!("transport loss did not emit an MCP terminal item");
+    };
+    let error_text = terminal_item
+        .error
+        .as_ref()
+        .map(|error| error.message.as_str())
+        .unwrap_or_default();
     assert!(
         error_text.contains("Transport closed"),
         "transport loss should remain distinguishable from a timeout: {error_text}"
@@ -418,9 +465,36 @@ async fn direct_mcp_transport_loss_returns_an_error_without_replaying_the_tool_c
         !error_text.contains("timed out awaiting tools/call"),
         "transport loss must not be reported as a tool deadline: {error_text}"
     );
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(first_response.requests().len(), 1);
+    assert_eq!(completion_response.requests().len(), 1);
     assert_eq!(
         std::fs::read_to_string(&call_count_file)?.lines().count(),
         1
+    );
+    std::fs::remove_file(&exit_file)?;
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.codex.call_mcp_tool(
+            MCP_SERVER,
+            TOOL,
+            Some(json!({ "call_count_file": call_count_file })),
+            /*meta*/ None,
+        ),
+    )
+    .await
+    .expect("the next explicit call should reconnect after transport loss")?;
+    assert_eq!(
+        recovered.structured_content,
+        Some(json!({ "result": "ok" }))
+    );
+    assert_eq!(
+        std::fs::read_to_string(&call_count_file)?.lines().count(),
+        2,
+        "transport recovery must not replay the ambiguous first call"
     );
     Ok(())
 }
@@ -516,6 +590,24 @@ async fn explicit_turn_interrupt_aborts_an_unbounded_mcp_call_without_a_follow_u
         first_response.requests().len(),
         1,
         "an explicit interrupt must not replay the MCP tool call or issue a follow-up model request"
+    );
+    let follow_up = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.codex.call_mcp_tool(
+            MCP_SERVER,
+            TOOL,
+            Some(sync_arguments(
+                /*started_file*/ None, /*release_file*/ None, /*barrier_id*/ None,
+            )),
+            /*meta*/ None,
+        ),
+    )
+    .await
+    .expect("MCP catalog lease should be released after cancellation")?;
+    assert_eq!(
+        follow_up.structured_content,
+        Some(json!({ "result": "ok" })),
+        "the same MCP connection should accept a later tool call",
     );
     Ok(())
 }

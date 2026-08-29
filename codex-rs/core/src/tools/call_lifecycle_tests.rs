@@ -22,7 +22,9 @@ fn cooperative_running_handler_retains_terminal_ownership() {
         lifecycle.cancellation_disposition(/*handler_is_cooperative*/ true),
         CancellationDisposition::AwaitDispatch
     );
+    assert!(lifecycle.cooperative_cancellation_won());
     lifecycle.handler_completed();
+    assert!(lifecycle.cooperative_cancellation_won());
     assert!(lifecycle.try_claim_terminal());
 }
 
@@ -49,5 +51,6 @@ fn completed_handler_cannot_be_relabelled_as_aborted() {
         lifecycle.cancellation_disposition(/*handler_is_cooperative*/ false),
         CancellationDisposition::AwaitDispatch
     );
+    assert!(!lifecycle.cooperative_cancellation_won());
     assert!(lifecycle.try_claim_terminal());
 }

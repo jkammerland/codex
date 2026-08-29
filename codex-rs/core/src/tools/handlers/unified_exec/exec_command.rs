@@ -203,15 +203,22 @@ impl ExecCommandHandler {
         let sandbox_permissions =
             resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
         let hook_command = args.cmd.clone();
-        maybe_emit_implicit_skill_invocation(
-            session.as_ref(),
-            context.step_context.turn.as_ref(),
-            &hook_command,
-            &cwd,
-            native_cwd.as_ref(),
-            &turn_environment.selection.environment_id,
-        )
-        .await;
+        tokio::select! {
+            biased;
+            _ = context.cancellation_token.cancelled() => {
+                return Err(FunctionCallError::RespondToModel(
+                    "exec_command was cancelled".to_string(),
+                ));
+            }
+            _ = maybe_emit_implicit_skill_invocation(
+                session.as_ref(),
+                context.step_context.turn.as_ref(),
+                &hook_command,
+                &cwd,
+                native_cwd.as_ref(),
+                &turn_environment.selection.environment_id,
+            ) => {}
+        }
         let shell_mode =
             shell_mode_for_environment(&turn.unified_exec_shell_mode, environment.as_ref());
         // Remote environments may use a different OS and must build commands with their native
@@ -240,7 +247,6 @@ impl ExecCommandHandler {
                 )));
             }
         }
-        let process_id = manager.allocate_process_id().await;
         let resolved_command = get_command(
             &args,
             shell,
@@ -268,14 +274,21 @@ impl ExecCommandHandler {
         let requested_additional_permissions = additional_permissions.clone();
         // TODO(anp): Make permission matching operate on PathUri for remote environments.
         let permission_cwd = native_cwd.as_ref().unwrap_or(&turn.config.cwd);
-        let effective_additional_permissions = apply_granted_turn_permissions(
-            context.session.as_ref(),
-            &turn_environment.selection.environment_id,
-            permission_cwd.as_path(),
-            sandbox_permissions,
-            additional_permissions,
-        )
-        .await;
+        let effective_additional_permissions = tokio::select! {
+            biased;
+            _ = context.cancellation_token.cancelled() => {
+                return Err(FunctionCallError::RespondToModel(
+                    "exec_command was cancelled".to_string(),
+                ));
+            }
+            permissions = apply_granted_turn_permissions(
+                context.session.as_ref(),
+                &turn_environment.selection.environment_id,
+                permission_cwd.as_path(),
+                sandbox_permissions,
+                additional_permissions,
+            ) => permissions,
+        };
         let additional_permissions_allowed = exec_permission_approvals_enabled
             || (session.features().enabled(Feature::RequestPermissionsTool)
                 && effective_additional_permissions.permissions_preapproved);
@@ -289,7 +302,6 @@ impl ExecCommandHandler {
             && !effective_additional_permissions.permissions_preapproved
             && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
         {
-            manager.release_process_id(process_id).await;
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
             )));
@@ -315,31 +327,31 @@ impl ExecCommandHandler {
         ) {
             Ok(normalized) => normalized,
             Err(err) => {
-                manager.release_process_id(process_id).await;
                 return Err(FunctionCallError::RespondToModel(err));
             }
         };
 
-        let intercepted_patch = intercept_apply_patch(
-            &command,
-            &cwd,
-            fs.as_ref(),
-            turn_environment.clone(),
-            context.session.clone(),
-            Arc::clone(&context.step_context),
-            context.cancellation_token.clone(),
-            Some(&tracker),
-            &context.call_id,
-            "exec_command",
-        )
-        .await;
-        // Keep the reservation when interception returns `Ok(None)`: the normal command below
-        // still needs this process ID.
-        if intercepted_patch.is_err() {
-            manager.release_process_id(process_id).await;
-        }
+        let intercepted_patch = tokio::select! {
+            biased;
+            result = intercept_apply_patch(
+                &command,
+                &cwd,
+                fs.as_ref(),
+                turn_environment.clone(),
+                context.session.clone(),
+                Arc::clone(&context.step_context),
+                context.cancellation_token.clone(),
+                Some(&tracker),
+                &context.call_id,
+                "exec_command",
+            ) => result,
+            _ = context.cancellation_token.cancelled() => {
+                return Err(FunctionCallError::RespondToModel(
+                    "exec_command was cancelled".to_string(),
+                ));
+            }
+        };
         if let Some(output) = intercepted_patch? {
-            manager.release_process_id(process_id).await;
             return Ok(boxed_tool_output(ExecCommandToolOutput {
                 event_call_id: String::new(),
                 chunk_id: String::new(),
@@ -354,6 +366,22 @@ impl ExecCommandHandler {
                 output_omitted_bytes: None,
                 hook_command: None,
             }));
+        }
+
+        let process_id = tokio::select! {
+            biased;
+            process_id = manager.allocate_process_id() => process_id,
+            _ = context.cancellation_token.cancelled() => {
+                return Err(FunctionCallError::RespondToModel(
+                    "exec_command was cancelled".to_string(),
+                ));
+            }
+        };
+        if context.cancellation_token.is_cancelled() {
+            manager.release_process_id(process_id).await;
+            return Err(FunctionCallError::RespondToModel(
+                "exec_command was cancelled".to_string(),
+            ));
         }
 
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);

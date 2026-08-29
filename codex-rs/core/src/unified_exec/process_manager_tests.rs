@@ -487,6 +487,45 @@ async fn completed_wait_drains_late_output_until_closed() {
 }
 
 #[tokio::test]
+async fn completed_wait_prefers_published_close_over_simultaneous_cancellation() {
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let output_notify = Arc::new(Notify::new());
+    let output_closed = Arc::new(AtomicBool::new(false));
+    let output_closed_notify = Arc::new(Notify::new());
+    let output = OutputHandles {
+        output_buffer: Arc::clone(&output_buffer),
+        output_notify: Arc::clone(&output_notify),
+        output_closed: Arc::clone(&output_closed),
+        output_closed_notify: Arc::clone(&output_closed_notify),
+        cancellation_token: CancellationToken::new(),
+    };
+    let invocation_cancellation = CancellationToken::new();
+    let collector_output = output.clone();
+    let collector_cancellation = invocation_cancellation.clone();
+    let collector = tokio::spawn(async move {
+        UnifiedExecProcessManager::collect_output_until_closed(
+            &collector_output,
+            &collector_cancellation,
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+
+    output_buffer.lock().await.push_chunk(b"final output");
+    output_closed.store(true, Ordering::Release);
+    invocation_cancellation.cancel();
+    output_notify.notify_waiters();
+    output_closed_notify.notify_waiters();
+
+    let collected = tokio::time::timeout(Duration::from_secs(1), collector)
+        .await
+        .expect("completed wait should resolve")
+        .expect("collector task should join")
+        .expect("published close should win cancellation");
+    assert_eq!(collected.to_bytes_with_omission_marker(), b"final output");
+}
+
+#[tokio::test]
 async fn cancelling_completed_wait_restores_partially_drained_output() {
     let mut initial_output = HeadTailBuffer::default();
     initial_output.push_chunk(b"before cancellation;");

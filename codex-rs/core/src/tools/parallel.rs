@@ -257,7 +257,11 @@ impl ToolCallRuntime {
         handles_cancellation_cooperatively: bool,
         cancelled: bool,
     ) -> Result<AnyToolResult, FunctionCallError> {
-        if cancelled && handles_cancellation_cooperatively && lifecycle.try_claim_terminal() {
+        if cancelled
+            && handles_cancellation_cooperatively
+            && lifecycle.cooperative_cancellation_won()
+            && lifecycle.try_claim_terminal()
+        {
             return Ok(Self::finish_aborted_call(
                 call,
                 started,
@@ -642,6 +646,44 @@ mod tests {
 
     impl CoreToolRuntime for ImmediateHandler {}
 
+    struct ImmediateCooperativeFailureHandler {
+        tool_name: codex_tools::ToolName,
+    }
+
+    impl ToolExecutor<ToolInvocation> for ImmediateCooperativeFailureHandler {
+        fn tool_name(&self) -> codex_tools::ToolName {
+            self.tool_name.clone()
+        }
+
+        fn spec(&self) -> codex_tools::ToolSpec {
+            codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+                name: self.tool_name.name.clone(),
+                description: "Immediate failing cooperative test tool.".to_string(),
+                strict: false,
+                defer_loading: None,
+                parameters: codex_tools::JsonSchema::default(),
+                output_schema: None,
+            })
+        }
+
+        fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+        where
+            ToolInvocation: 'a,
+        {
+            Box::pin(async {
+                Err(FunctionCallError::RespondToModel(
+                    "completed failure".to_string(),
+                ))
+            })
+        }
+    }
+
+    impl CoreToolRuntime for ImmediateCooperativeFailureHandler {
+        fn handles_cancellation_cooperatively(&self) -> bool {
+            true
+        }
+    }
+
     struct CooperativeCancellationHandler {
         tool_name: codex_tools::ToolName,
         handler_started: std::sync::Mutex<Option<oneshot::Sender<()>>>,
@@ -870,6 +912,85 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(vec![ToolCallOutcome::Completed { success: true }], actual);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_cooperative_failure_preserves_failed_lifecycle()
+    -> anyhow::Result<()> {
+        let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let records = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (finish_started_tx, finish_started_rx) = oneshot::channel();
+        let allow_finish = Arc::new(Notify::new());
+        let mut builder =
+            codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+        builder.tool_lifecycle_contributor(Arc::new(BlockingFinishContributor {
+            records: Arc::clone(&records),
+            finish_started: std::sync::Mutex::new(Some(finish_started_tx)),
+            allow_finish: Arc::clone(&allow_finish),
+        }));
+        session.services.extensions = Arc::new(builder.build());
+
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let tool_name = codex_tools::ToolName::plain("test_tool");
+        let handler = Arc::new(ImmediateCooperativeFailureHandler {
+            tool_name: tool_name.clone(),
+        }) as Arc<dyn CoreToolRuntime>;
+        let step_context = StepContext::for_test(Arc::clone(&turn_context));
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::from_tools([handler]),
+            Vec::new(),
+            ToolMode::Direct,
+            BTreeMap::new(),
+            /*tool_namespaces_info*/ None,
+            &[],
+        ));
+        let step_context = step_context.with_tool_router_for_test(router);
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let runtime = ToolCallRuntime::new(session, step_context, tracker);
+        let cancellation_token = CancellationToken::new();
+        let call = ToolCall {
+            tool_name,
+            call_id: "call-1".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: None,
+        };
+
+        let response_task =
+            tokio::spawn(runtime.handle_tool_call(call, cancellation_token.clone()));
+        tokio::time::timeout(Duration::from_secs(1), finish_started_rx)
+            .await
+            .expect("timed out waiting for failed lifecycle notification")
+            .expect("failed lifecycle notification should start");
+        cancellation_token.cancel();
+        allow_finish.notify_waiters();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), response_task)
+            .await
+            .expect("timed out waiting for tool response")
+            .expect("tool response task should join")?;
+        assert_eq!(
+            response,
+            ResponseInputItem::FunctionCallOutput {
+                call_id: "call-1".to_string(),
+                output: FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::Text("completed failure".to_string()),
+                    success: Some(false),
+                },
+            }
+        );
+        assert_eq!(
+            records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[ToolCallOutcome::Failed {
+                handler_executed: true,
+            }]
+        );
         Ok(())
     }
 }

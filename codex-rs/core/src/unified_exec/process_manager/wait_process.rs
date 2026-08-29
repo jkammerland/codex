@@ -234,12 +234,20 @@ impl UnifiedExecProcessManager {
 
             tokio::select! {
                 biased;
+                _ = &mut output_notified => {}
+                _ = &mut output_closed_notified => {}
                 _ = cancellation_token.cancelled() => {
+                    let drained_output = {
+                        let mut guard = output_buffer.lock().await;
+                        std::mem::take(&mut *guard)
+                    };
+                    collected.push_buffer(drained_output);
+                    if output_closed.load(Ordering::Acquire) {
+                        break;
+                    }
                     Self::restore_collected_output(output, collected).await;
                     return Err(UnifiedExecError::Cancelled);
                 }
-                _ = &mut output_notified => {}
-                _ = &mut output_closed_notified => {}
             }
         }
 

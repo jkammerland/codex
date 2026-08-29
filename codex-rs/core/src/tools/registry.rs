@@ -665,7 +665,24 @@ impl ToolRegistry {
                             "tool call was cancelled before handler dispatch".to_string(),
                         ));
                     }
-                    let result = handle_any_tool(tool.as_ref(), invocation.clone()).await;
+                    let result = if let Some(lifecycle) = lifecycle.as_deref()
+                        && tool.handles_cancellation_cooperatively()
+                    {
+                        let handler = handle_any_tool(tool.as_ref(), invocation.clone());
+                        tokio::pin!(handler);
+                        tokio::select! {
+                            biased;
+                            _ = invocation.cancellation_token.cancelled() => {
+                                let _ = lifecycle.cancellation_disposition(
+                                    /*handler_is_cooperative*/ true,
+                                );
+                                handler.await
+                            }
+                            result = &mut handler => result,
+                        }
+                    } else {
+                        handle_any_tool(tool.as_ref(), invocation.clone()).await
+                    };
                     if let Some(lifecycle) = lifecycle.as_deref() {
                         lifecycle.handler_completed();
                     }
@@ -700,10 +717,8 @@ impl ToolRegistry {
             None
         };
         let post_tool_use_outcome = if let Some(post_tool_use_payload) = post_tool_use_payload {
-            tokio::select! {
-                biased;
-                _ = invocation.cancellation_token.cancelled() => None,
-                outcome = run_post_tool_use_hooks(
+            Some(
+                run_post_tool_use_hooks(
                     &invocation.session,
                     &invocation.turn,
                     post_tool_use_payload.tool_use_id,
@@ -711,8 +726,9 @@ impl ToolRegistry {
                     post_tool_use_payload.tool_name.matcher_aliases().to_vec(),
                     post_tool_use_payload.tool_input,
                     post_tool_use_payload.tool_response,
-                ) => Some(outcome),
-            }
+                )
+                .await,
+            )
         } else {
             None
         };
@@ -729,7 +745,9 @@ impl ToolRegistry {
         // successful result still wins a simultaneous cancellation and completes normally.
         let cooperatively_cancelled = lifecycle.is_some()
             && tool.handles_cancellation_cooperatively()
-            && invocation.cancellation_token.is_cancelled()
+            && lifecycle
+                .as_deref()
+                .is_some_and(ToolCallLifecycle::cooperative_cancellation_won)
             && !success;
         // A PostToolUse block rejects the result, not the already-completed tool execution.
         let lifecycle_outcome = if cooperatively_cancelled {

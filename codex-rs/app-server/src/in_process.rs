@@ -162,6 +162,8 @@ pub struct InProcessStartArgs {
     pub initialize: InitializeParams,
     /// Capacity used for all runtime queues (clamped to at least 1).
     pub channel_capacity: usize,
+    #[cfg(test)]
+    pub(crate) fail_processor_after_initialized: bool,
 }
 
 /// Event emitted from the app-server to the in-process client.
@@ -423,6 +425,8 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
             .map_err(IoError::other)?;
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
+    #[cfg(test)]
+    let fail_processor_after_initialized = args.fail_processor_after_initialized;
 
     let runtime_handle = tokio::spawn(async move {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
@@ -528,7 +532,14 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                                 }
                             }
                             Some(ProcessorCommand::Notification(notification)) => {
+                                #[cfg(test)]
+                                let should_fail = fail_processor_after_initialized
+                                    && matches!(&notification, ClientNotification::Initialized);
                                 processor.process_client_notification(notification).await;
+                                #[cfg(test)]
+                                if should_fail {
+                                    panic!("injected in-process processor failure");
+                                }
                             }
                             None => {
                                 break;
@@ -856,9 +867,10 @@ mod tests {
         }
     }
 
-    async fn start_test_client_with_capacity(
+    async fn start_test_client_with_capacity_and_failure(
         session_source: SessionSource,
         channel_capacity: usize,
+        fail_processor_after_initialized: bool,
     ) -> InProcessClientHandle {
         let codex_home = TempDir::new().expect("temp dir");
         let config = Arc::new(build_test_config(codex_home.path()).await);
@@ -889,6 +901,7 @@ mod tests {
                 capabilities: None,
             },
             channel_capacity,
+            fail_processor_after_initialized,
         };
         let mut client = start(args).await.expect("in-process runtime should start");
         client._test_codex_home = Some(codex_home);
@@ -896,7 +909,49 @@ mod tests {
     }
 
     async fn start_test_client(session_source: SessionSource) -> InProcessClientHandle {
-        start_test_client_with_capacity(session_source, DEFAULT_IN_PROCESS_CHANNEL_CAPACITY).await
+        start_test_client_with_capacity_and_failure(
+            session_source,
+            DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+            /*fail_processor_after_initialized*/ false,
+        )
+        .await
+    }
+
+    async fn start_test_client_with_capacity(
+        session_source: SessionSource,
+        channel_capacity: usize,
+    ) -> InProcessClientHandle {
+        start_test_client_with_capacity_and_failure(
+            session_source,
+            channel_capacity,
+            /*fail_processor_after_initialized*/ false,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn in_process_processor_failure_closes_pending_runtime_requests() {
+        let client = start_test_client_with_capacity_and_failure(
+            SessionSource::Cli,
+            DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+            /*fail_processor_after_initialized*/ true,
+        )
+        .await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.request(ClientRequest::ConfigRequirementsRead {
+                request_id: RequestId::Integer(77),
+                params: None,
+            }),
+        )
+        .await
+        .expect("a failed processor must not leave an in-process request pending");
+        match result {
+            Ok(Err(error)) => assert!(error.message.contains("processor")),
+            Err(error) => assert_eq!(error.kind(), ErrorKind::BrokenPipe),
+            Ok(Ok(_)) => panic!("request unexpectedly succeeded after processor failure"),
+        }
     }
 
     #[tokio::test]

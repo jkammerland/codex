@@ -64,7 +64,7 @@ async fn listener_cancellation_remains_highest_priority() {
 }
 
 #[tokio::test]
-async fn transactional_listener_command_precedes_ready_event_and_unload() {
+async fn transactional_listener_command_survives_event_fairness_and_unload() {
     let (_cancel_tx, mut cancel_rx) = oneshot::channel();
     let (listener_command_tx, mut listener_command_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut pending_command = None;
@@ -86,6 +86,17 @@ async fn transactional_listener_command_precedes_ready_event_and_unload() {
     )
     .await;
 
+    assert!(matches!(input, ThreadListenerInput::Event(())));
+
+    let input = next_thread_listener_input(
+        &mut cancel_rx,
+        &mut listener_command_rx,
+        &mut pending_command,
+        future::pending::<()>(),
+        future::ready(true),
+        ThreadListenerPriority::Events,
+    )
+    .await;
     assert!(matches!(
         input,
         ThreadListenerInput::Command(Some(ThreadListenerCommand::ResolveServerRequest { .. }))

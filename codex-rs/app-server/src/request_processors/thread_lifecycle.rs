@@ -41,22 +41,30 @@ async fn next_thread_listener_input<EventResult>(
             }
         }
     }
-    let priority = if pending_command
+    let pending_command_is_transactional = pending_command
         .as_ref()
-        .is_some_and(ThreadListenerCommand::is_transactional)
-    {
-        ThreadListenerPriority::Commands
-    } else {
-        priority
-    };
+        .is_some_and(ThreadListenerCommand::is_transactional);
     let command = async {
         match pending_command.take() {
             Some(command) => Some(command),
             None => listener_command_rx.recv().await,
         }
     };
-    match priority {
-        ThreadListenerPriority::Events => {
+    match (priority, pending_command_is_transactional) {
+        (ThreadListenerPriority::Events, true) => {
+            tokio::select! {
+                biased;
+                _ = cancel_rx => ThreadListenerInput::Cancelled,
+                event = event => ThreadListenerInput::Event(event),
+                listener_command = command => {
+                    ThreadListenerInput::Command(listener_command)
+                }
+                unloading_watchers_open = unloading_watchers => {
+                    ThreadListenerInput::UnloadingWatchers(unloading_watchers_open)
+                }
+            }
+        }
+        (ThreadListenerPriority::Events, false) => {
             tokio::select! {
                 biased;
                 _ = cancel_rx => ThreadListenerInput::Cancelled,
@@ -69,7 +77,7 @@ async fn next_thread_listener_input<EventResult>(
                 }
             }
         }
-        ThreadListenerPriority::Commands => {
+        (ThreadListenerPriority::Commands, _) => {
             tokio::select! {
                 biased;
                 _ = cancel_rx => ThreadListenerInput::Cancelled,

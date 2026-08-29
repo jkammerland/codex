@@ -7,8 +7,59 @@ use codex_app_server_protocol::ThreadQueueChangedNotification;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::protocol::ThreadHistoryMode;
+use std::future::Future;
 
 pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
+const MAX_CONSECUTIVE_LISTENER_COMMANDS: usize = 32;
+
+enum ThreadListenerInput<EventResult> {
+    Cancelled,
+    Command(Option<ThreadListenerCommand>),
+    Event(EventResult),
+    UnloadingWatchers(bool),
+}
+
+enum ThreadListenerPriority {
+    Commands,
+    Events,
+}
+
+async fn next_thread_listener_input<EventResult>(
+    cancel_rx: &mut oneshot::Receiver<()>,
+    listener_command_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ThreadListenerCommand>,
+    event: impl Future<Output = EventResult>,
+    unloading_watchers: impl Future<Output = bool>,
+    priority: ThreadListenerPriority,
+) -> ThreadListenerInput<EventResult> {
+    match priority {
+        ThreadListenerPriority::Events => {
+            tokio::select! {
+                biased;
+                _ = cancel_rx => ThreadListenerInput::Cancelled,
+                event = event => ThreadListenerInput::Event(event),
+                unloading_watchers_open = unloading_watchers => {
+                    ThreadListenerInput::UnloadingWatchers(unloading_watchers_open)
+                }
+                listener_command = listener_command_rx.recv() => {
+                    ThreadListenerInput::Command(listener_command)
+                }
+            }
+        }
+        ThreadListenerPriority::Commands => {
+            tokio::select! {
+                biased;
+                _ = cancel_rx => ThreadListenerInput::Cancelled,
+                listener_command = listener_command_rx.recv() => {
+                    ThreadListenerInput::Command(listener_command)
+                }
+                event = event => ThreadListenerInput::Event(event),
+                unloading_watchers_open = unloading_watchers => {
+                    ThreadListenerInput::UnloadingWatchers(unloading_watchers_open)
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct ListenerTaskContext {
@@ -286,17 +337,31 @@ pub(super) async fn ensure_listener_task_running(
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
     tokio::spawn(async move {
+        let mut consecutive_listener_commands = 0_usize;
         loop {
-            tokio::select! {
-                biased;
-                _ = &mut cancel_rx => {
+            let priority = if consecutive_listener_commands >= MAX_CONSECUTIVE_LISTENER_COMMANDS {
+                ThreadListenerPriority::Events
+            } else {
+                ThreadListenerPriority::Commands
+            };
+            let input = next_thread_listener_input(
+                &mut cancel_rx,
+                &mut listener_command_rx,
+                conversation.next_event(),
+                unloading_state.wait_for_unloading_trigger(),
+                priority,
+            )
+            .await;
+            match input {
+                ThreadListenerInput::Cancelled => {
                     // Listener was superseded or the thread is being torn down.
                     break;
                 }
-                listener_command = listener_command_rx.recv() => {
+                ThreadListenerInput::Command(listener_command) => {
                     let Some(listener_command) = listener_command else {
                         break;
                     };
+                    consecutive_listener_commands = consecutive_listener_commands.saturating_add(1);
                     handle_thread_listener_command(
                         conversation_id,
                         &conversation,
@@ -310,7 +375,8 @@ pub(super) async fn ensure_listener_task_running(
                     )
                     .await;
                 }
-                event = conversation.next_event() => {
+                ThreadListenerInput::Event(event) => {
+                    consecutive_listener_commands = 0;
                     let event = match event {
                         Ok(event) => event,
                         Err(err) => {
@@ -320,12 +386,9 @@ pub(super) async fn ensure_listener_task_running(
                     };
 
                     if let Some(worker) = &turn_cost_worker {
-                        worker.observe_event(
-                            conversation_id,
-                            config.as_ref(),
-                            &event,
-                            || conversation.session_telemetry(),
-                        );
+                        worker.observe_event(conversation_id, config.as_ref(), &event, || {
+                            conversation.session_telemetry()
+                        });
                     }
 
                     // Track the event before emitting any typed translations
@@ -337,7 +400,8 @@ pub(super) async fn ensure_listener_task_running(
                         let realtime_effects = if realtime_history_enabled
                             && thread_state.realtime_history.should_observe(&event.msg)
                         {
-                            let active_turn_id = thread_state.active_turn_snapshot().map(|turn| turn.id);
+                            let active_turn_id =
+                                thread_state.active_turn_snapshot().map(|turn| turn.id);
                             thread_state
                                 .realtime_history
                                 .observe(&event.msg, active_turn_id.as_deref())
@@ -383,15 +447,13 @@ pub(super) async fn ensure_listener_task_running(
                     )
                     .await;
                     if matches!(event.msg, EventMsg::ShutdownComplete)
-                        && let Some(completion_tx) = thread_state
-                            .lock()
-                            .await
-                            .take_shutdown_drain_waiter()
+                        && let Some(completion_tx) =
+                            thread_state.lock().await.take_shutdown_drain_waiter()
                     {
                         let _ = completion_tx.send(());
                     }
                 }
-                unloading_watchers_open = unloading_state.wait_for_unloading_trigger() => {
+                ThreadListenerInput::UnloadingWatchers(unloading_watchers_open) => {
                     if !unloading_watchers_open {
                         break;
                     }
@@ -435,6 +497,10 @@ pub(super) async fn ensure_listener_task_running(
     });
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "thread_lifecycle_tests.rs"]
+mod tests;
 
 pub(super) async fn wait_for_thread_shutdown(thread: &Arc<CodexThread>) -> ThreadShutdownResult {
     match tokio::time::timeout(Duration::from_secs(10), thread.shutdown_and_wait()).await {

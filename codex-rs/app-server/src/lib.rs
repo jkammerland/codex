@@ -1196,8 +1196,7 @@ pub async fn run_main_with_transport_options(
 
     drop(transport_event_tx);
 
-    let _ = processor_handle.await;
-    let _ = outbound_handle.await;
+    let runtime_result = supervise_runtime_tasks(processor_handle, outbound_handle).await;
 
     transport_shutdown_token.cancel();
     let _ = otel_reloader_handle.await;
@@ -1205,7 +1204,44 @@ pub async fn run_main_with_transport_options(
         let _ = handle.await;
     }
 
-    Ok(())
+    runtime_result
+}
+
+async fn supervise_runtime_tasks(
+    mut processor_handle: JoinHandle<()>,
+    mut outbound_handle: JoinHandle<()>,
+) -> IoResult<()> {
+    enum RuntimeTask {
+        Processor,
+        Outbound,
+    }
+
+    let (task, result) = tokio::select! {
+        result = &mut processor_handle => (RuntimeTask::Processor, result),
+        result = &mut outbound_handle => (RuntimeTask::Outbound, result),
+    };
+    match (task, result) {
+        (RuntimeTask::Processor, Ok(())) => outbound_handle
+            .await
+            .map_err(|err| std::io::Error::other(format!("outbound router task failed: {err}"))),
+        (RuntimeTask::Outbound, Ok(())) => processor_handle
+            .await
+            .map_err(|err| std::io::Error::other(format!("processor task failed: {err}"))),
+        (RuntimeTask::Processor, Err(err)) => {
+            outbound_handle.abort();
+            let _ = outbound_handle.await;
+            Err(std::io::Error::other(format!(
+                "processor task failed: {err}"
+            )))
+        }
+        (RuntimeTask::Outbound, Err(err)) => {
+            processor_handle.abort();
+            let _ = processor_handle.await;
+            Err(std::io::Error::other(format!(
+                "outbound router task failed: {err}"
+            )))
+        }
+    }
 }
 
 struct SqliteRecoveryNotice {
@@ -1383,11 +1419,25 @@ mod tests {
     use super::LogFormat;
     #[cfg(debug_assertions)]
     use super::loader_overrides_with_test_user_config_file;
+    use super::supervise_runtime_tasks;
     #[cfg(debug_assertions)]
     use codex_config::LoaderOverrides;
     #[cfg(debug_assertions)]
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+    use std::future::pending;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
 
     #[test]
     fn log_format_from_env_value_matches_json_values_case_insensitively() {
@@ -1421,5 +1471,74 @@ mod tests {
             loader_overrides.user_config_path,
             Some(AbsolutePathBuf::from_absolute_path(path).expect("absolute test path"))
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_task_failure_aborts_its_sibling() {
+        let sibling_dropped = Arc::new(AtomicBool::new(false));
+        let sibling_drop_flag = Arc::clone(&sibling_dropped);
+        let processor_handle = tokio::spawn(async { panic!("processor failed") });
+        let outbound_handle = tokio::spawn(async move {
+            let _drop_flag = DropFlag(sibling_drop_flag);
+            pending::<()>().await;
+        });
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervise_runtime_tasks(processor_handle, outbound_handle),
+        )
+        .await
+        .expect("runtime supervision should not hang after a task failure")
+        .expect_err("runtime task failure should be reported");
+        assert!(err.to_string().contains("processor"));
+        assert!(sibling_dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn outbound_runtime_task_failure_aborts_processor() {
+        let sibling_dropped = Arc::new(AtomicBool::new(false));
+        let sibling_drop_flag = Arc::clone(&sibling_dropped);
+        let processor_handle = tokio::spawn(async move {
+            let _drop_flag = DropFlag(sibling_drop_flag);
+            pending::<()>().await;
+        });
+        let outbound_handle = tokio::spawn(async { panic!("outbound failed") });
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervise_runtime_tasks(processor_handle, outbound_handle),
+        )
+        .await
+        .expect("runtime supervision should not hang after a task failure")
+        .expect_err("runtime task failure should be reported");
+        assert!(err.to_string().contains("outbound"));
+        assert!(sibling_dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn runtime_tasks_can_finish_cleanly_in_either_order() {
+        for outbound_finishes_first in [false, true] {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            let processor_gate = Arc::clone(&gate);
+            let outbound_gate = Arc::clone(&gate);
+            let processor_handle = tokio::spawn(async move {
+                if outbound_finishes_first {
+                    processor_gate.notified().await;
+                } else {
+                    processor_gate.notify_one();
+                }
+            });
+            let outbound_handle = tokio::spawn(async move {
+                if outbound_finishes_first {
+                    outbound_gate.notify_one();
+                } else {
+                    outbound_gate.notified().await;
+                }
+            });
+
+            supervise_runtime_tasks(processor_handle, outbound_handle)
+                .await
+                .expect("clean runtime completion should succeed");
+        }
     }
 }

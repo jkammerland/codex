@@ -474,6 +474,31 @@ impl UnifiedExecProcessManager {
         context: &UnifiedExecContext,
     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
         let cwd = request.cwd.clone();
+        let plugin_attribution = if request.turn_environment.environment.is_remote() {
+            let file_system = request.turn_environment.environment.get_filesystem();
+            tokio::select! {
+                biased;
+                _ = context.cancellation_token.cancelled() => {
+                    self.release_process_id(request.process_id).await;
+                    return Err(UnifiedExecError::Cancelled);
+                }
+                attribution = context
+                    .step_context
+                    .turn
+                    .plugin_attribution_for_executor_command(
+                        &request.command,
+                        &cwd,
+                        file_system.as_ref(),
+                    ) => attribution,
+            }
+        } else {
+            cwd.to_abs_path().ok().and_then(|cwd| {
+                context
+                    .step_context
+                    .turn
+                    .plugin_attribution_for_command(&request.command, &cwd)
+            })
+        };
         let process = self
             .open_session_with_sandbox(&request, cwd.clone(), context)
             .await;
@@ -506,25 +531,6 @@ impl UnifiedExecProcessManager {
             &context.call_id,
             /*turn_diff_tracker*/ None,
         );
-        let plugin_attribution = if request.turn_environment.environment.is_remote() {
-            let file_system = request.turn_environment.environment.get_filesystem();
-            context
-                .step_context
-                .turn
-                .plugin_attribution_for_executor_command(
-                    &request.command,
-                    &cwd,
-                    file_system.as_ref(),
-                )
-                .await
-        } else {
-            cwd.to_abs_path().ok().and_then(|cwd| {
-                context
-                    .step_context
-                    .turn
-                    .plugin_attribution_for_command(&request.command, &cwd)
-            })
-        };
         let emitter = ToolEmitter::unified_exec(
             &request.command,
             cwd.clone(),
@@ -532,9 +538,6 @@ impl UnifiedExecProcessManager {
             Some(request.process_id.to_string()),
             plugin_attribution.clone(),
         );
-        emitter.emit(event_ctx, ToolEventStage::Begin).await;
-
-        start_streaming_output(&process, context, Arc::clone(&transcript));
         let start = Instant::now();
         // Persist live sessions before the initial yield wait so interrupting the
         // turn cannot drop the last Arc and terminate the background process.
@@ -570,6 +573,8 @@ impl UnifiedExecProcessManager {
                 metrics_sidecar,
             }
         };
+        emitter.emit(event_ctx, ToolEventStage::Begin).await;
+        start_streaming_output(&process, context, Arc::clone(&transcript));
 
         let yield_time_ms = clamp_yield_time(request.yield_time_ms);
         // For the initial exec_command call, we both stream output to events
@@ -1483,6 +1488,14 @@ impl UnifiedExecProcessManager {
             )
             .await
             {
+                let drained_output = {
+                    let mut guard = output_buffer.lock().await;
+                    std::mem::take(&mut *guard)
+                };
+                collected.push_buffer(drained_output);
+                if output_closed.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
                 Self::restore_collected_output(output, collected).await;
                 return Err(UnifiedExecError::Cancelled);
             }

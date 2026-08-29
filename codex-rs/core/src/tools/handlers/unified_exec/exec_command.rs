@@ -331,26 +331,21 @@ impl ExecCommandHandler {
             }
         };
 
-        let intercepted_patch = tokio::select! {
-            biased;
-            result = intercept_apply_patch(
-                &command,
-                &cwd,
-                fs.as_ref(),
-                turn_environment.clone(),
-                context.session.clone(),
-                Arc::clone(&context.step_context),
-                context.cancellation_token.clone(),
-                Some(&tracker),
-                &context.call_id,
-                "exec_command",
-            ) => result,
-            _ = context.cancellation_token.cancelled() => {
-                return Err(FunctionCallError::RespondToModel(
-                    "exec_command was cancelled".to_string(),
-                ));
-            }
-        };
+        // Once an intercepted patch starts, let it publish its committed delta and terminal event.
+        // Dropping this future on cancellation can leave filesystem mutations unreported.
+        let intercepted_patch = intercept_apply_patch(
+            &command,
+            &cwd,
+            fs.as_ref(),
+            turn_environment.clone(),
+            context.session.clone(),
+            Arc::clone(&context.step_context),
+            context.cancellation_token.clone(),
+            Some(&tracker),
+            &context.call_id,
+            "exec_command",
+        )
+        .await;
         if let Some(output) = intercepted_patch? {
             return Ok(boxed_tool_output(ExecCommandToolOutput {
                 event_call_id: String::new(),

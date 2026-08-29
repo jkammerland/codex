@@ -289,9 +289,16 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         let env = exec_env_for_sandbox_permissions(&req.env, launch_sandbox_permissions);
         let (mut env, managed_network_context, network_proxy_launch) = match managed_network {
             Some(network) if environment_is_remote => {
-                let mut launch = network.remote_launch_config().await.map_err(|err| {
-                    ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
-                })?;
+                let mut launch = tokio::select! {
+                    biased;
+                    _ = ctx.cancellation_token.cancelled() => {
+                        return Err(ToolError::Rejected(
+                            "unified exec start was cancelled".to_string(),
+                        ));
+                    }
+                    launch = network.remote_launch_config() => launch,
+                }
+                .map_err(|err| ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string()))))?;
                 if routes_approval_policy_to_guardian(
                     ctx.step_context.settings.approval_policy(),
                     ctx.step_context.settings.approvals_reviewer(),
@@ -314,16 +321,22 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                 if !launch.proxy.enabled {
                     (env, None, None)
                 } else {
-                    let environment_info =
-                        req.turn_environment
-                            .environment
-                            .info()
-                            .await
-                            .map_err(|err| {
-                                ToolError::Codex(CodexErr::Io(io::Error::other(format!(
-                                    "failed to query exec-server capabilities: {err}"
-                                ))))
-                            })?;
+                    let environment_info = tokio::select! {
+                        biased;
+                        _ = ctx.cancellation_token.cancelled() => {
+                            return Err(ToolError::Rejected(
+                                "unified exec start was cancelled".to_string(),
+                            ));
+                        }
+                        environment_info = req.turn_environment.environment.info() => {
+                            environment_info
+                        }
+                    }
+                    .map_err(|err| {
+                        ToolError::Codex(CodexErr::Io(io::Error::other(format!(
+                            "failed to query exec-server capabilities: {err}"
+                        ))))
+                    })?;
                     if !environment_info.capabilities.network_proxy_launch {
                         return Err(ToolError::Rejected(
                             "selected exec-server does not support executor-local network proxy launches"
@@ -350,13 +363,20 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             None => (env, None, None),
         };
         let explicit_env_overrides = req.explicit_env_overrides.clone();
-        let metrics_sidecar = sidecar_for_command(
-            ctx,
-            &req.command,
-            &req.cwd,
-            req.turn_environment.environment.as_ref(),
-        )
-        .await;
+        let metrics_sidecar = tokio::select! {
+            biased;
+            _ = ctx.cancellation_token.cancelled() => {
+                return Err(ToolError::Rejected(
+                    "unified exec start was cancelled".to_string(),
+                ));
+            }
+            metrics_sidecar = sidecar_for_command(
+                ctx,
+                &req.command,
+                &req.cwd,
+                req.turn_environment.environment.as_ref(),
+            ) => metrics_sidecar,
+        };
         if let Some(sidecar) = metrics_sidecar.as_ref() {
             sidecar.install_output_env(&mut env);
         }

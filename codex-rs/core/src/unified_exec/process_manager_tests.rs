@@ -441,6 +441,79 @@ async fn output_collection_observes_cancellation_while_elicitation_is_paused() {
 }
 
 #[tokio::test]
+async fn output_collection_prefers_close_while_elicitation_is_paused_and_cancelled() {
+    let mut buffered_output = HeadTailBuffer::<64>::default();
+    buffered_output.push_chunk(b"final paused output");
+    let output = OutputHandles {
+        output_buffer: Arc::new(tokio::sync::Mutex::new(buffered_output)),
+        output_notify: Arc::new(Notify::new()),
+        output_closed: Arc::new(AtomicBool::new(true)),
+        output_closed_notify: Arc::new(Notify::new()),
+        cancellation_token: CancellationToken::new(),
+    };
+    let (_pause_tx, pause_rx) = tokio::sync::watch::channel(true);
+    let invocation_cancellation = CancellationToken::new();
+    invocation_cancellation.cancel();
+
+    let collected = UnifiedExecProcessManager::collect_output_until_deadline(
+        &output,
+        Some(pause_rx),
+        Instant::now() + Duration::from_secs(60),
+        &invocation_cancellation,
+    )
+    .await
+    .expect("a published close must win cancellation during an elicitation pause");
+
+    assert_eq!(
+        collected.to_bytes_with_omission_marker(),
+        b"final paused output"
+    );
+}
+
+#[tokio::test]
+async fn output_collection_cancellation_is_not_starved_by_continuous_output() {
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::<64>::default()));
+    let output_notify = Arc::new(Notify::new());
+    let output = OutputHandles {
+        output_buffer: Arc::clone(&output_buffer),
+        output_notify: Arc::clone(&output_notify),
+        output_closed: Arc::new(AtomicBool::new(false)),
+        output_closed_notify: Arc::new(Notify::new()),
+        cancellation_token: CancellationToken::new(),
+    };
+    let invocation_cancellation = CancellationToken::new();
+    let collector_output = output.clone();
+    let collector_cancellation = invocation_cancellation.clone();
+    let collector = tokio::spawn(async move {
+        UnifiedExecProcessManager::collect_output_until_deadline(
+            &collector_output,
+            /*pause_state*/ None,
+            Instant::now() + Duration::from_secs(60),
+            &collector_cancellation,
+        )
+        .await
+    });
+
+    for _ in 0..100 {
+        output_buffer.lock().await.push_chunk(b"output");
+        output_notify.notify_one();
+        tokio::task::yield_now().await;
+    }
+    invocation_cancellation.cancel();
+    for _ in 0..100 {
+        output_buffer.lock().await.push_chunk(b"output");
+        output_notify.notify_one();
+        tokio::task::yield_now().await;
+    }
+
+    let result = tokio::time::timeout(Duration::from_secs(1), collector)
+        .await
+        .expect("continuous output must not starve cancellation")
+        .expect("collector task should join");
+    assert!(matches!(result, Err(UnifiedExecError::Cancelled)));
+}
+
+#[tokio::test]
 async fn completed_wait_drains_late_output_until_closed() {
     let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
     let output_notify = Arc::new(Notify::new());

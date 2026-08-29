@@ -92,12 +92,15 @@ impl UnifiedExecProcessManager {
 
                 tokio::select! {
                     biased;
-                    _ = cancellation_token.cancelled() => {
-                        return Err(UnifiedExecError::Cancelled);
-                    }
                     _ = &mut state_changed => {}
                     _ = &mut activity_changed => break ProcessWaitReason::Input,
                     _ = &mut output_notified, if tty => {}
+                    _ = cancellation_token.cancelled() => {
+                        if process.has_exited() || process.failure_message().is_some() {
+                            break ProcessWaitReason::Completed;
+                        }
+                        return Err(UnifiedExecError::Cancelled);
+                    }
                 }
             }
         };
@@ -226,6 +229,13 @@ impl UnifiedExecProcessManager {
             };
             if drained_output.retained_bytes() > 0 || drained_output.omitted_bytes() > 0 {
                 collected.push_buffer(drained_output);
+                if output_closed.load(Ordering::Acquire) {
+                    break;
+                }
+                if cancellation_token.is_cancelled() {
+                    Self::restore_collected_output(output, collected).await;
+                    return Err(UnifiedExecError::Cancelled);
+                }
                 continue;
             }
             if output_closed.load(Ordering::Acquire) {

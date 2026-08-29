@@ -58,14 +58,28 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
                 ));
             };
             let args: WaitProcessArgs = parse_arguments(&arguments)?;
-            let turn_state = session
-                .input_queue
-                .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
-                .await;
-            let (mut activity_rx, pending_activity) = session
-                .input_queue
-                .subscribe_activity(turn_state.as_deref())
-                .await;
+            let turn_state = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => {
+                    return Err(FunctionCallError::RespondToModel(
+                        "wait_process was cancelled".to_string(),
+                    ));
+                }
+                turn_state = session
+                    .input_queue
+                    .turn_state_for_sub_id(&session.active_turn, &turn.sub_id) => turn_state,
+            };
+            let (mut activity_rx, pending_activity) = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => {
+                    return Err(FunctionCallError::RespondToModel(
+                        "wait_process was cancelled".to_string(),
+                    ));
+                }
+                activity = session
+                    .input_queue
+                    .subscribe_activity(turn_state.as_deref()) => activity,
+            };
 
             let response = session
                 .services

@@ -1478,8 +1478,9 @@ mod tests {
         let sibling_dropped = Arc::new(AtomicBool::new(false));
         let sibling_drop_flag = Arc::clone(&sibling_dropped);
         let processor_handle = tokio::spawn(async { panic!("processor failed") });
+        let sibling_guard = DropFlag(sibling_drop_flag);
         let outbound_handle = tokio::spawn(async move {
-            let _drop_flag = DropFlag(sibling_drop_flag);
+            let _drop_flag = sibling_guard;
             pending::<()>().await;
         });
 
@@ -1498,8 +1499,9 @@ mod tests {
     async fn outbound_runtime_task_failure_aborts_processor() {
         let sibling_dropped = Arc::new(AtomicBool::new(false));
         let sibling_drop_flag = Arc::clone(&sibling_dropped);
+        let sibling_guard = DropFlag(sibling_drop_flag);
         let processor_handle = tokio::spawn(async move {
-            let _drop_flag = DropFlag(sibling_drop_flag);
+            let _drop_flag = sibling_guard;
             pending::<()>().await;
         });
         let outbound_handle = tokio::spawn(async { panic!("outbound failed") });

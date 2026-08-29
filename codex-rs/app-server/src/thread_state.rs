@@ -89,6 +89,17 @@ pub(crate) enum ThreadListenerCommand {
     },
 }
 
+impl ThreadListenerCommand {
+    pub(crate) fn is_transactional(&self) -> bool {
+        matches!(
+            self,
+            Self::SendThreadResumeResponse(_)
+                | Self::ResolveServerRequest { .. }
+                | Self::SealRealtimeUserInput { .. }
+        )
+    }
+}
+
 /// Per-conversation accumulation of the latest states e.g. error message while a turn runs.
 #[derive(Default, Clone)]
 pub(crate) struct TurnSummary {

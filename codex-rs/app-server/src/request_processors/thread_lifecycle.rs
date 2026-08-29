@@ -27,10 +27,34 @@ enum ThreadListenerPriority {
 async fn next_thread_listener_input<EventResult>(
     cancel_rx: &mut oneshot::Receiver<()>,
     listener_command_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ThreadListenerCommand>,
+    pending_command: &mut Option<ThreadListenerCommand>,
     event: impl Future<Output = EventResult>,
     unloading_watchers: impl Future<Output = bool>,
     priority: ThreadListenerPriority,
 ) -> ThreadListenerInput<EventResult> {
+    if pending_command.is_none() {
+        match listener_command_rx.try_recv() {
+            Ok(command) => *pending_command = Some(command),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                return ThreadListenerInput::Command(None);
+            }
+        }
+    }
+    let priority = if pending_command
+        .as_ref()
+        .is_some_and(ThreadListenerCommand::is_transactional)
+    {
+        ThreadListenerPriority::Commands
+    } else {
+        priority
+    };
+    let command = async {
+        match pending_command.take() {
+            Some(command) => Some(command),
+            None => listener_command_rx.recv().await,
+        }
+    };
     match priority {
         ThreadListenerPriority::Events => {
             tokio::select! {
@@ -40,7 +64,7 @@ async fn next_thread_listener_input<EventResult>(
                 unloading_watchers_open = unloading_watchers => {
                     ThreadListenerInput::UnloadingWatchers(unloading_watchers_open)
                 }
-                listener_command = listener_command_rx.recv() => {
+                listener_command = command => {
                     ThreadListenerInput::Command(listener_command)
                 }
             }
@@ -49,7 +73,7 @@ async fn next_thread_listener_input<EventResult>(
             tokio::select! {
                 biased;
                 _ = cancel_rx => ThreadListenerInput::Cancelled,
-                listener_command = listener_command_rx.recv() => {
+                listener_command = command => {
                     ThreadListenerInput::Command(listener_command)
                 }
                 event = event => ThreadListenerInput::Event(event),
@@ -338,6 +362,7 @@ pub(super) async fn ensure_listener_task_running(
     let outgoing_for_task = Arc::clone(&outgoing);
     tokio::spawn(async move {
         let mut consecutive_listener_commands = 0_usize;
+        let mut pending_listener_command = None;
         loop {
             let priority = if consecutive_listener_commands >= MAX_CONSECUTIVE_LISTENER_COMMANDS {
                 ThreadListenerPriority::Events
@@ -347,6 +372,7 @@ pub(super) async fn ensure_listener_task_running(
             let input = next_thread_listener_input(
                 &mut cancel_rx,
                 &mut listener_command_rx,
+                &mut pending_listener_command,
                 conversation.next_event(),
                 unloading_state.wait_for_unloading_trigger(),
                 priority,

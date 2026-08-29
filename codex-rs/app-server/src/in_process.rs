@@ -570,9 +570,20 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         let mut pending_request_responses =
             HashMap::<RequestId, oneshot::Sender<PendingClientRequestResponse>>::new();
         let mut shutdown_ack = None;
+        let mut processor_task_result = None;
+        let mut outbound_task_result = None;
 
         loop {
             tokio::select! {
+                biased;
+                result = &mut processor_handle => {
+                    processor_task_result = Some(result);
+                    break;
+                }
+                result = &mut outbound_handle => {
+                    outbound_task_result = Some(result);
+                    break;
+                }
                 message = client_rx.recv() => {
                     match message {
                         Some(InProcessClientMessage::Request { request, response_tx }) => {
@@ -745,9 +756,23 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
 
         drop(writer_rx);
         drop(processor_tx);
+        let runtime_failure = match (&processor_task_result, &outbound_task_result) {
+            (Some(Ok(())), None) => {
+                Some("in-process request processor exited unexpectedly".to_string())
+            }
+            (Some(Err(err)), None) => Some(format!("in-process request processor failed: {err}")),
+            (None, Some(Ok(()))) => {
+                Some("in-process outbound router exited unexpectedly".to_string())
+            }
+            (None, Some(Err(err))) => Some(format!("in-process outbound router failed: {err}")),
+            (Some(_), Some(_)) => Some("in-process runtime tasks exited unexpectedly".to_string()),
+            (None, None) => None,
+        };
         outgoing_message_sender
             .cancel_all_requests(Some(internal_error(
-                "in-process app-server runtime is shutting down",
+                runtime_failure
+                    .as_deref()
+                    .unwrap_or("in-process app-server runtime is shutting down"),
             )))
             .await;
         // Detached processor work can retain outgoing senders, so channel
@@ -755,16 +780,27 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         drop(outgoing_message_sender);
         for (_, response_tx) in pending_request_responses {
             let _ = response_tx.send(Err(internal_error(
-                "in-process app-server runtime is shutting down",
+                runtime_failure
+                    .as_deref()
+                    .unwrap_or("in-process app-server runtime is shutting down"),
             )));
         }
 
-        if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut processor_handle).await {
+        if processor_task_result.is_some() {
+            outbound_handle.abort();
+        } else if outbound_task_result.is_some() {
+            processor_handle.abort();
+        }
+        if processor_task_result.is_none()
+            && let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut processor_handle).await
+        {
             processor_handle.abort();
             let _ = processor_handle.await;
         }
         let _ = outbound_shutdown_tx.send(());
-        if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut outbound_handle).await {
+        if outbound_task_result.is_none()
+            && let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut outbound_handle).await
+        {
             outbound_handle.abort();
             let _ = outbound_handle.await;
         }

@@ -35,6 +35,16 @@ pub trait AgentGraphStore: Send + Sync {
         status: ThreadSpawnEdgeStatus,
     ) -> AgentGraphStoreFuture<'_, ()>;
 
+    /// Delete storage-owned state for a spawned thread that was never published.
+    ///
+    /// Implementations must delete the incoming spawn edge only after every other cleanup step
+    /// succeeds. Keeping the edge until last makes an interrupted or failed rollback discoverable
+    /// and retryable.
+    fn delete_unpublished_thread_state(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, ()>;
+
     /// List direct spawned children of a parent thread.
     ///
     /// When `status_filter` is `Some`, only child edges with that exact status are returned. When

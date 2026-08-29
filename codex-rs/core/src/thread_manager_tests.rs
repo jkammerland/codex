@@ -321,6 +321,13 @@ impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
         Box::pin(async { panic!("unexpected graph status update") })
     }
 
+    fn delete_unpublished_thread_state(
+        &self,
+        _child_thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async { panic!("unexpected unpublished thread cleanup") })
+    }
+
     fn list_thread_spawn_children(
         &self,
         _parent_thread_id: ThreadId,

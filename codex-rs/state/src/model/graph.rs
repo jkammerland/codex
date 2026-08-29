@@ -6,6 +6,7 @@ use strum::EnumString;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, Display, EnumString)]
 #[strum(serialize_all = "snake_case")]
 pub enum DirectionalThreadSpawnEdgeStatus {
+    Pending,
     Open,
     Closed,
 }

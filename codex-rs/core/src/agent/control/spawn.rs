@@ -32,20 +32,19 @@ struct ProvisionalSpawnEdge {
 }
 
 impl ProvisionalSpawnEdge {
-    async fn close(&self) {
-        if let Err(err) = self
-            .store
+    async fn mark_open(&self) -> codex_agent_graph_store::AgentGraphStoreResult<()> {
+        self.store
             .set_thread_spawn_edge_status(
                 self.child_thread_id,
-                codex_agent_graph_store::ThreadSpawnEdgeStatus::Closed,
+                codex_agent_graph_store::ThreadSpawnEdgeStatus::Open,
             )
             .await
-        {
-            warn!(
-                child_thread_id = %self.child_thread_id,
-                "failed to close provisional thread-spawn edge: {err}"
-            );
-        }
+    }
+
+    async fn rollback(&self) -> codex_agent_graph_store::AgentGraphStoreResult<()> {
+        self.store
+            .delete_unpublished_thread_state(self.child_thread_id)
+            .await
     }
 }
 
@@ -201,6 +200,46 @@ impl AgentControl {
                 return;
             }
         };
+
+        // Pending edges are the durable rollback journal for spawns that did not finish
+        // admission. They are never restored as agents. Retry their cleanup on every root
+        // restoration; database cleanup removes the journal entry last.
+        for parent_thread_id in
+            std::iter::once(root_thread_id).chain(descendant_ids.iter().copied())
+        {
+            let pending_children = match agent_graph_store
+                .list_thread_spawn_children(
+                    parent_thread_id,
+                    Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Pending),
+                )
+                .await
+            {
+                Ok(pending_children) => pending_children,
+                Err(err) => {
+                    warn!(
+                        "failed to inspect pending spawned-agent cleanup for {parent_thread_id}: {err}"
+                    );
+                    continue;
+                }
+            };
+            for pending_thread_id in pending_children {
+                match state.delete_stored_thread(pending_thread_id).await {
+                    Ok(()) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {
+                        if let Err(err) = agent_graph_store
+                            .delete_unpublished_thread_state(pending_thread_id)
+                            .await
+                        {
+                            warn!(
+                                "pending spawned-agent database cleanup remains for {pending_thread_id}: {err}"
+                            );
+                        }
+                    }
+                    Err(err) => warn!(
+                        "pending spawned-agent cleanup remains for {pending_thread_id}: {err}"
+                    ),
+                }
+            }
+        }
 
         for thread_id in descendant_ids {
             if self.state.agent_metadata_for_thread(thread_id).is_some() {
@@ -728,12 +767,18 @@ impl AgentControl {
             let _ = state.remove_thread(&new_thread.thread_id).await;
         }
         if spawn_cancellation.is_cancelled() {
-            self.discard_unpublished_spawn(
-                &state,
-                &new_thread.thread,
-                /*provisional_edge*/ None,
-            )
-            .await;
+            if let Err(cleanup_error) = self
+                .discard_unpublished_spawn(
+                    &state,
+                    &new_thread.thread,
+                    /*provisional_edge*/ None,
+                )
+                .await
+            {
+                return Err(CodexErr::Fatal(format!(
+                    "agent spawn cancellation rollback failed: {cleanup_error}"
+                )));
+            }
             return Err(CodexErr::Interrupted);
         }
         let provisional_edge = if let Some(parent_thread_id) = notification_source
@@ -746,16 +791,22 @@ impl AgentControl {
                 .upsert_thread_spawn_edge(
                     parent_thread_id,
                     new_thread.thread_id,
-                    codex_agent_graph_store::ThreadSpawnEdgeStatus::Open,
+                    codex_agent_graph_store::ThreadSpawnEdgeStatus::Pending,
                 )
                 .await
             {
-                self.discard_unpublished_spawn(
-                    &state,
-                    &new_thread.thread,
-                    /*provisional_edge*/ None,
-                )
-                .await;
+                if let Err(cleanup_error) = self
+                    .discard_unpublished_spawn(
+                        &state,
+                        &new_thread.thread,
+                        /*provisional_edge*/ None,
+                    )
+                    .await
+                {
+                    return Err(CodexErr::Fatal(format!(
+                        "failed to persist pending thread-spawn edge: {err}; rollback failed: {cleanup_error}"
+                    )));
+                }
                 return Err(CodexErr::Fatal(format!(
                     "failed to persist thread-spawn edge before initial submission: {err}"
                 )));
@@ -801,18 +852,46 @@ impl AgentControl {
             biased;
             result = &mut initial_submission => result,
             _ = spawn_cancellation.cancelled() => {
-                self.discard_unpublished_spawn(
-                    &state,
-                    &new_thread.thread,
-                    provisional_edge.as_ref(),
-                ).await;
+                if let Err(cleanup_error) = self
+                    .discard_unpublished_spawn(
+                        &state,
+                        &new_thread.thread,
+                        provisional_edge.as_ref(),
+                    )
+                    .await
+                {
+                    return Err(CodexErr::Fatal(format!(
+                        "agent spawn cancellation rollback remains pending: {cleanup_error}"
+                    )));
+                }
                 return Err(CodexErr::Interrupted);
             }
         };
         if let Err(error) = submission_result {
-            self.discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
-                .await;
+            if let Err(cleanup_error) = self
+                .discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
+                .await
+            {
+                return Err(CodexErr::Fatal(format!(
+                    "initial agent submission failed: {error}; rollback remains pending: {cleanup_error}"
+                )));
+            }
             return Err(error);
+        }
+        if let Some(provisional_edge) = provisional_edge.as_ref()
+            && let Err(err) = provisional_edge.mark_open().await
+        {
+            if let Err(cleanup_error) = self
+                .discard_unpublished_spawn(&state, &new_thread.thread, Some(provisional_edge))
+                .await
+            {
+                return Err(CodexErr::Fatal(format!(
+                    "failed to commit accepted agent spawn edge: {err}; rollback remains pending: {cleanup_error}"
+                )));
+            }
+            return Err(CodexErr::Fatal(format!(
+                "failed to commit accepted agent spawn edge: {err}"
+            )));
         }
 
         reservation.commit(agent_metadata.clone());
@@ -881,26 +960,40 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         thread: &Arc<CodexThread>,
         provisional_edge: Option<&ProvisionalSpawnEdge>,
-    ) {
+    ) -> Result<(), String> {
         let thread_id = thread.session.thread_id;
-        if let Some(provisional_edge) = provisional_edge {
-            provisional_edge.close().await;
-        }
+        thread
+            .shutdown_and_wait()
+            .await
+            .map_err(|err| format!("failed to shut down unpublished spawned agent: {err}"))?;
         let _ = state.remove_thread_if_matches(&thread_id, thread).await;
-        if let Err(err) = thread.shutdown_and_wait().await {
-            warn!(thread_id = %thread_id, "failed to shut down unpublished spawned agent: {err}");
-        }
         match state.delete_stored_thread(thread_id).await {
             Ok(()) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {}
             Err(err) => {
-                warn!(thread_id = %thread_id, "failed to delete unpublished spawned agent state: {err}");
+                return Err(format!(
+                    "failed to delete unpublished spawned agent state: {err}"
+                ));
             }
         }
-        if let Some(state_db) = thread.state_db()
+        if let Some(provisional_edge) = provisional_edge {
+            provisional_edge.rollback().await.map_err(|err| {
+                format!("failed to roll back provisional thread-spawn edge: {err}")
+            })?;
+        } else if let Some(agent_graph_store) = state.agent_graph_store() {
+            agent_graph_store
+                .delete_unpublished_thread_state(thread_id)
+                .await
+                .map_err(|err| {
+                    format!("failed to delete unpublished spawned agent metadata: {err}")
+                })?;
+        } else if let Some(state_db) = thread.state_db()
             && let Err(err) = state_db.delete_thread(thread_id).await
         {
-            warn!(thread_id = %thread_id, "failed to delete unpublished spawned agent metadata: {err}");
+            return Err(format!(
+                "failed to delete unpublished spawned agent metadata: {err}"
+            ));
         }
+        Ok(())
     }
 
     async fn spawn_forked_thread(

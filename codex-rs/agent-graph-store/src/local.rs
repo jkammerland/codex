@@ -60,6 +60,19 @@ impl AgentGraphStore for LocalAgentGraphStore {
         })
     }
 
+    fn delete_unpublished_thread_state(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.state_db
+                .delete_thread(child_thread_id)
+                .await
+                .map(|_| ())
+                .map_err(internal_error)
+        })
+    }
+
     fn list_thread_spawn_children(
         &self,
         parent_thread_id: ThreadId,
@@ -111,6 +124,7 @@ impl AgentGraphStore for LocalAgentGraphStore {
 
 fn to_state_status(status: ThreadSpawnEdgeStatus) -> codex_state::DirectionalThreadSpawnEdgeStatus {
     match status {
+        ThreadSpawnEdgeStatus::Pending => codex_state::DirectionalThreadSpawnEdgeStatus::Pending,
         ThreadSpawnEdgeStatus::Open => codex_state::DirectionalThreadSpawnEdgeStatus::Open,
         ThreadSpawnEdgeStatus::Closed => codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
     }

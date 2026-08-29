@@ -614,6 +614,17 @@ async fn failed_initial_submission_does_not_publish_spawned_agent() {
         "failed spawn cleanup must close its provisional graph edge"
     );
     assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Pending,
+            )
+            .await
+            .expect("pending child edges should load after failed submission"),
+        Vec::<ThreadId>::new(),
+        "failed spawn cleanup must finish its durable rollback journal"
+    );
+    assert_eq!(
         harness
             .control
             .list_agents(&parent.session_source, /*path_prefix*/ None)
@@ -723,6 +734,32 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
         .into_iter()
         .find(|thread_id| *thread_id != parent_thread_id)
         .expect("spawned child should be registered before initial submission");
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Pending,
+            )
+            .await
+            .expect("pending child edge should load during admission"),
+        vec![child_thread_id],
+        "a child must remain a cleanup journal entry until initial input is accepted"
+    );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("open child edges should load during admission"),
+        Vec::<ThreadId>::new(),
+        "an unaccepted child must not be recoverable as an open agent"
+    );
     let child_thread = harness
         .manager
         .get_thread(child_thread_id)
@@ -736,10 +773,6 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
     let child_rollout_path = child_thread
         .rollout_path()
         .expect("materialized child should report its rollout path");
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("sqlite state db should be available");
     cancellation_token.cancel();
     let error = spawn
         .await
@@ -772,6 +805,17 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
         Vec::<ThreadId>::new(),
         "cancelled spawn cleanup must not leave a recoverable open edge"
     );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Pending,
+            )
+            .await
+            .expect("pending child edges should load after cancellation"),
+        Vec::<ThreadId>::new(),
+        "cancelled spawn cleanup must finish its durable rollback journal"
+    );
 
     let spawned = harness
         .control
@@ -787,6 +831,26 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
         .await
         .expect("cancelled spawn should release the task path and capacity");
     assert_eq!(spawned.metadata.agent_path, child_source().get_agent_path());
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("accepted child edge should load"),
+        vec![spawned.thread_id]
+    );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Pending,
+            )
+            .await
+            .expect("pending child edges should load after accepted spawn"),
+        Vec::<ThreadId>::new()
+    );
 }
 
 #[tokio::test]
@@ -1376,6 +1440,98 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
     assert!(closed_worker.is_err());
     assert!(surviving_sibling.is_ok());
     assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
+}
+
+#[tokio::test]
+async fn restore_v2_agent_metadata_retries_pending_spawn_cleanup() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(AgentPath::root().join("worker").expect("worker path")),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+        )
+        .await
+        .expect("child spawn should succeed");
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    persist_thread_for_tree_resume(&parent_thread, "parent persisted").await;
+    persist_thread_for_tree_resume(&child_thread, "child persisted").await;
+    let child_rollout_path = child_thread
+        .rollout_path()
+        .expect("persisted child should report its rollout path");
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    state_db
+        .set_thread_spawn_edge_status(child_thread_id, DirectionalThreadSpawnEdgeStatus::Pending)
+        .await
+        .expect("interrupted rollback journal should persist");
+
+    let report = harness
+        .manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
+    assert_eq!(report.timed_out, Vec::<ThreadId>::new());
+
+    let resumed_manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        harness.config.model_provider.clone(),
+        harness.config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        harness.state_db.clone(),
+    );
+    let resumed_control = resumed_manager.agent_control();
+    resumed_control
+        .resume_agent_from_rollout(
+            harness.config.clone(),
+            parent_thread_id,
+            SessionSource::Exec,
+        )
+        .await
+        .expect("root resume should retry pending child cleanup");
+    resumed_control
+        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
+        .await;
+
+    assert_eq!(
+        state_db
+            .get_thread(child_thread_id)
+            .await
+            .expect("cleaned child metadata query should succeed"),
+        None
+    );
+    assert!(
+        !child_rollout_path.exists(),
+        "pending spawn recovery must remove the unpublished rollout"
+    );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Pending,
+            )
+            .await
+            .expect("pending children should load after cleanup"),
+        Vec::<ThreadId>::new()
+    );
+    assert!(resumed_control.ensure_agent_known(child_thread_id).is_err());
 }
 
 #[tokio::test]

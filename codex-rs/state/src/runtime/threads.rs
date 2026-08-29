@@ -127,6 +127,30 @@ WHERE id = ? AND preview = ''
         child_thread_id: ThreadId,
         status: crate::DirectionalThreadSpawnEdgeStatus,
     ) -> anyhow::Result<()> {
+        self.upsert_thread_spawn_edge_with_status(
+            parent_thread_id,
+            child_thread_id,
+            status.as_ref(),
+        )
+        .await
+    }
+
+    /// Begin a durable child admission without adding a public lifecycle enum variant.
+    pub async fn begin_thread_spawn_admission(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+    ) -> anyhow::Result<()> {
+        self.upsert_thread_spawn_edge_with_status(parent_thread_id, child_thread_id, "pending")
+            .await
+    }
+
+    async fn upsert_thread_spawn_edge_with_status(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+        status: &str,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             r#"
 INSERT INTO thread_spawn_edges (
@@ -141,7 +165,7 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
         )
         .bind(parent_thread_id.to_string())
         .bind(child_thread_id.to_string())
-        .bind(status.as_ref())
+        .bind(status)
         .execute(self.pool.as_ref())
         .await?;
         Ok(())
@@ -159,6 +183,36 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
             .execute(self.pool.as_ref())
             .await?;
         Ok(())
+    }
+
+    /// Publish a child admission after its initial task has been flushed.
+    pub async fn commit_thread_spawn_admission(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> anyhow::Result<()> {
+        self.set_thread_spawn_edge_status(
+            child_thread_id,
+            crate::DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+    }
+
+    /// List unpublished direct children that need recovery cleanup.
+    pub async fn list_pending_thread_spawn_children(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> anyhow::Result<Vec<ThreadId>> {
+        let rows = sqlx::query(
+            "SELECT child_thread_id FROM thread_spawn_edges WHERE parent_thread_id = ? AND status = 'pending' ORDER BY child_thread_id",
+        )
+        .bind(parent_thread_id.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?).map_err(Into::into)
+            })
+            .collect()
     }
 
     /// List direct spawned children of `parent_thread_id` whose edge matches `status`.

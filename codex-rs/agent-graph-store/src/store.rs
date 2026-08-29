@@ -35,6 +35,37 @@ pub trait AgentGraphStore: Send + Sync {
         status: ThreadSpawnEdgeStatus,
     ) -> AgentGraphStoreFuture<'_, ()>;
 
+    /// Begin a durable, unpublished child admission.
+    ///
+    /// The default preserves compatibility for stores that only understand open/closed edges.
+    fn begin_thread_spawn_admission(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        self.upsert_thread_spawn_edge(
+            parent_thread_id,
+            child_thread_id,
+            ThreadSpawnEdgeStatus::Open,
+        )
+    }
+
+    /// Publish a previously begun child admission after its initial task is durable.
+    fn commit_thread_spawn_admission(
+        &self,
+        _child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// List direct unpublished children that require rollback.
+    fn list_pending_thread_spawn_children(
+        &self,
+        _parent_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// Delete storage-owned state for a spawned thread that was never published.
     ///
     /// Implementations must delete the incoming spawn edge only after every other cleanup step
@@ -43,7 +74,9 @@ pub trait AgentGraphStore: Send + Sync {
     fn delete_unpublished_thread_state(
         &self,
         child_thread_id: ThreadId,
-    ) -> AgentGraphStoreFuture<'_, ()>;
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        self.set_thread_spawn_edge_status(child_thread_id, ThreadSpawnEdgeStatus::Closed)
+    }
 
     /// List direct spawned children of a parent thread.
     ///

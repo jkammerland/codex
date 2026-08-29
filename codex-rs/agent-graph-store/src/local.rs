@@ -60,6 +60,43 @@ impl AgentGraphStore for LocalAgentGraphStore {
         })
     }
 
+    fn begin_thread_spawn_admission(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.state_db
+                .begin_thread_spawn_admission(parent_thread_id, child_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn commit_thread_spawn_admission(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.state_db
+                .commit_thread_spawn_admission(child_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn list_pending_thread_spawn_children(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async move {
+            self.state_db
+                .list_pending_thread_spawn_children(parent_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
     fn delete_unpublished_thread_state(
         &self,
         child_thread_id: ThreadId,
@@ -124,7 +161,6 @@ impl AgentGraphStore for LocalAgentGraphStore {
 
 fn to_state_status(status: ThreadSpawnEdgeStatus) -> codex_state::DirectionalThreadSpawnEdgeStatus {
     match status {
-        ThreadSpawnEdgeStatus::Pending => codex_state::DirectionalThreadSpawnEdgeStatus::Pending,
         ThreadSpawnEdgeStatus::Open => codex_state::DirectionalThreadSpawnEdgeStatus::Open,
         ThreadSpawnEdgeStatus::Closed => codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
     }

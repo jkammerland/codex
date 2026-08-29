@@ -5,8 +5,6 @@ use serde::Serialize;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadSpawnEdgeStatus {
-    /// The child exists, but its initial input has not been durably accepted yet.
-    Pending,
     /// The child thread is still live or resumable as an open spawned agent.
     Open,
     /// The child thread has been closed from the parent/child graph's perspective.

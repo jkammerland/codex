@@ -9,6 +9,7 @@ impl UnifiedExecProcessManager {
     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
         let WaitProcessRequest {
             process_id,
+            cancellation_token,
             max_output_tokens,
             truncation_policy,
             interaction_event,
@@ -24,7 +25,13 @@ impl UnifiedExecProcessManager {
                 .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
             Arc::clone(&entry.process)
         };
-        let _interaction_guard = locked_process.interaction_lock().lock_owned().await;
+        let _interaction_guard = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => {
+                return Err(UnifiedExecError::Cancelled);
+            }
+            guard = locked_process.interaction_lock().lock_owned() => guard,
+        };
 
         let PreparedProcessHandles {
             process,
@@ -74,6 +81,7 @@ impl UnifiedExecProcessManager {
                 tokio::pin!(state_changed);
                 tokio::pin!(activity_changed);
                 tokio::pin!(output_notified);
+                output_notified.as_mut().enable();
 
                 if process.has_exited() || process.failure_message().is_some() {
                     break ProcessWaitReason::Completed;
@@ -84,6 +92,9 @@ impl UnifiedExecProcessManager {
 
                 tokio::select! {
                     biased;
+                    _ = cancellation_token.cancelled() => {
+                        return Err(UnifiedExecError::Cancelled);
+                    }
                     _ = &mut state_changed => {}
                     _ = &mut activity_changed => break ProcessWaitReason::Input,
                     _ = &mut output_notified, if tty => {}
@@ -92,9 +103,15 @@ impl UnifiedExecProcessManager {
         };
 
         let collected_output = if wait_reason == ProcessWaitReason::Completed {
-            Self::collect_output_until_closed(&output).await
+            Self::collect_output_until_closed(&output, &cancellation_token).await?
         } else {
-            Self::collect_output_until_deadline(&output, /*pause_state*/ None, Instant::now()).await
+            Self::collect_output_until_deadline(
+                &output,
+                /*pause_state*/ None,
+                Instant::now(),
+                &cancellation_token,
+            )
+            .await?
         };
         let wall_time = Instant::now().saturating_duration_since(start);
         let original_token_count = usize::try_from(approx_tokens_from_byte_count(
@@ -180,7 +197,10 @@ impl UnifiedExecProcessManager {
     /// must not be represented by a timer. Producers publish each chunk before
     /// setting `output_closed`, making the close state an acquire/release final
     /// drain boundary.
-    pub(super) async fn collect_output_until_closed(output: &OutputHandles) -> HeadTailBuffer {
+    pub(super) async fn collect_output_until_closed(
+        output: &OutputHandles,
+        cancellation_token: &CancellationToken,
+    ) -> Result<HeadTailBuffer, UnifiedExecError> {
         let OutputHandles {
             output_buffer,
             output_notify,
@@ -213,11 +233,16 @@ impl UnifiedExecProcessManager {
             }
 
             tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => {
+                    Self::restore_collected_output(output, collected).await;
+                    return Err(UnifiedExecError::Cancelled);
+                }
                 _ = &mut output_notified => {}
                 _ = &mut output_closed_notified => {}
             }
         }
 
-        collected
+        Ok(collected)
     }
 }

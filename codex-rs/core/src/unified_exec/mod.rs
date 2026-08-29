@@ -138,6 +138,7 @@ pub(crate) struct WriteStdinRequest<'a> {
 #[derive(Debug)]
 pub(crate) struct WaitProcessRequest<'a> {
     pub process_id: i32,
+    pub cancellation_token: CancellationToken,
     pub max_output_tokens: Option<usize>,
     pub truncation_policy: TruncationPolicy,
     pub interaction_event: Option<UnifiedExecInteractionEvent<'a>>,

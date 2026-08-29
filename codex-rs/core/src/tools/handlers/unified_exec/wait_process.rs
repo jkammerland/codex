@@ -47,6 +47,7 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
             let ToolInvocation {
                 session,
                 turn,
+                cancellation_token,
                 payload,
                 ..
             } = invocation;
@@ -70,6 +71,7 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
                 .unified_exec_manager
                 .wait_process(WaitProcessRequest {
                     process_id: args.session_id,
+                    cancellation_token,
                     max_output_tokens: args.max_output_tokens,
                     truncation_policy: turn.model_info().truncation_policy.into(),
                     interaction_event: Some(UnifiedExecInteractionEvent {

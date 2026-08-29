@@ -167,12 +167,14 @@ async fn exec_command_with_tty(
     }
 
     let deadline = started_at + Duration::from_millis(yield_time_ms);
+    let invocation_cancellation = CancellationToken::new();
     let collected_output = UnifiedExecProcessManager::collect_output_until_deadline(
         process.output_handles(),
         Some(session.subscribe_elicitation_pause_state()),
         deadline,
+        &invocation_cancellation,
     )
-    .await;
+    .await?;
     let wall_time = Instant::now().saturating_duration_since(started_at);
     let original_token_count = usize::try_from(approx_tokens_from_byte_count(
         collected_output.total_bytes(),
@@ -222,11 +224,27 @@ async fn wait_process_for_test(
     process_id: i32,
     activity_rx: &mut watch::Receiver<InputQueueActivity>,
 ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+    wait_process_for_test_with_cancellation(
+        session,
+        process_id,
+        activity_rx,
+        CancellationToken::new(),
+    )
+    .await
+}
+
+async fn wait_process_for_test_with_cancellation(
+    session: &Arc<Session>,
+    process_id: i32,
+    activity_rx: &mut watch::Receiver<InputQueueActivity>,
+    cancellation_token: CancellationToken,
+) -> Result<ExecCommandToolOutput, UnifiedExecError> {
     session
         .services
         .unified_exec_manager
         .wait_process(WaitProcessRequest {
             process_id,
+            cancellation_token,
             max_output_tokens: None,
             truncation_policy: TruncationPolicy::Tokens(10_000),
             interaction_event: None,
@@ -293,6 +311,52 @@ async fn wait_process_tty_wakes_on_output_then_completion() -> anyhow::Result<()
     assert_eq!(completed.wait_reason, Some(ProcessWaitReason::Completed));
     assert_eq!(completed.exit_code, Some(0));
     assert_eq!(completed.process_id, None);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_wait_process_releases_interaction_lock() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let started = exec_command_with_tty(
+        &session,
+        &turn,
+        "stty -echo; read line; printf 'received:%s' \"$line\"",
+        /*yield_time_ms*/ 10,
+        /*workdir*/ None,
+        /*tty*/ true,
+    )
+    .await?;
+    let process_id = started.process_id.expect("command should remain running");
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let cancellation_token = CancellationToken::new();
+    let wait = wait_process_for_test_with_cancellation(
+        &session,
+        process_id,
+        &mut activity_rx,
+        cancellation_token.clone(),
+    );
+    tokio::pin!(wait);
+
+    tokio::select! {
+        result = &mut wait => panic!("wait_process returned before cancellation: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
+    cancellation_token.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut wait)
+        .await
+        .expect("wait_process should observe cancellation");
+    assert!(matches!(result, Err(UnifiedExecError::Cancelled)));
+
+    let completed = write_stdin(
+        &session, &turn, process_id, "hello\n", /*yield_time_ms*/ 1_000,
+    )
+    .await?;
+    assert_eq!(completed.process_id, None);
+    assert_eq!(
+        String::from_utf8_lossy(&completed.raw_output),
+        "received:hello"
+    );
     Ok(())
 }
 
@@ -415,6 +479,25 @@ async fn write_stdin(
     input: &str,
     yield_time_ms: u64,
 ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+    write_stdin_with_cancellation(
+        session,
+        turn,
+        process_id,
+        input,
+        yield_time_ms,
+        CancellationToken::new(),
+    )
+    .await
+}
+
+async fn write_stdin_with_cancellation(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    process_id: i32,
+    input: &str,
+    yield_time_ms: u64,
+    cancellation_token: CancellationToken,
+) -> Result<ExecCommandToolOutput, UnifiedExecError> {
     session
         .services
         .unified_exec_manager
@@ -422,7 +505,7 @@ async fn write_stdin(
             &UnifiedExecContext::new(
                 Arc::clone(session),
                 crate::session::step_context::StepContext::for_test(Arc::clone(turn)),
-                tokio_util::sync::CancellationToken::new(),
+                cancellation_token,
                 "write".to_string(),
             ),
             WriteStdinRequest {
@@ -435,6 +518,70 @@ async fn write_stdin(
             },
         )
         .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_write_stdin_releases_interaction_lock() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let started = exec_command_with_tty(
+        &session,
+        &turn,
+        "stty -echo; read line; printf 'received:%s' \"$line\"",
+        /*yield_time_ms*/ 10,
+        /*workdir*/ None,
+        /*tty*/ true,
+    )
+    .await?;
+    let process_id = started.process_id.expect("command should remain running");
+    let locked_process = {
+        let store = session
+            .services
+            .unified_exec_manager
+            .process_store
+            .lock()
+            .await;
+        Arc::clone(
+            &store
+                .processes
+                .get(&process_id)
+                .expect("process should remain registered")
+                .process,
+        )
+    };
+    let interaction_guard = locked_process.interaction_lock().lock_owned().await;
+    let cancellation_token = CancellationToken::new();
+    let write = write_stdin_with_cancellation(
+        &session,
+        &turn,
+        process_id,
+        "blocked\n",
+        /*yield_time_ms*/ 1_000,
+        cancellation_token.clone(),
+    );
+    tokio::pin!(write);
+
+    tokio::select! {
+        result = &mut write => panic!("write_stdin returned before cancellation: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
+    cancellation_token.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut write)
+        .await
+        .expect("write_stdin should observe cancellation");
+    assert!(matches!(result, Err(UnifiedExecError::Cancelled)));
+    drop(interaction_guard);
+
+    let completed = write_stdin(
+        &session, &turn, process_id, "hello\n", /*yield_time_ms*/ 1_000,
+    )
+    .await?;
+    assert_eq!(completed.process_id, None);
+    assert_eq!(
+        String::from_utf8_lossy(&completed.raw_output),
+        "received:hello"
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -922,12 +1069,15 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
     process.write(b"printf 'remote-unified-exec\\n'\n").await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    let invocation_cancellation = CancellationToken::new();
     let collected = UnifiedExecProcessManager::collect_output_until_deadline(
         process.output_handles(),
         /*pause_state*/ None,
         Instant::now() + Duration::from_millis(2_500),
+        &invocation_cancellation,
     )
     .await
+    .expect("collector should not be cancelled")
     .to_bytes_with_omission_marker();
 
     assert!(String::from_utf8_lossy(&collected).contains("remote-unified-exec"));

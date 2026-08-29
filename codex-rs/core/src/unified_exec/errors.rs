@@ -5,6 +5,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub(crate) enum UnifiedExecError {
+    #[error("Unified exec interaction cancelled")]
+    Cancelled,
     #[error("Failed to create unified exec process: {message}")]
     CreateProcess { message: String },
     #[error("Unified exec process failed: {message}")]

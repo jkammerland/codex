@@ -309,11 +309,13 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
         output_closed_notify: Arc::clone(&output_closed_notify),
         cancellation_token: cancellation_token.clone(),
     };
+    let invocation_cancellation = CancellationToken::new();
 
     let collect = UnifiedExecProcessManager::collect_output_until_deadline(
         &output,
         /*pause_state*/ None,
         Instant::now() + Duration::from_secs(5),
+        &invocation_cancellation,
     );
     let produce = async {
         for chunk in chunks {
@@ -338,6 +340,7 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
     };
 
     let (collected, ()) = tokio::join!(collect, produce);
+    let collected = collected.expect("collector should not be cancelled");
     let mut expected = HeadTailBuffer::<10>::default();
     for chunk in chunks {
         expected.push_chunk(chunk);
@@ -366,13 +369,16 @@ async fn output_collection_preserves_omissions_from_drained_buffer() {
         output_closed_notify,
         cancellation_token,
     };
+    let invocation_cancellation = CancellationToken::new();
 
     let collected = UnifiedExecProcessManager::collect_output_until_deadline(
         &output,
         /*pause_state*/ None,
         Instant::now() + Duration::from_secs(1),
+        &invocation_cancellation,
     )
-    .await;
+    .await
+    .expect("collector should not be cancelled");
 
     assert_eq!(collected, expected);
 }
@@ -395,8 +401,13 @@ async fn completed_wait_drains_late_output_until_closed() {
     tokio::time::pause();
     cancellation_token.cancel();
     let collector_output = output.clone();
+    let invocation_cancellation = CancellationToken::new();
     let collector = tokio::spawn(async move {
-        UnifiedExecProcessManager::collect_output_until_closed(&collector_output).await
+        UnifiedExecProcessManager::collect_output_until_closed(
+            &collector_output,
+            &invocation_cancellation,
+        )
+        .await
     });
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
@@ -410,9 +421,64 @@ async fn completed_wait_drains_late_output_until_closed() {
     output_closed.store(true, Ordering::Release);
     output_closed_notify.notify_waiters();
 
-    let collected = collector.await.expect("collector task should not panic");
+    let collected = collector
+        .await
+        .expect("collector task should not panic")
+        .expect("collector should finish after output closes");
     tokio::time::resume();
     assert_eq!(collected.to_bytes_with_omission_marker(), b"late output");
+}
+
+#[tokio::test]
+async fn cancelling_completed_wait_restores_partially_drained_output() {
+    let mut initial_output = HeadTailBuffer::default();
+    initial_output.push_chunk(b"before cancellation;");
+    let output_buffer = Arc::new(tokio::sync::Mutex::new(initial_output));
+    let output_notify = Arc::new(Notify::new());
+    let output_closed = Arc::new(AtomicBool::new(false));
+    let output_closed_notify = Arc::new(Notify::new());
+    let process_cancellation = CancellationToken::new();
+    let output = OutputHandles {
+        output_buffer: Arc::clone(&output_buffer),
+        output_notify,
+        output_closed,
+        output_closed_notify,
+        cancellation_token: process_cancellation,
+    };
+    let invocation_cancellation = CancellationToken::new();
+    let collector_output = output.clone();
+    let collector_cancellation = invocation_cancellation.clone();
+    let collector = tokio::spawn(async move {
+        UnifiedExecProcessManager::collect_output_until_closed(
+            &collector_output,
+            &collector_cancellation,
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if output_buffer.lock().await.retained_bytes() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("collector should drain the initial output");
+    output_buffer.lock().await.push_chunk(b"after cancellation");
+    invocation_cancellation.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(1), collector)
+        .await
+        .expect("collector should observe cancellation")
+        .expect("collector task should not panic");
+    assert!(matches!(result, Err(UnifiedExecError::Cancelled)));
+    let restored = std::mem::take(&mut *output_buffer.lock().await);
+    assert_eq!(
+        restored.to_bytes_with_omission_marker(),
+        b"before cancellation;after cancellation"
+    );
 }
 
 #[tokio::test]

@@ -95,6 +95,7 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
     ("GH_PAGER", "cat"),
     ("CODEX_CI", "1"),
 ];
+
 const NETWORK_ACCESS_DENIED_MESSAGE: &str =
     "Network access was denied by the Codex sandbox network proxy.";
 const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
@@ -579,8 +580,9 @@ impl UnifiedExecProcessManager {
             process.output_handles(),
             Some(context.session.subscribe_elicitation_pause_state()),
             deadline,
+            &context.cancellation_token,
         )
-        .await;
+        .await?;
         let wall_time = Instant::now().saturating_duration_since(start);
 
         let original_token_count = usize::try_from(approx_tokens_from_byte_count(
@@ -779,7 +781,13 @@ impl UnifiedExecProcessManager {
                 .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
             Arc::clone(&entry.process)
         };
-        let _interaction_guard = locked_process.interaction_lock().lock_owned().await;
+        let _interaction_guard = tokio::select! {
+            biased;
+            _ = context.cancellation_token.cancelled() => {
+                return Err(UnifiedExecError::Cancelled);
+            }
+            guard = locked_process.interaction_lock().lock_owned() => guard,
+        };
         // A queued write must observe strict review enabled while it was waiting.
         let strict_auto_review = context
             .session
@@ -903,8 +911,13 @@ impl UnifiedExecProcessManager {
         };
         let start = Instant::now();
         let deadline = start + Duration::from_millis(yield_time_ms);
-        let collected_output =
-            Self::collect_output_until_deadline(&output, pause_state, deadline).await;
+        let collected_output = Self::collect_output_until_deadline(
+            &output,
+            pause_state,
+            deadline,
+            &context.cancellation_token,
+        )
+        .await?;
         let wall_time = Instant::now().saturating_duration_since(start);
 
         let original_token_count = usize::try_from(approx_tokens_from_byte_count(
@@ -1412,7 +1425,8 @@ impl UnifiedExecProcessManager {
         output: &OutputHandles<MAX_BYTES>,
         mut pause_state: Option<watch::Receiver<bool>>,
         mut deadline: Instant,
-    ) -> HeadTailBuffer<MAX_BYTES> {
+        invocation_cancellation: &CancellationToken,
+    ) -> Result<HeadTailBuffer<MAX_BYTES>, UnifiedExecError> {
         const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
 
         let OutputHandles {
@@ -1432,17 +1446,20 @@ impl UnifiedExecProcessManager {
                 &mut post_exit_deadline,
             )
             .await;
+            if invocation_cancellation.is_cancelled() {
+                Self::restore_collected_output(output, collected).await;
+                return Err(UnifiedExecError::Cancelled);
+            }
+            let output_notified = output_notify.notified();
+            tokio::pin!(output_notified);
+            output_notified.as_mut().enable();
             let drained_output: HeadTailBuffer<MAX_BYTES>;
             let has_drained_output: bool;
-            let mut wait_for_output = None;
             {
                 let mut guard = output_buffer.lock().await;
                 drained_output = std::mem::take(&mut *guard);
                 has_drained_output =
                     drained_output.retained_bytes() > 0 || drained_output.omitted_bytes() > 0;
-                if !has_drained_output {
-                    wait_for_output = Some(output_notify.notified());
-                }
             }
 
             if !has_drained_output {
@@ -1464,12 +1481,16 @@ impl UnifiedExecProcessManager {
                     if close_wait_remaining == Duration::ZERO {
                         break;
                     }
-                    let notified = wait_for_output.unwrap_or_else(|| output_notify.notified());
                     let closed = output_closed_notify.notified();
-                    tokio::pin!(notified);
                     tokio::pin!(closed);
+                    closed.as_mut().enable();
                     tokio::select! {
-                        _ = &mut notified => {}
+                        biased;
+                        _ = invocation_cancellation.cancelled() => {
+                            Self::restore_collected_output(output, collected).await;
+                            return Err(UnifiedExecError::Cancelled);
+                        }
+                        _ = &mut output_notified => {}
                         _ = &mut closed => {}
                         _ = tokio::time::sleep(close_wait_remaining) => break,
                         _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
@@ -1477,12 +1498,15 @@ impl UnifiedExecProcessManager {
                     continue;
                 }
 
-                let notified = wait_for_output.unwrap_or_else(|| output_notify.notified());
-                tokio::pin!(notified);
                 let exit_notified = cancellation_token.cancelled();
                 tokio::pin!(exit_notified);
                 tokio::select! {
-                    _ = &mut notified => {}
+                    biased;
+                    _ = invocation_cancellation.cancelled() => {
+                        Self::restore_collected_output(output, collected).await;
+                        return Err(UnifiedExecError::Cancelled);
+                    }
+                    _ = &mut output_notified => {}
                     _ = &mut exit_notified => exit_signal_received = true,
                     _ = tokio::time::sleep(remaining) => break,
                     _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
@@ -1498,7 +1522,17 @@ impl UnifiedExecProcessManager {
             }
         }
 
-        collected
+        Ok(collected)
+    }
+
+    async fn restore_collected_output<const MAX_BYTES: usize>(
+        output: &OutputHandles<MAX_BYTES>,
+        mut collected: HeadTailBuffer<MAX_BYTES>,
+    ) {
+        let mut guard = output.output_buffer.lock().await;
+        collected.push_buffer(std::mem::take(&mut *guard));
+        *guard = collected;
+        output.output_notify.notify_waiters();
     }
 
     async fn extend_deadlines_while_paused(

@@ -921,6 +921,15 @@ impl CodexThread {
             .await
     }
 
+    /// Rebuilds MCP connections on the next refresh after a transport failure.
+    pub fn request_mcp_transport_reconnect(&self) {
+        self.session
+            .services
+            .mcp_runtime
+            .reconnect_on_next_refresh();
+        self.session.request_mcp_runtime_refresh();
+    }
+
     pub async fn call_mcp_tool(
         &self,
         server: &str,

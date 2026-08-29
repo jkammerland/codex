@@ -11,6 +11,8 @@ use codex_core::CodexThread;
 use codex_login::AuthManager;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpEventStream;
+use codex_mcp::McpEventStreamEnd;
+use codex_mcp::McpEventStreamItem;
 use codex_protocol::ThreadId;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -207,11 +209,22 @@ async fn forward_events(
             () = auth_changes.changed() => break,
             () = thread.wait_until_terminated() => break,
             result = stream.recv() => match result {
-                Ok(Some(notification)) => notification,
-                Ok(None)
-                    if ready.is_none()
-                        && reconnect_attempts < MAX_MCP_EVENT_STREAM_RECONNECT_ATTEMPTS =>
-                {
+                Ok(McpEventStreamItem::Notification(notification)) => notification,
+                Ok(McpEventStreamItem::Ended(end_reason)) => {
+                    if end_reason == McpEventStreamEnd::TransportClosed {
+                        thread.request_mcp_transport_reconnect();
+                    }
+                    let reconnectable = ready.is_none()
+                        || matches!(
+                            end_reason,
+                            McpEventStreamEnd::ConnectionSuperseded
+                                | McpEventStreamEnd::TransportClosed
+                        );
+                    if !reconnectable
+                        || reconnect_attempts >= MAX_MCP_EVENT_STREAM_RECONNECT_ATTEMPTS
+                    {
+                        break;
+                    }
                     reconnect_attempts += 1;
                     let deadline = *reconnect_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + MCP_EVENT_STREAM_STARTUP_TIMEOUT
@@ -233,19 +246,25 @@ async fn forward_events(
                                     params.meta.clone(),
                                 )
                                 .await?;
-                            let notification = stream.recv().await?;
-                            Ok::<_, anyhow::Error>((stream, notification))
+                            let item = stream.recv().await?;
+                            Ok::<_, anyhow::Error>((stream, item))
                         }) => match result {
-                            Ok(Ok((reconnected, Some(notification)))) => {
+                            Ok(Ok((reconnected, McpEventStreamItem::Notification(notification)))) => {
                                 stream = reconnected;
                                 notification
                             }
-                            Ok(Ok((_, None)) | Err(_)) => continue,
+                            Ok(Ok((reconnected, McpEventStreamItem::Ended(end_reason)))) => {
+                                stream = reconnected;
+                                if end_reason == McpEventStreamEnd::TransportClosed {
+                                    thread.request_mcp_transport_reconnect();
+                                }
+                                continue;
+                            }
+                            Ok(Err(_)) => continue,
                             Err(_) => break,
                         },
                     }
                 }
-                Ok(None) => break,
                 Err(error) => {
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(Err(internal_error(format!("{error:#}"))));

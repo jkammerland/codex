@@ -65,6 +65,24 @@ pub struct McpEventNotification {
     pub params: Option<Value>,
 }
 
+/// Why an MCP event subscription stopped producing notifications.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpEventStreamEnd {
+    /// The server completed or explicitly cancelled the subscription.
+    ServerEnded,
+    /// The runtime published a replacement connection for the hosted event server.
+    ConnectionSuperseded,
+    /// The underlying transport disappeared unexpectedly.
+    TransportClosed,
+}
+
+/// The next observable state of an MCP event subscription.
+#[derive(Clone, Debug, PartialEq)]
+pub enum McpEventStreamItem {
+    Notification(McpEventNotification),
+    Ended(McpEventStreamEnd),
+}
+
 /// Owns an MCP event subscription and cancels its request when dropped.
 pub struct McpEventStream {
     request: Option<CancellableEventStreamRequest>,
@@ -75,17 +93,17 @@ pub struct McpEventStream {
 
 impl McpEventStream {
     /// Receives the next raw lifecycle notification for this subscription.
-    pub async fn recv(&mut self) -> Result<Option<McpEventNotification>> {
+    pub async fn recv(&mut self) -> Result<McpEventStreamItem> {
         enum Next {
             RuntimeChanged,
             Notification(McpEventNotification),
-            Finished(Result<Option<McpEventNotification>>),
+            Finished(Result<McpEventStreamEnd>),
         }
 
         loop {
             let next = {
                 let Some(request) = self.request.as_mut() else {
-                    return Ok(None);
+                    return Ok(McpEventStreamItem::Ended(McpEventStreamEnd::ServerEnded));
                 };
                 tokio::select! {
                     biased;
@@ -107,10 +125,12 @@ impl McpEventStream {
                     }
                     response = &mut request.handle.rx => {
                         let result = match response {
-                            Ok(Ok(_))
-                            | Ok(Err(ServiceError::Cancelled { .. }))
-                            | Ok(Err(ServiceError::TransportClosed))
-                            | Err(_) => Ok(None),
+                            Ok(Ok(_)) | Ok(Err(ServiceError::Cancelled { .. })) => {
+                                Ok(McpEventStreamEnd::ServerEnded)
+                            }
+                            Ok(Err(ServiceError::TransportClosed)) | Err(_) => {
+                                Ok(McpEventStreamEnd::TransportClosed)
+                            }
                             Ok(Err(error)) => Err(error.into()),
                         };
                         Next::Finished(result)
@@ -134,15 +154,19 @@ impl McpEventStream {
                     }
                     self.cancel();
                     if latest.is_some() {
-                        return Ok(None);
+                        return Ok(McpEventStreamItem::Ended(
+                            McpEventStreamEnd::ConnectionSuperseded,
+                        ));
                     }
                     return Err(anyhow!("hosted MCP event server was removed"));
                 }
-                Next::Notification(notification) => return Ok(Some(notification)),
+                Next::Notification(notification) => {
+                    return Ok(McpEventStreamItem::Notification(notification));
+                }
                 Next::Finished(result) => {
                     self.request = None;
                     self.connection = None;
-                    return result;
+                    return result.map(McpEventStreamItem::Ended);
                 }
             }
         }

@@ -128,7 +128,8 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
     });
     let router = Router::new()
         .route("/api/codex/ps/mcp", handler.clone())
-        .route("/changed/api/codex/ps/mcp", handler);
+        .route("/changed/api/codex/ps/mcp", handler.clone())
+        .route("/changed2/api/codex/ps/mcp", handler);
     let mcp_server = tokio::spawn(async move { axum::serve(listener, router).await });
 
     let codex_home = TempDir::new()?;
@@ -197,14 +198,37 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         "subscription start must not complete before the active notification"
     );
 
-    allow_activation.notify_one();
+    let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        &config_path,
+        config.replace(&apps_url, &format!("{apps_url}/changed")),
+    )?;
+    let startup_reload_request_id = app_server
+        .send_raw_request("config/mcpServer/reload", /*params*/ None)
+        .await?;
+    let _: McpServerRefreshResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(startup_reload_request_id),
+    )
+    .await??;
+    let (replacement_stream_path, replacement_stream_request) =
+        timeout(Duration::from_secs(5), stream_started_rx.recv())
+            .await?
+            .context("starting MCP event stream did not move to the replacement connection")?;
+    assert_eq!(replacement_stream_path, "/changed/api/codex/ps/mcp");
+    assert_eq!(
+        replacement_stream_request["params"],
+        stream_request["params"]
+    );
+
     let _: McpServerEventStreamStartResponse = timeout(
         Duration::from_secs(5),
         app_server.read_response(start_request_id),
     )
     .await??;
     let metadata = json!({
-        "io.modelcontextprotocol/subscriptionId": stream_request["id"],
+        "io.modelcontextprotocol/subscriptionId": replacement_stream_request["id"],
         "provider": "event-test-server",
     });
     let active: McpServerEventStreamNotification = timeout(
@@ -257,11 +281,13 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         "an unchanged MCP refresh must retain the active event stream"
     );
 
-    let config_path = codex_home.path().join(CONFIG_TOML_FILE);
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        config.replace(&apps_url, &format!("{apps_url}/changed")),
+        config.replace(
+            &format!("{apps_url}/changed"),
+            &format!("{apps_url}/changed2"),
+        ),
     )?;
     let reload_request_id = app_server
         .send_raw_request("config/mcpServer/reload", /*params*/ None)
@@ -275,10 +301,42 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         timeout(Duration::from_secs(5), stream_started_rx.recv())
             .await?
             .context("active MCP event stream did not move to the replacement connection")?;
-    assert_eq!(replacement_stream_path, "/changed/api/codex/ps/mcp");
+    assert_eq!(replacement_stream_path, "/changed2/api/codex/ps/mcp");
     assert_eq!(
         replacement_stream_request["params"],
         stream_request["params"]
+    );
+    let replacement_metadata = json!({
+        "io.modelcontextprotocol/subscriptionId": replacement_stream_request["id"],
+        "provider": "event-test-server",
+    });
+    let replacement_active: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        replacement_active.notification,
+        McpServerEventNotification {
+            method: "notifications/events/active".to_string(),
+            params: json!({ "_meta": replacement_metadata, "status": "active" }),
+        }
+    );
+    let replacement_event: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        replacement_event.notification,
+        McpServerEventNotification {
+            method: "notifications/events/event".to_string(),
+            params: json!({
+                "_meta": replacement_metadata,
+                "name": "issue.updated",
+                "data": { "issue": 42 },
+            }),
+        }
     );
 
     let _: McpServerEventStreamStopResponse = app_server

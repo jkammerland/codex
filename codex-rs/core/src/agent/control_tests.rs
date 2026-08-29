@@ -560,6 +560,7 @@ async fn failed_initial_submission_does_not_publish_spawned_agent() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow multi-agent v2");
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let (parent_thread_id, parent) = harness.start_thread().await;
     harness
@@ -632,6 +633,7 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow multi-agent v2");
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let (parent_thread_id, parent) = harness.start_thread().await;
     harness
@@ -647,6 +649,27 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
         )
         .expect("child source")
     };
+    let already_cancelled = tokio_util::sync::CancellationToken::new();
+    already_cancelled.cancel();
+    let error = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("cancelled before spawn"),
+            Some(child_source()),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                cancellation_token: already_cancelled,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("an already-cancelled spawn should not create a thread");
+    assert!(matches!(error.details(), CodexErrorDetails::Interrupted));
+    assert_eq!(
+        harness.manager.list_thread_ids().await,
+        vec![parent_thread_id]
+    );
     let cancellation_token = tokio_util::sync::CancellationToken::new();
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -677,7 +700,17 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
     });
 
     started.notified().await;
-    assert_eq!(harness.manager.list_thread_ids().await.len(), 2);
+    let child_thread_id = harness
+        .manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .find(|thread_id| *thread_id != parent_thread_id)
+        .expect("spawned child should be registered before initial submission");
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
     cancellation_token.cancel();
     let error = spawn
         .await
@@ -687,6 +720,13 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
     assert_eq!(
         harness.manager.list_thread_ids().await,
         vec![parent_thread_id]
+    );
+    assert_eq!(
+        state_db
+            .get_thread(child_thread_id)
+            .await
+            .expect("cancelled child metadata query should succeed"),
+        None
     );
 
     let spawned = harness
@@ -3330,7 +3370,7 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
 async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     let harness = AgentControlHarness::new().await;
     let (_root_thread_id, root_thread) = harness.start_thread().await;
-    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
+    let (worker_thread_id, worker_thread) = harness.start_thread().await;
     let mut tester_config = harness.config.clone();
     let _ = tester_config.features.enable(Feature::MultiAgentV2);
     let tester_thread_id = harness
@@ -3410,6 +3450,18 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     })
     .await
     .expect("completion watcher should queue a direct-parent message");
+    assert!(
+        worker_thread
+            .session
+            .input_queue
+            .has_pending_mailbox_items()
+            .await,
+        "child completion status must not publish before the parent mailbox is installed"
+    );
+    assert_eq!(
+        tester_thread.agent_status().await,
+        AgentStatus::Completed(Some("done".to_string()))
+    );
 
     let root_history = root_thread.session.clone_history().await;
     assert!(!history_contains_assistant_inter_agent_communication(

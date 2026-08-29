@@ -114,6 +114,12 @@ impl Handler {
             )
             .await;
 
+        if outcome == WaitOutcome::Interrupted {
+            return Err(FunctionCallError::RespondToModel(
+                "wait_agent was cancelled".to_string(),
+            ));
+        }
+
         Ok(boxed_tool_output(result))
     }
 }

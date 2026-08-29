@@ -48,7 +48,6 @@ use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
@@ -186,18 +185,19 @@ async fn spawn_v2_wait_test_worker() -> (
 }
 
 async fn interrupt_v2_wait_test_worker(worker: &crate::CodexThread) {
+    let turn = worker.session.new_default_turn().await;
     worker
         .session
-        .send_event_raw(Event {
-            id: "interrupted-turn".to_string(),
-            msg: EventMsg::TurnAborted(TurnAbortedEvent {
+        .send_event(
+            turn.as_ref(),
+            EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some("interrupted-turn".to_string()),
                 started_at: None,
                 reason: TurnAbortReason::Interrupted,
                 completed_at: None,
                 duration_ms: None,
             }),
-        })
+        )
         .await;
     assert_eq!(worker.agent_status().await, AgentStatus::Interrupted);
 }
@@ -3409,35 +3409,95 @@ async fn multi_agent_v2_wait_agent_wakes_when_last_worker_is_interrupted() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_child_error_waits_for_terminal_status() {
+    let (_session, _turn, _manager, worker) = spawn_v2_wait_test_worker().await;
+    let worker_turn = worker.session.new_default_turn().await;
+    let status_before_error = worker.agent_status().await;
+
+    worker
+        .session
+        .send_event(
+            worker_turn.as_ref(),
+            EventMsg::Error(codex_protocol::protocol::ErrorEvent {
+                misalignment: None,
+                message: "worker failed".to_string(),
+                codex_error_info: None,
+            }),
+        )
+        .await;
+    assert_eq!(worker.agent_status().await, status_before_error);
+
+    worker
+        .session
+        .send_event(
+            worker_turn.as_ref(),
+            EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id: Some(worker_turn.sub_id.clone()),
+                started_at: None,
+                reason: TurnAbortReason::Interrupted,
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+    assert_eq!(worker.agent_status().await, AgentStatus::Interrupted);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_child_completion_installs_parent_mail_before_status() {
+    let (session, _turn, manager, worker) = spawn_v2_wait_test_worker().await;
+    let parent = manager
+        .get_thread(session.thread_id)
+        .await
+        .expect("parent thread should remain loaded");
+    let worker_turn = worker.session.new_default_turn().await;
+
+    worker
+        .session
+        .send_event(
+            worker_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: worker_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some("done".to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    assert!(parent.session.input_queue.has_pending_mailbox_items().await);
+    assert_eq!(
+        worker.agent_status().await,
+        AgentStatus::Completed(Some("done".to_string()))
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_wait_agent_reports_turn_cancellation() {
     let (session, turn, _manager, _worker) = spawn_v2_wait_test_worker().await;
     let cancellation_token = CancellationToken::new();
     let mut wait_invocation = invocation(session, turn, "wait_agent", function_payload(json!({})));
     wait_invocation.cancellation_token = cancellation_token.clone();
-    let wait_task = tokio::spawn(async move {
-        WaitAgentHandlerV2
-            .handle(wait_invocation)
-            .await
-            .expect("wait_agent should handle cancellation")
-    });
+    let wait_task = tokio::spawn(async move { WaitAgentHandlerV2.handle(wait_invocation).await });
     tokio::task::yield_now().await;
 
     cancellation_token.cancel();
 
-    let output = timeout(Duration::from_millis(500), wait_task)
+    let result = timeout(Duration::from_millis(500), wait_task)
         .await
         .expect("turn cancellation should wake wait_agent")
         .expect("wait task should join");
-    let (content, success) = expect_text_output(output);
-    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("turn cancellation should abort wait_agent"),
+    };
     assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait interrupted by turn cancellation.".to_string(),
-        }
+        error,
+        FunctionCallError::RespondToModel("wait_agent was cancelled".to_string())
     );
-    assert_eq!(success, None);
 }
 
 #[tokio::test]

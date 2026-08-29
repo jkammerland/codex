@@ -338,23 +338,29 @@ impl AgentControl {
         } else {
             (None, None)
         };
-        let result = self
-            .handle_thread_request_result(
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        let submission_result = state
+            .send_op(
                 agent_id,
-                state,
-                state
-                    .send_op(
-                        agent_id,
-                        Op::InterAgentCommunication {
-                            communication,
-                            start_options,
-                        },
-                        parent_turn_id,
-                        root_turn_id,
-                    )
-                    .await,
+                Op::InterAgentCommunicationWithAck {
+                    communication,
+                    start_options,
+                    reply,
+                },
+                parent_turn_id,
+                root_turn_id,
             )
             .await;
+        let result = match self
+            .handle_thread_request_result(agent_id, state, submission_result)
+            .await
+        {
+            Ok(submission_id) => reply_rx
+                .await
+                .map(|()| submission_id)
+                .map_err(|_| CodexErr::InternalAgentDied),
+            Err(error) => Err(error),
+        };
         if let (Some(communication), Ok(communication_id)) =
             (communication_for_log, result.as_ref())
         {

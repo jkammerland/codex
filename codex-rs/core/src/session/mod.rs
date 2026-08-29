@@ -2014,12 +2014,11 @@ impl Session {
             id: turn_context.sub_id.clone(),
             msg,
         };
-        let defer_v2_child_terminal_status = turn_context.multi_agent_version
-            == MultiAgentVersion::V2
+        let defer_v2_child_status = turn_context.multi_agent_version == MultiAgentVersion::V2
             && matches!(
                 (&legacy_source, &turn_context.session_source),
                 (
-                    EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_),
+                    EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::Error(_),
                     SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                         agent_path: Some(_),
                         ..
@@ -2044,7 +2043,7 @@ impl Session {
                 .analytics_events_client
                 .track_guardian_session_event(self.thread_id, &event);
         }
-        if defer_v2_child_terminal_status {
+        if defer_v2_child_status {
             self.send_event_raw_with_persistence(
                 event,
                 /*persist*/ true,
@@ -2057,7 +2056,7 @@ impl Session {
         let deferred_agent_status = self
             .maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
             .await;
-        if defer_v2_child_terminal_status && let Some(status) = deferred_agent_status {
+        if defer_v2_child_status && let Some(status) = deferred_agent_status {
             self.agent_status.send_replace(status);
         }
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
@@ -2105,17 +2104,15 @@ impl Session {
             Some(error) => AgentStatus::Errored(error.message),
             None => agent_status_from_event(msg)?,
         };
-        if !is_final(&status) {
-            return None;
+        if is_final(&status) {
+            self.forward_child_completion_to_parent(
+                turn_context,
+                *parent_thread_id,
+                child_agent_path,
+                status.clone(),
+            )
+            .await;
         }
-
-        self.forward_child_completion_to_parent(
-            turn_context,
-            *parent_thread_id,
-            child_agent_path,
-            status.clone(),
-        )
-        .await;
         Some(status)
     }
 

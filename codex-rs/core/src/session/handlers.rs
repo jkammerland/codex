@@ -641,6 +641,16 @@ pub(super) async fn submission_loop(
                         .await;
                     false
                 }
+                Op::InterAgentCommunicationWithAck {
+                    communication,
+                    start_options,
+                    reply,
+                } => {
+                    inter_agent_communication(&sess, sub.id.clone(), communication, start_options)
+                        .await;
+                    let _ = reply.send(());
+                    false
+                }
                 Op::ExecApproval {
                     id: approval_id,
                     turn_id,

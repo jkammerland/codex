@@ -588,6 +588,9 @@ impl AgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
+        if options.cancellation_token.is_cancelled() {
+            return Err(CodexErr::Interrupted);
+        }
         let state = self.upgrade()?;
         let spawn_cancellation = options.cancellation_token.clone();
         #[cfg(test)]
@@ -701,6 +704,11 @@ impl AgentControl {
         if options.remove_thread_before_initial_submission {
             let _ = state.remove_thread(&new_thread.thread_id).await;
         }
+        if spawn_cancellation.is_cancelled() {
+            self.discard_unpublished_spawn(&state, &new_thread.thread)
+                .await;
+            return Err(CodexErr::Interrupted);
+        }
         let start_options = TurnStartOptions {
             parent_turn_id: options.parent_turn_id,
             root_turn_id: options.root_turn_id,
@@ -735,26 +743,13 @@ impl AgentControl {
             biased;
             result = &mut initial_submission => result,
             _ = spawn_cancellation.cancelled() => {
-                if let Some(thread) = state.remove_thread(&new_thread.thread_id).await
-                    && let Err(err) = thread.shutdown_and_wait().await
-                {
-                    warn!(
-                        thread_id = %new_thread.thread_id,
-                        "failed to shut down cancelled spawned agent: {err}"
-                    );
-                }
+                self.discard_unpublished_spawn(&state, &new_thread.thread).await;
                 return Err(CodexErr::Interrupted);
             }
         };
         if let Err(error) = submission_result {
-            if let Some(thread) = state.remove_thread(&new_thread.thread_id).await
-                && let Err(err) = thread.shutdown_and_wait().await
-            {
-                warn!(
-                    thread_id = %new_thread.thread_id,
-                    "failed to shut down spawned agent after initial submission failed: {err}"
-                );
-            }
+            self.discard_unpublished_spawn(&state, &new_thread.thread)
+                .await;
             return Err(error);
         }
 
@@ -824,6 +819,23 @@ impl AgentControl {
             metadata: agent_metadata,
             status: self.get_status(new_thread.thread_id).await,
         })
+    }
+
+    async fn discard_unpublished_spawn(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        thread: &Arc<CodexThread>,
+    ) {
+        let thread_id = thread.session.thread_id;
+        let _ = state.remove_thread_if_matches(&thread_id, thread).await;
+        if let Err(err) = thread.shutdown_and_wait().await {
+            warn!(thread_id = %thread_id, "failed to shut down unpublished spawned agent: {err}");
+        }
+        if let Some(state_db) = thread.state_db()
+            && let Err(err) = state_db.delete_thread(thread_id).await
+        {
+            warn!(thread_id = %thread_id, "failed to delete unpublished spawned agent state: {err}");
+        }
     }
 
     async fn spawn_forked_thread(

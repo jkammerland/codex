@@ -713,17 +713,20 @@ impl ToolRegistry {
 
         // A PostToolUse block rejects the result, not the already-completed tool execution.
         let lifecycle_outcome = match &result {
-            Ok(_) => ToolCallOutcome::Completed { success },
-            Err(_) => ToolCallOutcome::Failed {
+            Ok(_) => Some(ToolCallOutcome::Completed { success }),
+            Err(FunctionCallError::Cancelled) => None,
+            Err(_) => Some(ToolCallOutcome::Failed {
                 handler_executed: true,
-            },
+            }),
         };
-        notify_tool_finish_if_unclaimed(
-            &invocation,
-            terminal_outcome_reached.as_deref(),
-            lifecycle_outcome,
-        )
-        .await;
+        if let Some(lifecycle_outcome) = lifecycle_outcome {
+            notify_tool_finish_if_unclaimed(
+                &invocation,
+                terminal_outcome_reached.as_deref(),
+                lifecycle_outcome,
+            )
+            .await;
+        }
 
         match result {
             Ok(mut result) => {

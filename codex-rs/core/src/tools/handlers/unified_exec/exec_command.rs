@@ -410,6 +410,7 @@ impl ExecCommandHandler {
                     hook_command: Some(hook_command),
                 }))
             }
+            Err(UnifiedExecError::Cancelled) => Err(FunctionCallError::Cancelled),
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
                 "exec_command failed for `{command_for_display}`: {err:?}"
             ))),

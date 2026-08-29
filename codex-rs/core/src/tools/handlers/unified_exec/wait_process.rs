@@ -7,6 +7,7 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecInteractionEvent;
 use crate::unified_exec::WaitProcessRequest;
 use codex_tools::ToolName;
@@ -82,8 +83,9 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
                     pending_activity,
                 })
                 .await
-                .map_err(|err| {
-                    FunctionCallError::RespondToModel(format!("wait_process failed: {err}"))
+                .map_err(|err| match err {
+                    UnifiedExecError::Cancelled => FunctionCallError::Cancelled,
+                    err => FunctionCallError::RespondToModel(format!("wait_process failed: {err}")),
                 })?;
 
             Ok(boxed_tool_output(response))

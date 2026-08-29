@@ -10,6 +10,7 @@ use tokio_util::either::Either;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
+use tracing::Span;
 use tracing::info;
 use tracing::instrument;
 use tracing::trace_span;
@@ -17,6 +18,7 @@ use tracing::trace_span;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::session::turn_context::TurnContext;
 use crate::tools::context::AbortedToolOutput;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolPayload;
@@ -183,33 +185,56 @@ impl ToolCallRuntime {
         async move {
             let _tool_call_timing_guard = tool_call_timing_guard;
             tokio::select! {
-                res = &mut dispatch_handle => res.map_err(Self::tool_task_join_error)?,
+                res = &mut dispatch_handle => {
+                    match res.map_err(Self::tool_task_join_error)? {
+                        Err(FunctionCallError::Cancelled) => {
+                            Ok(Self::finish_aborted_call(
+                                &call,
+                                started,
+                                abort_session.as_ref(),
+                                abort_turn.as_ref(),
+                                abort_source,
+                                &abort_dispatch_span,
+                            ).await)
+                        }
+                        result => result,
+                    }
+                },
                 _ = cancellation_token.cancelled() => {
                     if terminal_outcome_reached.load(Ordering::Acquire)
                         || dispatch_handle.is_finished()
                         || handles_cancellation_cooperatively
                             && handler_started.load(Ordering::Acquire)
                     {
-                        dispatch_handle.await.map_err(Self::tool_task_join_error)?
+                        match dispatch_handle.await.map_err(Self::tool_task_join_error)? {
+                            Err(FunctionCallError::Cancelled) => {
+                                Ok(Self::finish_aborted_call(
+                                    &call,
+                                    started,
+                                    abort_session.as_ref(),
+                                    abort_turn.as_ref(),
+                                    abort_source,
+                                    &abort_dispatch_span,
+                                ).await)
+                            }
+                            result => result,
+                        }
                     } else {
-                        let secs = started.elapsed().as_secs_f32().max(0.1);
-                        abort_dispatch_span.record("aborted", true);
                         dispatch_handle.abort();
                         match dispatch_handle.await {
+                            Ok(Err(FunctionCallError::Cancelled)) => {}
                             Ok(result) => return result,
                             Err(err) if err.is_cancelled() => {}
                             Err(err) => return Err(Self::tool_task_join_error(err)),
                         }
-                        let response = Self::aborted_response(&call, secs);
-                        notify_tool_aborted(
+                        Ok(Self::finish_aborted_call(
+                            &call,
+                            started,
                             abort_session.as_ref(),
                             abort_turn.as_ref(),
-                            call.call_id.as_str(),
-                            &call.tool_name,
                             abort_source,
-                        )
-                        .await;
-                        Ok(response)
+                            &abort_dispatch_span,
+                        ).await)
                     }
                 },
             }
@@ -221,6 +246,27 @@ impl ToolCallRuntime {
 impl ToolCallRuntime {
     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
+    }
+
+    async fn finish_aborted_call(
+        call: &ToolCall,
+        started: Instant,
+        session: &Session,
+        turn: &TurnContext,
+        source: ToolCallSource,
+        dispatch_span: &Span,
+    ) -> AnyToolResult {
+        let secs = started.elapsed().as_secs_f32().max(0.1);
+        dispatch_span.record("aborted", true);
+        notify_tool_aborted(
+            session,
+            turn,
+            call.call_id.as_str(),
+            &call.tool_name,
+            source,
+        )
+        .await;
+        Self::aborted_response(call, secs)
     }
 
     fn failure_response(call: ToolCall, err: FunctionCallError) -> ResponseInputItem {

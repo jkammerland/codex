@@ -99,17 +99,15 @@ impl WriteStdinHandler {
                 },
             )
             .await
-            .map_err(|err| {
-                let message = match err {
-                    UnifiedExecError::StdinApproval(ToolError::Rejected(reason)) => {
-                        format!("write_stdin rejected: {reason}")
-                    }
-                    UnifiedExecError::StdinApproval(ToolError::Codex(err)) => {
-                        format!("write_stdin approval failed: {err}")
-                    }
-                    err => format!("write_stdin failed: {err}"),
-                };
-                FunctionCallError::RespondToModel(message)
+            .map_err(|err| match err {
+                UnifiedExecError::Cancelled => FunctionCallError::Cancelled,
+                UnifiedExecError::StdinApproval(ToolError::Rejected(reason)) => {
+                    FunctionCallError::RespondToModel(format!("write_stdin rejected: {reason}"))
+                }
+                UnifiedExecError::StdinApproval(ToolError::Codex(err)) => {
+                    FunctionCallError::RespondToModel(format!("write_stdin approval failed: {err}"))
+                }
+                err => FunctionCallError::RespondToModel(format!("write_stdin failed: {err}")),
             })?;
 
         Ok(boxed_tool_output(response))

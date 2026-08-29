@@ -276,6 +276,10 @@ impl CoreToolRuntime for McpHandler {
         Some(&self.tool_info.server_name)
     }
 
+    fn handles_cancellation_cooperatively(&self) -> bool {
+        true
+    }
+
     fn on_tool_result_accepted(&self, invocation: &ToolInvocation, result: &dyn ToolOutput) {
         let ToolCallSource::CodeMode { cell_id, .. } = &invocation.source else {
             return;

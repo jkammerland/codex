@@ -791,6 +791,12 @@ impl McpConnectionSet {
         self.servers.contains_key(server_name)
     }
 
+    pub(crate) fn connection_by_name(&self, server_name: &str) -> Option<Arc<McpServerConnection>> {
+        self.servers
+            .get(server_name)
+            .map(|view| Arc::clone(&view.connection))
+    }
+
     pub(crate) async fn authentication_failed_servers(&self) -> Vec<String> {
         let mut failed_servers = Vec::new();
         for (server_name, view) in &self.servers {

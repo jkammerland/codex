@@ -8,6 +8,8 @@ use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
+use codex_protocol::items::McpToolCallStatus;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -474,14 +476,40 @@ async fn explicit_turn_interrupt_aborts_an_unbounded_mcp_call_without_a_follow_u
     wait_for_path_exists(&started_file, Duration::from_secs(5)).await?;
 
     fixture.codex.submit(Op::Interrupt).await?;
-    let abort = wait_for_event(&fixture.codex, |event| {
-        matches!(event, EventMsg::TurnAborted(_))
+    let (abort, terminal_item) = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut terminal_item = None;
+        loop {
+            match fixture.codex.next_event().await?.msg {
+                EventMsg::ItemCompleted(event)
+                    if matches!(
+                        &event.item,
+                        TurnItem::McpToolCall(item)
+                            if item.id == "call-unbounded-interrupt"
+                    ) =>
+                {
+                    terminal_item = Some(event.item);
+                }
+                EventMsg::TurnAborted(abort) => {
+                    break Ok::<_, anyhow::Error>((abort, terminal_item));
+                }
+                _ => {}
+            }
+        }
     })
-    .await;
-    let EventMsg::TurnAborted(abort) = abort else {
-        unreachable!("event guard guarantees a turn-aborted event");
-    };
+    .await??;
     assert_eq!(abort.reason, TurnAbortReason::Interrupted);
+    let Some(TurnItem::McpToolCall(terminal_item)) = terminal_item else {
+        anyhow::bail!("interrupted MCP call did not emit a typed terminal item");
+    };
+    assert_eq!(terminal_item.status, McpToolCallStatus::Failed);
+    assert!(
+        terminal_item
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("explicit_turn_interrupt")),
+        "interrupted MCP error should preserve its cancellation origin: {:?}",
+        terminal_item.error
+    );
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(

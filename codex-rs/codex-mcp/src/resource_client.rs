@@ -70,44 +70,79 @@ pub struct McpEventStream {
     request: Option<CancellableEventStreamRequest>,
     runtime_handle: Handle,
     connection: Option<Arc<McpServerConnection>>,
-    hosted_event_server_removals: watch::Receiver<()>,
+    hosted_event_server_connection: watch::Receiver<Option<Arc<McpServerConnection>>>,
 }
 
 impl McpEventStream {
     /// Receives the next raw lifecycle notification for this subscription.
     pub async fn recv(&mut self) -> Result<Option<McpEventNotification>> {
-        let Some(request) = self.request.as_mut() else {
-            return Ok(None);
-        };
+        enum Next {
+            RuntimeChanged,
+            Notification(McpEventNotification),
+            Finished(Result<Option<McpEventNotification>>),
+        }
 
-        tokio::select! {
-            biased;
+        loop {
+            let next = {
+                let Some(request) = self.request.as_mut() else {
+                    return Ok(None);
+                };
+                tokio::select! {
+                    biased;
 
-            Ok(()) = self.hosted_event_server_removals.changed() => {
-                self.cancel();
-                Err(anyhow!("hosted MCP event server was removed"))
-            }
-            Some(notification) = request.notifications.recv() => {
-                let metadata = notification.get_meta().0.0.clone();
-                let mut params = notification.params;
-                if !metadata.is_empty() {
-                    params.get_or_insert_with(|| json!({}))["_meta"] = Value::Object(metadata);
+                    Ok(()) = self.hosted_event_server_connection.changed() => {
+                        Next::RuntimeChanged
+                    }
+                    Some(notification) = request.notifications.recv() => {
+                        let metadata = notification.get_meta().0.0.clone();
+                        let mut params = notification.params;
+                        if !metadata.is_empty() {
+                            params.get_or_insert_with(|| json!({}))["_meta"] =
+                                Value::Object(metadata);
+                        }
+                        Next::Notification(McpEventNotification {
+                            method: notification.method,
+                            params,
+                        })
+                    }
+                    response = &mut request.handle.rx => {
+                        let result = match response {
+                            Ok(Ok(_))
+                            | Ok(Err(ServiceError::Cancelled { .. }))
+                            | Ok(Err(ServiceError::TransportClosed))
+                            | Err(_) => Ok(None),
+                            Ok(Err(error)) => Err(error.into()),
+                        };
+                        Next::Finished(result)
+                    }
                 }
-                Ok(Some(McpEventNotification {
-                    method: notification.method,
-                    params,
-                }))
-            }
-            response = &mut request.handle.rx => {
-                self.request = None;
-                self.connection = None;
+            };
 
-                match response {
-                    Ok(Ok(_))
-                    | Ok(Err(ServiceError::Cancelled { .. }))
-                    | Ok(Err(ServiceError::TransportClosed))
-                    | Err(_) => Ok(None),
-                    Ok(Err(error)) => Err(error.into()),
+            match next {
+                Next::RuntimeChanged => {
+                    let latest = self
+                        .hosted_event_server_connection
+                        .borrow_and_update()
+                        .clone();
+                    if self
+                        .connection
+                        .as_ref()
+                        .zip(latest.as_ref())
+                        .is_some_and(|(current, latest)| Arc::ptr_eq(current, latest))
+                    {
+                        continue;
+                    }
+                    self.cancel();
+                    if latest.is_some() {
+                        return Ok(None);
+                    }
+                    return Err(anyhow!("hosted MCP event server was removed"));
+                }
+                Next::Notification(notification) => return Ok(Some(notification)),
+                Next::Finished(result) => {
+                    self.request = None;
+                    self.connection = None;
+                    return result;
                 }
             }
         }
@@ -271,7 +306,7 @@ impl McpResourceClient {
             params["_meta"] = Value::Object(request_meta.clone());
         }
 
-        let (connections, hosted_event_server_removals) = self
+        let (connections, hosted_event_server_connection) = self
             .runtime
             .latest_connections_for_event_server(CODEX_APPS_MCP_SERVER_NAME)?;
         let (managed, _, connection) = connections
@@ -287,7 +322,7 @@ impl McpResourceClient {
             request: Some(request),
             runtime_handle: Handle::current(),
             connection: Some(connection),
-            hosted_event_server_removals,
+            hosted_event_server_connection,
         })
     }
 }

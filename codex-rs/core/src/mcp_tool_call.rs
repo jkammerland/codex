@@ -265,6 +265,7 @@ pub(crate) async fn handle_mcp_tool_call(
                 return handle_approved_mcp_tool_call(
                     &sess,
                     step_context.as_ref(),
+                    cancellation_token,
                     &call_id,
                     originating_item_id.as_ref(),
                     invocation,
@@ -339,6 +340,7 @@ pub(crate) async fn handle_mcp_tool_call(
     handle_approved_mcp_tool_call(
         &sess,
         step_context.as_ref(),
+        cancellation_token,
         &call_id,
         originating_item_id.as_ref(),
         invocation,
@@ -402,6 +404,7 @@ impl McpToolCallItemMetadata {
 async fn handle_approved_mcp_tool_call(
     sess: &Arc<Session>,
     step_context: &StepContext,
+    cancellation_token: &CancellationToken,
     call_id: &str,
     originating_item_id: Option<&ResponseItemId>,
     invocation: McpInvocation,
@@ -422,7 +425,7 @@ async fn handle_approved_mcp_tool_call(
     let mut tool_input = arguments_value
         .clone()
         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
-    let result = async {
+    let call = async {
         let result = async {
             let mut result = prepared_call
                 .call_with_preparation(/*requested_timeout*/ None, || async {
@@ -546,8 +549,15 @@ async fn handle_approved_mcp_tool_call(
             connector_id,
             connector_name,
         },
-    ))
-    .await;
+    ));
+    tokio::pin!(call);
+    let result = tokio::select! {
+        biased;
+        _ = cancellation_token.cancelled() => {
+            Err("MCP tool call cancelled (origin=explicit_turn_interrupt)".to_string())
+        }
+        result = &mut call => result,
+    };
     if result.is_err() && prepared_call.transport_is_closed().await {
         // Do not retry an ambiguous tool call: the server may have executed it
         // before the transport closed. Publish fresh connections for the next

@@ -78,6 +78,12 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
         None
     }
 
+    /// Whether a started handler observes its invocation cancellation token and owns terminal
+    /// lifecycle emission before returning.
+    fn handles_cancellation_cooperatively(&self) -> bool {
+        false
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(
             payload,

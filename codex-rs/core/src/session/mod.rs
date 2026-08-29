@@ -1859,6 +1859,7 @@ impl Session {
         config.config_layer_stack = next_config
             .config_layer_stack
             .with_user_layer_from(&config.config_layer_stack);
+        config.chatgpt_base_url = next_config.chatgpt_base_url;
         config.mcp_servers = next_config.mcp_servers;
         config.mcp_optional_startup_grace = next_config.mcp_optional_startup_grace;
         config.mcp_oauth_credentials_store_mode = next_config.mcp_oauth_credentials_store_mode;

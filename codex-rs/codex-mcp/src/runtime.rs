@@ -46,6 +46,7 @@ use tokio_util::sync::CancellationToken;
 use crate::McpConfig;
 use crate::binding::McpBinding;
 use crate::connection_manager::McpConnectionSet;
+use crate::connection_manager::McpServerConnection;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestRouter;
 use crate::elicitation::ElicitationReviewerHandle;
@@ -85,13 +86,18 @@ pub struct McpRuntimeInput {
     pub elicitation_lifecycle: Option<ElicitationLifecycle>,
 }
 
+type McpEventServerRuntime = (
+    Arc<McpConnectionSet>,
+    watch::Receiver<Option<Arc<McpServerConnection>>>,
+);
+
 /// Owns all mutable MCP state for one Codex thread.
 ///
 /// Publication replaces the latest state atomically. Existing bindings retain
 /// their exact connections and configuration for as long as they are needed.
 pub struct McpRuntime {
     current: ArcSwap<PublishedMcpRuntime>,
-    hosted_event_server_removals: watch::Sender<()>,
+    hosted_event_server_connection: watch::Sender<Option<Arc<McpServerConnection>>>,
     reconnect_pending: AtomicBool,
     elicitation_router: ElicitationRequestRouter,
     resource_origins: Mutex<ResourceOrigins>,
@@ -178,7 +184,7 @@ impl McpRuntime {
                 selected_environments: HashMap::new(),
                 cached_binding: Mutex::new(None),
             }),
-            hosted_event_server_removals: watch::channel(()).0,
+            hosted_event_server_connection: watch::channel(None).0,
             reconnect_pending: AtomicBool::new(false),
             elicitation_router: ElicitationRequestRouter::default(),
             resource_origins: Mutex::default(),
@@ -291,6 +297,9 @@ impl McpRuntime {
                         .source()
                         .is_host_owned_apps(CODEX_APPS_MCP_SERVER_NAME, registration.config())
                 });
+        let hosted_event_server_connection = hosted_event_server_retained
+            .then(|| connections.connection_by_name(CODEX_APPS_MCP_SERVER_NAME))
+            .flatten();
         self.current.store(Arc::new(PublishedMcpRuntime {
             connections,
             config: Some(config),
@@ -302,9 +311,8 @@ impl McpRuntime {
             cached_binding: Mutex::new(None),
         }));
         let _ = publish.send(true);
-        if !hosted_event_server_retained {
-            self.hosted_event_server_removals.send_replace(());
-        }
+        self.hosted_event_server_connection
+            .send_replace(hosted_event_server_connection);
     }
 
     /// Ensures the next refresh creates fresh connections for every configured server.
@@ -565,8 +573,10 @@ impl McpRuntime {
     pub(crate) fn latest_connections_for_event_server(
         &self,
         server: &str,
-    ) -> anyhow::Result<(Arc<McpConnectionSet>, watch::Receiver<()>)> {
-        let hosted_event_server_removals = self.hosted_event_server_removals.subscribe();
+    ) -> anyhow::Result<McpEventServerRuntime> {
+        // Subscribe before loading the runtime so a concurrent publication is either reflected
+        // in the snapshot or remains visible as a pending watch change.
+        let hosted_event_server_connection = self.hosted_event_server_connection.subscribe();
         let current = self.current.load();
         if server == CODEX_APPS_MCP_SERVER_NAME
             && !current
@@ -583,7 +593,7 @@ impl McpRuntime {
         }
         Ok((
             Arc::clone(&current.connections),
-            hosted_event_server_removals,
+            hosted_event_server_connection,
         ))
     }
 

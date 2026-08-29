@@ -3409,6 +3409,38 @@ async fn multi_agent_v2_wait_agent_wakes_when_last_worker_is_interrupted() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_wait_agent_reports_turn_cancellation() {
+    let (session, turn, _manager, _worker) = spawn_v2_wait_test_worker().await;
+    let cancellation_token = CancellationToken::new();
+    let mut wait_invocation = invocation(session, turn, "wait_agent", function_payload(json!({})));
+    wait_invocation.cancellation_token = cancellation_token.clone();
+    let wait_task = tokio::spawn(async move {
+        WaitAgentHandlerV2
+            .handle(wait_invocation)
+            .await
+            .expect("wait_agent should handle cancellation")
+    });
+    tokio::task::yield_now().await;
+
+    cancellation_token.cancel();
+
+    let output = timeout(Duration::from_millis(500), wait_task)
+        .await
+        .expect("turn cancellation should wake wait_agent")
+        .expect("wait task should join");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait interrupted by turn cancellation.".to_string(),
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
 async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();

@@ -37,6 +37,7 @@ impl Handler {
             turn,
             payload,
             call_id,
+            cancellation_token,
             ..
         } = invocation;
         let arguments = function_arguments(payload)?;
@@ -78,14 +79,17 @@ impl Handler {
             .get_agent_path()
             .unwrap_or_else(AgentPath::root)
             .to_string();
-        let outcome = wait_for_activity(
-            &session.services.agent_control,
-            &turn.session_source,
-            &current_agent_name,
-            &mut activity_rx,
-            pending_activity,
-        )
-        .await?;
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => WaitOutcome::Interrupted,
+            outcome = wait_for_activity(
+                &session.services.agent_control,
+                &turn.session_source,
+                &current_agent_name,
+                &mut activity_rx,
+                pending_activity,
+            ) => outcome?,
+        };
         let result = WaitAgentResult::from_outcome(outcome);
 
         session
@@ -94,7 +98,11 @@ impl Handler {
                 TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                     id: call_id,
                     tool: CollabAgentTool::Wait,
-                    status: CollabAgentToolCallStatus::Completed,
+                    status: if outcome == WaitOutcome::Interrupted {
+                        CollabAgentToolCallStatus::Interrupted
+                    } else {
+                        CollabAgentToolCallStatus::Completed
+                    },
                     sender_thread_id: session.thread_id,
                     receiver_thread_ids: Vec::new(),
                     receiver_agents: Vec::new(),
@@ -111,6 +119,10 @@ impl Handler {
 }
 
 impl CoreToolRuntime for Handler {
+    fn handles_cancellation_cooperatively(&self) -> bool {
+        true
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }
@@ -131,6 +143,7 @@ impl WaitAgentResult {
             WaitOutcome::MailboxActivity => "Wait completed.",
             WaitOutcome::Steered => "Wait interrupted by new input.",
             WaitOutcome::NoLiveAgents => "No live agents to wait for.",
+            WaitOutcome::Interrupted => "Wait interrupted by turn cancellation.",
         };
         Self {
             message: message.to_string(),
@@ -161,6 +174,7 @@ enum WaitOutcome {
     MailboxActivity,
     Steered,
     NoLiveAgents,
+    Interrupted,
 }
 
 async fn wait_for_activity(

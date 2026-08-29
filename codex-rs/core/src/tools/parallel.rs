@@ -112,6 +112,9 @@ impl ToolCallRuntime {
         let router = &self.step_context.tool_router;
         let supports_parallel = router.tool_supports_parallel(&call);
         let tool_runtime = router.tool_runtime(&call);
+        let handles_cancellation_cooperatively = tool_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.handles_cancellation_cooperatively());
         let router = Arc::clone(router);
         let session = Arc::clone(&self.session);
         let step_context = Arc::clone(&self.step_context);
@@ -130,6 +133,8 @@ impl ToolCallRuntime {
         let abort_turn = Arc::clone(&turn);
         let terminal_outcome_reached = Arc::new(AtomicBool::new(false));
         let dispatch_terminal_outcome_reached = Arc::clone(&terminal_outcome_reached);
+        let handler_started = Arc::new(AtomicBool::new(false));
+        let dispatch_handler_started = Arc::clone(&handler_started);
         let dispatch_call = call.clone();
 
         let dispatch_span = trace_span!(
@@ -159,6 +164,7 @@ impl ToolCallRuntime {
                 if let Some(execution_started_at) = execution_started_at {
                     let _ = execution_started_at.set(Instant::now());
                 }
+                dispatch_handler_started.store(true, Ordering::Release);
 
                 router
                     .dispatch_tool_call_with_terminal_outcome(
@@ -179,7 +185,11 @@ impl ToolCallRuntime {
             tokio::select! {
                 res = &mut dispatch_handle => res.map_err(Self::tool_task_join_error)?,
                 _ = cancellation_token.cancelled() => {
-                    if terminal_outcome_reached.load(Ordering::Acquire) || dispatch_handle.is_finished() {
+                    if terminal_outcome_reached.load(Ordering::Acquire)
+                        || dispatch_handle.is_finished()
+                        || handles_cancellation_cooperatively
+                            && handler_started.load(Ordering::Acquire)
+                    {
                         dispatch_handle.await.map_err(Self::tool_task_join_error)?
                     } else {
                         let secs = started.elapsed().as_secs_f32().max(0.1);

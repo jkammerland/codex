@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use codex_code_mode::CellId;
 use codex_code_mode::CodeModeNestedToolCall;
@@ -28,7 +31,16 @@ pub(super) struct CodeModeDispatchBroker {
     dispatch_tx: async_channel::Sender<DispatchMessage>,
     dispatch_rx: async_channel::Receiver<DispatchMessage>,
     dispatch_gates: Arc<Mutex<HashMap<CellId, CellDispatchGate>>>,
+    host_state: Arc<Mutex<DispatchHostState>>,
+    next_host_generation: AtomicU64,
+    dispatcher_started: AtomicBool,
+    dispatcher_shutdown: CancellationToken,
     executed_tool_calls: Option<Arc<ExecutedToolCallRecorder>>,
+}
+
+struct DispatchHostState {
+    host: Option<Arc<CoreTurnHost>>,
+    active_generation: Option<u64>,
 }
 
 struct CellDispatchGate {
@@ -44,6 +56,13 @@ impl CodeModeDispatchBroker {
             dispatch_tx,
             dispatch_rx,
             dispatch_gates: Arc::new(Mutex::new(HashMap::new())),
+            host_state: Arc::new(Mutex::new(DispatchHostState {
+                host: None,
+                active_generation: None,
+            })),
+            next_host_generation: AtomicU64::new(0),
+            dispatcher_started: AtomicBool::new(false),
+            dispatcher_shutdown: CancellationToken::new(),
             executed_tool_calls,
         }
     }
@@ -79,11 +98,23 @@ impl CodeModeDispatchBroker {
     }
 
     pub(super) fn close_cell(&self, cell_id: &CellId) {
-        let mut dispatch_gates = self
-            .dispatch_gates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        dispatch_gates.remove(cell_id);
+        let no_active_cells = {
+            let mut dispatch_gates = self
+                .dispatch_gates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            dispatch_gates.remove(cell_id);
+            dispatch_gates.is_empty()
+        };
+        if no_active_cells {
+            let mut host_state = self
+                .host_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if host_state.active_generation.is_none() {
+                host_state.host = None;
+            }
+        }
         if let Some(recorder) = &self.executed_tool_calls {
             recorder.finish_cell_recording(cell_id);
         }
@@ -110,94 +141,142 @@ impl CodeModeDispatchBroker {
             .features
             .enabled(codex_features::Feature::ExecutedToolCallMetadata);
         let tool_runtime = ToolCallRuntime::new(Arc::clone(&exec.session), step_context, tracker);
-        let host = Arc::new(CoreTurnHost { exec, tool_runtime });
-        let dispatch_rx = self.dispatch_rx.clone();
-        let dispatch_gates = Arc::clone(&self.dispatch_gates);
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            loop {
-                let message = tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    message = dispatch_rx.recv() => message.ok(),
-                };
-                let Some(message) = message else {
-                    break;
-                };
-                match message {
-                    DispatchMessage::Notify {
-                        call_id,
-                        cell_id,
-                        text,
-                        cancellation_token,
-                        response_tx,
-                    } => {
-                        let response = if wait_until_cell_ready_for_dispatch(
-                            &dispatch_gates,
-                            &cell_id,
-                            &cancellation_token,
-                        )
-                        .await
-                        {
-                            host.notify(call_id, cell_id, text).await
-                        } else {
-                            remove_dispatch_gate(&dispatch_gates, &cell_id);
-                            Err("code mode notification cancelled".to_string())
-                        };
-                        let _ = response_tx.send(response);
-                    }
-                    DispatchMessage::InvokeTool {
-                        invocation,
-                        cancellation_token,
-                        response_tx,
-                        span,
-                    } => {
-                        let cell_id = invocation.cell_id.clone();
-                        if !wait_until_cell_ready_for_dispatch(
-                            &dispatch_gates,
-                            &cell_id,
-                            &cancellation_token,
-                        )
-                        .await
-                        {
-                            remove_dispatch_gate(&dispatch_gates, &cell_id);
-                            continue;
-                        }
-                        let host = Arc::clone(&host);
-                        let dispatch_gates = Arc::clone(&dispatch_gates);
-                        tokio::spawn(async move {
-                            let invocation = {
-                                let dispatch_gate = track_completeness.then(|| {
-                                    dispatch_gates
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                });
-                                if dispatch_gate.as_ref().is_some_and(|gates| {
-                                    cancellation_token.is_cancelled()
-                                        || !gates.contains_key(&cell_id)
-                                }) {
-                                    return;
-                                }
-                                // Submission and cell closure share this gate.
-                                span.in_scope(|| {
-                                    host.submit_tool(invocation, cancellation_token.clone())
-                                })
-                                .instrument(span)
-                            };
-                            tokio::pin!(invocation);
-                            let response = tokio::select! {
-                                biased;
-                                _ = cancellation_token.cancelled() => invocation.await,
-                                response = &mut invocation => response,
+        let host = Arc::new(CoreTurnHost {
+            exec,
+            tool_runtime,
+            track_completeness,
+        });
+        let generation = self.next_host_generation.fetch_add(1, Ordering::Relaxed);
+        if self.dispatcher_shutdown.is_cancelled() {
+            return CodeModeDispatchWorker {
+                dispatch_gates: Arc::clone(&self.dispatch_gates),
+                host_state: Arc::clone(&self.host_state),
+                generation,
+            };
+        }
+        {
+            let mut host_state = self
+                .host_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            host_state.host = Some(host);
+            host_state.active_generation = Some(generation);
+        }
+        if self
+            .dispatcher_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let dispatch_rx = self.dispatch_rx.clone();
+            let dispatch_gates = Arc::clone(&self.dispatch_gates);
+            let host_state = Arc::clone(&self.host_state);
+            let dispatcher_shutdown = self.dispatcher_shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    let message = tokio::select! {
+                        biased;
+                        _ = dispatcher_shutdown.cancelled() => break,
+                        message = dispatch_rx.recv() => message.ok(),
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
+                    let host = host_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .host
+                        .clone();
+                    let Some(host) = host else {
+                        tracing::warn!("dropping code-mode dispatch without an active host");
+                        continue;
+                    };
+                    match message {
+                        DispatchMessage::Notify {
+                            call_id,
+                            cell_id,
+                            text,
+                            cancellation_token,
+                            response_tx,
+                        } => {
+                            let response = if wait_until_cell_ready_for_dispatch(
+                                &dispatch_gates,
+                                &cell_id,
+                                &cancellation_token,
+                            )
+                            .await
+                            {
+                                host.notify(call_id, cell_id, text).await
+                            } else {
+                                remove_dispatch_gate(&dispatch_gates, &cell_id);
+                                Err("code mode notification cancelled".to_string())
                             };
                             let _ = response_tx.send(response);
-                        });
+                        }
+                        DispatchMessage::InvokeTool {
+                            invocation,
+                            cancellation_token,
+                            response_tx,
+                            span,
+                        } => {
+                            let cell_id = invocation.cell_id.clone();
+                            if !wait_until_cell_ready_for_dispatch(
+                                &dispatch_gates,
+                                &cell_id,
+                                &cancellation_token,
+                            )
+                            .await
+                            {
+                                remove_dispatch_gate(&dispatch_gates, &cell_id);
+                                continue;
+                            }
+                            let dispatch_gates = Arc::clone(&dispatch_gates);
+                            tokio::spawn(async move {
+                                let invocation = {
+                                    let dispatch_gate = host.track_completeness.then(|| {
+                                        dispatch_gates
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    });
+                                    if dispatch_gate.as_ref().is_some_and(|gates| {
+                                        cancellation_token.is_cancelled()
+                                            || !gates.contains_key(&cell_id)
+                                    }) {
+                                        return;
+                                    }
+                                    // Submission and cell closure share this gate.
+                                    span.in_scope(|| {
+                                        host.submit_tool(invocation, cancellation_token.clone())
+                                    })
+                                    .instrument(span)
+                                };
+                                tokio::pin!(invocation);
+                                let response = tokio::select! {
+                                    biased;
+                                    _ = cancellation_token.cancelled() => invocation.await,
+                                    response = &mut invocation => response,
+                                };
+                                let _ = response_tx.send(response);
+                            });
+                        }
                     }
                 }
-            }
-        });
-        CodeModeDispatchWorker {
-            shutdown_tx: Some(shutdown_tx),
+            });
         }
+        CodeModeDispatchWorker {
+            dispatch_gates: Arc::clone(&self.dispatch_gates),
+            host_state: Arc::clone(&self.host_state),
+            generation,
+        }
+    }
+
+    pub(super) fn shutdown(&self) {
+        self.dispatcher_shutdown.cancel();
+        let mut host_state = self
+            .host_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        host_state.host = None;
+        host_state.active_generation = None;
     }
 }
 
@@ -338,13 +417,27 @@ enum DispatchMessage {
 }
 
 pub(crate) struct CodeModeDispatchWorker {
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    dispatch_gates: Arc<Mutex<HashMap<CellId, CellDispatchGate>>>,
+    host_state: Arc<Mutex<DispatchHostState>>,
+    generation: u64,
 }
 
 impl Drop for CodeModeDispatchWorker {
     fn drop(&mut self) {
-        if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            let _ = shutdown_tx.send(());
+        let no_active_cells = self
+            .dispatch_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        let mut host_state = self
+            .host_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if host_state.active_generation == Some(self.generation) {
+            host_state.active_generation = None;
+            if no_active_cells {
+                host_state.host = None;
+            }
         }
     }
 }
@@ -352,6 +445,7 @@ impl Drop for CodeModeDispatchWorker {
 struct CoreTurnHost {
     exec: ExecContext,
     tool_runtime: ToolCallRuntime,
+    track_completeness: bool,
 }
 
 impl CoreTurnHost {

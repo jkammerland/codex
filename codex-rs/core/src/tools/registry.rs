@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::function_tool::FunctionCallError;
@@ -15,6 +13,7 @@ use crate::sandbox_tags::permission_profile_policy_tag;
 use crate::sandbox_tags::permission_profile_sandbox_tag;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use crate::tools::call_lifecycle::ToolCallLifecycle;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -78,8 +77,8 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
         None
     }
 
-    /// Whether a started handler observes its invocation cancellation token and owns terminal
-    /// lifecycle emission before returning.
+    /// Whether a started handler observes its invocation cancellation token and restores its
+    /// in-flight state before returning.
     fn handles_cancellation_cooperatively(&self) -> bool {
         false
     }
@@ -485,8 +484,7 @@ impl ToolRegistry {
     pub(crate) async fn dispatch_any_with_terminal_outcome(
         &self,
         mut invocation: ToolInvocation,
-        terminal_outcome_reached: Option<Arc<AtomicBool>>,
-        handler_started: Option<Arc<AtomicBool>>,
+        lifecycle: Option<Arc<ToolCallLifecycle>>,
     ) -> Result<AnyToolResult, FunctionCallError> {
         let tool_name = invocation.tool_name.clone();
         let call_id_owned = invocation.call_id.clone();
@@ -591,7 +589,7 @@ impl ToolRegistry {
                     dispatch_trace.record_failed(&err);
                     notify_tool_finish_if_unclaimed(
                         &invocation,
-                        terminal_outcome_reached.as_deref(),
+                        lifecycle.as_deref(),
                         ToolCallOutcome::Blocked,
                     )
                     .await;
@@ -611,7 +609,7 @@ impl ToolRegistry {
                         dispatch_trace.record_failed(&err);
                         notify_tool_finish_if_unclaimed(
                             &invocation,
-                            terminal_outcome_reached.as_deref(),
+                            lifecycle.as_deref(),
                             ToolCallOutcome::Failed {
                                 handler_executed: false,
                             },
@@ -651,10 +649,6 @@ impl ToolRegistry {
 
         let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
 
-        if let Some(handler_started) = handler_started {
-            handler_started.store(true, Ordering::Release);
-        }
-
         let result = otel
             .log_tool_result_with_tags(
                 &tool_name,
@@ -662,7 +656,21 @@ impl ToolRegistry {
                 log_payload.as_ref(),
                 &tool_result_tags,
                 &extra_trace_fields,
-                || handle_any_tool(tool.as_ref(), invocation.clone()),
+                || async {
+                    if lifecycle
+                        .as_deref()
+                        .is_some_and(|lifecycle| !lifecycle.try_start_handler())
+                    {
+                        return Err(FunctionCallError::RespondToModel(
+                            "tool call was cancelled before handler dispatch".to_string(),
+                        ));
+                    }
+                    let result = handle_any_tool(tool.as_ref(), invocation.clone()).await;
+                    if let Some(lifecycle) = lifecycle.as_deref() {
+                        lifecycle.handler_completed();
+                    }
+                    result
+                },
                 |result| {
                     (
                         result.result.log_output(),
@@ -692,8 +700,10 @@ impl ToolRegistry {
             None
         };
         let post_tool_use_outcome = if let Some(post_tool_use_payload) = post_tool_use_payload {
-            Some(
-                run_post_tool_use_hooks(
+            tokio::select! {
+                biased;
+                _ = invocation.cancellation_token.cancelled() => None,
+                outcome = run_post_tool_use_hooks(
                     &invocation.session,
                     &invocation.turn,
                     post_tool_use_payload.tool_use_id,
@@ -701,9 +711,8 @@ impl ToolRegistry {
                     post_tool_use_payload.tool_name.matcher_aliases().to_vec(),
                     post_tool_use_payload.tool_input,
                     post_tool_use_payload.tool_response,
-                )
-                .await,
-            )
+                ) => Some(outcome),
+            }
         } else {
             None
         };
@@ -718,7 +727,7 @@ impl ToolRegistry {
 
         // A cooperatively cancelled handler leaves terminal ownership to ToolCallRuntime. A
         // successful result still wins a simultaneous cancellation and completes normally.
-        let cooperatively_cancelled = terminal_outcome_reached.is_some()
+        let cooperatively_cancelled = lifecycle.is_some()
             && tool.handles_cancellation_cooperatively()
             && invocation.cancellation_token.is_cancelled()
             && !success;
@@ -734,12 +743,8 @@ impl ToolRegistry {
             })
         };
         if let Some(lifecycle_outcome) = lifecycle_outcome {
-            notify_tool_finish_if_unclaimed(
-                &invocation,
-                terminal_outcome_reached.as_deref(),
-                lifecycle_outcome,
-            )
-            .await;
+            notify_tool_finish_if_unclaimed(&invocation, lifecycle.as_deref(), lifecycle_outcome)
+                .await;
         }
 
         match result {
@@ -782,10 +787,10 @@ impl ToolRegistry {
 
 async fn notify_tool_finish_if_unclaimed(
     invocation: &ToolInvocation,
-    terminal_outcome_reached: Option<&AtomicBool>,
+    lifecycle: Option<&ToolCallLifecycle>,
     outcome: ToolCallOutcome,
 ) -> bool {
-    if terminal_outcome_reached.is_some_and(|reached| reached.swap(true, Ordering::AcqRel)) {
+    if lifecycle.is_some_and(|lifecycle| !lifecycle.try_claim_terminal()) {
         return false;
     }
 

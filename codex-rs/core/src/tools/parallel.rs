@@ -1,7 +1,5 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use tokio::sync::RwLock;
@@ -19,6 +17,8 @@ use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::tools::call_lifecycle::CancellationDisposition;
+use crate::tools::call_lifecycle::ToolCallLifecycle;
 use crate::tools::context::AbortedToolOutput;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolPayload;
@@ -133,10 +133,8 @@ impl ToolCallRuntime {
         let abort_session = Arc::clone(&session);
         let abort_source = source.clone();
         let abort_turn = Arc::clone(&turn);
-        let terminal_outcome_reached = Arc::new(AtomicBool::new(false));
-        let dispatch_terminal_outcome_reached = Arc::clone(&terminal_outcome_reached);
-        let handler_started = Arc::new(AtomicBool::new(false));
-        let dispatch_handler_started = Arc::clone(&handler_started);
+        let lifecycle = Arc::new(ToolCallLifecycle::new());
+        let dispatch_lifecycle = Arc::clone(&lifecycle);
         let dispatch_call = call.clone();
 
         let dispatch_span = trace_span!(
@@ -175,8 +173,7 @@ impl ToolCallRuntime {
                         tracker,
                         dispatch_call,
                         source,
-                        dispatch_terminal_outcome_reached,
-                        dispatch_handler_started,
+                        dispatch_lifecycle,
                     )
                     .instrument(dispatch_span.clone())
                     .await
@@ -195,52 +192,49 @@ impl ToolCallRuntime {
                         abort_turn.as_ref(),
                         &abort_source,
                         &abort_dispatch_span,
-                        &terminal_outcome_reached,
+                        &lifecycle,
                         handles_cancellation_cooperatively,
-                        handler_started.load(Ordering::Acquire),
                         cancellation_token.is_cancelled(),
                     ).await
                 },
                 _ = cancellation_token.cancelled() => {
-                    if terminal_outcome_reached.load(Ordering::Acquire)
-                        || dispatch_handle.is_finished()
-                        || handles_cancellation_cooperatively
-                            && handler_started.load(Ordering::Acquire)
-                    {
-                        let result = dispatch_handle.await.map_err(Self::tool_task_join_error)?;
-                        Self::finish_cooperative_cancellation(
-                            result,
-                            &call,
-                            started,
-                            abort_session.as_ref(),
-                            abort_turn.as_ref(),
-                            &abort_source,
-                            &abort_dispatch_span,
-                            &terminal_outcome_reached,
-                            handles_cancellation_cooperatively,
-                            handler_started.load(Ordering::Acquire),
-                            /*cancelled*/ true,
-                        ).await
-                    } else if terminal_outcome_reached
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                        .is_err()
-                    {
-                        dispatch_handle.await.map_err(Self::tool_task_join_error)?
+                    let disposition = if dispatch_handle.is_finished() {
+                        CancellationDisposition::AwaitDispatch
                     } else {
-                        dispatch_handle.abort();
-                        match dispatch_handle.await {
-                            Ok(_) => {}
-                            Err(err) if err.is_cancelled() => {}
-                            Err(err) => return Err(Self::tool_task_join_error(err)),
+                        lifecycle.cancellation_disposition(handles_cancellation_cooperatively)
+                    };
+                    match disposition {
+                        CancellationDisposition::AwaitDispatch => {
+                            let result = dispatch_handle.await.map_err(Self::tool_task_join_error)?;
+                            Self::finish_cooperative_cancellation(
+                                result,
+                                &call,
+                                started,
+                                abort_session.as_ref(),
+                                abort_turn.as_ref(),
+                                &abort_source,
+                                &abort_dispatch_span,
+                                &lifecycle,
+                                handles_cancellation_cooperatively,
+                                /*cancelled*/ true,
+                            ).await
                         }
-                        Ok(Self::finish_aborted_call(
-                            &call,
-                            started,
-                            abort_session.as_ref(),
-                            abort_turn.as_ref(),
-                            &abort_source,
-                            &abort_dispatch_span,
-                        ).await)
+                        CancellationDisposition::AbortDispatch => {
+                            dispatch_handle.abort();
+                            match dispatch_handle.await {
+                                Ok(_) => {}
+                                Err(err) if err.is_cancelled() => {}
+                                Err(err) => return Err(Self::tool_task_join_error(err)),
+                            }
+                            Ok(Self::finish_aborted_call(
+                                &call,
+                                started,
+                                abort_session.as_ref(),
+                                abort_turn.as_ref(),
+                                &abort_source,
+                                &abort_dispatch_span,
+                            ).await)
+                        }
                     }
                 },
             }
@@ -259,18 +253,11 @@ impl ToolCallRuntime {
         turn: &TurnContext,
         source: &ToolCallSource,
         dispatch_span: &Span,
-        terminal_outcome_reached: &AtomicBool,
+        lifecycle: &ToolCallLifecycle,
         handles_cancellation_cooperatively: bool,
-        handler_started: bool,
         cancelled: bool,
     ) -> Result<AnyToolResult, FunctionCallError> {
-        if cancelled
-            && handles_cancellation_cooperatively
-            && handler_started
-            && terminal_outcome_reached
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
+        if cancelled && handles_cancellation_cooperatively && lifecycle.try_claim_terminal() {
             return Ok(Self::finish_aborted_call(
                 call,
                 started,

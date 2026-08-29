@@ -471,9 +471,12 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                                 .to_string(),
                         ));
                     }
-                    let process = self
-                        .manager
-                        .open_session_with_prepared_exec_env(
+                    let process = tokio::select! {
+                        biased;
+                        _ = ctx.cancellation_token.cancelled() => {
+                            return Err(ToolError::Rejected("unified exec start was cancelled".to_string()));
+                        }
+                        result = self.manager.open_session_with_prepared_exec_env(
                             req.process_id,
                             &prepared.exec_request,
                             windows_sandbox_proxy_settings_mode,
@@ -481,8 +484,8 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                             req.tty,
                             prepared.spawn_lifecycle,
                             req.turn_environment.environment.as_ref(),
-                        )
-                        .await
+                        ) => result,
+                    }
                         .map_err(|err| match err {
                             UnifiedExecError::SandboxDenied { output, .. } => {
                                 ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
@@ -534,6 +537,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                 windows_sandbox_proxy_settings_mode,
                 req.tty,
                 Box::new(NoopSpawnLifecycle),
+                &ctx.cancellation_token,
                 req.turn_environment.environment.as_ref(),
             )
             .await?;

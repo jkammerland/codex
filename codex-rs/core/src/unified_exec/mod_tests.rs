@@ -584,6 +584,53 @@ async fn cancelling_write_stdin_releases_interaction_lock() -> anyhow::Result<()
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_write_stdin_during_output_wait_releases_the_process() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let started = exec_command_with_tty(
+        &session,
+        &turn,
+        "stty -echo; read first; read second; printf 'received:%s:%s' \"$first\" \"$second\"",
+        /*yield_time_ms*/ 10,
+        /*workdir*/ None,
+        /*tty*/ true,
+    )
+    .await?;
+    let process_id = started.process_id.expect("command should remain running");
+    let cancellation_token = CancellationToken::new();
+    let first_write = write_stdin_with_cancellation(
+        &session,
+        &turn,
+        process_id,
+        "first\n",
+        /*yield_time_ms*/ 30_000,
+        cancellation_token.clone(),
+    );
+    tokio::pin!(first_write);
+
+    tokio::select! {
+        result = &mut first_write => panic!("write_stdin returned before cancellation: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+    }
+    cancellation_token.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut first_write)
+        .await
+        .expect("write_stdin output wait should observe cancellation");
+    assert!(matches!(result, Err(UnifiedExecError::Cancelled)));
+
+    let completed = write_stdin(
+        &session, &turn, process_id, "second\n", /*yield_time_ms*/ 1_000,
+    )
+    .await?;
+    assert_eq!(completed.process_id, None);
+    assert_eq!(
+        String::from_utf8_lossy(&completed.raw_output),
+        "received:first:second"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_persists_across_requests() -> anyhow::Result<()> {
     skip_if_sandbox!(Ok(()));

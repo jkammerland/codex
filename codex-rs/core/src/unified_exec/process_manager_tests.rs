@@ -413,6 +413,34 @@ async fn output_collection_prefers_published_close_over_invocation_cancellation(
 }
 
 #[tokio::test]
+async fn output_collection_observes_cancellation_while_elicitation_is_paused() {
+    let output = OutputHandles {
+        output_buffer: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::<64>::default())),
+        output_notify: Arc::new(Notify::new()),
+        output_closed: Arc::new(AtomicBool::new(false)),
+        output_closed_notify: Arc::new(Notify::new()),
+        cancellation_token: CancellationToken::new(),
+    };
+    let (_pause_tx, pause_rx) = tokio::sync::watch::channel(true);
+    let invocation_cancellation = CancellationToken::new();
+    invocation_cancellation.cancel();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        UnifiedExecProcessManager::collect_output_until_deadline(
+            &output,
+            Some(pause_rx),
+            Instant::now() + Duration::from_secs(60),
+            &invocation_cancellation,
+        ),
+    )
+    .await
+    .expect("paused output collection should observe cancellation");
+
+    assert!(matches!(result, Err(UnifiedExecError::Cancelled)));
+}
+
+#[tokio::test]
 async fn completed_wait_drains_late_output_until_closed() {
     let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
     let output_notify = Arc::new(Notify::new());

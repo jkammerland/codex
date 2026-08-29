@@ -860,6 +860,10 @@ impl UnifiedExecProcessManager {
                 .map_err(UnifiedExecError::StdinApproval)?;
         }
 
+        if context.cancellation_token.is_cancelled() {
+            return Err(UnifiedExecError::Cancelled);
+        }
+
         // Revalidate the identity after approval: a removed process ID can be reused.
         let PreparedProcessHandles {
             process,
@@ -880,16 +884,35 @@ impl UnifiedExecProcessManager {
         if !request.input.is_empty() {
             if !tty {
                 if request.input == INTERRUPT {
-                    process.interrupt().await?;
+                    tokio::select! {
+                        biased;
+                        _ = context.cancellation_token.cancelled() => {
+                            return Err(UnifiedExecError::Cancelled);
+                        }
+                        result = process.interrupt() => result?,
+                    }
                 } else {
                     return Err(UnifiedExecError::StdinClosed);
                 }
             } else {
-                match process.write(request.input.as_bytes()).await {
+                let write_result = tokio::select! {
+                    biased;
+                    _ = context.cancellation_token.cancelled() => {
+                        return Err(UnifiedExecError::Cancelled);
+                    }
+                    result = process.write(request.input.as_bytes()) => result,
+                };
+                match write_result {
                     Ok(()) => {
                         // Give the remote process a brief window to react so that we are
                         // more likely to capture its output in the poll below.
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::select! {
+                            biased;
+                            _ = context.cancellation_token.cancelled() => {
+                                return Err(UnifiedExecError::Cancelled);
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        }
                     }
                     Err(err) => {
                         let status = self.refresh_process_state(process_id).await;
@@ -1169,6 +1192,7 @@ impl UnifiedExecProcessManager {
         windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
         tty: bool,
         spawn_lifecycle: SpawnLifecycleHandle,
+        cancellation_token: &CancellationToken,
         environment: &codex_exec_server::Environment,
     ) -> Result<UnifiedExecProcess, ToolError> {
         let mut request = if environment.is_remote() || shell_snapshot.is_some() {
@@ -1187,16 +1211,19 @@ impl UnifiedExecProcessManager {
         request.exec_server_network_proxy = network_proxy_launch;
         request.exec_server_env_config = exec_server_env_config;
         request.exec_server_shell_snapshot = shell_snapshot;
-        self.open_session_with_prepared_exec_env(
-            process_id,
-            &request,
-            windows_sandbox_proxy_settings_mode,
-            network_policy_decider,
-            tty,
-            spawn_lifecycle,
-            environment,
-        )
-        .await
+        tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => Err(UnifiedExecError::Cancelled),
+            result = self.open_session_with_prepared_exec_env(
+                process_id,
+                &request,
+                windows_sandbox_proxy_settings_mode,
+                network_policy_decider,
+                tty,
+                spawn_lifecycle,
+                environment,
+            ) => result,
+        }
         .map_err(|err| match err {
             UnifiedExecError::SandboxDenied { output, .. } => {
                 ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
@@ -1448,12 +1475,17 @@ impl UnifiedExecProcessManager {
         let mut exit_signal_received = cancellation_token.is_cancelled();
         let mut post_exit_deadline: Option<Instant> = None;
         loop {
-            Self::extend_deadlines_while_paused(
+            if Self::extend_deadlines_while_paused(
                 &mut pause_state,
                 &mut deadline,
                 &mut post_exit_deadline,
+                invocation_cancellation,
             )
-            .await;
+            .await
+            {
+                Self::restore_collected_output(output, collected).await;
+                return Err(UnifiedExecError::Cancelled);
+            }
             let output_notified = output_notify.notified();
             tokio::pin!(output_notified);
             output_notified.as_mut().enable();
@@ -1554,18 +1586,25 @@ impl UnifiedExecProcessManager {
         pause_state: &mut Option<watch::Receiver<bool>>,
         deadline: &mut Instant,
         post_exit_deadline: &mut Option<Instant>,
-    ) {
+        invocation_cancellation: &CancellationToken,
+    ) -> bool {
         let Some(receiver) = pause_state.as_mut() else {
-            return;
+            return false;
         };
         if !*receiver.borrow() {
-            return;
+            return false;
         }
 
         let paused_at = Instant::now();
         while *receiver.borrow() {
-            if receiver.changed().await.is_err() {
-                break;
+            tokio::select! {
+                biased;
+                _ = invocation_cancellation.cancelled() => return true,
+                result = receiver.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                }
             }
         }
 
@@ -1574,6 +1613,7 @@ impl UnifiedExecProcessManager {
         if let Some(post_exit_deadline) = post_exit_deadline.as_mut() {
             *post_exit_deadline += paused_for;
         }
+        false
     }
 
     async fn wait_for_pause_change(pause_state: Option<&watch::Receiver<bool>>) {

@@ -4,6 +4,7 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 #[cfg(test)]
 use crate::session::turn_context::TurnContext;
+use crate::tools::call_lifecycle::ToolCallLifecycle;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -27,7 +28,6 @@ use codex_tools::ToolSpec;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
@@ -315,8 +315,7 @@ impl ToolRouter {
             tracker,
             call,
             source,
-            /*terminal_outcome_reached*/ None,
-            /*handler_started*/ None,
+            /*lifecycle*/ None,
         )
         .await
     }
@@ -331,8 +330,7 @@ impl ToolRouter {
         tracker: SharedTurnDiffTracker,
         call: ToolCall,
         source: ToolCallSource,
-        terminal_outcome_reached: Arc<AtomicBool>,
-        handler_started: Arc<AtomicBool>,
+        lifecycle: Arc<ToolCallLifecycle>,
     ) -> Result<AnyToolResult, FunctionCallError> {
         self.dispatch_tool_call_with_code_mode_result_inner(
             session,
@@ -341,8 +339,7 @@ impl ToolRouter {
             tracker,
             call,
             source,
-            Some(terminal_outcome_reached),
-            Some(handler_started),
+            Some(lifecycle),
         )
         .await
     }
@@ -356,8 +353,7 @@ impl ToolRouter {
         tracker: SharedTurnDiffTracker,
         call: ToolCall,
         source: ToolCallSource,
-        terminal_outcome_reached: Option<Arc<AtomicBool>>,
-        handler_started: Option<Arc<AtomicBool>>,
+        lifecycle: Option<Arc<ToolCallLifecycle>>,
     ) -> Result<AnyToolResult, FunctionCallError> {
         let ToolCall {
             tool_name,
@@ -381,11 +377,7 @@ impl ToolRouter {
         };
 
         self.registry
-            .dispatch_any_with_terminal_outcome(
-                invocation,
-                terminal_outcome_reached,
-                handler_started,
-            )
+            .dispatch_any_with_terminal_outcome(invocation, lifecycle)
             .await
     }
 }

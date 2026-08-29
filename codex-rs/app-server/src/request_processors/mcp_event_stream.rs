@@ -220,12 +220,11 @@ async fn forward_events(
                     if end_reason == McpEventStreamEnd::TransportClosed {
                         thread.request_mcp_transport_reconnect();
                     }
-                    let reconnectable = ready.is_none()
-                        || matches!(
-                            end_reason,
-                            McpEventStreamEnd::ConnectionSuperseded
-                                | McpEventStreamEnd::TransportClosed
-                        );
+                    let reconnectable = matches!(
+                        end_reason,
+                        McpEventStreamEnd::ConnectionSuperseded
+                            | McpEventStreamEnd::TransportClosed
+                    );
                     if !reconnectable
                         || reconnect_attempts >= MAX_MCP_EVENT_STREAM_RECONNECT_ATTEMPTS
                     {
@@ -266,7 +265,10 @@ async fn forward_events(
                                 pending_end_reason = Some(end_reason);
                                 continue;
                             }
-                            Ok(Err(_)) => continue,
+                            Ok(Err(_)) => {
+                                pending_end_reason = Some(end_reason);
+                                continue;
+                            }
                             Err(_) => break,
                         },
                     }

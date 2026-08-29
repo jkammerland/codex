@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -32,6 +33,7 @@ use codex_config::CONFIG_TOML_FILE;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_features::Feature;
 use core_test_support::responses;
+use futures::Stream;
 use futures::StreamExt as _;
 use futures::stream;
 use pretty_assertions::assert_eq;
@@ -52,10 +54,12 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
     let allow_activation = Arc::new(Notify::new());
     let activation_gate = Arc::clone(&allow_activation);
     let stream_count = Arc::new(AtomicUsize::new(0));
+    let fail_once_count = Arc::new(AtomicUsize::new(0));
     let handler = post(move |uri: Uri, Json(message): Json<Value>| {
         let stream_started_tx = stream_started_tx.clone();
         let allow_activation = Arc::clone(&activation_gate);
         let stream_count = Arc::clone(&stream_count);
+        let fail_once_count = Arc::clone(&fail_once_count);
 
         async move {
             match message["method"].as_str() {
@@ -85,9 +89,15 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                 Some("events/stream") => {
                     let stream_number = stream_count.fetch_add(1, Ordering::AcqRel);
                     let quiet_after_active = uri.path().contains("/quiet");
+                    let end_after_active = uri.path().contains("/ended");
                     stream_started_tx
                         .send((uri.path().to_string(), message.clone()))
                         .expect("stream-start receiver must remain open");
+                    if uri.path().contains("/fail-once")
+                        && fail_once_count.fetch_add(1, Ordering::AcqRel) == 0
+                    {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
                     let metadata = json!({
                         "io.modelcontextprotocol/subscriptionId": message["id"],
                         "provider": "event-test-server",
@@ -106,23 +116,47 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                             "data": { "issue": 42 },
                         },
                     });
-                    let events = stream::once(async move {
+                    let completed = json!({
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "result": {},
+                    });
+                    let active_event = stream::once(async move {
                         if stream_number == 0 {
                             allow_activation.notified().await;
                         }
                         Ok::<_, Infallible>(
                             Event::default().event("message").data(active.to_string()),
                         )
-                    })
-                    .chain(stream::once(async move {
-                        if quiet_after_active {
-                            return std::future::pending::<Result<Event, Infallible>>().await;
-                        }
-                        Ok::<_, Infallible>(
-                            Event::default().event("message").data(event.to_string()),
-                        )
-                    }))
-                    .chain(stream::pending());
+                    });
+                    let events: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
+                        if end_after_active {
+                            Box::pin(active_event.chain(stream::once(async move {
+                                Ok::<_, Infallible>(
+                                    Event::default()
+                                        .event("message")
+                                        .data(completed.to_string()),
+                                )
+                            })))
+                        } else {
+                            Box::pin(
+                                active_event
+                                    .chain(stream::once(async move {
+                                        if quiet_after_active {
+                                            return std::future::pending::<
+                                                Result<Event, Infallible>,
+                                            >()
+                                            .await;
+                                        }
+                                        Ok::<_, Infallible>(
+                                            Event::default()
+                                                .event("message")
+                                                .data(event.to_string()),
+                                        )
+                                    }))
+                                    .chain(stream::pending()),
+                            )
+                        };
 
                     Sse::new(events).into_response()
                 }
@@ -137,7 +171,9 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         .route("/quiet1/api/codex/ps/mcp", handler.clone())
         .route("/quiet2/api/codex/ps/mcp", handler.clone())
         .route("/quiet3/api/codex/ps/mcp", handler.clone())
-        .route("/quiet4/api/codex/ps/mcp", handler);
+        .route("/quiet4/api/codex/ps/mcp", handler.clone())
+        .route("/fail-once/api/codex/ps/mcp", handler.clone())
+        .route("/ended/api/codex/ps/mcp", handler);
     let mcp_server = tokio::spawn(async move { axum::serve(listener, router).await });
 
     let codex_home = TempDir::new()?;
@@ -283,7 +319,7 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
     )
     .await??;
     assert!(
-        timeout(Duration::from_millis(100), stream_started_rx.recv())
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
             .await
             .is_err(),
         "an unchanged MCP refresh must retain the active event stream"
@@ -347,7 +383,46 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         }
     );
 
-    let mut previous_url = format!("{apps_url}/changed2");
+    let fail_once_url = format!("{apps_url}/fail-once");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        &config_path,
+        config.replace(&format!("{apps_url}/changed2"), &fail_once_url),
+    )?;
+    let reload_request_id = app_server
+        .send_raw_request("config/mcpServer/reload", /*params*/ None)
+        .await?;
+    let _: McpServerRefreshResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(reload_request_id),
+    )
+    .await??;
+    for attempt in 1..=2 {
+        let (path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+            .await?
+            .with_context(|| format!("fail-once reconnect attempt {attempt} did not occur"))?;
+        assert_eq!(path, "/fail-once/api/codex/ps/mcp");
+    }
+    let recovered_active: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        recovered_active.notification.method,
+        "notifications/events/active"
+    );
+    let recovered_event: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        recovered_event.notification.method,
+        "notifications/events/event"
+    );
+
+    let mut previous_url = fail_once_url;
     for replacement_index in 1..=4 {
         let replacement_url = format!("{apps_url}/quiet{replacement_index}");
         let config = std::fs::read_to_string(&config_path)?;
@@ -391,6 +466,43 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         );
         previous_url = replacement_url;
     }
+
+    let ended_url = format!("{apps_url}/ended");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(&config_path, config.replace(&previous_url, &ended_url))?;
+    let reload_request_id = app_server
+        .send_raw_request("config/mcpServer/reload", /*params*/ None)
+        .await?;
+    let _: McpServerRefreshResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(reload_request_id),
+    )
+    .await??;
+    let (ended_path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+        .await?
+        .context("server-ended stream did not start")?;
+    assert_eq!(ended_path, "/ended/api/codex/ps/mcp");
+    let ended_active: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        ended_active.notification.method,
+        "notifications/events/active"
+    );
+    let ended: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(ended.notification.method, "notifications/events/terminated");
+    assert!(
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
+            .await
+            .is_err(),
+        "server-ended event streams must not reconnect"
+    );
 
     let _: McpServerEventStreamStopResponse = app_server
         .request(|request_id| ClientRequest::McpServerEventStreamStop {

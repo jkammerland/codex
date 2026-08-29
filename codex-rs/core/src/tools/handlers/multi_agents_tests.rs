@@ -3410,7 +3410,11 @@ async fn multi_agent_v2_wait_agent_wakes_when_last_worker_is_interrupted() {
 
 #[tokio::test]
 async fn multi_agent_v2_child_error_waits_for_terminal_status() {
-    let (_session, _turn, _manager, worker) = spawn_v2_wait_test_worker().await;
+    let (session, _turn, manager, worker) = spawn_v2_wait_test_worker().await;
+    let parent = manager
+        .get_thread(session.thread_id)
+        .await
+        .expect("parent thread should remain loaded");
     let worker_turn = worker.session.new_default_turn().await;
     let status_before_error = worker.agent_status().await;
 
@@ -3440,7 +3444,11 @@ async fn multi_agent_v2_child_error_waits_for_terminal_status() {
             }),
         )
         .await;
-    assert_eq!(worker.agent_status().await, AgentStatus::Interrupted);
+    assert!(parent.session.input_queue.has_pending_mailbox_items().await);
+    assert_eq!(
+        worker.agent_status().await,
+        AgentStatus::Errored("worker failed".to_string())
+    );
 }
 
 #[tokio::test]

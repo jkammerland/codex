@@ -84,11 +84,38 @@ pub async fn inter_agent_communication(
     communication: InterAgentCommunication,
     start_options: codex_protocol::turn_input::TurnStartOptions,
 ) {
+    let trigger_turn =
+        enqueue_inter_agent_communication(sess, &sub_id, communication, start_options).await;
+    if trigger_turn || sess.has_outstanding_durable_sleep() {
+        sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
+            .await;
+    }
+}
+
+async fn enqueue_inter_agent_communication(
+    sess: &Arc<Session>,
+    sub_id: &str,
+    communication: InterAgentCommunication,
+    start_options: codex_protocol::turn_input::TurnStartOptions,
+) -> bool {
     let trigger_turn = communication.trigger_turn;
     sess.input_queue
         .enqueue_mailbox_communication(communication, start_options)
         .await;
-    crate::agent_communication::emit_agent_communication_receive(&sub_id);
+    crate::agent_communication::emit_agent_communication_receive(sub_id);
+    trigger_turn
+}
+
+async fn inter_agent_communication_with_ack(
+    sess: &Arc<Session>,
+    sub_id: String,
+    communication: InterAgentCommunication,
+    start_options: codex_protocol::turn_input::TurnStartOptions,
+    reply: tokio::sync::oneshot::Sender<()>,
+) {
+    let trigger_turn =
+        enqueue_inter_agent_communication(sess, &sub_id, communication, start_options).await;
+    let _ = reply.send(());
     if trigger_turn || sess.has_outstanding_durable_sleep() {
         sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
             .await;
@@ -646,9 +673,14 @@ pub(super) async fn submission_loop(
                     start_options,
                     reply,
                 } => {
-                    inter_agent_communication(&sess, sub.id.clone(), communication, start_options)
-                        .await;
-                    let _ = reply.send(());
+                    inter_agent_communication_with_ack(
+                        &sess,
+                        sub.id.clone(),
+                        communication,
+                        start_options,
+                        reply,
+                    )
+                    .await;
                     false
                 }
                 Op::ExecApproval {

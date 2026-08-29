@@ -1993,10 +1993,7 @@ impl Session {
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
         let legacy_source = msg.clone();
         if let EventMsg::Error(error) = &legacy_source
-            && error
-                .codex_error_info
-                .as_ref()
-                .is_some_and(CodexErrorInfo::affects_turn_status)
+            && error.affects_turn_status()
         {
             turn_context
                 .terminal_error

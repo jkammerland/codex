@@ -60,6 +60,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
@@ -597,6 +598,21 @@ async fn failed_initial_submission_does_not_publish_spawned_agent() {
         harness.manager.list_thread_ids().await,
         vec![parent_thread_id]
     );
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("open child edges should load after failed submission"),
+        Vec::<ThreadId>::new(),
+        "failed spawn cleanup must close its provisional graph edge"
+    );
     assert_eq!(
         harness
             .control
@@ -707,6 +723,19 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
         .into_iter()
         .find(|thread_id| *thread_id != parent_thread_id)
         .expect("spawned child should be registered before initial submission");
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("spawned child should remain loaded before cancellation");
+    child_thread.ensure_rollout_materialized().await;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("cancelled child rollout should materialize for cleanup coverage");
+    let child_rollout_path = child_thread
+        .rollout_path()
+        .expect("materialized child should report its rollout path");
     let state_db = harness
         .state_db
         .as_ref()
@@ -727,6 +756,21 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
             .await
             .expect("cancelled child metadata query should succeed"),
         None
+    );
+    assert!(
+        !child_rollout_path.exists(),
+        "cancelled spawn cleanup must remove its local ThreadStore rollout"
+    );
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("open child edges should load after cancellation"),
+        Vec::<ThreadId>::new(),
+        "cancelled spawn cleanup must not leave a recoverable open edge"
     );
 
     let spawned = harness
@@ -911,6 +955,48 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         history.raw_items(),
         &communication
     ));
+}
+
+#[tokio::test]
+async fn internal_agent_death_after_submission_releases_agent_state() {
+    let harness = AgentControlHarness::new().await;
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("child task"),
+            /*session_source*/ None,
+        )
+        .await
+        .expect("child spawn should succeed");
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_some()
+    );
+    let state = harness
+        .control
+        .upgrade()
+        .expect("agent control should retain its manager");
+
+    let error = harness
+        .control
+        .handle_thread_request_result(child_thread_id, &state, Err(CodexErr::InternalAgentDied))
+        .await
+        .expect_err("lost acknowledgement should report agent death");
+
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InternalAgentDied
+    ));
+    assert_eq!(harness.manager.list_thread_ids().await, Vec::new());
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_none()
+    );
 }
 
 #[tokio::test]

@@ -351,16 +351,16 @@ impl AgentControl {
                 root_turn_id,
             )
             .await;
-        let result = match self
-            .handle_thread_request_result(agent_id, state, submission_result)
-            .await
-        {
+        let result = match submission_result {
             Ok(submission_id) => reply_rx
                 .await
                 .map(|()| submission_id)
                 .map_err(|_| CodexErr::InternalAgentDied),
             Err(error) => Err(error),
         };
+        let result = self
+            .handle_thread_request_result(agent_id, state, result)
+            .await;
         if let (Some(communication), Ok(communication_id)) =
             (communication_for_log, result.as_ref())
         {

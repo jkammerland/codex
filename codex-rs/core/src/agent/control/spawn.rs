@@ -26,6 +26,29 @@ struct SpawnAgentThreadInheritance {
     exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
 }
 
+struct ProvisionalSpawnEdge {
+    store: Arc<dyn codex_agent_graph_store::AgentGraphStore>,
+    child_thread_id: ThreadId,
+}
+
+impl ProvisionalSpawnEdge {
+    async fn close(&self) {
+        if let Err(err) = self
+            .store
+            .set_thread_spawn_edge_status(
+                self.child_thread_id,
+                codex_agent_graph_store::ThreadSpawnEdgeStatus::Closed,
+            )
+            .await
+        {
+            warn!(
+                child_thread_id = %self.child_thread_id,
+                "failed to close provisional thread-spawn edge: {err}"
+            );
+        }
+    }
+}
+
 /// Initial input delivered after a spawned agent acquires execution capacity.
 ///
 /// V2 communication spawns keep the communication and its context paired so centralized
@@ -705,10 +728,45 @@ impl AgentControl {
             let _ = state.remove_thread(&new_thread.thread_id).await;
         }
         if spawn_cancellation.is_cancelled() {
-            self.discard_unpublished_spawn(&state, &new_thread.thread)
-                .await;
+            self.discard_unpublished_spawn(
+                &state,
+                &new_thread.thread,
+                /*provisional_edge*/ None,
+            )
+            .await;
             return Err(CodexErr::Interrupted);
         }
+        let provisional_edge = if let Some(parent_thread_id) = notification_source
+            .as_ref()
+            .and_then(SessionSource::parent_thread_id)
+            && !new_thread.thread.config_snapshot().await.ephemeral
+            && let Some(store) = state.agent_graph_store()
+        {
+            if let Err(err) = store
+                .upsert_thread_spawn_edge(
+                    parent_thread_id,
+                    new_thread.thread_id,
+                    codex_agent_graph_store::ThreadSpawnEdgeStatus::Open,
+                )
+                .await
+            {
+                self.discard_unpublished_spawn(
+                    &state,
+                    &new_thread.thread,
+                    /*provisional_edge*/ None,
+                )
+                .await;
+                return Err(CodexErr::Fatal(format!(
+                    "failed to persist thread-spawn edge before initial submission: {err}"
+                )));
+            }
+            Some(ProvisionalSpawnEdge {
+                store,
+                child_thread_id: new_thread.thread_id,
+            })
+        } else {
+            None
+        };
         let start_options = TurnStartOptions {
             parent_turn_id: options.parent_turn_id,
             root_turn_id: options.root_turn_id,
@@ -743,12 +801,16 @@ impl AgentControl {
             biased;
             result = &mut initial_submission => result,
             _ = spawn_cancellation.cancelled() => {
-                self.discard_unpublished_spawn(&state, &new_thread.thread).await;
+                self.discard_unpublished_spawn(
+                    &state,
+                    &new_thread.thread,
+                    provisional_edge.as_ref(),
+                ).await;
                 return Err(CodexErr::Interrupted);
             }
         };
         if let Err(error) = submission_result {
-            self.discard_unpublished_spawn(&state, &new_thread.thread)
+            self.discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
                 .await;
             return Err(error);
         }
@@ -793,13 +855,6 @@ impl AgentControl {
 
         // Publish the thread only after its initial turn has been accepted.
         state.notify_thread_created(new_thread.thread_id);
-        self.persist_thread_spawn_edge_for_source(
-            new_thread.thread.as_ref(),
-            new_thread.thread_id,
-            notification_source.as_ref(),
-        )
-        .await;
-
         if multi_agent_version != MultiAgentVersion::V2 {
             let child_reference = agent_metadata
                 .agent_path
@@ -825,16 +880,26 @@ impl AgentControl {
         &self,
         state: &Arc<ThreadManagerState>,
         thread: &Arc<CodexThread>,
+        provisional_edge: Option<&ProvisionalSpawnEdge>,
     ) {
         let thread_id = thread.session.thread_id;
+        if let Some(provisional_edge) = provisional_edge {
+            provisional_edge.close().await;
+        }
         let _ = state.remove_thread_if_matches(&thread_id, thread).await;
         if let Err(err) = thread.shutdown_and_wait().await {
             warn!(thread_id = %thread_id, "failed to shut down unpublished spawned agent: {err}");
         }
+        match state.delete_stored_thread(thread_id).await {
+            Ok(()) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {}
+            Err(err) => {
+                warn!(thread_id = %thread_id, "failed to delete unpublished spawned agent state: {err}");
+            }
+        }
         if let Some(state_db) = thread.state_db()
             && let Err(err) = state_db.delete_thread(thread_id).await
         {
-            warn!(thread_id = %thread_id, "failed to delete unpublished spawned agent state: {err}");
+            warn!(thread_id = %thread_id, "failed to delete unpublished spawned agent metadata: {err}");
         }
     }
 

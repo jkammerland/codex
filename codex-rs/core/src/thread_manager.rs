@@ -70,6 +70,7 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::RolloutCompressionMode;
 use codex_rollout::state_db::StateDbHandle;
 use codex_skills_extension::HostSkillsService;
+use codex_thread_store::DeleteThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
@@ -1516,6 +1517,15 @@ impl ThreadManagerState {
                 }
                 err => CodexErr::Fatal(format!("failed to read stored thread {thread_id}: {err}")),
             })
+    }
+
+    pub(crate) async fn delete_stored_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), ThreadStoreError> {
+        self.thread_store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await
     }
 
     pub(crate) async fn load_latest_model_context(

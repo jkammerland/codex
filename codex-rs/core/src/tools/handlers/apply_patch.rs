@@ -521,15 +521,23 @@ pub(crate) async fn intercept_apply_patch(
 ) -> Result<Option<FunctionToolOutput>, FunctionCallError> {
     let turn = &step_context.turn;
     let sandbox = turn_environment.sandbox_context(/*additional_permissions*/ None);
-    match codex_apply_patch::maybe_parse_apply_patch_verified_with_mode(
+    let verification = codex_apply_patch::maybe_parse_apply_patch_verified_with_mode(
         command,
         cwd,
         apply_patch_file_update_mode(turn),
         fs,
         Some(&sandbox),
-    )
-    .await
-    {
+    );
+    let verified = tokio::select! {
+        biased;
+        verified = verification => verified,
+        _ = cancellation_token.cancelled() => {
+            return Err(FunctionCallError::RespondToModel(
+                "exec_command was cancelled before patch mutation".to_string(),
+            ));
+        }
+    };
+    match verified {
         codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
             let tool_ctx = ToolCtx {
                 session,

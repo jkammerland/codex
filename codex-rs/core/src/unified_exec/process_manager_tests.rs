@@ -494,22 +494,32 @@ async fn output_collection_cancellation_is_not_starved_by_continuous_output() {
         .await
     });
 
-    for _ in 0..100 {
-        output_buffer.lock().await.push_chunk(b"output");
-        output_notify.notify_one();
-        tokio::task::yield_now().await;
-    }
+    let producer_stop = CancellationToken::new();
+    let producer_started = Arc::new(Notify::new());
+    let producer = tokio::spawn({
+        let output_buffer = Arc::clone(&output_buffer);
+        let output_notify = Arc::clone(&output_notify);
+        let producer_stop = producer_stop.clone();
+        let producer_started = Arc::clone(&producer_started);
+        async move {
+            producer_started.notify_one();
+            while !producer_stop.is_cancelled() {
+                output_buffer.lock().await.push_chunk(b"output");
+                output_notify.notify_one();
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+    producer_started.notified().await;
+    tokio::task::yield_now().await;
     invocation_cancellation.cancel();
-    for _ in 0..100 {
-        output_buffer.lock().await.push_chunk(b"output");
-        output_notify.notify_one();
-        tokio::task::yield_now().await;
-    }
 
     let result = tokio::time::timeout(Duration::from_secs(1), collector)
         .await
         .expect("continuous output must not starve cancellation")
         .expect("collector task should join");
+    producer_stop.cancel();
+    producer.await.expect("output producer should join");
     assert!(matches!(result, Err(UnifiedExecError::Cancelled)));
 }
 

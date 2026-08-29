@@ -12,7 +12,11 @@ use codex_protocol::protocol::SessionSource;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+const RESIDENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub(super) struct V2Residency {
@@ -51,12 +55,13 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         config: &Config,
         protected_thread_id: Option<ThreadId>,
+        cancellation_token: &CancellationToken,
     ) -> CodexResult<V2ResidencySlot> {
         let capacity = config
             .effective_agent_max_threads(MultiAgentVersion::V2)
             .unwrap_or(usize::MAX);
         Arc::clone(&self.v2_residency)
-            .reserve_slot(state, capacity, protected_thread_id)
+            .reserve_slot(state, capacity, protected_thread_id, cancellation_token)
             .await
     }
 
@@ -83,8 +88,12 @@ impl V2Residency {
         manager: &Arc<ThreadManagerState>,
         capacity: usize,
         protected_thread_id: Option<ThreadId>,
+        cancellation_token: &CancellationToken,
     ) -> CodexResult<V2ResidencySlot> {
         loop {
+            if cancellation_token.is_cancelled() {
+                return Err(CodexErr::Interrupted);
+            }
             if self.try_reserve_pending_slot(capacity) {
                 return Ok(V2ResidencySlot {
                     residency: self,
@@ -92,8 +101,8 @@ impl V2Residency {
                 });
             }
             if !self
-                .try_unload_one_resident(manager, protected_thread_id)
-                .await
+                .try_unload_one_resident(manager, protected_thread_id, cancellation_token)
+                .await?
             {
                 return Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
                     max_threads: capacity,
@@ -118,42 +127,68 @@ impl V2Residency {
         &self,
         manager: &Arc<ThreadManagerState>,
         protected_thread_id: Option<ThreadId>,
-    ) -> bool {
+        cancellation_token: &CancellationToken,
+    ) -> CodexResult<bool> {
         let candidates_to_scan = self.resident_count();
         for _ in 0..candidates_to_scan {
+            if cancellation_token.is_cancelled() {
+                return Err(CodexErr::Interrupted);
+            }
             let Some(candidate_thread_id) = self.pop_lru_candidate(protected_thread_id) else {
-                return false;
+                return Ok(false);
             };
-            let Some(candidate_thread) = manager
-                .get_thread(candidate_thread_id)
-                .await
+            let candidate_thread = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Err(CodexErr::Interrupted),
+                thread = manager.get_thread(candidate_thread_id) => thread,
+            };
+            let Some(candidate_thread) = candidate_thread
                 .ok()
                 .filter(|thread| is_resident_candidate(thread))
             else {
                 continue;
             };
-            let Ok(_delivery_permit) = candidate_thread
-                .session
-                .agent_delivery_gate
-                .clone()
-                .acquire_owned()
-                .await
-            else {
+            let delivery_permit = candidate_thread.session.agent_delivery_gate.clone();
+            let Ok(_delivery_permit) = (tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Err(CodexErr::Interrupted),
+                permit = delivery_permit.acquire_owned() => permit,
+            }) else {
                 self.touch(candidate_thread_id);
                 continue;
             };
-            if has_nonterminal_loaded_child(manager, candidate_thread_id).await {
+            let has_nonterminal_child = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Err(CodexErr::Interrupted),
+                has_child = has_nonterminal_loaded_child(manager, candidate_thread_id) => has_child,
+            };
+            if has_nonterminal_child {
                 self.touch(candidate_thread_id);
                 continue;
             }
-            if !is_unloadable(candidate_thread.as_ref()).await {
+            let unloadable = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Err(CodexErr::Interrupted),
+                unloadable = is_unloadable(candidate_thread.as_ref()) => unloadable,
+            };
+            if !unloadable {
                 self.touch(candidate_thread_id);
                 continue;
+            }
+            if cancellation_token.is_cancelled() {
+                return Err(CodexErr::Interrupted);
             }
             candidate_thread.ensure_rollout_materialized().await;
-            if let Err(err) = candidate_thread.shutdown_and_wait().await {
+            // Once shutdown is submitted it must not be dropped on cancellation. The bounded
+            // observer keeps a broken teardown from wedging unrelated spawn admission forever.
+            let shutdown = tokio::time::timeout(
+                RESIDENT_SHUTDOWN_TIMEOUT,
+                candidate_thread.shutdown_and_wait(),
+            )
+            .await;
+            if !matches!(shutdown, Ok(Ok(()))) {
                 warn!(
-                    "failed to shut down v2 resident thread before unloading {candidate_thread_id}: {err}"
+                    "failed to shut down v2 resident thread before unloading {candidate_thread_id}: {shutdown:?}"
                 );
                 self.touch(candidate_thread_id);
                 continue;
@@ -166,9 +201,9 @@ impl V2Residency {
                 .state
                 .save_evicted_environments(candidate_thread_id, environments);
             let _ = manager.remove_thread(&candidate_thread_id).await;
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     fn resident_count(&self) -> usize {

@@ -640,6 +640,14 @@ pub enum Op {
         start_options: TurnStartOptions,
     },
 
+    /// Inter-agent communication whose sender must observe mailbox installation before
+    /// publishing a dependent state transition.
+    InterAgentCommunicationWithAck {
+        communication: InterAgentCommunication,
+        start_options: TurnStartOptions,
+        reply: oneshot::Sender<()>,
+    },
+
     /// Approve a command execution
     ExecApproval {
         /// The id of the submission we are approving
@@ -924,7 +932,9 @@ impl Op {
             Self::SuspendTurnAndShutdown { .. } => "suspend_turn_and_shutdown",
             Self::ThreadSettings { .. } => "thread_settings",
             Self::TurnSettings { .. } => "turn_settings",
-            Self::InterAgentCommunication { .. } => "inter_agent_communication",
+            Self::InterAgentCommunication { .. } | Self::InterAgentCommunicationWithAck { .. } => {
+                "inter_agent_communication"
+            }
             Self::ExecApproval { .. } => "exec_approval",
             Self::PatchApproval { .. } => "patch_approval",
             Self::ResolveElicitation { .. } => "resolve_elicitation",

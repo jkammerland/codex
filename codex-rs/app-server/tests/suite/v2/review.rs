@@ -22,6 +22,7 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
@@ -316,6 +317,50 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
         error.error.message.contains("branch must not be empty"),
         "unexpected message: {}",
         error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn unresolved_review_target_completes_as_failed_with_error() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let thread_id = start_default_thread(&mut mcp).await?;
+
+    let ReviewStartResponse { turn, .. } = mcp
+        .request(|request_id| ClientRequest::ReviewStart {
+            request_id,
+            params: ReviewStartParams {
+                thread_id: thread_id.clone(),
+                delivery: Some(ReviewDelivery::Inline),
+                target: ReviewTarget::BaseBranch {
+                    branch: "refs/heads/codex-test-branch-that-does-not-exist".to_string(),
+                },
+            },
+        })
+        .await?;
+    let completed: TurnCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("turn/completed"),
+    )
+    .await??;
+
+    assert_eq!(completed.thread_id, thread_id);
+    assert_eq!(completed.turn.id, turn.id);
+    assert_eq!(completed.turn.status, TurnStatus::Failed);
+    assert!(
+        completed
+            .turn
+            .error
+            .as_ref()
+            .is_some_and(|error| !error.message.is_empty()),
+        "failed review resolution must retain its stable API error"
     );
 
     Ok(())

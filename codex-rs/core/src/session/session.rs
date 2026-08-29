@@ -35,6 +35,11 @@ use codex_skills::SkillError;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
+pub(crate) struct SpawnAdmissionBarrier {
+    pub(crate) persisted: oneshot::Sender<std::io::Result<()>>,
+    pub(crate) release: oneshot::Receiver<()>,
+}
+
 /// Context for an initialized model agent
 ///
 /// A session has at most 1 running task at a time, and can be interrupted by user input.
@@ -66,6 +71,7 @@ pub(crate) struct Session {
     pub(crate) input_queue: InputQueue,
     /// Linearizes durable agent-mail delivery with V2 residency eviction.
     pub(crate) agent_delivery_gate: Arc<Semaphore>,
+    pub(super) spawn_admission_barrier: Mutex<Option<SpawnAdmissionBarrier>>,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
@@ -582,6 +588,24 @@ async fn warm_plugins_and_skills_for_session_init(
 }
 
 impl Session {
+    pub(crate) async fn install_spawn_admission_barrier(
+        &self,
+    ) -> (oneshot::Receiver<std::io::Result<()>>, oneshot::Sender<()>) {
+        let (persisted, persisted_rx) = oneshot::channel();
+        let (release_tx, release) = oneshot::channel();
+        let previous = self
+            .spawn_admission_barrier
+            .lock()
+            .await
+            .replace(SpawnAdmissionBarrier { persisted, release });
+        debug_assert!(previous.is_none());
+        (persisted_rx, release_tx)
+    }
+
+    pub(crate) async fn take_spawn_admission_barrier(&self) -> Option<SpawnAdmissionBarrier> {
+        self.spawn_admission_barrier.lock().await.take()
+    }
+
     /// Returns the concrete identity for this thread.
     pub(crate) fn thread_id(&self) -> ThreadId {
         self.thread_id
@@ -1486,6 +1510,7 @@ impl Session {
                 async_hook_results,
                 input_queue: InputQueue::new(),
                 agent_delivery_gate: Arc::new(Semaphore::new(1)),
+                spawn_admission_barrier: Mutex::new(None),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 git_enrichment_policy,

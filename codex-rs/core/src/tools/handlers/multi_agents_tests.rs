@@ -103,6 +103,27 @@ fn function_payload(args: serde_json::Value) -> ToolPayload {
     }
 }
 
+fn assert_durable_mailbox_eq(
+    actual: Vec<crate::session::TurnInput>,
+    expected: Vec<crate::session::TurnInput>,
+) {
+    let normalized = actual
+        .into_iter()
+        .map(|item| match item {
+            crate::session::TurnInput::InterAgentCommunication(mut communication) => {
+                assert!(
+                    communication.id.as_ref().is_some_and(|id| !id.is_empty()),
+                    "durable mailbox communication should have a response item ID"
+                );
+                communication.id = None;
+                crate::session::TurnInput::InterAgentCommunication(communication)
+            }
+            item => item,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(normalized, expected);
+}
+
 fn parse_agent_id(id: &str) -> ThreadId {
     ThreadId::from_string(id).expect("agent id should be valid")
 }
@@ -1142,7 +1163,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         .input_queue
         .drain_mailbox_input_items()
         .await;
-    assert_eq!(
+    assert_durable_mailbox_eq(
         mailbox,
         vec![crate::session::TurnInput::InterAgentCommunication(
             InterAgentCommunication::new_encrypted(
@@ -1151,8 +1172,8 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                 Vec::new(),
                 "encrypted-send-message".to_string(),
                 /*trigger_turn*/ false,
-            )
-        )]
+            ),
+        )],
     );
 }
 
@@ -1343,7 +1364,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         .input_queue
         .drain_mailbox_input_items()
         .await;
-    assert_eq!(
+    assert_durable_mailbox_eq(
         mailbox,
         vec![crate::session::TurnInput::InterAgentCommunication(
             InterAgentCommunication::new_encrypted(
@@ -1352,8 +1373,8 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                 Vec::new(),
                 "encrypted-done".to_string(),
                 /*trigger_turn*/ false,
-            )
-        )]
+            ),
+        )],
     );
 }
 
@@ -1988,7 +2009,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .input_queue
         .drain_mailbox_input_items()
         .await;
-    assert_eq!(
+    assert_durable_mailbox_eq(
         notifications,
         vec![
             crate::session::TurnInput::InterAgentCommunication(InterAgentCommunication::new(
@@ -2005,7 +2026,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
                 second_notification,
                 /*trigger_turn*/ false,
             )),
-        ]
+        ],
     );
 }
 

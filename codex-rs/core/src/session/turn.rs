@@ -160,6 +160,44 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    let input_already_recorded = if let Some(barrier) = sess.take_spawn_admission_barrier().await {
+        for input_item in &input {
+            record_pending_input(
+                &sess,
+                &turn_context,
+                input_item.clone(),
+                Vec::new(),
+                PersistContext::TurnStart,
+            )
+            .await;
+        }
+        let persistence = match sess
+            .try_ensure_rollout_materialized(PersistContext::TurnStart)
+            .await
+        {
+            Ok(()) => sess.flush_rollout().await,
+            Err(err) => Err(err),
+        };
+        match persistence {
+            Ok(()) => {
+                let _ = barrier.persisted.send(Ok(()));
+            }
+            Err(err) => {
+                let message = err.to_string();
+                let _ = barrier.persisted.send(Err(err));
+                return Err(CodexErr::Fatal(format!(
+                    "failed to persist spawned agent initial task: {message}"
+                )));
+            }
+        }
+        if barrier.release.await.is_err() {
+            return Err(CodexErr::Interrupted);
+        }
+        true
+    } else {
+        false
+    };
+
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
@@ -178,8 +216,12 @@ pub(crate) async fn run_turn(
     .await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
-                .await;
+            if input_already_recorded {
+                run_hooks_for_recorded_inputs(&sess, &turn_context, &input).await;
+            } else {
+                run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
+                    .await;
+            }
             return Err(err);
         }
         if matches!(err.details(), CodexErrorDetails::ToolCollision(_)) {
@@ -200,8 +242,17 @@ pub(crate) async fn run_turn(
         {
             Ok(requirements) => requirements,
             Err(err) => {
-                run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
+                if input_already_recorded {
+                    run_hooks_for_recorded_inputs(&sess, &turn_context, &input).await;
+                } else {
+                    run_hooks_and_record_inputs(
+                        &sess,
+                        &turn_context,
+                        &input,
+                        PersistContext::Standard,
+                    )
                     .await;
+                }
                 return Err(err.into());
             }
         };
@@ -217,8 +268,12 @@ pub(crate) async fn run_turn(
     {
         Ok(step_context) => step_context,
         Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
-                .await;
+            if input_already_recorded {
+                run_hooks_for_recorded_inputs(&sess, &turn_context, &input).await;
+            } else {
+                run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
+                    .await;
+            }
             return Err(err);
         }
         Err(err) => return Err(err),
@@ -266,7 +321,12 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
     let mut can_drain_pending_input = input.is_empty();
-    if run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart).await {
+    let blocked_input = if input_already_recorded {
+        run_hooks_for_recorded_inputs(&sess, &turn_context, &input).await
+    } else {
+        run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart).await
+    };
+    if blocked_input {
         return Ok(None);
     }
 
@@ -652,6 +712,26 @@ pub(crate) async fn run_hooks_and_record_inputs(
             )
             .await;
         }
+    }
+    blocked_input && !accepted_user_input
+}
+
+async fn run_hooks_for_recorded_inputs(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    input: &[TurnInput],
+) -> bool {
+    let mut blocked_input = false;
+    let mut accepted_user_input = false;
+    for input_item in input {
+        let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
+        if hook_outcome.should_stop {
+            blocked_input = true;
+        } else if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty())
+        {
+            accepted_user_input = true;
+        }
+        record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
     }
     blocked_input && !accepted_user_input
 }

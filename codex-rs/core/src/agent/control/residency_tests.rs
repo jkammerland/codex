@@ -18,6 +18,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
@@ -41,7 +42,12 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
     let state = control.upgrade().expect("thread manager should be live");
 
     let first_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
         .await
         .expect("first resident slot");
     let first =
@@ -50,7 +56,12 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
     mark_thread_completed(first.thread.as_ref()).await;
 
     let second_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
         .await
         .expect("second resident slot should evict the first idle agent");
     match manager.get_thread(first.thread_id).await {
@@ -65,6 +76,79 @@ async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
 
     assert!(manager.get_thread(root.thread_id).await.is_ok());
     assert!(manager.get_thread(second.thread_id).await.is_ok());
+}
+
+#[tokio::test]
+async fn residency_admission_cancels_while_waiting_for_delivery_gate() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+    let state = control.upgrade().expect("thread manager should be live");
+    let initial_cancellation = CancellationToken::new();
+    let first_slot = control
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &initial_cancellation,
+        )
+        .await
+        .expect("first resident slot");
+    let first =
+        spawn_v2_subagent(&control, &state, config.clone(), root.thread_id, "worker-1").await;
+    first_slot.commit(first.thread_id);
+    mark_thread_completed(first.thread.as_ref()).await;
+    let delivery_permit = first
+        .thread
+        .session
+        .agent_delivery_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("hold delivery gate");
+
+    let cancellation = CancellationToken::new();
+    let reservation = control.reserve_v2_residency_slot(
+        &state,
+        &config,
+        /*protected_thread_id*/ None,
+        &cancellation,
+    );
+    tokio::pin!(reservation);
+    assert!(futures::poll!(&mut reservation).is_pending());
+    cancellation.cancel();
+    let Err(error) = reservation.await else {
+        panic!("cancelled residency admission must stop waiting");
+    };
+
+    assert!(matches!(error.details(), CodexErrorDetails::Interrupted));
+    assert!(manager.get_thread(first.thread_id).await.is_ok());
+    drop(delivery_permit);
+    let retry_cancellation = CancellationToken::new();
+    let retry = control
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &retry_cancellation,
+        )
+        .await
+        .expect("cancellation must not leak residency capacity");
+    drop(retry);
 }
 
 #[tokio::test]
@@ -89,7 +173,12 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
     let state = control.upgrade().expect("thread manager should be live");
 
     let first_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
         .await
         .expect("first resident slot");
     let first =
@@ -98,7 +187,12 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
     mark_thread_interrupted(first.thread.as_ref()).await;
 
     let second_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
         .await
         .expect("second resident slot should evict the first interrupted idle agent");
     match manager.get_thread(first.thread_id).await {
@@ -155,7 +249,12 @@ async fn residency_does_not_evict_parent_before_nonterminal_child_reports_comple
     let state = control.upgrade().expect("thread manager should be live");
 
     let parent_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
         .await
         .expect("parent resident slot");
     let parent = state
@@ -177,6 +276,7 @@ async fn residency_does_not_evict_parent_before_nonterminal_child_reports_comple
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
             /*environments*/ None,
+            /*reserved_thread_id*/ None,
         )
         .await
         .expect("spawn parent agent");
@@ -184,7 +284,12 @@ async fn residency_does_not_evict_parent_before_nonterminal_child_reports_comple
     mark_thread_completed(parent.thread.as_ref()).await;
 
     let child_slot = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
         .await
         .expect("child resident slot");
     let child = state
@@ -206,13 +311,19 @@ async fn residency_does_not_evict_parent_before_nonterminal_child_reports_comple
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
             /*environments*/ None,
+            /*reserved_thread_id*/ None,
         )
         .await
         .expect("spawn child agent");
     child_slot.commit(child.thread_id);
 
     let Err(error) = control
-        .reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
         .await
     else {
         panic!("nonterminal child must protect its parent from eviction");
@@ -248,6 +359,7 @@ async fn spawn_v2_subagent(
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
             /*environments*/ None,
+            /*reserved_thread_id*/ None,
         )
         .await
         .expect("spawn v2 subagent")

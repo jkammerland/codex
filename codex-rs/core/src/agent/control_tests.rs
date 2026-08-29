@@ -68,6 +68,7 @@ use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::PersistContext;
 use codex_thread_store::ThreadStore;
 use codex_utils_path_uri::PathUri;
+use core_test_support::responses::strip_metadata_from_items;
 use core_test_support::responses::strip_response_item_ids;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -348,6 +349,29 @@ fn history_contains_assistant_inter_agent_communication<'a>(
     })
 }
 
+fn history_contains_agent_message<'a>(
+    history_items: impl IntoIterator<Item = &'a ResponseItem>,
+    expected: &InterAgentCommunication,
+) -> bool {
+    history_items.into_iter().any(|item| {
+        matches!(
+            item,
+            ResponseItem::AgentMessage {
+                id,
+                author,
+                recipient,
+                content,
+                ..
+            } if id == &expected.id
+                && author == &expected.author.to_string()
+                && recipient == &expected.recipient.to_string()
+                && content == &vec![codex_protocol::models::AgentMessageInputContent::InputText {
+                    text: expected.content.clone(),
+                }]
+        )
+    })
+}
+
 async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> bool {
     let wait = async {
         loop {
@@ -596,10 +620,7 @@ async fn failed_initial_submission_does_not_publish_spawned_agent() {
     );
     assert_eq!(
         state_db
-            .list_thread_spawn_children_with_status(
-                parent_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Pending,
-            )
+            .list_pending_thread_spawn_children(parent_thread_id)
             .await
             .expect("pending child edges should load after failed submission"),
         Vec::<ThreadId>::new(),
@@ -721,10 +742,7 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
         .expect("sqlite state db should be available");
     assert_eq!(
         state_db
-            .list_thread_spawn_children_with_status(
-                parent_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Pending,
-            )
+            .list_pending_thread_spawn_children(parent_thread_id)
             .await
             .expect("pending child edge should load during admission"),
         vec![child_thread_id],
@@ -788,14 +806,86 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
     );
     assert_eq!(
         state_db
-            .list_thread_spawn_children_with_status(
-                parent_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Pending,
-            )
+            .list_pending_thread_spawn_children(parent_thread_id)
             .await
             .expect("pending child edges should load after cancellation"),
         Vec::<ThreadId>::new(),
         "cancelled spawn cleanup must finish its durable rollback journal"
+    );
+
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
+    let submission_started = Arc::new(tokio::sync::Notify::new());
+    let submission_release = Arc::new(tokio::sync::Notify::new());
+    let durability_wait_started = Arc::new(tokio::sync::Notify::new());
+    let spawn = tokio::spawn({
+        let control = harness.control.clone();
+        let config = harness.config.clone();
+        let source = child_source();
+        let cancellation_token = cancellation_token.clone();
+        let submission_started = Arc::clone(&submission_started);
+        let submission_release = Arc::clone(&submission_release);
+        let durability_wait_started = Arc::clone(&durability_wait_started);
+        async move {
+            control
+                .spawn_agent_with_metadata(
+                    config,
+                    text_input("withheld durability receipt"),
+                    Some(source),
+                    SpawnAgentOptions {
+                        parent_thread_id: Some(parent_thread_id),
+                        cancellation_token,
+                        initial_submission_barrier: Some(
+                            crate::agent::control::InitialSubmissionBarrier {
+                                started: submission_started,
+                                release: submission_release,
+                            },
+                        ),
+                        durability_receipt_wait_started: Some(durability_wait_started),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }
+    });
+    submission_started.notified().await;
+    let child_thread_id = harness
+        .manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .find(|thread_id| *thread_id != parent_thread_id)
+        .expect("spawned child should be registered before initial submission");
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("spawned child should be available before durability receipt");
+    let withheld_receipt = child_thread
+        .session
+        .take_spawn_admission_barrier()
+        .await
+        .expect("spawn admission barrier should be installed before submission");
+    submission_release.notify_one();
+    durability_wait_started.notified().await;
+    cancellation_token.cancel();
+    let error = timeout(Duration::from_secs(5), spawn)
+        .await
+        .expect("cancelled durability wait should not hang")
+        .expect("spawn task should join")
+        .expect_err("cancelled durability wait should fail");
+    drop(withheld_receipt);
+    assert!(matches!(error.details(), CodexErrorDetails::Interrupted));
+    assert_eq!(
+        harness.manager.list_thread_ids().await,
+        vec![parent_thread_id]
+    );
+    assert_eq!(
+        state_db
+            .list_pending_thread_spawn_children(parent_thread_id)
+            .await
+            .expect("pending child edges should load after receipt cancellation"),
+        Vec::<ThreadId>::new(),
+        "cancelling a stalled durability receipt must complete admission rollback"
     );
 
     let spawned = harness
@@ -824,14 +914,125 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
     );
     assert_eq!(
         state_db
-            .list_thread_spawn_children_with_status(
-                parent_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Pending,
-            )
+            .list_pending_thread_spawn_children(parent_thread_id)
             .await
             .expect("pending child edges should load after accepted spawn"),
         Vec::<ThreadId>::new()
     );
+}
+
+#[tokio::test]
+async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, parent) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
+    let persisted = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let spawn = tokio::spawn({
+        let control = harness.control.clone();
+        let config = harness.config.clone();
+        let persisted = Arc::clone(&persisted);
+        let release = Arc::clone(&release);
+        async move {
+            control
+                .spawn_agent_with_metadata(
+                    config,
+                    text_input("durable initial task"),
+                    Some(
+                        thread_spawn_source(
+                            parent_thread_id,
+                            &parent.session_source,
+                            next_thread_spawn_depth(&parent.session_source),
+                            /*agent_role*/ None,
+                            Some("worker".to_string()),
+                        )
+                        .expect("child source"),
+                    ),
+                    SpawnAgentOptions {
+                        parent_thread_id: Some(parent_thread_id),
+                        admission_commit_barrier: Some(
+                            crate::agent::control::AdmissionCommitBarrier { persisted, release },
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }
+    });
+
+    persisted.notified().await;
+    let child_thread_id = harness
+        .manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .find(|thread_id| *thread_id != parent_thread_id)
+        .expect("durably initialized child should be loaded");
+    let child = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("durably initialized child should be readable");
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    assert!(history_contains_text(
+        child.session.clone_history().await.raw_items(),
+        "durable initial task",
+    ));
+    assert_eq!(
+        (
+            state_db
+                .list_pending_thread_spawn_children(parent_thread_id)
+                .await
+                .expect("pending edge query"),
+            state_db
+                .list_thread_spawn_children_with_status(
+                    parent_thread_id,
+                    DirectionalThreadSpawnEdgeStatus::Open,
+                )
+                .await
+                .expect("open edge query"),
+        ),
+        (vec![child_thread_id], Vec::<ThreadId>::new()),
+    );
+
+    release.notify_one();
+    let spawned = spawn
+        .await
+        .expect("spawn task should join")
+        .expect("spawn should commit after durable initialization");
+    assert_eq!(spawned.thread_id, child_thread_id);
+    assert_eq!(
+        (
+            state_db
+                .list_pending_thread_spawn_children(parent_thread_id)
+                .await
+                .expect("pending edge query after commit"),
+            state_db
+                .list_thread_spawn_children_with_status(
+                    parent_thread_id,
+                    DirectionalThreadSpawnEdgeStatus::Open,
+                )
+                .await
+                .expect("open edge query after commit"),
+        ),
+        (Vec::<ThreadId>::new(), vec![child_thread_id]),
+    );
+    harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should complete");
 }
 
 #[tokio::test]
@@ -967,16 +1168,154 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
 
     assert!(thread.session.input_queue.has_pending_mailbox_items().await);
     let (items, _) = thread.session.input_queue.drain_mailbox_input_items().await;
+    let crate::session::TurnInput::InterAgentCommunication(recorded_communication) = &items[0]
+    else {
+        panic!("expected inter-agent communication");
+    };
+    let mut expected_communication = communication.clone();
+    expected_communication.id = recorded_communication.id.clone();
     assert_eq!(
         items,
         vec![crate::session::TurnInput::InterAgentCommunication(
-            communication.clone()
+            expected_communication.clone()
         )]
     );
 
     let history = thread.session.clone_history().await;
-    assert!(!history_contains_assistant_inter_agent_communication(
+    assert!(history_contains_agent_message(
         history.raw_items(),
+        &expected_communication
+    ));
+}
+
+#[tokio::test]
+async fn public_acknowledged_mail_op_completes_after_durable_delivery() {
+    let harness = AgentControlHarness::new().await;
+    let (_, thread) = harness.start_thread().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "acknowledged public op".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let (reply, acknowledged) = tokio::sync::oneshot::channel();
+
+    let submission_id = thread
+        .submit(Op::InterAgentCommunicationWithAck {
+            communication: communication.clone(),
+            start_options: Default::default(),
+            reply,
+        })
+        .await
+        .expect("public acknowledged mail op should submit");
+
+    assert!(!submission_id.is_empty());
+    assert_eq!(acknowledged.await, Ok(()));
+    let history = thread.session.clone_history().await;
+    assert!(history.raw_items().any(|item| {
+        matches!(
+            item,
+            ResponseItem::AgentMessage { content, .. }
+                if content == &vec![codex_protocol::models::AgentMessageInputContent::InputText {
+                    text: communication.content.clone(),
+                }]
+        )
+    }));
+}
+
+#[tokio::test]
+async fn acknowledged_mail_wins_when_delivery_precedes_shutdown() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "mail before shutdown".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let permit = thread
+        .session
+        .agent_delivery_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("delivery gate");
+    let delivery = harness.control.send_inter_agent_communication(
+        thread_id,
+        communication.clone(),
+        AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
+        Default::default(),
+    );
+    tokio::pin!(delivery);
+    assert!(futures::poll!(&mut delivery).is_pending());
+    let shutdown = harness.control.shutdown_live_agent(thread_id);
+    tokio::pin!(shutdown);
+    assert!(futures::poll!(&mut shutdown).is_pending());
+
+    drop(permit);
+    delivery.await.expect("delivery should win admission");
+    shutdown.await.expect("shutdown should complete");
+
+    let history = thread.session.clone_history().await;
+    let recorded = history
+        .raw_items()
+        .find_map(|item| match item {
+            ResponseItem::AgentMessage { id, .. } => id.clone(),
+            _ => None,
+        })
+        .expect("acknowledged mail should have a durable response item id");
+    let mut expected_communication = communication;
+    expected_communication.id = Some(recorded);
+    assert!(history_contains_agent_message(
+        history.raw_items(),
+        &expected_communication
+    ));
+}
+
+#[tokio::test]
+async fn shutdown_rejects_mail_when_shutdown_precedes_delivery() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "mail after shutdown".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let permit = thread
+        .session
+        .agent_delivery_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("delivery gate");
+    let shutdown = harness.control.shutdown_live_agent(thread_id);
+    tokio::pin!(shutdown);
+    assert!(futures::poll!(&mut shutdown).is_pending());
+    let delivery = harness.control.send_inter_agent_communication(
+        thread_id,
+        communication.clone(),
+        AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
+        Default::default(),
+    );
+    tokio::pin!(delivery);
+    assert!(futures::poll!(&mut delivery).is_pending());
+
+    drop(permit);
+    shutdown.await.expect("shutdown should win admission");
+    let error = delivery
+        .await
+        .expect_err("delivery must fail after shutdown");
+
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InternalAgentDied
+    ));
+    assert!(!history_contains_agent_message(
+        thread.session.clone_history().await.raw_items(),
         &communication
     ));
 }
@@ -1253,7 +1592,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         "residency reload must preserve the worker provider instead of inheriting its sender's provider",
     );
 
-    let communication = InterAgentCommunication::new(
+    let mut communication = InterAgentCommunication::new(
         AgentPath::root(),
         agent_path,
         Vec::new(),
@@ -1274,6 +1613,11 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         .input_queue
         .drain_mailbox_input_items()
         .await;
+    let crate::session::TurnInput::InterAgentCommunication(recorded_communication) = &items[0]
+    else {
+        panic!("expected inter-agent communication");
+    };
+    communication.id = recorded_communication.id.clone();
     assert_eq!(
         items,
         vec![crate::session::TurnInput::InterAgentCommunication(
@@ -1404,43 +1748,69 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
 }
 
 #[tokio::test]
-async fn restore_v2_agent_metadata_retries_pending_spawn_cleanup() {
+async fn root_resume_retries_pending_spawn_cleanup_below_closed_ancestor() {
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    let child_thread_id = harness
+    let ancestor_path = AgentPath::root().join("worker").expect("worker path");
+    let ancestor_thread_id = harness
         .control
         .spawn_agent(
             harness.config.clone(),
-            text_input("hello child"),
+            text_input("hello ancestor"),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth: 1,
-                agent_path: Some(AgentPath::root().join("worker").expect("worker path")),
+                agent_path: Some(ancestor_path.clone()),
                 agent_nickname: None,
                 agent_role: Some("worker".to_string()),
             })),
         )
         .await
-        .expect("child spawn should succeed");
-    let child_thread = harness
-        .manager
-        .get_thread(child_thread_id)
+        .expect("ancestor spawn should succeed");
+    let pending_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello pending descendant"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: ancestor_thread_id,
+                depth: 2,
+                agent_path: Some(ancestor_path.join("pending").expect("pending path")),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+        )
         .await
-        .expect("child thread should exist");
+        .expect("pending descendant spawn should succeed");
+    let ancestor_thread = harness
+        .manager
+        .get_thread(ancestor_thread_id)
+        .await
+        .expect("ancestor thread should exist");
+    let pending_thread = harness
+        .manager
+        .get_thread(pending_thread_id)
+        .await
+        .expect("pending descendant thread should exist");
     persist_thread_for_tree_resume(&parent_thread, "parent persisted").await;
-    persist_thread_for_tree_resume(&child_thread, "child persisted").await;
-    let child_rollout_path = child_thread
+    persist_thread_for_tree_resume(&ancestor_thread, "ancestor persisted").await;
+    persist_thread_for_tree_resume(&pending_thread, "pending descendant persisted").await;
+    let pending_rollout_path = pending_thread
         .rollout_path()
-        .expect("persisted child should report its rollout path");
+        .expect("persisted pending descendant should report its rollout path");
     let state_db = harness
         .state_db
         .as_ref()
         .expect("sqlite state db should be available");
     state_db
-        .set_thread_spawn_edge_status(child_thread_id, DirectionalThreadSpawnEdgeStatus::Pending)
+        .set_thread_spawn_edge_status(ancestor_thread_id, DirectionalThreadSpawnEdgeStatus::Closed)
+        .await
+        .expect("closed ancestor edge should persist");
+    state_db
+        .begin_thread_spawn_admission(ancestor_thread_id, pending_thread_id)
         .await
         .expect("interrupted rollback journal should persist");
 
@@ -1467,32 +1837,35 @@ async fn restore_v2_agent_metadata_retries_pending_spawn_cleanup() {
         )
         .await
         .expect("root resume should retry pending child cleanup");
-    resumed_control
-        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
 
     assert_eq!(
         state_db
-            .get_thread(child_thread_id)
+            .get_thread(pending_thread_id)
             .await
             .expect("cleaned child metadata query should succeed"),
         None
     );
     assert!(
-        !child_rollout_path.exists(),
+        !pending_rollout_path.exists(),
         "pending spawn recovery must remove the unpublished rollout"
     );
     assert_eq!(
         state_db
-            .list_thread_spawn_children_with_status(
-                parent_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Pending,
-            )
+            .list_pending_thread_spawn_children(ancestor_thread_id)
             .await
             .expect("pending children should load after cleanup"),
         Vec::<ThreadId>::new()
     );
-    assert!(resumed_control.ensure_agent_known(child_thread_id).is_err());
+    assert!(
+        resumed_control
+            .ensure_agent_known(ancestor_thread_id)
+            .is_err()
+    );
+    assert!(
+        resumed_control
+            .ensure_agent_known(pending_thread_id)
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -2112,9 +2485,16 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         )),
     ];
     assert_eq!(
-        strip_response_item_ids(&history_items),
+        strip_response_item_ids(&history_items[..expected_history.len()]),
         strip_response_item_ids(&expected_history),
         "full-history forked child history should replace parent usage hints with the child subagent hint while filtering non-final assistant/tool chatter"
+    );
+    assert_eq!(
+        strip_response_item_ids(&strip_metadata_from_items(
+            &history_items[expected_history.len()..]
+        )),
+        vec![user_message("child task")],
+        "spawn admission should durably record exactly the child's initial task"
     );
     assert_eq!(
         serde_json::to_value(child_thread.session.reference_context_item().await)
@@ -3538,6 +3918,12 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
 
     sleep(Duration::from_millis(100)).await;
 
+    assert_eq!(
+        tester_thread.agent_status().await,
+        AgentStatus::Completed(Some("done".to_string())),
+        "parent delivery failure must not withhold the child's terminal status"
+    );
+
     assert!(
         !harness
             .manager
@@ -3621,7 +4007,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         &AgentStatus::Completed(Some("done".to_string())),
     )
     .expect("completed status should render");
-    let expected_communication = InterAgentCommunication::new(
+    let mut expected_communication = InterAgentCommunication::new(
         tester_path.clone(),
         worker_path.clone(),
         Vec::new(),
@@ -3645,6 +4031,11 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         .input_queue
         .drain_mailbox_input_items()
         .await;
+    let crate::session::TurnInput::InterAgentCommunication(recorded_communication) = &items[0]
+    else {
+        panic!("expected inter-agent communication");
+    };
+    expected_communication.id = recorded_communication.id.clone();
     assert_eq!(
         items,
         vec![crate::session::TurnInput::InterAgentCommunication(

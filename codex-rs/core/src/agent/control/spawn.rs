@@ -26,6 +26,16 @@ struct SpawnAgentThreadInheritance {
     exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
 }
 
+struct ForkedThreadSpawn<'a> {
+    state: &'a Arc<ThreadManagerState>,
+    config: Config,
+    session_source: SessionSource,
+    options: &'a SpawnAgentOptions,
+    inheritance: SpawnAgentThreadInheritance,
+    multi_agent_version: MultiAgentVersion,
+    reserved_thread_id: Option<ThreadId>,
+}
+
 struct ProvisionalSpawnEdge {
     store: Arc<dyn codex_agent_graph_store::AgentGraphStore>,
     child_thread_id: ThreadId,
@@ -34,10 +44,7 @@ struct ProvisionalSpawnEdge {
 impl ProvisionalSpawnEdge {
     async fn mark_open(&self) -> codex_agent_graph_store::AgentGraphStoreResult<()> {
         self.store
-            .set_thread_spawn_edge_status(
-                self.child_thread_id,
-                codex_agent_graph_store::ThreadSpawnEdgeStatus::Open,
-            )
+            .commit_thread_spawn_admission(self.child_thread_id)
             .await
     }
 
@@ -187,6 +194,16 @@ impl AgentControl {
         let Some(agent_graph_store) = state.agent_graph_store() else {
             return;
         };
+        let all_descendant_ids = match agent_graph_store
+            .list_thread_spawn_descendants(root_thread_id, /*status_filter*/ None)
+            .await
+        {
+            Ok(descendant_ids) => descendant_ids,
+            Err(err) => {
+                warn!("failed to inspect persisted V2 agent metadata for {root_thread_id}: {err}");
+                return;
+            }
+        };
         let descendant_ids = match agent_graph_store
             .list_thread_spawn_descendants(
                 root_thread_id,
@@ -205,13 +222,10 @@ impl AgentControl {
         // admission. They are never restored as agents. Retry their cleanup on every root
         // restoration; database cleanup removes the journal entry last.
         for parent_thread_id in
-            std::iter::once(root_thread_id).chain(descendant_ids.iter().copied())
+            std::iter::once(root_thread_id).chain(all_descendant_ids.iter().copied())
         {
             let pending_children = match agent_graph_store
-                .list_thread_spawn_children(
-                    parent_thread_id,
-                    Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Pending),
-                )
+                .list_pending_thread_spawn_children(parent_thread_id)
                 .await
             {
                 Ok(pending_children) => pending_children,
@@ -601,8 +615,9 @@ impl AgentControl {
             )
         };
         // Reserving a slot can evict an idle nested parent. Keep its authority captured above.
+        let residency_cancellation = CancellationToken::new();
         let residency_slot = self
-            .reserve_v2_residency_slot(&state, &config, Some(thread_id))
+            .reserve_v2_residency_slot(&state, &config, Some(thread_id), &residency_cancellation)
             .await?;
 
         match state
@@ -657,6 +672,10 @@ impl AgentControl {
         let spawn_cancellation = options.cancellation_token.clone();
         #[cfg(test)]
         let initial_submission_barrier = options.initial_submission_barrier.clone();
+        #[cfg(test)]
+        let admission_commit_barrier = options.admission_commit_barrier.clone();
+        #[cfg(test)]
+        let durability_receipt_wait_started = options.durability_receipt_wait_started.clone();
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(
                 &InitialHistory::New,
@@ -676,8 +695,13 @@ impl AgentControl {
                 .is_some_and(is_v2_resident_session_source);
         let residency_slot = if spawn_uses_v2_residency {
             Some(
-                self.reserve_v2_residency_slot(&state, &config, /*protected_thread_id*/ None)
-                    .await?,
+                self.reserve_v2_residency_slot(
+                    &state,
+                    &config,
+                    /*protected_thread_id*/ None,
+                    &spawn_cancellation,
+                )
+                .await?,
             )
         } else {
             None
@@ -718,19 +742,49 @@ impl AgentControl {
             other => (other, AgentMetadata::default()),
         };
         let notification_source = session_source.clone();
+        let provisional_edge = if let Some(parent_thread_id) = notification_source
+            .as_ref()
+            .and_then(SessionSource::parent_thread_id)
+            && !config.ephemeral
+            && let Some(store) = state.agent_graph_store()
+        {
+            let provisional_edge = ProvisionalSpawnEdge {
+                store,
+                child_thread_id: self.generate_thread_id(),
+            };
+            if let Err(err) = provisional_edge
+                .store
+                .begin_thread_spawn_admission(parent_thread_id, provisional_edge.child_thread_id)
+                .await
+            {
+                if let Err(cleanup_error) = provisional_edge.rollback().await {
+                    return Err(CodexErr::Fatal(format!(
+                        "failed to begin pending thread-spawn admission: {err}; rollback failed: {cleanup_error}"
+                    )));
+                }
+                return Err(CodexErr::Fatal(format!(
+                    "failed to begin pending thread-spawn admission: {err}"
+                )));
+            }
+            Some(provisional_edge)
+        } else {
+            None
+        };
+        let reserved_thread_id = provisional_edge.as_ref().map(|edge| edge.child_thread_id);
 
         // The same `AgentControl` is sent to spawn the thread.
-        let new_thread = match (session_source, options.fork_mode.as_ref(), inheritance) {
+        let new_thread_result = match (session_source, options.fork_mode.as_ref(), inheritance) {
             (Some(session_source), Some(_), inheritance) => {
-                Box::pin(self.spawn_forked_thread(
-                    &state,
+                Box::pin(self.spawn_forked_thread(ForkedThreadSpawn {
+                    state: &state,
                     config,
                     session_source,
-                    &options,
+                    options: &options,
                     inheritance,
                     multi_agent_version,
-                ))
-                .await?
+                    reserved_thread_id,
+                }))
+                .await
             }
             (Some(session_source), None, inheritance) => {
                 let history_mode = if let Some(parent_thread_id) = options.parent_thread_id
@@ -756,11 +810,29 @@ impl AgentControl {
                     inheritance.environments,
                     inheritance.exec_policy,
                     options.environments.clone(),
+                    reserved_thread_id,
                 ))
-                .await?
+                .await
             }
-            (None, _, _) => Box::pin(state.spawn_new_thread(config.clone(), self.clone())).await?,
+            (None, _, _) => Box::pin(state.spawn_new_thread(config.clone(), self.clone())).await,
         };
+        let new_thread = match new_thread_result {
+            Ok(new_thread) => new_thread,
+            Err(error) => {
+                if let Some(provisional_edge) = provisional_edge.as_ref()
+                    && let Err(cleanup_error) = provisional_edge.rollback().await
+                {
+                    return Err(CodexErr::Fatal(format!(
+                        "agent construction failed: {error}; admission rollback failed: {cleanup_error}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        debug_assert_eq!(
+            reserved_thread_id,
+            provisional_edge.as_ref().map(|edge| edge.child_thread_id)
+        );
         agent_metadata.agent_id = Some(new_thread.thread_id);
         #[cfg(test)]
         if options.remove_thread_before_initial_submission {
@@ -768,11 +840,7 @@ impl AgentControl {
         }
         if spawn_cancellation.is_cancelled() {
             if let Err(cleanup_error) = self
-                .discard_unpublished_spawn(
-                    &state,
-                    &new_thread.thread,
-                    /*provisional_edge*/ None,
-                )
+                .discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
                 .await
             {
                 return Err(CodexErr::Fatal(format!(
@@ -781,43 +849,21 @@ impl AgentControl {
             }
             return Err(CodexErr::Interrupted);
         }
-        let provisional_edge = if let Some(parent_thread_id) = notification_source
-            .as_ref()
-            .and_then(SessionSource::parent_thread_id)
-            && !new_thread.thread.config_snapshot().await.ephemeral
-            && let Some(store) = state.agent_graph_store()
-        {
-            if let Err(err) = store
-                .upsert_thread_spawn_edge(
-                    parent_thread_id,
-                    new_thread.thread_id,
-                    codex_agent_graph_store::ThreadSpawnEdgeStatus::Pending,
-                )
-                .await
-            {
-                if let Err(cleanup_error) = self
-                    .discard_unpublished_spawn(
-                        &state,
-                        &new_thread.thread,
-                        /*provisional_edge*/ None,
-                    )
-                    .await
-                {
-                    return Err(CodexErr::Fatal(format!(
-                        "failed to persist pending thread-spawn edge: {err}; rollback failed: {cleanup_error}"
-                    )));
-                }
-                return Err(CodexErr::Fatal(format!(
-                    "failed to persist thread-spawn edge before initial submission: {err}"
-                )));
-            }
-            Some(ProvisionalSpawnEdge {
-                store,
-                child_thread_id: new_thread.thread_id,
-            })
+        let mut admission_barrier = if provisional_edge.is_some() {
+            Some(
+                new_thread
+                    .thread
+                    .session
+                    .install_spawn_admission_barrier()
+                    .await,
+            )
         } else {
             None
         };
+        debug_assert_eq!(
+            reserved_thread_id,
+            Some(new_thread.thread_id).filter(|_| provisional_edge.is_some())
+        );
         let start_options = TurnStartOptions {
             parent_turn_id: options.parent_turn_id,
             root_turn_id: options.root_turn_id,
@@ -842,6 +888,7 @@ impl AgentControl {
                         communication,
                         context,
                         start_options,
+                        AgentMailDurability::SpawnAdmissionBarrier,
                     )
                     .await
                 }
@@ -852,6 +899,7 @@ impl AgentControl {
             biased;
             result = &mut initial_submission => result,
             _ = spawn_cancellation.cancelled() => {
+                drop(admission_barrier.take());
                 if let Err(cleanup_error) = self
                     .discard_unpublished_spawn(
                         &state,
@@ -868,6 +916,7 @@ impl AgentControl {
             }
         };
         if let Err(error) = submission_result {
+            drop(admission_barrier.take());
             if let Err(cleanup_error) = self
                 .discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
                 .await
@@ -878,9 +927,91 @@ impl AgentControl {
             }
             return Err(error);
         }
+        #[cfg(test)]
+        if let Some(wait_started) = durability_receipt_wait_started {
+            wait_started.notify_one();
+        }
+        if let Some((persisted, _)) = admission_barrier.as_mut() {
+            let persistence = tokio::select! {
+                biased;
+                _ = spawn_cancellation.cancelled() => None,
+                result = persisted => Some(result),
+            };
+            let Some(persistence) = persistence else {
+                drop(admission_barrier.take());
+                if let Err(cleanup_error) = self
+                    .discard_unpublished_spawn(
+                        &state,
+                        &new_thread.thread,
+                        provisional_edge.as_ref(),
+                    )
+                    .await
+                {
+                    return Err(CodexErr::Fatal(format!(
+                        "agent spawn cancellation rollback remains pending: {cleanup_error}"
+                    )));
+                }
+                return Err(CodexErr::Interrupted);
+            };
+            match persistence {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    drop(admission_barrier.take());
+                    if let Err(cleanup_error) = self
+                        .discard_unpublished_spawn(
+                            &state,
+                            &new_thread.thread,
+                            provisional_edge.as_ref(),
+                        )
+                        .await
+                    {
+                        return Err(CodexErr::Fatal(format!(
+                            "initial agent task persistence failed: {error}; rollback remains pending: {cleanup_error}"
+                        )));
+                    }
+                    return Err(CodexErr::Fatal(format!(
+                        "initial agent task persistence failed: {error}"
+                    )));
+                }
+                Err(_) => {
+                    drop(admission_barrier.take());
+                    if let Err(cleanup_error) = self
+                        .discard_unpublished_spawn(
+                            &state,
+                            &new_thread.thread,
+                            provisional_edge.as_ref(),
+                        )
+                        .await
+                    {
+                        return Err(CodexErr::Fatal(format!(
+                            "spawned agent ended before persisting its initial task; rollback remains pending: {cleanup_error}"
+                        )));
+                    }
+                    return Err(CodexErr::InternalAgentDied);
+                }
+            }
+        }
+        #[cfg(test)]
+        if let Some(barrier) = admission_commit_barrier {
+            barrier.persisted.notify_one();
+            barrier.release.notified().await;
+        }
+        if spawn_cancellation.is_cancelled() {
+            drop(admission_barrier.take());
+            if let Err(cleanup_error) = self
+                .discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
+                .await
+            {
+                return Err(CodexErr::Fatal(format!(
+                    "agent spawn cancellation rollback remains pending: {cleanup_error}"
+                )));
+            }
+            return Err(CodexErr::Interrupted);
+        }
         if let Some(provisional_edge) = provisional_edge.as_ref()
             && let Err(err) = provisional_edge.mark_open().await
         {
+            drop(admission_barrier.take());
             if let Err(cleanup_error) = self
                 .discard_unpublished_spawn(&state, &new_thread.thread, Some(provisional_edge))
                 .await
@@ -897,6 +1028,9 @@ impl AgentControl {
         reservation.commit(agent_metadata.clone());
         if let Some(residency_slot) = residency_slot {
             residency_slot.commit(new_thread.thread_id);
+        }
+        if let Some((_, release)) = admission_barrier.take() {
+            let _ = release.send(());
         }
 
         if let Some(SessionSource::SubAgent(
@@ -998,13 +1132,17 @@ impl AgentControl {
 
     async fn spawn_forked_thread(
         &self,
-        state: &Arc<ThreadManagerState>,
-        config: Config,
-        session_source: SessionSource,
-        options: &SpawnAgentOptions,
-        inheritance: SpawnAgentThreadInheritance,
-        multi_agent_version: MultiAgentVersion,
+        request: ForkedThreadSpawn<'_>,
     ) -> CodexResult<crate::thread_manager::NewThread> {
+        let ForkedThreadSpawn {
+            state,
+            config,
+            session_source,
+            options,
+            inheritance,
+            multi_agent_version,
+            reserved_thread_id,
+        } = request;
         let SpawnAgentThreadInheritance {
             environments: inherited_environments,
             exec_policy: inherited_exec_policy,
@@ -1275,6 +1413,7 @@ impl AgentControl {
                 inherited_exec_policy,
                 options.environments.clone(),
                 thread_extension_init,
+                reserved_thread_id,
             )
             .await
     }
@@ -1295,6 +1434,8 @@ impl AgentControl {
         if config.multi_agent_version_from_features() == MultiAgentVersion::V2
             || resumed_multi_agent_version == MultiAgentVersion::V2
         {
+            self.restore_v2_agent_metadata(&config, resumed_thread_id)
+                .await;
             return Ok(resumed_thread_id);
         }
         let Some(agent_graph_store) = state.agent_graph_store() else {

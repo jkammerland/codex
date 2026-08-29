@@ -224,6 +224,10 @@ async fn handle_spawn_agent(
                     remove_thread_before_initial_submission: false,
                     #[cfg(test)]
                     initial_submission_barrier: None,
+                    #[cfg(test)]
+                    admission_commit_barrier: None,
+                    #[cfg(test)]
+                    durability_receipt_wait_started: None,
                 },
             ),
     )

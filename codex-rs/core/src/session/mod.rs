@@ -2100,17 +2100,15 @@ impl Session {
             Some(error) => AgentStatus::Errored(error.message),
             None => agent_status_from_event(msg)?,
         };
-        if is_final(&status)
-            && !self
+        if is_final(&status) {
+            let _ = self
                 .forward_child_completion_to_parent(
                     turn_context,
                     *parent_thread_id,
                     child_agent_path,
                     status.clone(),
                 )
-                .await
-        {
-            return None;
+                .await;
         }
         Some(status)
     }
@@ -2200,16 +2198,13 @@ impl Session {
         );
         let context =
             AgentCommunicationContext::new(AgentCommunicationKind::Result, self.thread_id);
-        if let Err(err) = self
-            .services
-            .agent_control
-            .send_inter_agent_communication(
-                parent_thread_id,
-                communication,
-                context,
-                TurnStartOptions::default(),
-            )
-            .await
+        if let Err(err) = Box::pin(self.services.agent_control.send_inter_agent_communication(
+            parent_thread_id,
+            communication,
+            context,
+            TurnStartOptions::default(),
+        ))
+        .await
         {
             debug!("failed to notify parent thread {parent_thread_id}: {err}");
             return false;
@@ -2289,26 +2284,6 @@ impl Session {
             event,
             /*persist*/ true,
             AgentStatusUpdate::Apply,
-        )
-        .await;
-    }
-
-    /// Persists and delivers an auxiliary event without changing the enclosing turn or agent
-    /// status. Auxiliary commands share a turn context but do not own its terminal lifecycle.
-    pub(crate) async fn send_nonterminal_event(&self, turn_context: &TurnContext, msg: EventMsg) {
-        self.services
-            .rollout_thread_trace
-            .record_codex_turn_event(&turn_context.sub_id, &msg);
-        self.services
-            .rollout_thread_trace
-            .record_tool_call_event(turn_context.sub_id.clone(), &msg);
-        self.send_event_raw_with_persistence(
-            Event {
-                id: turn_context.sub_id.clone(),
-                msg,
-            },
-            /*persist*/ true,
-            AgentStatusUpdate::Defer,
         )
         .await;
     }
@@ -3532,7 +3507,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         communication: InterAgentCommunication,
-    ) {
+    ) -> std::io::Result<()> {
         let response_item = communication.to_model_input_item();
         let (items, _) = self.prepare_conversation_items_for_history(
             turn_context,
@@ -3548,14 +3523,34 @@ impl Session {
                 turn_context.model_info().truncation_policy.into(),
             );
         }
-        self.persist_rollout_items(&[
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: communication.trigger_turn,
-            },
-            RolloutItem::ResponseItem(response_item.into()),
-        ])
-        .await;
+        if let Some(live_thread) = self.live_thread() {
+            live_thread
+                .append_items(&[
+                    RolloutItem::InterAgentCommunicationMetadata {
+                        trigger_turn: communication.trigger_turn,
+                    },
+                    RolloutItem::ResponseItem(response_item.into()),
+                ])
+                .await
+                .map_err(std::io::Error::other)?;
+        }
         self.send_raw_response_items(turn_context, items).await;
+        Ok(())
+    }
+
+    pub(crate) async fn has_recorded_inter_agent_communication(
+        &self,
+        communication: &InterAgentCommunication,
+    ) -> bool {
+        let Some(communication_id) = communication.id.as_ref() else {
+            return false;
+        };
+        self.state
+            .lock()
+            .await
+            .clone_history()
+            .raw_items()
+            .any(|item| item.id() == Some(communication_id))
     }
 
     async fn maybe_warn_on_server_model_mismatch(

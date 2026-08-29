@@ -93,7 +93,50 @@ pub async fn inter_agent_communication(
     }
 }
 
+async fn inter_agent_communication_with_ack(
+    sess: &Arc<Session>,
+    sub_id: String,
+    communication: InterAgentCommunication,
+    start_options: codex_protocol::turn_input::TurnStartOptions,
+    reply: tokio::sync::oneshot::Sender<()>,
+) {
+    let Ok(_delivery_permit) = sess.agent_delivery_gate.clone().acquire_owned().await else {
+        return;
+    };
+    let Ok(trigger_turn) = sess
+        .persist_and_enqueue_inter_agent_communication(&sub_id, communication, start_options)
+        .await
+    else {
+        return;
+    };
+    let _ = reply.send(());
+    if trigger_turn || sess.has_outstanding_durable_sleep() {
+        sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
+            .await;
+    }
+}
+
 impl Session {
+    pub(crate) async fn persist_and_enqueue_inter_agent_communication(
+        self: &Arc<Self>,
+        sub_id: &str,
+        mut communication: InterAgentCommunication,
+        start_options: codex_protocol::turn_input::TurnStartOptions,
+    ) -> std::io::Result<bool> {
+        if communication.id.as_ref().is_none_or(|id| id.is_empty()) {
+            communication.id = Some(codex_protocol::ResponseItemId::new("msg"));
+        }
+        let turn_context = self.new_default_turn().await;
+        self.try_ensure_rollout_materialized(PersistContext::Standard)
+            .await?;
+        self.record_inter_agent_communication(&turn_context, communication.clone())
+            .await?;
+        self.flush_rollout().await?;
+        Ok(self
+            .enqueue_inter_agent_communication(sub_id, communication, start_options)
+            .await)
+    }
+
     pub(crate) fn enqueue_inter_agent_communication<'a>(
         self: &'a Arc<Self>,
         sub_id: &'a str,
@@ -530,23 +573,23 @@ pub async fn review(
             .await;
         }
         Err(err) => {
-            let event = Event {
-                id: sub_id,
-                msg: EventMsg::Error(ErrorEvent {
-                    misalignment: None,
-                    message: err.to_string(),
-                    codex_error_info: Some(CodexErrorInfo::Other),
-                }),
+            let error = ErrorEvent {
+                misalignment: None,
+                message: err.to_string(),
+                codex_error_info: Some(CodexErrorInfo::Other),
             };
-            sess.send_event(&turn_context, event.msg).await;
+            sess.send_event(&turn_context, EventMsg::Error(error.clone()))
+                .await;
             sess.send_event(
                 &turn_context,
-                EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
-                    turn_id: Some(turn_context.sub_id.clone()),
-                    reason: codex_protocol::protocol::TurnAbortReason::ReviewEnded,
+                EventMsg::TurnComplete(codex_protocol::protocol::TurnCompleteEvent {
+                    turn_id: turn_context.sub_id.clone(),
+                    last_agent_message: None,
+                    error: Some(error),
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
+                    time_to_first_token_ms: None,
                 }),
             )
             .await;
@@ -666,6 +709,21 @@ pub(super) async fn submission_loop(
                 } => {
                     inter_agent_communication(&sess, sub.id.clone(), communication, start_options)
                         .await;
+                    false
+                }
+                Op::InterAgentCommunicationWithAck {
+                    communication,
+                    start_options,
+                    reply,
+                } => {
+                    inter_agent_communication_with_ack(
+                        &sess,
+                        sub.id.clone(),
+                        communication,
+                        start_options,
+                        reply,
+                    )
+                    .await;
                     false
                 }
                 Op::ExecApproval {

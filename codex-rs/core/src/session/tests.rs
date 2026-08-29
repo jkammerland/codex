@@ -2370,7 +2370,8 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
 
     session
         .record_inter_agent_communication(&turn_context, communication)
-        .await;
+        .await
+        .expect("record communication");
 
     let recorded_history = session.clone_history().await;
     let recorded_items = raw_history_items(&recorded_history);
@@ -2447,7 +2448,8 @@ async fn record_inter_agent_communication_preserves_item_id_in_rollout_and_resum
 
     session
         .record_inter_agent_communication(&turn_context, communication)
-        .await;
+        .await
+        .expect("record communication");
 
     let live_history = session.clone_history().await;
     let live_items = raw_history_items(&live_history);
@@ -6383,6 +6385,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         agent_delivery_gate: Arc::new(Semaphore::new(1)),
+        spawn_admission_barrier: Mutex::new(None),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
@@ -8663,6 +8666,7 @@ where
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         agent_delivery_gate: Arc::new(Semaphore::new(1)),
+        spawn_admission_barrier: Mutex::new(None),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,

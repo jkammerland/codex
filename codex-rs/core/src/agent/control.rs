@@ -91,6 +91,13 @@ pub(crate) struct InitialSubmissionBarrier {
     pub(crate) release: Arc<tokio::sync::Notify>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct AdmissionCommitBarrier {
+    pub(crate) persisted: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
@@ -106,6 +113,10 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) remove_thread_before_initial_submission: bool,
     #[cfg(test)]
     pub(crate) initial_submission_barrier: Option<InitialSubmissionBarrier>,
+    #[cfg(test)]
+    pub(crate) admission_commit_barrier: Option<AdmissionCommitBarrier>,
+    #[cfg(test)]
+    pub(crate) durability_receipt_wait_started: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +124,12 @@ pub(crate) struct LiveAgent {
     pub(crate) thread_id: ThreadId,
     pub(crate) metadata: AgentMetadata,
     pub(crate) status: AgentStatus,
+}
+
+#[derive(Clone, Copy)]
+enum AgentMailDurability {
+    BeforeAcknowledgement,
+    SpawnAdmissionBarrier,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -249,6 +266,7 @@ impl AgentControl {
             communication,
             agent_communication_context,
             start_options,
+            AgentMailDurability::BeforeAcknowledgement,
         )
         .await
     }
@@ -309,6 +327,7 @@ impl AgentControl {
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
         start_options: TurnStartOptions,
+        durability: AgentMailDurability,
     ) -> CodexResult<String> {
         self.submit_inter_agent_communication(
             agent_id,
@@ -316,6 +335,7 @@ impl AgentControl {
             communication,
             context,
             start_options,
+            durability,
         )
         .await
     }
@@ -327,6 +347,7 @@ impl AgentControl {
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
         start_options: TurnStartOptions,
+        durability: AgentMailDurability,
     ) -> CodexResult<String> {
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
@@ -342,10 +363,27 @@ impl AgentControl {
             return Err(CodexErr::InternalAgentDied);
         }
         let submission_id = Uuid::now_v7().to_string();
-        let trigger_turn = thread
-            .session
-            .enqueue_inter_agent_communication(&submission_id, communication, start_options)
-            .await;
+        let trigger_turn = match durability {
+            AgentMailDurability::BeforeAcknowledgement => thread
+                .session
+                .persist_and_enqueue_inter_agent_communication(
+                    &submission_id,
+                    communication,
+                    start_options,
+                )
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to persist inter-agent communication for {agent_id}: {err}"
+                    ))
+                })?,
+            AgentMailDurability::SpawnAdmissionBarrier => {
+                thread
+                    .session
+                    .enqueue_inter_agent_communication(&submission_id, communication, start_options)
+                    .await
+            }
+        };
         let should_schedule = trigger_turn || thread.session.has_outstanding_durable_sleep();
         drop(delivery_permit);
         if should_schedule {

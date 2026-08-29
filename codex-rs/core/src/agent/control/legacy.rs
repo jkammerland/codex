@@ -8,6 +8,13 @@ impl AgentControl {
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
         let result = if let Ok(thread) = state.get_thread(agent_id).await {
+            let _delivery_permit = thread
+                .session
+                .agent_delivery_gate
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| CodexErr::InternalAgentDied)?;
             thread
                 .session
                 .ensure_rollout_materialized(PersistContext::Standard)

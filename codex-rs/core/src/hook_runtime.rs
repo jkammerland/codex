@@ -680,8 +680,15 @@ pub(crate) async fn record_pending_input(
             sess.ensure_rollout_materialized(persist_context).await;
         }
         TurnInput::InterAgentCommunication(communication) => {
-            sess.record_inter_agent_communication(turn_context, communication)
-                .await;
+            if !sess
+                .has_recorded_inter_agent_communication(&communication)
+                .await
+                && let Err(err) = sess
+                    .record_inter_agent_communication(turn_context, communication)
+                    .await
+            {
+                tracing::error!("failed to record inter-agent communication: {err}");
+            }
         }
     }
     record_additional_contexts(sess, turn_context, additional_contexts).await;

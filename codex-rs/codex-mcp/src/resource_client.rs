@@ -118,10 +118,6 @@ impl McpEventStream {
                 };
                 tokio::select! {
                     biased;
-
-                    Ok(()) = self.hosted_event_server_connection.changed() => {
-                        Next::RuntimeChanged
-                    }
                     Some(notification) = request.notifications.recv() => {
                         let metadata = notification.get_meta().0.0.clone();
                         let mut params = notification.params;
@@ -145,6 +141,9 @@ impl McpEventStream {
                             Ok(Err(error)) => Err(error.into()),
                         };
                         Next::Finished(result)
+                    }
+                    Ok(()) = self.hosted_event_server_connection.changed() => {
+                        Next::RuntimeChanged
                     }
                 }
             };

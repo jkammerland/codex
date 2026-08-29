@@ -554,10 +554,10 @@ async fn handle_approved_mcp_tool_call(
     );
     let result = tokio::select! {
         biased;
+        result = &mut call => result,
         _ = cancellation_token.cancelled() => {
             Err("MCP tool call cancelled (origin=explicit_turn_interrupt)".to_string())
         }
-        result = &mut call => result,
     };
     drop(call);
     if result.is_err() && prepared_call.transport_is_closed().await {

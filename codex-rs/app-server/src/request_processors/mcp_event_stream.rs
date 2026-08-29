@@ -28,8 +28,6 @@ use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingMessageSender;
 
 const MAX_MCP_EVENT_STREAMS_PER_CONNECTION: usize = 64;
-const MAX_MCP_EVENT_STREAM_RECONNECT_ATTEMPTS: u32 = 3;
-const MCP_EVENT_STREAM_RECONNECT_DELAY: Duration = Duration::from_secs(/*secs*/ 1);
 const MCP_EVENT_STREAM_STARTUP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 90);
 
 pub(crate) type McpEventStreamReady = oneshot::Receiver<Result<(), JSONRPCErrorError>>;
@@ -192,9 +190,6 @@ async fn forward_events(
     ready: oneshot::Sender<Result<(), JSONRPCErrorError>>,
 ) {
     let mut ready = Some(ready);
-    let mut reconnect_attempts = 0;
-    let mut reconnect_deadline = None;
-    let mut pending_end_reason = None;
     let send = |notification| {
         outgoing.send_server_notification_to_connection_and_wait(
             connection_id,
@@ -209,69 +204,16 @@ async fn forward_events(
             biased;
             () = auth_changes.changed() => break,
             () = thread.wait_until_terminated() => break,
-            result = async {
-                match pending_end_reason.take() {
-                    Some(end_reason) => Ok(McpEventStreamItem::Ended(end_reason)),
-                    None => stream.recv_item().await,
-                }
-            } => match result {
+            result = stream.recv_item() => match result {
                 Ok(McpEventStreamItem::Notification(notification)) => notification,
                 Ok(McpEventStreamItem::Ended(end_reason)) => {
                     if end_reason == McpEventStreamEnd::TransportClosed {
                         thread.request_mcp_transport_reconnect();
                     }
-                    let reconnectable = matches!(
-                        end_reason,
-                        McpEventStreamEnd::ConnectionSuperseded
-                            | McpEventStreamEnd::TransportClosed
-                    );
-                    if !reconnectable
-                        || reconnect_attempts >= MAX_MCP_EVENT_STREAM_RECONNECT_ATTEMPTS
-                    {
-                        break;
-                    }
-                    reconnect_attempts += 1;
-                    let deadline = *reconnect_deadline.get_or_insert_with(|| {
-                        tokio::time::Instant::now() + MCP_EVENT_STREAM_STARTUP_TIMEOUT
-                    });
-                    tokio::select! {
-                        biased;
-                        () = auth_changes.changed() => break,
-                        () = thread.wait_until_terminated() => break,
-                        result = tokio::time::timeout_at(deadline, async {
-                            tokio::time::sleep(
-                                MCP_EVENT_STREAM_RECONNECT_DELAY
-                                    * (1 << (reconnect_attempts - 1)),
-                            )
-                            .await;
-                            let mut stream = thread
-                                .start_mcp_event_stream(
-                                    &params.name,
-                                    params.arguments.clone(),
-                                    params.meta.clone(),
-                                )
-                                .await?;
-                            let item = stream.recv_item().await?;
-                            Ok::<_, anyhow::Error>((stream, item))
-                        }) => match result {
-                            Ok(Ok((reconnected, McpEventStreamItem::Notification(notification)))) => {
-                                stream = reconnected;
-                                notification
-                            }
-                            Ok(Ok((_reconnected, McpEventStreamItem::Ended(end_reason)))) => {
-                                if end_reason == McpEventStreamEnd::TransportClosed {
-                                    thread.request_mcp_transport_reconnect();
-                                }
-                                pending_end_reason = Some(end_reason);
-                                continue;
-                            }
-                            Ok(Err(_)) => {
-                                pending_end_reason = Some(end_reason);
-                                continue;
-                            }
-                            Err(_) => break,
-                        },
-                    }
+                    // Replaying a subscription without a server cursor can duplicate already
+                    // delivered events or skip events emitted during recovery. Terminate this
+                    // subscription and let the client explicitly choose whether to start anew.
+                    break;
                 }
                 Err(error) => {
                     if let Some(ready) = ready.take() {
@@ -293,12 +235,8 @@ async fn forward_events(
         {
             break;
         }
-        if active {
-            reconnect_attempts = 0;
-            reconnect_deadline = None;
-            if let Some(ready) = ready.take() {
-                let _ = ready.send(Ok(()));
-            }
+        if active && let Some(ready) = ready.take() {
+            let _ = ready.send(Ok(()));
         }
         if terminated {
             return;

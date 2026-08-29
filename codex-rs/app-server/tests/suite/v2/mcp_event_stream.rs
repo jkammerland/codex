@@ -224,7 +224,7 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         })
     );
     let duplicate_request_id = app_server
-        .send_raw_request("mcpServer/event/stream/start", Some(start_params))
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
         .await?;
     let duplicate_error = timeout(
         Duration::from_secs(5),
@@ -256,19 +256,35 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         app_server.read_response(startup_reload_request_id),
     )
     .await??;
+    let startup_error = timeout(
+        Duration::from_secs(5),
+        app_server.read_stream_until_error_message(RequestId::Integer(start_request_id)),
+    )
+    .await??;
+    assert!(
+        startup_error
+            .error
+            .message
+            .contains("ended before becoming active")
+    );
+    assert!(
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
+            .await
+            .is_err(),
+        "connection replacement must not replay a starting subscription"
+    );
+
+    let changed_start_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
     let (replacement_stream_path, replacement_stream_request) =
         timeout(Duration::from_secs(5), stream_started_rx.recv())
             .await?
-            .context("starting MCP event stream did not move to the replacement connection")?;
+            .context("explicit replacement subscription did not start")?;
     assert_eq!(replacement_stream_path, "/changed/api/codex/ps/mcp");
-    assert_eq!(
-        replacement_stream_request["params"],
-        stream_request["params"]
-    );
-
     let _: McpServerEventStreamStartResponse = timeout(
         Duration::from_secs(5),
-        app_server.read_response(start_request_id),
+        app_server.read_response(changed_start_request_id),
     )
     .await??;
     let metadata = json!({
@@ -341,15 +357,35 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         app_server.read_response(reload_request_id),
     )
     .await??;
+    let terminated: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        terminated.notification.method,
+        "notifications/events/terminated"
+    );
+    assert!(
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
+            .await
+            .is_err(),
+        "connection replacement must terminate rather than replay an active subscription"
+    );
+
+    let changed2_start_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
     let (replacement_stream_path, replacement_stream_request) =
         timeout(Duration::from_secs(5), stream_started_rx.recv())
             .await?
-            .context("active MCP event stream did not move to the replacement connection")?;
+            .context("explicit changed2 subscription did not start")?;
     assert_eq!(replacement_stream_path, "/changed2/api/codex/ps/mcp");
-    assert_eq!(
-        replacement_stream_request["params"],
-        stream_request["params"]
-    );
+    let _: McpServerEventStreamStartResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(changed2_start_request_id),
+    )
+    .await??;
     let replacement_metadata = json!({
         "io.modelcontextprotocol/subscriptionId": replacement_stream_request["id"],
         "provider": "event-test-server",
@@ -397,12 +433,55 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         app_server.read_response(reload_request_id),
     )
     .await??;
-    for attempt in 1..=2 {
-        let (path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
-            .await?
-            .with_context(|| format!("fail-once reconnect attempt {attempt} did not occur"))?;
-        assert_eq!(path, "/fail-once/api/codex/ps/mcp");
-    }
+    let terminated: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        terminated.notification.method,
+        "notifications/events/terminated"
+    );
+    let fail_start_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
+    let (path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+        .await?
+        .context("explicit fail-once subscription did not start")?;
+    assert_eq!(path, "/fail-once/api/codex/ps/mcp");
+    let _ = timeout(
+        Duration::from_secs(5),
+        app_server.read_stream_until_error_message(RequestId::Integer(fail_start_request_id)),
+    )
+    .await??;
+    let failed_terminated: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        failed_terminated.notification.method,
+        "notifications/events/terminated"
+    );
+    assert!(
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
+            .await
+            .is_err(),
+        "failed subscription startup must not retry automatically"
+    );
+
+    let recovered_start_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
+    let (path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+        .await?
+        .context("explicit recovery subscription did not start")?;
+    assert_eq!(path, "/fail-once/api/codex/ps/mcp");
+    let _: McpServerEventStreamStartResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(recovered_start_request_id),
+    )
+    .await??;
     let recovered_active: McpServerEventStreamNotification = timeout(
         Duration::from_secs(5),
         app_server.read_notification("mcpServer/event/stream/notification"),
@@ -422,54 +501,9 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         "notifications/events/event"
     );
 
-    let mut previous_url = fail_once_url;
-    for replacement_index in 1..=4 {
-        let replacement_url = format!("{apps_url}/quiet{replacement_index}");
-        let config = std::fs::read_to_string(&config_path)?;
-        std::fs::write(
-            &config_path,
-            config.replace(&previous_url, &replacement_url),
-        )?;
-        let reload_request_id = app_server
-            .send_raw_request("config/mcpServer/reload", /*params*/ None)
-            .await?;
-        let _: McpServerRefreshResponse = timeout(
-            Duration::from_secs(5),
-            app_server.read_response(reload_request_id),
-        )
-        .await??;
-        let (replacement_stream_path, replacement_stream_request) =
-            timeout(Duration::from_secs(5), stream_started_rx.recv())
-                .await?
-                .with_context(|| {
-                    format!("quiet replacement {replacement_index} did not start a new stream")
-                })?;
-        assert_eq!(
-            replacement_stream_path,
-            format!("/quiet{replacement_index}/api/codex/ps/mcp")
-        );
-        let replacement_metadata = json!({
-            "io.modelcontextprotocol/subscriptionId": replacement_stream_request["id"],
-            "provider": "event-test-server",
-        });
-        let replacement_active: McpServerEventStreamNotification = timeout(
-            Duration::from_secs(5),
-            app_server.read_notification("mcpServer/event/stream/notification"),
-        )
-        .await??;
-        assert_eq!(
-            replacement_active.notification,
-            McpServerEventNotification {
-                method: "notifications/events/active".to_string(),
-                params: json!({ "_meta": replacement_metadata, "status": "active" }),
-            }
-        );
-        previous_url = replacement_url;
-    }
-
     let ended_url = format!("{apps_url}/ended");
     let config = std::fs::read_to_string(&config_path)?;
-    std::fs::write(&config_path, config.replace(&previous_url, &ended_url))?;
+    std::fs::write(&config_path, config.replace(&fail_once_url, &ended_url))?;
     let reload_request_id = app_server
         .send_raw_request("config/mcpServer/reload", /*params*/ None)
         .await?;
@@ -478,10 +512,27 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         app_server.read_response(reload_request_id),
     )
     .await??;
+    let terminated: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        terminated.notification.method,
+        "notifications/events/terminated"
+    );
+    let ended_start_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params))
+        .await?;
     let (ended_path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
         .await?
         .context("server-ended stream did not start")?;
     assert_eq!(ended_path, "/ended/api/codex/ps/mcp");
+    let _: McpServerEventStreamStartResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(ended_start_request_id),
+    )
+    .await??;
     let ended_active: McpServerEventStreamNotification = timeout(
         Duration::from_secs(5),
         app_server.read_notification("mcpServer/event/stream/notification"),

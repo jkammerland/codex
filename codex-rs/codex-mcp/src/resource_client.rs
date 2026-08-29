@@ -86,6 +86,7 @@ pub enum McpEventStreamItem {
 /// Owns an MCP event subscription and cancels its request when dropped.
 pub struct McpEventStream {
     request: Option<CancellableEventStreamRequest>,
+    pending_end: Option<Result<McpEventStreamEnd>>,
     runtime_handle: Handle,
     connection: Option<Arc<McpServerConnection>>,
     hosted_event_server_connection: watch::Receiver<Option<Arc<McpServerConnection>>>,
@@ -112,24 +113,15 @@ impl McpEventStream {
         }
 
         loop {
+            if let Some(result) = self.pending_end.take() {
+                return result.map(McpEventStreamItem::Ended);
+            }
             let next = {
                 let Some(request) = self.request.as_mut() else {
                     return Ok(McpEventStreamItem::Ended(McpEventStreamEnd::ServerEnded));
                 };
                 tokio::select! {
                     biased;
-                    Some(notification) = request.notifications.recv() => {
-                        let metadata = notification.get_meta().0.0.clone();
-                        let mut params = notification.params;
-                        if !metadata.is_empty() {
-                            params.get_or_insert_with(|| json!({}))["_meta"] =
-                                Value::Object(metadata);
-                        }
-                        Next::Notification(McpEventNotification {
-                            method: notification.method,
-                            params,
-                        })
-                    }
                     response = &mut request.handle.rx => {
                         let result = match response {
                             Ok(Ok(_)) | Ok(Err(ServiceError::Cancelled { .. })) => {
@@ -144,6 +136,9 @@ impl McpEventStream {
                     }
                     Ok(()) = self.hosted_event_server_connection.changed() => {
                         Next::RuntimeChanged
+                    }
+                    Some(notification) = request.notifications.recv() => {
+                        Next::Notification(event_notification(notification))
                     }
                 }
             };
@@ -162,20 +157,38 @@ impl McpEventStream {
                     {
                         continue;
                     }
+                    let queued = self
+                        .request
+                        .as_mut()
+                        .and_then(|request| request.notifications.try_recv().ok())
+                        .map(event_notification);
                     self.cancel();
-                    if latest.is_some() {
-                        return Ok(McpEventStreamItem::Ended(
-                            McpEventStreamEnd::ConnectionSuperseded,
-                        ));
+                    let end = if latest.is_some() {
+                        Ok(McpEventStreamEnd::ConnectionSuperseded)
+                    } else {
+                        Err(anyhow!("hosted MCP event server was removed"))
+                    };
+                    if let Some(notification) = queued {
+                        self.pending_end = Some(end);
+                        return Ok(McpEventStreamItem::Notification(notification));
                     }
-                    return Err(anyhow!("hosted MCP event server was removed"));
+                    return end.map(McpEventStreamItem::Ended);
                 }
                 Next::Notification(notification) => {
                     return Ok(McpEventStreamItem::Notification(notification));
                 }
                 Next::Finished(result) => {
+                    let queued = self
+                        .request
+                        .as_mut()
+                        .and_then(|request| request.notifications.try_recv().ok())
+                        .map(event_notification);
                     self.request = None;
                     self.connection = None;
+                    if let Some(notification) = queued {
+                        self.pending_end = Some(result);
+                        return Ok(McpEventStreamItem::Notification(notification));
+                    }
                     return result.map(McpEventStreamItem::Ended);
                 }
             }
@@ -354,10 +367,23 @@ impl McpResourceClient {
 
         Ok(McpEventStream {
             request: Some(request),
+            pending_end: None,
             runtime_handle: Handle::current(),
             connection: Some(connection),
             hosted_event_server_connection,
         })
+    }
+}
+
+fn event_notification(notification: rmcp::model::CustomNotification) -> McpEventNotification {
+    let metadata = notification.get_meta().0.0.clone();
+    let mut params = notification.params;
+    if !metadata.is_empty() {
+        params.get_or_insert_with(|| json!({}))["_meta"] = Value::Object(metadata);
+    }
+    McpEventNotification {
+        method: notification.method,
+        params,
     }
 }
 

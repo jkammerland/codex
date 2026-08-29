@@ -80,6 +80,12 @@ impl EventNotificationReceiver {
             .await
             .map(|queued| queued.notification)
     }
+
+    pub fn try_recv(&mut self) -> Result<CustomNotification, mpsc::error::TryRecvError> {
+        self.notifications
+            .try_recv()
+            .map(|queued| queued.notification)
+    }
 }
 
 impl Drop for EventNotificationReceiver {

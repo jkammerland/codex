@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -35,6 +37,7 @@ pub(crate) type McpEventStreamReady = oneshot::Receiver<Result<(), JSONRPCErrorE
 #[derive(Debug)]
 struct McpEventStreamTask {
     thread_id: ThreadId,
+    retired: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
 
@@ -61,7 +64,9 @@ impl McpEventStreams {
         let (ready_tx, ready_rx) = oneshot::channel();
         {
             let mut tasks = self.tasks.lock().await;
-            tasks.retain(|_, task| !task.task.is_finished());
+            tasks.retain(|_, task| {
+                !task.retired.load(Ordering::Acquire) && !task.task.is_finished()
+            });
             if tasks.contains_key(&subscription_id) {
                 return Err(invalid_request(format!(
                     "MCP event subscription '{subscription_id}' already exists"
@@ -76,6 +81,8 @@ impl McpEventStreams {
                     data: None,
                 });
             }
+            let retired = Arc::new(AtomicBool::new(false));
+            let task_retired = Arc::clone(&retired);
             let task = tokio::spawn(async move {
                 let mut auth_changes =
                     McpEventStreamAuthChanges::new(Arc::clone(&processor.auth_manager));
@@ -111,23 +118,32 @@ impl McpEventStreams {
                 };
                 match opened {
                     Ok((stream, thread)) => {
-                        forward_events(
+                        forward_events(McpEventForwarder {
                             connection_id,
-                            &params,
-                            processor.outgoing.as_ref(),
+                            params: &params,
+                            outgoing: processor.outgoing.as_ref(),
                             thread,
                             stream,
                             auth_changes,
-                            ready_tx,
-                        )
+                            ready: Some(ready_tx),
+                            retired: Arc::clone(&task_retired),
+                        })
                         .await;
                     }
                     Err(error) => {
+                        task_retired.store(true, Ordering::Release);
                         let _ = ready_tx.send(Err(error));
                     }
                 }
             });
-            tasks.insert(subscription_id, McpEventStreamTask { thread_id, task });
+            tasks.insert(
+                subscription_id,
+                McpEventStreamTask {
+                    thread_id,
+                    retired,
+                    task,
+                },
+            );
         }
         Ok(ready_rx)
     }
@@ -180,16 +196,28 @@ impl McpEventStreams {
     }
 }
 
-async fn forward_events(
+struct McpEventForwarder<'a> {
     connection_id: ConnectionId,
-    params: &McpServerEventStreamStartParams,
-    outgoing: &OutgoingMessageSender,
+    params: &'a McpServerEventStreamStartParams,
+    outgoing: &'a OutgoingMessageSender,
     thread: Arc<CodexThread>,
-    mut stream: McpEventStream,
-    mut auth_changes: McpEventStreamAuthChanges,
-    ready: oneshot::Sender<Result<(), JSONRPCErrorError>>,
-) {
-    let mut ready = Some(ready);
+    stream: McpEventStream,
+    auth_changes: McpEventStreamAuthChanges,
+    ready: Option<oneshot::Sender<Result<(), JSONRPCErrorError>>>,
+    retired: Arc<AtomicBool>,
+}
+
+async fn forward_events(forwarder: McpEventForwarder<'_>) {
+    let McpEventForwarder {
+        connection_id,
+        params,
+        outgoing,
+        thread,
+        mut stream,
+        mut auth_changes,
+        mut ready,
+        retired,
+    } = forwarder;
     let send = |notification| {
         outgoing.send_server_notification_to_connection_and_wait(
             connection_id,
@@ -199,11 +227,11 @@ async fn forward_events(
             }),
         )
     };
-    loop {
+    let termination_reason = loop {
         let notification = tokio::select! {
             biased;
-            () = auth_changes.changed() => break,
-            () = thread.wait_until_terminated() => break,
+            () = auth_changes.changed() => break "authenticationChanged",
+            () = thread.wait_until_terminated() => break "threadTerminated",
             result = stream.recv_item() => match result {
                 Ok(McpEventStreamItem::Notification(notification)) => notification,
                 Ok(McpEventStreamItem::Ended(end_reason)) => {
@@ -213,18 +241,26 @@ async fn forward_events(
                     // Replaying a subscription without a server cursor can duplicate already
                     // delivered events or skip events emitted during recovery. Terminate this
                     // subscription and let the client explicitly choose whether to start anew.
-                    break;
+                    break match end_reason {
+                        McpEventStreamEnd::ServerEnded => "serverEnded",
+                        McpEventStreamEnd::ConnectionSuperseded => "connectionSuperseded",
+                        McpEventStreamEnd::TransportClosed => "transportClosed",
+                    };
                 }
                 Err(error) => {
                     if let Some(ready) = ready.take() {
+                        retired.store(true, Ordering::Release);
                         let _ = ready.send(Err(internal_error(format!("{error:#}"))));
                     }
-                    break;
+                    break "streamError";
                 }
             },
         };
         let active = notification.method == "notifications/events/active";
         let terminated = notification.method == "notifications/events/terminated";
+        if terminated {
+            retired.store(true, Ordering::Release);
+        }
         if !send(McpServerEventNotification {
             method: notification.method,
             params: notification
@@ -233,7 +269,8 @@ async fn forward_events(
         })
         .await
         {
-            break;
+            retired.store(true, Ordering::Release);
+            return;
         }
         if active && let Some(ready) = ready.take() {
             let _ = ready.send(Ok(()));
@@ -241,15 +278,16 @@ async fn forward_events(
         if terminated {
             return;
         }
-    }
+    };
+    retired.store(true, Ordering::Release);
     if let Some(ready) = ready {
-        let _ = ready.send(Err(internal_error(
-            "MCP event stream ended before becoming active",
-        )));
+        let _ = ready.send(Err(internal_error(format!(
+            "MCP event stream ended before becoming active: {termination_reason}"
+        ))));
     } else {
         send(McpServerEventNotification {
             method: "notifications/events/terminated".to_string(),
-            params: Value::Object(Default::default()),
+            params: serde_json::json!({ "reason": termination_reason }),
         })
         .await;
     }

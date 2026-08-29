@@ -90,6 +90,7 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                     let stream_number = stream_count.fetch_add(1, Ordering::AcqRel);
                     let quiet_after_active = uri.path().contains("/quiet");
                     let end_after_active = uri.path().contains("/ended");
+                    let flood_after_active = uri.path().contains("/flood");
                     stream_started_tx
                         .send((uri.path().to_string(), message.clone()))
                         .expect("stream-start receiver must remain open");
@@ -138,6 +139,12 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                                         .data(completed.to_string()),
                                 )
                             })))
+                        } else if flood_after_active {
+                            Box::pin(active_event.chain(stream::repeat_with(move || {
+                                Ok::<_, Infallible>(
+                                    Event::default().event("message").data(event.to_string()),
+                                )
+                            })))
                         } else {
                             Box::pin(
                                 active_event
@@ -172,6 +179,8 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         .route("/quiet2/api/codex/ps/mcp", handler.clone())
         .route("/quiet3/api/codex/ps/mcp", handler.clone())
         .route("/quiet4/api/codex/ps/mcp", handler.clone())
+        .route("/flood1/api/codex/ps/mcp", handler.clone())
+        .route("/flood2/api/codex/ps/mcp", handler.clone())
         .route("/fail-once/api/codex/ps/mcp", handler.clone())
         .route("/ended/api/codex/ps/mcp", handler);
     let mcp_server = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -267,13 +276,6 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
             .message
             .contains("ended before becoming active")
     );
-    assert!(
-        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
-            .await
-            .is_err(),
-        "connection replacement must not replay a starting subscription"
-    );
-
     let changed_start_request_id = app_server
         .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
         .await?;
@@ -282,6 +284,12 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
             .await?
             .context("explicit replacement subscription did not start")?;
     assert_eq!(replacement_stream_path, "/changed/api/codex/ps/mcp");
+    assert!(
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
+            .await
+            .is_err(),
+        "connection replacement must not replay a starting subscription"
+    );
     let _: McpServerEventStreamStartResponse = timeout(
         Duration::from_secs(5),
         app_server.read_response(changed_start_request_id),
@@ -363,14 +371,11 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
     )
     .await??;
     assert_eq!(
-        terminated.notification.method,
-        "notifications/events/terminated"
-    );
-    assert!(
-        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
-            .await
-            .is_err(),
-        "connection replacement must terminate rather than replay an active subscription"
+        terminated.notification,
+        McpServerEventNotification {
+            method: "notifications/events/terminated".to_string(),
+            params: json!({ "reason": "connectionSuperseded" }),
+        }
     );
 
     let changed2_start_request_id = app_server
@@ -381,6 +386,12 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
             .await?
             .context("explicit changed2 subscription did not start")?;
     assert_eq!(replacement_stream_path, "/changed2/api/codex/ps/mcp");
+    assert!(
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
+            .await
+            .is_err(),
+        "connection replacement must terminate rather than replay an active subscription"
+    );
     let _: McpServerEventStreamStartResponse = timeout(
         Duration::from_secs(5),
         app_server.read_response(changed2_start_request_id),
@@ -419,11 +430,11 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         }
     );
 
-    let fail_once_url = format!("{apps_url}/fail-once");
+    let flood1_url = format!("{apps_url}/flood1");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        config.replace(&format!("{apps_url}/changed2"), &fail_once_url),
+        config.replace(&format!("{apps_url}/changed2"), &flood1_url),
     )?;
     let reload_request_id = app_server
         .send_raw_request("config/mcpServer/reload", /*params*/ None)
@@ -437,6 +448,120 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         Duration::from_secs(5),
         app_server.read_notification("mcpServer/event/stream/notification"),
     )
+    .await??;
+    assert_eq!(
+        terminated.notification,
+        McpServerEventNotification {
+            method: "notifications/events/terminated".to_string(),
+            params: json!({ "reason": "connectionSuperseded" }),
+        }
+    );
+
+    let flood1_start_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
+    let (path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+        .await?
+        .context("flooding subscription did not start")?;
+    assert_eq!(path, "/flood1/api/codex/ps/mcp");
+    let _: McpServerEventStreamStartResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(flood1_start_request_id),
+    )
+    .await??;
+    let flood1_active: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        flood1_active.notification.method,
+        "notifications/events/active"
+    );
+    let flood1_event: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        flood1_event.notification.method,
+        "notifications/events/event"
+    );
+
+    let flood2_url = format!("{apps_url}/flood2");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(&config_path, config.replace(&flood1_url, &flood2_url))?;
+    let reload_request_id = app_server
+        .send_raw_request("config/mcpServer/reload", /*params*/ None)
+        .await?;
+    let _: McpServerRefreshResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(reload_request_id),
+    )
+    .await??;
+    let flood_terminated = timeout(Duration::from_secs(5), async {
+        loop {
+            let notification: McpServerEventStreamNotification = app_server
+                .read_notification("mcpServer/event/stream/notification")
+                .await?;
+            if notification.notification.method == "notifications/events/terminated" {
+                return Ok::<_, anyhow::Error>(notification);
+            }
+        }
+    })
+    .await??;
+    assert_eq!(
+        flood_terminated.notification,
+        McpServerEventNotification {
+            method: "notifications/events/terminated".to_string(),
+            params: json!({ "reason": "connectionSuperseded" }),
+        },
+        "a continuously ready old-generation event queue must not starve replacement"
+    );
+
+    let flood2_start_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
+    let (path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+        .await?
+        .context("replacement flooding subscription did not start")?;
+    assert_eq!(path, "/flood2/api/codex/ps/mcp");
+    let _: McpServerEventStreamStartResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(flood2_start_request_id),
+    )
+    .await??;
+    let flood2_active: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        flood2_active.notification.method,
+        "notifications/events/active"
+    );
+
+    let fail_once_url = format!("{apps_url}/fail-once");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(&config_path, config.replace(&flood2_url, &fail_once_url))?;
+    let reload_request_id = app_server
+        .send_raw_request("config/mcpServer/reload", /*params*/ None)
+        .await?;
+    let _: McpServerRefreshResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(reload_request_id),
+    )
+    .await??;
+    let terminated = timeout(Duration::from_secs(5), async {
+        loop {
+            let notification: McpServerEventStreamNotification = app_server
+                .read_notification("mcpServer/event/stream/notification")
+                .await?;
+            if notification.notification.method == "notifications/events/terminated" {
+                return Ok::<_, anyhow::Error>(notification);
+            }
+        }
+    })
     .await??;
     assert_eq!(
         terminated.notification.method,
@@ -460,14 +585,11 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
     )
     .await??;
     assert_eq!(
-        failed_terminated.notification.method,
-        "notifications/events/terminated"
-    );
-    assert!(
-        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
-            .await
-            .is_err(),
-        "failed subscription startup must not retry automatically"
+        failed_terminated.notification,
+        McpServerEventNotification {
+            method: "notifications/events/terminated".to_string(),
+            params: json!({ "reason": "streamError" }),
+        }
     );
 
     let recovered_start_request_id = app_server
@@ -477,6 +599,12 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         .await?
         .context("explicit recovery subscription did not start")?;
     assert_eq!(path, "/fail-once/api/codex/ps/mcp");
+    assert!(
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
+            .await
+            .is_err(),
+        "failed subscription startup must not retry automatically"
+    );
     let _: McpServerEventStreamStartResponse = timeout(
         Duration::from_secs(5),
         app_server.read_response(recovered_start_request_id),
@@ -547,7 +675,13 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         app_server.read_notification("mcpServer/event/stream/notification"),
     )
     .await??;
-    assert_eq!(ended.notification.method, "notifications/events/terminated");
+    assert_eq!(
+        ended.notification,
+        McpServerEventNotification {
+            method: "notifications/events/terminated".to_string(),
+            params: json!({ "reason": "serverEnded" }),
+        }
+    );
     assert!(
         timeout(Duration::from_millis(1_200), stream_started_rx.recv())
             .await

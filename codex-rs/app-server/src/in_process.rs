@@ -587,7 +587,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         let mut processor_task_result = None;
         let mut outbound_task_result = None;
 
-        loop {
+        'runtime: loop {
             tokio::select! {
                 result = &mut processor_handle => {
                     processor_task_result = Some(result);
@@ -734,14 +734,24 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                         OutgoingMessage::AppServerNotification(envelope) => {
                             let notification = envelope.notification;
                             if server_notification_requires_delivery(&notification) {
-                                if event_tx
-                                    .send(InProcessServerEvent::ServerNotification(Box::new(
-                                        notification,
-                                    )))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
+                                let send = event_tx.send(
+                                    InProcessServerEvent::ServerNotification(Box::new(notification)),
+                                );
+                                tokio::pin!(send);
+                                tokio::select! {
+                                    result = &mut processor_handle => {
+                                        processor_task_result = Some(result);
+                                        break 'runtime;
+                                    }
+                                    result = &mut outbound_handle => {
+                                        outbound_task_result = Some(result);
+                                        break 'runtime;
+                                    }
+                                    result = &mut send => {
+                                        if result.is_err() {
+                                            break 'runtime;
+                                        }
+                                    }
                                 }
                             } else if let Err(send_error) =
                                 event_tx.try_send(InProcessServerEvent::ServerNotification(
@@ -949,6 +959,40 @@ mod tests {
         )
         .await
         .expect("a failed processor must not leave an in-process request pending");
+        match result {
+            Ok(Err(error)) => assert!(error.message.contains("processor")),
+            Err(error) => panic!("pending request escaped runtime failure handling: {error}"),
+            Ok(Ok(_)) => panic!("request unexpectedly succeeded after processor failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn guaranteed_notification_backpressure_does_not_hide_processor_failure() {
+        let client = start_test_client_with_capacity_and_failure(
+            SessionSource::Cli,
+            /*channel_capacity*/ 1,
+            /*fail_processor_after_initialized*/ true,
+        )
+        .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match client
+                    .request(ClientRequest::ConfigRequirementsRead {
+                        request_id: RequestId::Integer(78),
+                        params: None,
+                    })
+                    .await
+                {
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        tokio::task::yield_now().await;
+                    }
+                    result => break result,
+                }
+            }
+        })
+        .await
+        .expect("backpressured guaranteed events must not hide processor failure");
         match result {
             Ok(Err(error)) => assert!(error.message.contains("processor")),
             Err(error) => panic!("pending request escaped runtime failure handling: {error}"),

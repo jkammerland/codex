@@ -451,6 +451,20 @@ pub(super) async fn ensure_listener_task_running(
             match input {
                 ThreadListenerInput::Cancelled => {
                     // Listener was superseded or the thread is being torn down.
+                    let message = "thread listener was replaced before the request completed";
+                    if thread_state.lock().await.listener_generation == listener_generation {
+                        thread_state_manager.unregister_listener_command_tx_if_matches(
+                            conversation_id,
+                            &listener_command_tx,
+                        );
+                    }
+                    fail_pending_listener_commands(
+                        &mut pending_listener_command,
+                        &mut listener_command_rx,
+                        outgoing_for_task.as_ref(),
+                        message,
+                    )
+                    .await;
                     break;
                 }
                 ThreadListenerInput::Command(listener_command) => {

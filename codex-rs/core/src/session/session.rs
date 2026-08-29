@@ -64,6 +64,8 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
+    /// Linearizes durable agent-mail delivery with V2 residency eviction.
+    pub(crate) agent_delivery_gate: Arc<Semaphore>,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
@@ -1483,6 +1485,7 @@ impl Session {
                 active_turn: Mutex::new(None),
                 async_hook_results,
                 input_queue: InputQueue::new(),
+                agent_delivery_gate: Arc::new(Semaphore::new(1)),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 git_enrichment_policy,

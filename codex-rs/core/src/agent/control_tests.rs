@@ -104,25 +104,6 @@ fn text_input(text: &str) -> Vec<UserInput> {
     }]
 }
 
-fn captured_op_matches(actual: &(ThreadId, Op), expected: &(ThreadId, Op)) -> bool {
-    if actual.0 != expected.0 {
-        return false;
-    }
-    match (&actual.1, &expected.1) {
-        (
-            Op::InterAgentCommunication {
-                communication: actual,
-                ..
-            },
-            Op::InterAgentCommunication {
-                communication: expected,
-                ..
-            },
-        ) => actual == expected,
-        _ => false,
-    }
-}
-
 fn rollout_response_item(item: ResponseItem) -> RolloutItem {
     RolloutItem::ResponseItem(item.into())
 }
@@ -984,35 +965,14 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         .expect("send_inter_agent_communication should succeed");
     assert!(!submission_id.is_empty());
 
-    let expected = (
-        thread_id,
-        Op::InterAgentCommunication {
-            communication: communication.clone(),
-            start_options: Default::default(),
-        },
+    assert!(thread.session.input_queue.has_pending_mailbox_items().await);
+    let (items, _) = thread.session.input_queue.drain_mailbox_input_items().await;
+    assert_eq!(
+        items,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            communication.clone()
+        )]
     );
-    let captured = harness
-        .manager
-        .captured_ops()
-        .into_iter()
-        .find(|entry| captured_op_matches(entry, &expected));
-    assert!(captured.is_some());
-
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if thread
-                .session
-                .input_queue
-                .has_pending_input(&thread.session.active_turn)
-                .await
-            {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("inter-agent communication should stay pending");
 
     let history = thread.session.clone_history().await;
     assert!(!history_contains_assistant_inter_agent_communication(
@@ -1022,7 +982,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
 }
 
 #[tokio::test]
-async fn internal_agent_death_after_submission_releases_agent_state() {
+async fn stale_internal_agent_death_does_not_remove_healthy_thread() {
     let harness = AgentControlHarness::new().await;
     let child_thread_id = harness
         .control
@@ -1048,18 +1008,21 @@ async fn internal_agent_death_after_submission_releases_agent_state() {
         .control
         .handle_thread_request_result(child_thread_id, &state, Err(CodexErr::InternalAgentDied))
         .await
-        .expect_err("lost acknowledgement should report agent death");
+        .expect_err("stale death report should retain its original error");
 
     assert!(matches!(
         error.details(),
         CodexErrorDetails::InternalAgentDied
     ));
-    assert_eq!(harness.manager.list_thread_ids().await, Vec::new());
+    assert_eq!(
+        harness.manager.list_thread_ids().await,
+        vec![child_thread_id]
+    );
     assert!(
         harness
             .control
             .get_agent_metadata(child_thread_id)
-            .is_none()
+            .is_some()
     );
 }
 
@@ -1306,19 +1269,17 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         )
         .await
         .expect("send_inter_agent_communication should succeed after reload");
-    let expected = (
-        spawned_agent.thread_id,
-        Op::InterAgentCommunication {
-            communication,
-            start_options: Default::default(),
-        },
+    let (items, _) = reloaded_child
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(
+        items,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            communication
+        )]
     );
-    let captured = harness
-        .manager
-        .captured_ops()
-        .into_iter()
-        .find(|entry| captured_op_matches(entry, &expected));
-    assert!(captured.is_some());
 }
 
 #[tokio::test]
@@ -3615,31 +3576,28 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     let (worker_thread_id, worker_thread) = harness.start_thread().await;
     let mut tester_config = harness.config.clone();
     let _ = tester_config.features.enable(Feature::MultiAgentV2);
+    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
+    let tester_path = worker_path.join("tester").expect("tester path");
     let tester_thread_id = harness
-        .manager
-        .start_thread(StartThreadOptions::new(tester_config.clone()))
+        .control
+        .spawn_agent(
+            tester_config,
+            text_input("tester task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: worker_thread_id,
+                depth: 2,
+                agent_path: Some(tester_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
         .await
-        .expect("tester thread should start")
-        .thread_id;
+        .expect("tester thread should start");
     let tester_thread = harness
         .manager
         .get_thread(tester_thread_id)
         .await
         .expect("tester thread should exist");
-    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
-    let tester_path = worker_path.join("tester").expect("tester path");
-    harness.control.maybe_start_completion_watcher(
-        tester_thread_id,
-        Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: worker_thread_id,
-            depth: 2,
-            agent_path: Some(tester_path.clone()),
-            agent_nickname: None,
-            agent_role: Some("explorer".to_string()),
-        })),
-        tester_path.to_string(),
-        Some(tester_path.clone()),
-    );
     let tester_turn = tester_thread.session.new_default_turn().await;
     tester_thread
         .session
@@ -3663,35 +3621,13 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         &AgentStatus::Completed(Some("done".to_string())),
     )
     .expect("completed status should render");
-    let expected = (
-        worker_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                tester_path.clone(),
-                worker_path.clone(),
-                Vec::new(),
-                expected_message.clone(),
-                /*trigger_turn*/ false,
-            ),
-            start_options: Default::default(),
-        },
+    let expected_communication = InterAgentCommunication::new(
+        tester_path.clone(),
+        worker_path.clone(),
+        Vec::new(),
+        expected_message.clone(),
+        /*trigger_turn*/ false,
     );
-
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let captured = harness
-                .manager
-                .captured_ops()
-                .into_iter()
-                .find(|entry| captured_op_matches(entry, &expected));
-            if captured.is_some() {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("completion watcher should queue a direct-parent message");
     assert!(
         worker_thread
             .session
@@ -3703,6 +3639,17 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     assert_eq!(
         tester_thread.agent_status().await,
         AgentStatus::Completed(Some("done".to_string()))
+    );
+    let (items, _) = worker_thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(
+        items,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            expected_communication
+        )]
     );
 
     let root_history = root_thread.session.clone_history().await;

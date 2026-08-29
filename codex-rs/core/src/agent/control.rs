@@ -330,37 +330,29 @@ impl AgentControl {
     ) -> CodexResult<String> {
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
-        let (parent_turn_id, root_turn_id) = if communication.trigger_turn {
-            (
-                start_options.parent_turn_id.clone(),
-                start_options.root_turn_id.clone(),
-            )
-        } else {
-            (None, None)
-        };
-        let (reply, reply_rx) = tokio::sync::oneshot::channel();
-        let submission_result = state
-            .send_op(
-                agent_id,
-                Op::InterAgentCommunicationWithAck {
-                    communication,
-                    start_options,
-                    reply,
-                },
-                parent_turn_id,
-                root_turn_id,
-            )
+        let thread = state.get_thread(agent_id).await?;
+        let delivery_permit = thread
+            .session
+            .agent_delivery_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| CodexErr::InternalAgentDied)?;
+        if !thread.is_running() {
+            return Err(CodexErr::InternalAgentDied);
+        }
+        let submission_id = Uuid::now_v7().to_string();
+        let trigger_turn = thread
+            .session
+            .enqueue_inter_agent_communication(&submission_id, communication, start_options)
             .await;
-        let result = match submission_result {
-            Ok(submission_id) => reply_rx
-                .await
-                .map(|()| submission_id)
-                .map_err(|_| CodexErr::InternalAgentDied),
-            Err(error) => Err(error),
-        };
-        let result = self
-            .handle_thread_request_result(agent_id, state, result)
-            .await;
+        let should_schedule = trigger_turn || thread.session.has_outstanding_durable_sleep();
+        drop(delivery_permit);
+        if should_schedule {
+            let session = Arc::clone(&thread.session);
+            tokio::spawn(session.maybe_start_turn_for_pending_work());
+        }
+        let result = Ok(submission_id);
         if let (Some(communication), Ok(communication_id)) =
             (communication_for_log, result.as_ref())
         {
@@ -402,9 +394,16 @@ impl AgentControl {
             .as_ref()
             .is_err_and(|err| matches!(err.details(), CodexErrorDetails::InternalAgentDied))
         {
-            let _ = state.remove_thread(&agent_id).await;
-            self.forget_v2_residency(agent_id);
-            self.state.release_spawned_thread(agent_id);
+            let removed = match state.get_thread(agent_id).await {
+                Ok(thread) if !thread.is_running() => {
+                    state.remove_thread_if_matches(&agent_id, &thread).await
+                }
+                Ok(_) | Err(_) => None,
+            };
+            if removed.is_some() {
+                self.forget_v2_residency(agent_id);
+                self.state.release_spawned_thread(agent_id);
+            }
         }
         result
     }
@@ -631,13 +630,15 @@ impl AgentControl {
                 return;
             };
             let child_thread = state.get_thread(child_thread_id).await.ok();
-            let child_uses_multi_agent_v2 = match child_thread.as_ref() {
-                Some(child_thread) => {
-                    child_thread.multi_agent_version() == Some(MultiAgentVersion::V2)
-                }
-                None => true,
-            };
-            if child_agent_path.is_some() && child_uses_multi_agent_v2 {
+            if child_thread
+                .as_ref()
+                .is_some_and(|child| child.multi_agent_version() == Some(MultiAgentVersion::V2))
+            {
+                // A loaded V2 child publishes terminal status only after its session installs
+                // the completion mail. Sending here too would duplicate the same result.
+                return;
+            }
+            if child_thread.is_none() && child_agent_path.is_some() {
                 let Some(child_agent_path) = child_agent_path.clone() else {
                     return;
                 };

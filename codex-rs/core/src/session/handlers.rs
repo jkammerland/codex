@@ -84,41 +84,30 @@ pub async fn inter_agent_communication(
     communication: InterAgentCommunication,
     start_options: codex_protocol::turn_input::TurnStartOptions,
 ) {
-    let trigger_turn =
-        enqueue_inter_agent_communication(sess, &sub_id, communication, start_options).await;
+    let trigger_turn = sess
+        .enqueue_inter_agent_communication(&sub_id, communication, start_options)
+        .await;
     if trigger_turn || sess.has_outstanding_durable_sleep() {
         sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
             .await;
     }
 }
 
-async fn enqueue_inter_agent_communication(
-    sess: &Arc<Session>,
-    sub_id: &str,
-    communication: InterAgentCommunication,
-    start_options: codex_protocol::turn_input::TurnStartOptions,
-) -> bool {
-    let trigger_turn = communication.trigger_turn;
-    sess.input_queue
-        .enqueue_mailbox_communication(communication, start_options)
-        .await;
-    crate::agent_communication::emit_agent_communication_receive(sub_id);
-    trigger_turn
-}
-
-async fn inter_agent_communication_with_ack(
-    sess: &Arc<Session>,
-    sub_id: String,
-    communication: InterAgentCommunication,
-    start_options: codex_protocol::turn_input::TurnStartOptions,
-    reply: tokio::sync::oneshot::Sender<()>,
-) {
-    let trigger_turn =
-        enqueue_inter_agent_communication(sess, &sub_id, communication, start_options).await;
-    let _ = reply.send(());
-    if trigger_turn || sess.has_outstanding_durable_sleep() {
-        sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
-            .await;
+impl Session {
+    pub(crate) fn enqueue_inter_agent_communication<'a>(
+        self: &'a Arc<Self>,
+        sub_id: &'a str,
+        communication: InterAgentCommunication,
+        start_options: codex_protocol::turn_input::TurnStartOptions,
+    ) -> futures::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let trigger_turn = communication.trigger_turn;
+            self.input_queue
+                .enqueue_mailbox_communication(communication, start_options)
+                .await;
+            crate::agent_communication::emit_agent_communication_receive(sub_id);
+            trigger_turn
+        })
     }
 }
 
@@ -550,6 +539,17 @@ pub async fn review(
                 }),
             };
             sess.send_event(&turn_context, event.msg).await;
+            sess.send_event(
+                &turn_context,
+                EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
+                    turn_id: Some(turn_context.sub_id.clone()),
+                    reason: codex_protocol::protocol::TurnAbortReason::ReviewEnded,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                }),
+            )
+            .await;
         }
     }
 }
@@ -666,21 +666,6 @@ pub(super) async fn submission_loop(
                 } => {
                     inter_agent_communication(&sess, sub.id.clone(), communication, start_options)
                         .await;
-                    false
-                }
-                Op::InterAgentCommunicationWithAck {
-                    communication,
-                    start_options,
-                    reply,
-                } => {
-                    inter_agent_communication_with_ack(
-                        &sess,
-                        sub.id.clone(),
-                        communication,
-                        start_options,
-                        reply,
-                    )
-                    .await;
                     false
                 }
                 Op::ExecApproval {

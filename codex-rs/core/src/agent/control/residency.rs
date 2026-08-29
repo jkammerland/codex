@@ -132,6 +132,20 @@ impl V2Residency {
             else {
                 continue;
             };
+            let Ok(_delivery_permit) = candidate_thread
+                .session
+                .agent_delivery_gate
+                .clone()
+                .acquire_owned()
+                .await
+            else {
+                self.touch(candidate_thread_id);
+                continue;
+            };
+            if has_nonterminal_loaded_child(manager, candidate_thread_id).await {
+                self.touch(candidate_thread_id);
+                continue;
+            }
             if !is_unloadable(candidate_thread.as_ref()).await {
                 self.touch(candidate_thread_id);
                 continue;
@@ -228,6 +242,25 @@ fn is_resident_candidate(thread: &CodexThread) -> bool {
 
 pub(super) fn is_v2_resident_session_source(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
+}
+
+async fn has_nonterminal_loaded_child(
+    manager: &ThreadManagerState,
+    parent_thread_id: ThreadId,
+) -> bool {
+    for (candidate_parent_thread_id, child_thread_id) in
+        manager.list_live_thread_spawn_edges().await
+    {
+        if candidate_parent_thread_id != parent_thread_id {
+            continue;
+        }
+        if let Ok(child) = manager.get_thread(child_thread_id).await
+            && !crate::agent::status::is_final(&child.agent_status().await)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 async fn is_unloadable(thread: &CodexThread) -> bool {

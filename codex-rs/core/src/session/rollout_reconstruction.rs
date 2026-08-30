@@ -116,6 +116,23 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> RolloutReconstruction {
+        let started_turn_ids = rollout_items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.as_str()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let durable_claim_model_item_ids = rollout_items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication: Some(communication),
+                    ..
+                } => communication.id.clone(),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         // Replay metadata should already match the shape of the future lazy reverse loader, even
         // while history materialization still uses an eager bridge. Scan newest-to-oldest,
         // stopping once a surviving replacement-history checkpoint and the required resume metadata
@@ -270,14 +287,31 @@ impl Session {
                     }
                 }
                 RolloutItem::ResponseItem(response_item) => {
-                    let active_segment =
-                        active_segment.get_or_insert_with(ActiveReplaySegment::default);
-                    active_segment.counts_as_user_turn |=
-                        is_user_turn_boundary(&response_item.item);
+                    if response_item
+                        .id()
+                        .is_none_or(|id| !durable_claim_model_item_ids.contains(id))
+                    {
+                        let active_segment =
+                            active_segment.get_or_insert_with(ActiveReplaySegment::default);
+                        active_segment.counts_as_user_turn |=
+                            is_user_turn_boundary(&response_item.item);
+                    }
                 }
                 RolloutItem::InterAgentCommunication(_) => {
                     let active_segment =
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
+                    active_segment.counts_as_user_turn = true;
+                }
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication: Some(_),
+                    turn_id,
+                    ..
+                } if started_turn_ids.contains(turn_id.as_str()) => {
+                    let active_segment =
+                        active_segment.get_or_insert_with(ActiveReplaySegment::default);
+                    active_segment
+                        .turn_id
+                        .get_or_insert_with(|| turn_id.clone());
                     active_segment.counts_as_user_turn = true;
                 }
                 RolloutItem::EventMsg(_)
@@ -287,7 +321,10 @@ impl Session {
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::TerminalAgentStatus { .. }
                 | RolloutItem::DurableInterAgentCommunication { .. }
-                | RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {}
+                | RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication: None | Some(_),
+                    ..
+                } => {}
             }
 
             if base_replacement_history.is_some()
@@ -322,6 +359,7 @@ impl Session {
         .unwrap_or(u64::MAX);
 
         let mut history = ContextManager::new();
+        let mut recorded_durable_claim_model_item_ids = HashSet::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
         if let Some(base_replacement_history) = base_replacement_history {
             history.replace_annotated(base_replacement_history.to_vec());
@@ -332,12 +370,31 @@ impl Session {
         for item in rollout_suffix {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
-                    history.record_annotated_items(
-                        std::slice::from_ref(response_item),
+                    if response_item
+                        .id()
+                        .is_none_or(|id| !durable_claim_model_item_ids.contains(id))
+                    {
+                        history.record_annotated_items(
+                            std::slice::from_ref(response_item),
+                            turn_context.model_info().truncation_policy.into(),
+                        );
+                    }
+                }
+                RolloutItem::InterAgentCommunication(communication) => {
+                    let response_item = communication.to_model_input_item();
+                    history.record_items(
+                        std::iter::once(&response_item),
                         turn_context.model_info().truncation_policy.into(),
                     );
                 }
-                RolloutItem::InterAgentCommunication(communication) => {
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
+                    communication: Some(communication),
+                    turn_id,
+                    ..
+                } if started_turn_ids.contains(turn_id.as_str())
+                    && recorded_durable_claim_model_item_ids.insert(communication_id.clone()) =>
+                {
                     let response_item = communication.to_model_input_item();
                     history.record_items(
                         std::iter::once(&response_item),
@@ -347,7 +404,10 @@ impl Session {
                 RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::TerminalAgentStatus { .. }
                 | RolloutItem::DurableInterAgentCommunication { .. }
-                | RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {}
+                | RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication: None | Some(_),
+                    ..
+                } => {}
                 RolloutItem::Compacted(compacted) => {
                     if let Some(replacement_history) = &compacted.replacement_history {
                         // This should actually never happen, because the reverse loop above (to build rollout_suffix)

@@ -3,6 +3,7 @@ use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -59,6 +60,40 @@ fn projects_turn_lifecycle_without_prior_builder_state() {
                 started_at: Some(10),
                 completed_at: Some(20),
                 duration_ms: Some(10_000),
+            }],
+            ..Default::default()
+        }
+    );
+}
+
+#[test]
+fn projects_legacy_terminal_agent_error_metadata() {
+    let changes = project(RolloutItem::InterAgentCommunicationMetadata {
+        trigger_turn: false,
+        mail_fingerprint: None,
+        delivery_id: None,
+        terminal_turn_id: Some("turn-1".to_string()),
+        terminal_status: Some(AgentStatus::Errored("parent delivery failed".to_string())),
+        mail_communication: None,
+        mail_start_options: None,
+        consumed_mail_id: None,
+    });
+
+    assert_eq!(
+        changes,
+        ThreadHistoryChangeSet {
+            changed_turns: vec![ThreadHistoryTurnChange {
+                turn_id: "turn-1".to_string(),
+                status: TurnStatus::Failed,
+                error: Some(TurnError {
+                    misalignment: None,
+                    message: "parent delivery failed".to_string(),
+                    codex_error_info: None,
+                    additional_details: None,
+                }),
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             }],
             ..Default::default()
         }

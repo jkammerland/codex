@@ -426,6 +426,69 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
 }
 
 #[test]
+fn mcp11_overloaded_inter_agent_metadata_remains_recoverable() -> Result<()> {
+    let value = json!({
+        "type": "inter_agent_communication_metadata",
+        "payload": {
+            "trigger_turn": true,
+            "mail_fingerprint": "legacy-fingerprint",
+            "delivery_id": "msg_delivery",
+            "terminal_turn_id": "terminal-turn",
+            "terminal_status": { "completed": "done" },
+            "mail_communication": {
+                "id": "msg_mail",
+                "author": "/root",
+                "recipient": "/root/child",
+                "other_recipients": [],
+                "content": "legacy durable mail",
+                "trigger_turn": true
+            },
+            "mail_start_options": {
+                "turn_trigger": null,
+                "final_output_json_schema": null,
+                "service_tier": null,
+                "parent_turn_id": "parent-turn",
+                "root_turn_id": "root-turn",
+                "cyber_access_program": null
+            },
+            "consumed_mail_id": "msg_consumed"
+        }
+    });
+
+    let RolloutItem::InterAgentCommunicationMetadata {
+        trigger_turn,
+        mail_fingerprint,
+        delivery_id,
+        terminal_turn_id,
+        terminal_status,
+        mail_communication,
+        mail_start_options,
+        consumed_mail_id,
+    } = serde_json::from_value(value)?
+    else {
+        panic!("expected inter-agent metadata");
+    };
+    assert_eq!(trigger_turn, true);
+    assert_eq!(mail_fingerprint.as_deref(), Some("legacy-fingerprint"));
+    assert_eq!(delivery_id.as_deref(), Some("msg_delivery"));
+    assert_eq!(terminal_turn_id.as_deref(), Some("terminal-turn"));
+    assert_eq!(
+        terminal_status,
+        Some(AgentStatus::Completed(Some("done".to_string())))
+    );
+    assert_eq!(
+        mail_communication.and_then(|communication| communication.id),
+        Some(ResponseItemId::from_server("msg_mail".to_string()))
+    );
+    assert_eq!(
+        mail_start_options.and_then(|options| options.parent_turn_id),
+        Some("parent-turn".to_string())
+    );
+    assert_eq!(consumed_mail_id.as_deref(), Some("msg_consumed"));
+    Ok(())
+}
+
+#[test]
 /// Keeps the generated schema aligned with each variant's actual persisted shape.
 fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;

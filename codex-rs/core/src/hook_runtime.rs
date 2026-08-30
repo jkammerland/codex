@@ -684,11 +684,7 @@ pub(crate) async fn record_pending_input(
                 .has_recorded_inter_agent_communication(&communication)
                 .await
                 && let Err(err) = sess
-                    .record_inter_agent_communication(
-                        turn_context,
-                        communication,
-                        /*mail_fingerprint*/ None,
-                    )
+                    .record_inter_agent_communication(turn_context, communication)
                     .await
             {
                 tracing::error!("failed to record inter-agent communication: {err}");

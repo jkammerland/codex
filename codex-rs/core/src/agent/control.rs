@@ -414,7 +414,8 @@ impl AgentControl {
                 let trigger_turn = thread
                     .session
                     .enqueue_inter_agent_communication(&submission_id, communication, start_options)
-                    .await;
+                    .await
+                    .map_err(|error| CodexErr::Fatal(error.to_string()))?;
                 let should_schedule =
                     trigger_turn || thread.session.has_outstanding_durable_sleep();
                 drop(delivery_permit);

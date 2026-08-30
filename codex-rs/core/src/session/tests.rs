@@ -2369,11 +2369,7 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     expected_item.set_turn_id_if_missing(&turn_context.sub_id);
 
     session
-        .record_inter_agent_communication(
-            &turn_context,
-            communication,
-            /*mail_fingerprint*/ None,
-        )
+        .record_inter_agent_communication(&turn_context, communication)
         .await
         .expect("record communication");
 
@@ -2416,6 +2412,11 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
             trigger_turn: false,
             mail_fingerprint: None,
             delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: None,
         },
         RolloutItem::ResponseItem(expected_item.clone().into()),
     ];
@@ -2453,11 +2454,7 @@ async fn record_inter_agent_communication_preserves_item_id_in_rollout_and_resum
     );
 
     session
-        .record_inter_agent_communication(
-            &turn_context,
-            communication,
-            /*mail_fingerprint*/ None,
-        )
+        .record_inter_agent_communication(&turn_context, communication)
         .await
         .expect("record communication");
 
@@ -11403,7 +11400,8 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
             ),
             Default::default(),
         )
-        .await;
+        .await
+        .expect("bounded mail");
 
     session
         .emit_thread_idle_lifecycle_if_idle(codex_extension_api::ThreadIdleCause::Completed)
@@ -11481,7 +11479,8 @@ async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
         .await;
     sess.input_queue
         .enqueue_mailbox_communication(communication.clone(), Default::default())
-        .await;
+        .await
+        .expect("bounded mail");
 
     assert!(
         !sess.input_queue.has_pending_input(&sess.active_turn).await,
@@ -11533,7 +11532,8 @@ async fn trigger_turn_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
             ),
             Default::default(),
         )
-        .await;
+        .await
+        .expect("bounded mail");
 
     assert!(
         !sess.input_queue.has_pending_input(&sess.active_turn).await,
@@ -11570,7 +11570,8 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
         .await;
     sess.input_queue
         .enqueue_mailbox_communication(communication.clone(), Default::default())
-        .await;
+        .await
+        .expect("bounded mail");
     let submission = submit_steer_only(
         &sess,
         vec![UserInput::Text {
@@ -11622,7 +11623,8 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
         .await;
     sess.input_queue
         .enqueue_mailbox_communication(communication.clone(), Default::default())
-        .await;
+        .await
+        .expect("bounded mail");
     let submission = submit_steer_only(
         &sess,
         vec![UserInput::Text {
@@ -11678,7 +11680,8 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
         .await;
     sess.input_queue
         .enqueue_mailbox_communication(communication.clone(), Default::default())
-        .await;
+        .await
+        .expect("bounded mail");
 
     let item = ResponseItem::FunctionCall {
         id: None,

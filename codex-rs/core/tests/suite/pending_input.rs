@@ -119,6 +119,109 @@ async fn idle_response_items_include_pending_mailbox_in_first_request() -> anyho
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_mail_is_recovered_into_exactly_one_model_item() -> anyhow::Result<()> {
+    const MAIL_TEXT: &str = "durable mailbox input across cold resume";
+
+    let server = responses::start_mock_server().await;
+    let mut initial_builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should enable multi-agent v2");
+    });
+    let initial = initial_builder.build_with_auto_env(&server).await?;
+    let (reply, acknowledged) = oneshot::channel();
+    initial
+        .codex
+        .submit(Op::InterAgentCommunicationWithAck {
+            communication: InterAgentCommunication::new(
+                AgentPath::try_from("/root/worker").expect("worker path should parse"),
+                AgentPath::root(),
+                Vec::new(),
+                MAIL_TEXT.to_string(),
+                /*trigger_turn*/ false,
+            ),
+            start_options: Default::default(),
+            reply,
+        })
+        .await?;
+    acknowledged.await?;
+
+    let first_response = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            ev_response_created("durable-mail-first-resume"),
+            ev_completed("durable-mail-first-resume"),
+        ]),
+    )
+    .await;
+    let mut first_resume_builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should enable multi-agent v2");
+    });
+    let first_resume = first_resume_builder.restart(&server, &initial).await?;
+    let submission = first_resume
+        .codex
+        .start_turn_if_idle(TurnInputRequest::new(TurnInput::ResponseItem(
+            responses::user_message_item("claim recovered mail"),
+        )))
+        .await?;
+    assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
+    wait_for_turn_complete(first_resume.codex.as_ref()).await;
+
+    let first_request = first_response.single_request();
+    assert_eq!(agent_mail_count(&first_request, MAIL_TEXT), 1);
+
+    let second_response = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            ev_response_created("durable-mail-second-resume"),
+            ev_completed("durable-mail-second-resume"),
+        ]),
+    )
+    .await;
+    let mut second_resume_builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should enable multi-agent v2");
+    });
+    let second_resume = second_resume_builder
+        .restart(&server, &first_resume)
+        .await?;
+    let submission = second_resume
+        .codex
+        .start_turn_if_idle(TurnInputRequest::new(TurnInput::ResponseItem(
+            responses::user_message_item("verify recovered mail is not replayed"),
+        )))
+        .await?;
+    assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
+    wait_for_turn_complete(second_resume.codex.as_ref()).await;
+
+    let second_request = second_response.single_request();
+    assert_eq!(agent_mail_count(&second_request, MAIL_TEXT), 1);
+
+    second_resume.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+fn agent_mail_count(request: &responses::ResponsesRequest, text: &str) -> usize {
+    request
+        .inputs_of_type("agent_message")
+        .iter()
+        .filter(|message| {
+            message["content"].as_array().is_some_and(|content| {
+                content
+                    .iter()
+                    .any(|item| item["type"] == "input_text" && item["text"] == text)
+            })
+        })
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn standalone_tool_output_starts_instruction_turn() -> anyhow::Result<()> {
     let server = responses::start_mock_server().await;
     let response = responses::mount_sse_once(

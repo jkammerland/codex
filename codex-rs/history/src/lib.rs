@@ -106,6 +106,16 @@ pub enum RolloutItem {
         /// Deterministic message ID after a spawned child's terminal outbox entry is handled.
         /// This acknowledgement is never model-visible.
         delivery_id: Option<ResponseItemId>,
+        /// Legacy `.mcp.11` terminal marker retained for rollout recovery only.
+        terminal_turn_id: Option<String>,
+        /// Legacy `.mcp.11` terminal status retained for rollout recovery only.
+        terminal_status: Option<AgentStatus>,
+        /// Legacy `.mcp.11` durable mailbox payload retained for rollout recovery only.
+        mail_communication: Option<InterAgentCommunication>,
+        /// Legacy `.mcp.11` mailbox settings retained for rollout recovery only.
+        mail_start_options: Option<codex_protocol::turn_input::TurnStartOptions>,
+        /// Legacy `.mcp.11` consumed-mail marker retained for rollout recovery only.
+        consumed_mail_id: Option<ResponseItemId>,
     },
     /// Model-invisible terminal child outbox entry retained for wire compatibility.
     TerminalAgentStatus {
@@ -122,6 +132,9 @@ pub enum RolloutItem {
     /// Durable proof that a turn owns one exact mailbox delivery occurrence.
     DurableInterAgentCommunicationClaimed {
         communication_id: ResponseItemId,
+        /// Bounded model-visible communication stored atomically with the claim.
+        /// Older fork rollouts omit this field and recover it from the payload record.
+        communication: Option<InterAgentCommunication>,
         fingerprint: String,
         turn_id: String,
     },

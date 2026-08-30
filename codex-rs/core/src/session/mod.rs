@@ -160,8 +160,6 @@ use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
 use codex_utils_audio::prepare_response_items as prepare_audio_response_items;
-use codex_utils_output_truncation::TruncationPolicy;
-use codex_utils_output_truncation::truncate_text;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use futures::future::Shared;
@@ -210,6 +208,7 @@ use codex_protocol::exec_output::StreamOutput;
 
 mod code_mode_warning;
 pub(crate) mod context_window;
+mod durable_mail_recovery;
 mod environment;
 pub(crate) mod extension_metrics;
 mod handlers;
@@ -245,10 +244,6 @@ pub(crate) use self::input_queue::InputQueueActivity;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
 
-pub(crate) struct DurableMailMetadata {
-    pub(crate) fingerprint: String,
-    pub(crate) start_options: codex_protocol::turn_input::TurnStartOptions,
-}
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -483,7 +478,6 @@ pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
-const INTER_AGENT_MODEL_CONTENT_MAX_TOKENS: usize = 8_000;
 
 impl Session {
     /// Spawn and initialize a new session.
@@ -1380,106 +1374,64 @@ impl Session {
             InitialHistory::Resumed(resumed_history) => {
                 let turn_context = self.new_default_turn().await;
                 let rollout_items = resumed_history.history;
-                let started_turn_ids = rollout_items
-                    .iter()
-                    .filter_map(|item| match item {
-                        RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                            Some(event.turn_id.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect::<HashSet<_>>();
-                let claimed_durable_mail = rollout_items
-                    .iter()
-                    .filter_map(|item| match item {
-                        RolloutItem::DurableInterAgentCommunicationClaimed {
-                            communication_id,
-                            fingerprint,
-                            turn_id,
-                        } => Some((
-                            (communication_id.clone(), fingerprint.clone()),
-                            turn_id.clone(),
-                        )),
-                        _ => None,
-                    })
-                    .collect::<HashMap<_, _>>();
-                let effective_instruction_turns =
-                    crate::thread_rollout_truncation::instruction_turn_positions_in_rollout(
-                        &rollout_items,
-                    )
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                for (metadata_index, pair) in rollout_items.windows(2).enumerate() {
-                    if !effective_instruction_turns.contains(&metadata_index) {
-                        continue;
-                    }
-                    let [
-                        RolloutItem::DurableInterAgentCommunication {
-                            communication,
-                            start_options,
-                            fingerprint,
-                            turn_id,
-                        },
-                        RolloutItem::ResponseItem(response_item),
-                    ] = pair
-                    else {
-                        continue;
-                    };
-                    if let Some(id) = response_item.id().cloned() {
-                        let claimed_turn_id =
-                            claimed_durable_mail.get(&(id.clone(), fingerprint.clone()));
-                        if let Some(claimed_turn_id) = claimed_turn_id
-                            && started_turn_ids.contains(claimed_turn_id)
-                        {
-                            self.input_queue
-                                .restore_recorded_durable_mail(
-                                    id,
-                                    fingerprint.clone(),
-                                    Some(claimed_turn_id.clone()),
-                                )
-                                .await;
-                        } else if communication.id.as_ref() == Some(&id)
-                            && self
-                                .input_queue
-                                .prepare_persisted_mailbox_communication(
-                                    communication.clone(),
-                                    start_options.clone(),
-                                    fingerprint.clone(),
-                                    claimed_turn_id.cloned().unwrap_or_else(|| turn_id.clone()),
-                                )
-                                .await
-                        {
-                            let _ = self
-                                .input_queue
-                                .mark_mailbox_communication_persisted(&id)
-                                .await;
-                        } else {
-                            // Legacy records do not retain enough lineage to replay safely.
-                            self.input_queue
-                                .restore_recorded_durable_mail(
-                                    id,
-                                    fingerprint.clone(),
-                                    Some(
-                                        claimed_turn_id.cloned().unwrap_or_else(|| turn_id.clone()),
-                                    ),
-                                )
-                                .await;
-                        }
-                    }
+                let durable_mail_recovery =
+                    durable_mail_recovery::recover_durable_mail(&rollout_items);
+                for consumed in durable_mail_recovery.consumed {
+                    self.input_queue
+                        .restore_recorded_durable_mail(
+                            consumed.id,
+                            consumed.fingerprint,
+                            Some(consumed.claimed_turn_id),
+                        )
+                        .await;
                 }
-                for ((id, fingerprint), claimed_turn_id) in &claimed_durable_mail {
-                    if self
-                        .input_queue
-                        .recorded_durable_mail_fingerprint(id)
-                        .await
-                        .or(self.input_queue.pending_durable_mail_fingerprint(id).await)
-                        .is_none()
+                for pending in durable_mail_recovery.pending {
+                    let intended_turn_id = if pending.intended_turn_id.is_empty() {
+                        uuid::Uuid::new_v4().to_string()
+                    } else {
+                        pending.intended_turn_id
+                    };
+                    let id = pending.communication.id.clone();
+                    let restored = if pending.already_claimed {
+                        self.input_queue
+                            .restore_claimed_mailbox_communication(
+                                pending.communication,
+                                pending.start_options,
+                                pending.fingerprint.clone(),
+                                intended_turn_id.clone(),
+                            )
+                            .await
+                    } else {
+                        self.input_queue
+                            .prepare_persisted_mailbox_communication(
+                                pending.communication,
+                                pending.start_options,
+                                pending.fingerprint.clone(),
+                                intended_turn_id.clone(),
+                            )
+                            .await
+                    };
+                    if restored.as_ref().is_ok_and(|restored| *restored)
+                        && !pending.already_claimed
+                        && let Some(id) = id.as_ref()
                     {
+                        let _ = self
+                            .input_queue
+                            .mark_mailbox_communication_persisted(id)
+                            .await;
+                    } else if !restored.as_ref().is_ok_and(|restored| *restored)
+                        && let Some(id) = id
+                    {
+                        warn!(
+                            communication_id = %id,
+                            error = ?restored.err(),
+                            "failed to restore durable mailbox payload"
+                        );
                         self.input_queue
                             .restore_recorded_durable_mail(
-                                id.clone(),
-                                fingerprint.clone(),
-                                Some(claimed_turn_id.clone()),
+                                id,
+                                pending.fingerprint,
+                                Some(intended_turn_id),
                             )
                             .await;
                     }
@@ -2185,13 +2137,16 @@ impl Session {
             // Otherwise a waiter can observe the child as terminal and return before the
             // corresponding completion mail reaches the parent.
             self.services.mcp_runtime.observe_event(&event.msg);
-            let mut rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
+            let mut rollout_items = Vec::with_capacity(2);
             if let Some(status) = v2_child_terminal_status.clone() {
                 let turn_id = parent_completion::terminal_event_turn_id(&event.msg)
                     .unwrap_or(&turn_context.sub_id)
                     .to_string();
                 rollout_items.push(RolloutItem::TerminalAgentStatus { turn_id, status });
             }
+            // Persist the recovery marker first. If the process stops between JSONL records,
+            // cold resume still knows the terminal outcome and can finish parent delivery.
+            rollout_items.push(RolloutItem::EventMsg(event.msg.clone()));
             let terminal_result = match self.try_persist_rollout_items(&rollout_items).await {
                 Ok(()) => match self.flush_rollout().await {
                     Ok(()) => {
@@ -3563,22 +3518,8 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         communication: InterAgentCommunication,
-        durable_mail: Option<DurableMailMetadata>,
     ) -> std::io::Result<()> {
-        let mut model_communication = communication.clone();
-        model_communication.author =
-            crate::session_prefix::bounded_completion_agent_path(&communication.author);
-        model_communication.recipient =
-            crate::session_prefix::bounded_completion_agent_path(&communication.recipient);
-        model_communication.other_recipients = communication
-            .other_recipients
-            .iter()
-            .map(crate::session_prefix::bounded_completion_agent_path)
-            .collect();
-        model_communication.content = truncate_text(
-            &communication.content,
-            TruncationPolicy::Tokens(INTER_AGENT_MODEL_CONTENT_MAX_TOKENS),
-        );
+        let model_communication = input_queue::mailbox_model_communication(&communication);
         let response_item = model_communication.to_model_input_item();
         let (items, _) = self.prepare_conversation_items_for_history(
             turn_context,
@@ -3586,22 +3527,21 @@ impl Session {
         );
         let items = items.as_ref();
         let response_item = items[0].clone();
-        if let Some(live_thread) = self.live_thread() {
-            let metadata = match durable_mail {
-                Some(DurableMailMetadata {
-                    fingerprint,
-                    start_options,
-                }) => RolloutItem::DurableInterAgentCommunication {
-                    communication: communication.clone(),
-                    start_options,
-                    fingerprint,
-                    turn_id: turn_context.sub_id.clone(),
-                },
-                None => RolloutItem::InterAgentCommunicationMetadata {
-                    trigger_turn: communication.trigger_turn,
-                    mail_fingerprint: None,
-                    delivery_id: None,
-                },
+        let claimed_durable_mail = if let Some(id) = communication.id.as_ref() {
+            self.input_queue.durable_mail_was_consumed(id).await
+        } else {
+            false
+        };
+        if !claimed_durable_mail && let Some(live_thread) = self.live_thread() {
+            let metadata = RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: communication.trigger_turn,
+                mail_fingerprint: None,
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: None,
             };
             live_thread
                 .append_items(&[metadata, RolloutItem::ResponseItem(response_item.into())])
@@ -3620,23 +3560,62 @@ impl Session {
         Ok(())
     }
 
+    pub(crate) async fn persist_durable_inter_agent_communication(
+        &self,
+        turn_context: &TurnContext,
+        communication: &InterAgentCommunication,
+        fingerprint: &str,
+        start_options: &codex_protocol::turn_input::TurnStartOptions,
+    ) -> std::io::Result<()> {
+        let live_thread = self.live_thread().ok_or_else(|| {
+            std::io::Error::other("cannot persist durable mailbox without a live rollout writer")
+        })?;
+        live_thread
+            .append_items(&[RolloutItem::DurableInterAgentCommunication {
+                communication: communication.clone(),
+                start_options: start_options.clone(),
+                fingerprint: fingerprint.to_string(),
+                turn_id: turn_context.sub_id.clone(),
+            }])
+            .await
+            .map_err(std::io::Error::other)
+    }
+
     pub(crate) async fn claim_and_drain_mailbox_input_items(
         &self,
         turn_id: &str,
     ) -> std::io::Result<(Vec<TurnInput>, codex_protocol::turn_input::TurnStartOptions)> {
-        let claims = self.input_queue.pending_durable_mail_claims().await;
-        if !claims.is_empty() {
+        let snapshot = self.input_queue.pending_mailbox_claim_snapshot().await;
+        let items = snapshot
+            .durable_mail
+            .iter()
+            .filter(|claim| claim.persisted_turn_id.as_deref() != Some(turn_id))
+            .flat_map(|claim| {
+                let communication = claim.model_communication.clone();
+                [
+                    RolloutItem::DurableInterAgentCommunicationClaimed {
+                        communication_id: claim.communication_id.clone(),
+                        communication: Some(communication.clone()),
+                        fingerprint: claim.fingerprint.clone(),
+                        turn_id: turn_id.to_string(),
+                    },
+                    // Keep the previous release able to reconstruct this delivery after a binary
+                    // rollback. Current reconstruction recognizes and de-duplicates this bounded
+                    // payload/response shadow in favor of the atomic claim above.
+                    RolloutItem::DurableInterAgentCommunication {
+                        communication: communication.clone(),
+                        start_options: claim.start_options.clone(),
+                        fingerprint: claim.fingerprint.clone(),
+                        turn_id: turn_id.to_string(),
+                    },
+                    RolloutItem::ResponseItem(communication.to_model_input_item().into()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        if !items.is_empty() {
             let live_thread = self.live_thread().ok_or_else(|| {
                 std::io::Error::other("cannot claim durable mailbox without a live rollout writer")
             })?;
-            let items = claims
-                .iter()
-                .map(|claim| RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id: claim.communication_id.clone(),
-                    fingerprint: claim.fingerprint.clone(),
-                    turn_id: turn_id.to_string(),
-                })
-                .collect::<Vec<_>>();
             live_thread
                 .append_items(&items)
                 .await
@@ -3644,7 +3623,7 @@ impl Session {
             self.flush_rollout().await?;
         }
         self.input_queue
-            .drain_claimed_mailbox_input_items(&claims, turn_id)
+            .drain_claimed_mailbox_input_items(&snapshot, turn_id)
             .await
             .ok_or_else(|| std::io::Error::other("durable mailbox changed while being claimed"))
     }

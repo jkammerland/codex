@@ -43,6 +43,25 @@ fn terminal_marker_is_ignored_after_a_rollback() {
 }
 
 #[test]
+fn legacy_terminal_marker_remains_recoverable() {
+    let rollout_items = vec![RolloutItem::InterAgentCommunicationMetadata {
+        trigger_turn: false,
+        mail_fingerprint: None,
+        delivery_id: None,
+        terminal_turn_id: Some("terminal-turn".to_string()),
+        terminal_status: Some(AgentStatus::Completed(Some("done".to_string()))),
+        mail_communication: None,
+        mail_start_options: None,
+        consumed_mail_id: None,
+    }];
+
+    assert_eq!(
+        terminal_status_from_rollout(&rollout_items),
+        Some(AgentStatus::Completed(Some("done".to_string())))
+    );
+}
+
+#[test]
 fn parent_completion_delivery_id_preserves_legacy_wire_identity() {
     let thread_id = ThreadId::from_u128(42);
     let turn_id = "turn-7";

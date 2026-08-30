@@ -218,6 +218,11 @@ impl Session {
                     trigger_turn: false,
                     mail_fingerprint: None,
                     delivery_id: Some(delivery_id),
+                    terminal_turn_id: None,
+                    terminal_status: None,
+                    mail_communication: None,
+                    mail_start_options: None,
+                    consumed_mail_id: None,
                 }])
                 .await
                 .map_err(std::io::Error::other)?;
@@ -450,6 +455,11 @@ fn terminal_status_marker_from_rollout(
             RolloutItem::TerminalAgentStatus { turn_id, status } => {
                 return Some((turn_id, status));
             }
+            RolloutItem::InterAgentCommunicationMetadata {
+                terminal_turn_id: Some(turn_id),
+                terminal_status: Some(status),
+                ..
+            } => return Some((turn_id, status)),
             RolloutItem::EventMsg(EventMsg::TurnStarted(_) | EventMsg::ThreadRolledBack(_)) => {
                 return None;
             }

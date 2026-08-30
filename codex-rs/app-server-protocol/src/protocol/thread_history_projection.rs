@@ -80,6 +80,11 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
         RolloutItem::TerminalAgentStatus {
             turn_id,
             status: AgentStatus::Errored(message),
+        }
+        | RolloutItem::InterAgentCommunicationMetadata {
+            terminal_turn_id: Some(turn_id),
+            terminal_status: Some(AgentStatus::Errored(message)),
+            ..
         } => ThreadHistoryChangeSet {
             changed_turns: vec![ThreadHistoryTurnChange {
                 turn_id: turn_id.clone(),

@@ -430,7 +430,9 @@ INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_
     .fetch_all(&pool)
     .await
     .expect("old-writer items should load");
-    assert_eq!(ordinals, vec![(11, 11), (12, 12), (13, 0), (14, 0)]);
+    // Migration 7 invalidates the disposable projection before the simulated old writer runs.
+    // The old writer must remain able to append rows using its zero-column default.
+    assert_eq!(ordinals, vec![(13, 0), (14, 0)]);
 
     pool.close().await;
 }
@@ -515,10 +517,7 @@ async fn realtime_items_preserve_older_thread_history_writers() {
     .expect("older binaries should never observe turnless realtime items");
     assert_eq!(
         ordinary_items,
-        vec![
-            ("existing-item".to_string(), "turn-1".to_string()),
-            ("older-writer-item".to_string(), "turn-1".to_string()),
-        ]
+        vec![("older-writer-item".to_string(), "turn-1".to_string())]
     );
     sqlx::query("DELETE FROM thread_history_projection_state WHERE thread_id = ?")
         .bind("thread-1")
@@ -535,6 +534,82 @@ async fn realtime_items_preserve_older_thread_history_writers() {
     assert_eq!(remaining_realtime_items, 0);
 
     older_pool.close().await;
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn terminal_status_projection_change_rebuilds_existing_history() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let previous_migrator = Migrator {
+        migrations: Cow::Owned(
+            THREAD_HISTORY_MIGRATOR
+                .migrations
+                .iter()
+                .filter(|migration| migration.version < 7)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: THREAD_HISTORY_MIGRATOR.ignore_missing,
+        locking: THREAD_HISTORY_MIGRATOR.locking,
+        table_name: THREAD_HISTORY_MIGRATOR.table_name.clone(),
+        create_schemas: THREAD_HISTORY_MIGRATOR.create_schemas.clone(),
+        no_tx: THREAD_HISTORY_MIGRATOR.no_tx,
+    };
+    let pool = sqlite
+        .open_thread_history_db(&previous_migrator, /*telemetry_override*/ None)
+        .await
+        .expect("previous thread history migrations should apply");
+    sqlx::query(
+        "INSERT INTO thread_turns (thread_id, turn_id, rollout_ordinal, status) VALUES ('thread-1', 'turn-1', 1, 'completed')",
+    )
+    .execute(&pool)
+    .await
+    .expect("existing projected turn should be inserted");
+    sqlx::query(
+        "INSERT INTO thread_items (thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_json) VALUES ('thread-1', 'turn-1', 'item-1', 2, 100, '{}')",
+    )
+    .execute(&pool)
+    .await
+    .expect("existing projected item should be inserted");
+    sqlx::query(
+        "INSERT INTO thread_realtime_items (thread_id, item_id, rollout_ordinal, created_at_ms, item_type, item_json) VALUES ('thread-1', 'realtime-1', 3, 100, 'realtime_session_started', '{}')",
+    )
+    .execute(&pool)
+    .await
+    .expect("existing projected realtime item should be inserted");
+    sqlx::query(
+        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES ('thread-1', 100, 4)",
+    )
+    .execute(&pool)
+    .await
+    .expect("existing projection checkpoint should be inserted");
+
+    THREAD_HISTORY_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("terminal status projection migration should apply");
+
+    let counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        r#"
+SELECT
+    (SELECT COUNT(*) FROM thread_turns),
+    (SELECT COUNT(*) FROM thread_items),
+    (SELECT COUNT(*) FROM thread_realtime_items),
+    (SELECT COUNT(*) FROM thread_history_projection_state)
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("projection tables should remain readable");
+    assert_eq!(counts, (0, 0, 0, 0));
+
     pool.close().await;
 }
 

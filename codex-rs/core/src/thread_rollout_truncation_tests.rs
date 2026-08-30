@@ -453,6 +453,11 @@ fn fork_turn_positions_use_canonical_agent_messages_and_delivery_metadata() {
             trigger_turn: false,
             mail_fingerprint: None,
             delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: None,
         },
         response_item(queued.to_model_input_item()),
         response_item(assistant_msg("first answer")),
@@ -460,6 +465,11 @@ fn fork_turn_positions_use_canonical_agent_messages_and_delivery_metadata() {
             trigger_turn: true,
             mail_fingerprint: None,
             delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: None,
         },
         response_item(triggered.to_model_input_item()),
         response_item(assistant_msg("second answer")),
@@ -475,6 +485,68 @@ fn fork_turn_positions_use_canonical_agent_messages_and_delivery_metadata() {
         })),
     );
     assert_eq!(fork_turn_positions_in_rollout(&rollout), vec![0, 8]);
+}
+
+#[test]
+fn durable_claim_shadow_counts_once_only_after_its_turn_starts() {
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "durable result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(ResponseItemId::with_suffix("msg", "durable-shadow"));
+    let mut rollout = vec![
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication.id.clone().expect("communication id"),
+            communication: Some(communication.clone()),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "claimed-turn".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunication {
+            communication: communication.clone(),
+            start_options: Default::default(),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "claimed-turn".to_string(),
+        },
+        response_item(communication.to_model_input_item()),
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication.id.clone().expect("communication id"),
+            communication: Some(communication.clone()),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "claimed-turn".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunication {
+            communication: communication.clone(),
+            start_options: Default::default(),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "claimed-turn".to_string(),
+        },
+        response_item(communication.to_model_input_item()),
+    ];
+
+    assert!(!initial_history_has_prior_user_turns(
+        &InitialHistory::Forked(rollout.clone())
+    ));
+    assert_eq!(
+        fork_turn_positions_in_rollout(&rollout),
+        Vec::<usize>::new()
+    );
+
+    rollout.push(RolloutItem::EventMsg(EventMsg::TurnStarted(
+        TurnStartedEvent {
+            turn_id: "claimed-turn".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        },
+    )));
+    assert!(initial_history_has_prior_user_turns(
+        &InitialHistory::Forked(rollout.clone())
+    ));
+    assert_eq!(fork_turn_positions_in_rollout(&rollout), vec![0]);
 }
 
 #[test]

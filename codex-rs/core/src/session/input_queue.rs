@@ -10,10 +10,13 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
+use codex_utils_output_truncation::TruncationPolicy;
+use codex_utils_output_truncation::truncate_text;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::io;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
@@ -21,18 +24,66 @@ use tokio::sync::watch;
 static PENDING_MAILBOX_MESSAGES: Gauge = Gauge::new("core.mailbox.pending");
 const MAX_MAILBOX_ITEMS_PER_TURN: usize = 64;
 pub(super) const MAX_MAILBOX_MODEL_TOKENS_PER_TURN: usize = 9_000;
+const INTER_AGENT_MODEL_CONTENT_MAX_TOKENS: usize = 8_000;
+
+pub(super) fn mailbox_model_communication(
+    communication: &InterAgentCommunication,
+) -> InterAgentCommunication {
+    let mut model_communication = communication.clone();
+    model_communication.author =
+        crate::session_prefix::bounded_completion_agent_path(&communication.author);
+    model_communication.recipient =
+        crate::session_prefix::bounded_completion_agent_path(&communication.recipient);
+    model_communication.other_recipients = communication
+        .other_recipients
+        .iter()
+        .map(crate::session_prefix::bounded_completion_agent_path)
+        .collect();
+    model_communication.content = truncate_text(
+        &communication.content,
+        TruncationPolicy::Tokens(INTER_AGENT_MODEL_CONTENT_MAX_TOKENS),
+    );
+    model_communication
+}
 
 pub(super) fn mailbox_model_token_estimate(communication: &InterAgentCommunication) -> usize {
     usize::try_from(estimate_item_token_count(
-        &communication.to_model_input_item(),
+        &mailbox_model_communication(communication).to_model_input_item(),
     ))
     .unwrap_or(usize::MAX)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+fn validate_mailbox_model_size(communication: &InterAgentCommunication) -> io::Result<usize> {
+    let model_tokens = mailbox_model_token_estimate(communication);
+    if model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN {
+        let id = communication
+            .id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "without an ID".to_string());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "inter-agent communication {id} is too large for model context ({model_tokens} estimated tokens; maximum {MAX_MAILBOX_MODEL_TOKENS_PER_TURN})"
+            ),
+        ));
+    }
+    Ok(model_tokens)
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DurableMailClaim {
     pub(crate) communication_id: ResponseItemId,
+    pub(crate) model_communication: InterAgentCommunication,
+    pub(crate) start_options: TurnStartOptions,
     pub(crate) fingerprint: String,
+    pub(crate) persisted_turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MailboxClaimSnapshot {
+    pub(crate) selected_count: usize,
+    pub(crate) durable_mail: Vec<DurableMailClaim>,
 }
 
 /// Input consumed by a regular turn.
@@ -132,6 +183,7 @@ struct PendingMailboxCommunication {
     start_options: TurnStartOptions,
     fingerprint: Option<String>,
     intended_turn_id: Option<String>,
+    persisted_claim_turn_id: Option<String>,
     model_tokens: usize,
     persisted: bool,
     _diagnostics_guard: GaugeGuard,
@@ -146,7 +198,7 @@ fn deliverable_mail_count(pending_mails: &VecDeque<PendingMailboxCommunication>)
         .take(MAX_MAILBOX_ITEMS_PER_TURN)
     {
         let next_model_tokens = model_tokens.saturating_add(mail.model_tokens);
-        if count > 0 && next_model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN {
+        if next_model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN {
             break;
         }
         count += 1;
@@ -174,6 +226,43 @@ impl InputQueue {
             .lock()
             .await
             .record_durable_mail(id, fingerprint, claimed_turn_id);
+    }
+
+    pub(crate) async fn restore_claimed_mailbox_communication(
+        &self,
+        communication: InterAgentCommunication,
+        start_options: TurnStartOptions,
+        fingerprint: String,
+        claimed_turn_id: String,
+    ) -> io::Result<bool> {
+        let Some(id) = communication.id.clone() else {
+            return Ok(false);
+        };
+        let model_tokens = validate_mailbox_model_size(&communication)?;
+        let mut mailbox = self.mailbox.lock().await;
+        if mailbox
+            .pending_mails
+            .iter()
+            .any(|pending| pending.communication.id.as_ref() == Some(&id))
+        {
+            return Ok(false);
+        }
+        mailbox
+            .pending_mails
+            .push_back(PendingMailboxCommunication {
+                communication,
+                start_options,
+                fingerprint: Some(fingerprint.clone()),
+                intended_turn_id: Some(claimed_turn_id.clone()),
+                persisted_claim_turn_id: Some(claimed_turn_id.clone()),
+                model_tokens,
+                persisted: true,
+                _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
+            });
+        mailbox.record_durable_mail(id, fingerprint, Some(claimed_turn_id));
+        drop(mailbox);
+        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
+        Ok(true)
     }
 
     pub(crate) async fn recorded_durable_mail_fingerprint(
@@ -216,18 +305,18 @@ impl InputQueue {
         start_options: TurnStartOptions,
         fingerprint: String,
         intended_turn_id: String,
-    ) -> bool {
+    ) -> io::Result<bool> {
         let Some(id) = communication.id.as_ref() else {
-            return false;
+            return Ok(false);
         };
-        let model_tokens = mailbox_model_token_estimate(&communication);
+        let model_tokens = validate_mailbox_model_size(&communication)?;
         let mut mailbox = self.mailbox.lock().await;
         if let Some(pending) = mailbox
             .pending_mails
             .iter()
             .find(|pending| pending.communication.id.as_ref() == Some(id))
         {
-            return pending.fingerprint.as_deref() == Some(fingerprint.as_str());
+            return Ok(pending.fingerprint.as_deref() == Some(fingerprint.as_str()));
         }
         mailbox
             .pending_mails
@@ -236,11 +325,12 @@ impl InputQueue {
                 start_options,
                 fingerprint: Some(fingerprint),
                 intended_turn_id: Some(intended_turn_id),
+                persisted_claim_turn_id: None,
                 model_tokens,
                 persisted: false,
                 _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
             });
-        true
+        Ok(true)
     }
 
     pub(crate) async fn mark_mailbox_communication_persisted(&self, id: &ResponseItemId) -> bool {
@@ -288,8 +378,8 @@ impl InputQueue {
         &self,
         communication: InterAgentCommunication,
         start_options: TurnStartOptions,
-    ) {
-        let model_tokens = mailbox_model_token_estimate(&communication);
+    ) -> io::Result<()> {
+        let model_tokens = validate_mailbox_model_size(&communication)?;
         self.mailbox
             .lock()
             .await
@@ -299,11 +389,13 @@ impl InputQueue {
                 start_options,
                 fingerprint: None,
                 intended_turn_id: None,
+                persisted_claim_turn_id: None,
                 model_tokens,
                 persisted: true,
                 _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
             });
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
+        Ok(())
     }
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
@@ -330,29 +422,36 @@ impl InputQueue {
     }
 
     pub(crate) async fn pending_mailbox_turn_id(&self) -> Option<String> {
-        self.mailbox
-            .lock()
-            .await
-            .pending_mails
-            .iter()
-            .take_while(|mail| mail.persisted)
-            .find_map(|mail| mail.intended_turn_id.clone())
-    }
-
-    pub(crate) async fn pending_durable_mail_claims(&self) -> Vec<DurableMailClaim> {
         let mailbox = self.mailbox.lock().await;
         let deliverable_count = deliverable_mail_count(&mailbox.pending_mails);
         mailbox
             .pending_mails
             .iter()
             .take(deliverable_count)
+            .find_map(|mail| mail.intended_turn_id.clone())
+    }
+
+    pub(crate) async fn pending_mailbox_claim_snapshot(&self) -> MailboxClaimSnapshot {
+        let mailbox = self.mailbox.lock().await;
+        let deliverable_count = deliverable_mail_count(&mailbox.pending_mails);
+        let durable_mail = mailbox
+            .pending_mails
+            .iter()
+            .take(deliverable_count)
             .filter_map(|mail| {
                 Some(DurableMailClaim {
                     communication_id: mail.communication.id.clone()?,
+                    model_communication: mailbox_model_communication(&mail.communication),
+                    start_options: mail.start_options.clone(),
                     fingerprint: mail.fingerprint.clone()?,
+                    persisted_turn_id: mail.persisted_claim_turn_id.clone(),
                 })
             })
-            .collect()
+            .collect();
+        MailboxClaimSnapshot {
+            selected_count: deliverable_count,
+            durable_mail,
+        }
     }
 
     #[cfg(test)]
@@ -364,36 +463,45 @@ impl InputQueue {
 
     pub(crate) async fn drain_claimed_mailbox_input_items(
         &self,
-        claims: &[DurableMailClaim],
+        snapshot: &MailboxClaimSnapshot,
         turn_id: &str,
     ) -> Option<(Vec<TurnInput>, TurnStartOptions)> {
-        self.drain_mailbox_input_items_inner(Some((claims, turn_id)))
+        self.drain_mailbox_input_items_inner(Some((snapshot, turn_id)))
             .await
     }
 
     async fn drain_mailbox_input_items_inner(
         &self,
-        claim: Option<(&[DurableMailClaim], &str)>,
+        claim: Option<(&MailboxClaimSnapshot, &str)>,
     ) -> Option<(Vec<TurnInput>, TurnStartOptions)> {
         let pending_mails = {
             let mut mailbox = self.mailbox.lock().await;
-            let deliverable_count = deliverable_mail_count(&mailbox.pending_mails);
-            if let Some((expected_claims, turn_id)) = claim {
+            let selected_count = match claim {
+                Some((snapshot, _)) => snapshot.selected_count,
+                None => deliverable_mail_count(&mailbox.pending_mails),
+            };
+            if let Some((snapshot, turn_id)) = claim {
+                if selected_count > deliverable_mail_count(&mailbox.pending_mails) {
+                    return None;
+                }
                 let current_claims = mailbox
                     .pending_mails
                     .iter()
-                    .take(deliverable_count)
+                    .take(selected_count)
                     .filter_map(|mail| {
                         Some(DurableMailClaim {
                             communication_id: mail.communication.id.clone()?,
+                            model_communication: mailbox_model_communication(&mail.communication),
+                            start_options: mail.start_options.clone(),
                             fingerprint: mail.fingerprint.clone()?,
+                            persisted_turn_id: mail.persisted_claim_turn_id.clone(),
                         })
                     })
                     .collect::<Vec<_>>();
-                if current_claims != expected_claims {
+                if current_claims != snapshot.durable_mail {
                     return None;
                 }
-                for durable_claim in expected_claims {
+                for durable_claim in &snapshot.durable_mail {
                     mailbox.record_durable_mail(
                         durable_claim.communication_id.clone(),
                         durable_claim.fingerprint.clone(),
@@ -403,7 +511,7 @@ impl InputQueue {
             }
             mailbox
                 .pending_mails
-                .drain(..deliverable_count)
+                .drain(..selected_count)
                 .collect::<Vec<_>>()
         };
         // A later follow-up supersedes the earlier choice, including an omitted choice.
@@ -750,7 +858,8 @@ mod tests {
         );
         input_queue
             .enqueue_mailbox_communication(mail_one, Default::default())
-            .await;
+            .await
+            .expect("bounded mail");
         let mail_two = make_mail(
             AgentPath::root(),
             AgentPath::try_from("/root/worker").expect("agent path"),
@@ -759,7 +868,8 @@ mod tests {
         );
         input_queue
             .enqueue_mailbox_communication(mail_two, Default::default())
-            .await;
+            .await
+            .expect("bounded mail");
 
         activity_rx.changed().await.expect("mailbox update");
         assert_eq!(
@@ -845,10 +955,12 @@ mod tests {
 
         input_queue
             .enqueue_mailbox_communication(mail_one.clone(), Default::default())
-            .await;
+            .await
+            .expect("bounded mail");
         input_queue
             .enqueue_mailbox_communication(mail_two.clone(), Default::default())
-            .await;
+            .await
+            .expect("bounded mail");
 
         assert_eq!(
             input_queue.drain_mailbox_input_items().await.0,
@@ -876,7 +988,8 @@ mod tests {
         for mail in &mails {
             input_queue
                 .enqueue_mailbox_communication(mail.clone(), Default::default())
-                .await;
+                .await
+                .expect("bounded mail");
         }
 
         let first_batch = input_queue.drain_mailbox_input_items().await.0;
@@ -911,7 +1024,8 @@ mod tests {
         for mail in &mails {
             input_queue
                 .enqueue_mailbox_communication(mail.clone(), Default::default())
-                .await;
+                .await
+                .expect("bounded mail");
         }
         let active_turn = Mutex::new(Some(ActiveTurn::default()));
         let first_batch = input_queue.drain_mailbox_input_items().await;
@@ -963,10 +1077,12 @@ mod tests {
         assert!(first_tokens + second_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN);
         input_queue
             .enqueue_mailbox_communication(first.clone(), Default::default())
-            .await;
+            .await
+            .expect("bounded mail");
         input_queue
             .enqueue_mailbox_communication(second.clone(), Default::default())
-            .await;
+            .await
+            .expect("bounded mail");
 
         assert_eq!(
             input_queue.drain_mailbox_input_items().await.0,
@@ -980,40 +1096,166 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_queue_uses_model_token_cost_for_encrypted_mail() {
+    async fn input_queue_rejects_oversized_encrypted_mail() {
         let input_queue = InputQueue::new();
-        let progress = make_mail(
-            AgentPath::try_from("/root/worker").expect("agent path"),
-            AgentPath::root(),
-            "progress",
-            /*trigger_turn*/ false,
-        );
-        let completion = make_mail(
-            AgentPath::try_from("/root/worker").expect("agent path"),
-            AgentPath::root(),
-            "completion",
-            /*trigger_turn*/ false,
-        );
         let encrypted_task = InterAgentCommunication::new_encrypted(
             AgentPath::root(),
             AgentPath::try_from("/root/worker").expect("agent path"),
             Vec::new(),
-            format!("delegated task{}", "x".repeat(40_000)),
+            format!("delegated task{}", "x".repeat(100_000)),
             /*trigger_turn*/ true,
         );
-        let expected = vec![
-            TurnInput::InterAgentCommunication(progress.clone()),
-            TurnInput::InterAgentCommunication(completion.clone()),
-            TurnInput::InterAgentCommunication(encrypted_task.clone()),
-        ];
-        for mail in [progress, completion, encrypted_task] {
-            input_queue
-                .enqueue_mailbox_communication(mail, Default::default())
-                .await;
-        }
+        assert!(mailbox_model_token_estimate(&encrypted_task) > MAX_MAILBOX_MODEL_TOKENS_PER_TURN);
+        input_queue
+            .enqueue_mailbox_communication(encrypted_task, Default::default())
+            .await
+            .expect_err("oversized encrypted mail must be rejected");
 
-        assert_eq!(input_queue.drain_mailbox_input_items().await.0, expected);
+        assert_eq!(input_queue.drain_mailbox_input_items().await.0, Vec::new());
         assert!(!input_queue.has_pending_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn mailbox_admission_estimates_the_bounded_agent_paths() {
+        let input_queue = InputQueue::new();
+        let long_path = AgentPath::try_from(format!("/root/{}", "worker".repeat(8_000)))
+            .expect("long agent path remains structurally valid");
+        let communication = make_mail(
+            long_path,
+            AgentPath::root(),
+            "bounded path",
+            /*trigger_turn*/ true,
+        );
+        assert!(
+            usize::try_from(estimate_item_token_count(
+                &communication.to_model_input_item()
+            ))
+            .unwrap_or(usize::MAX)
+                > MAX_MAILBOX_MODEL_TOKENS_PER_TURN
+        );
+        assert!(mailbox_model_token_estimate(&communication) <= MAX_MAILBOX_MODEL_TOKENS_PER_TURN);
+
+        input_queue
+            .enqueue_mailbox_communication(communication.clone(), Default::default())
+            .await
+            .expect("bounded model form should be admitted");
+        assert_eq!(
+            input_queue.drain_mailbox_input_items().await.0,
+            vec![TurnInput::InterAgentCommunication(communication)]
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_claim_does_not_absorb_mail_arriving_during_flush() {
+        let input_queue = InputQueue::new();
+        let first_id = ResponseItemId::with_suffix("msg", "first");
+        let mut first = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "first",
+            /*trigger_turn*/ true,
+        );
+        first.id = Some(first_id.clone());
+        assert!(
+            input_queue
+                .prepare_persisted_mailbox_communication(
+                    first.clone(),
+                    Default::default(),
+                    "first-fingerprint".to_string(),
+                    "first-turn".to_string(),
+                )
+                .await
+                .expect("valid first mail")
+        );
+        assert!(
+            input_queue
+                .mark_mailbox_communication_persisted(&first_id)
+                .await
+        );
+        let snapshot = input_queue.pending_mailbox_claim_snapshot().await;
+
+        let second_id = ResponseItemId::with_suffix("msg", "second");
+        let mut second = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "second",
+            /*trigger_turn*/ true,
+        );
+        second.id = Some(second_id.clone());
+        assert!(
+            input_queue
+                .prepare_persisted_mailbox_communication(
+                    second.clone(),
+                    Default::default(),
+                    "second-fingerprint".to_string(),
+                    "second-turn".to_string(),
+                )
+                .await
+                .expect("valid second mail")
+        );
+        assert!(
+            input_queue
+                .mark_mailbox_communication_persisted(&second_id)
+                .await
+        );
+
+        assert_eq!(
+            input_queue
+                .drain_claimed_mailbox_input_items(&snapshot, "claimed-turn")
+                .await
+                .expect("the durable snapshot remains claimable")
+                .0,
+            vec![TurnInput::InterAgentCommunication(first)]
+        );
+        assert_eq!(
+            input_queue.drain_mailbox_input_items().await.0,
+            vec![TurnInput::InterAgentCommunication(second)]
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_turn_id_is_limited_to_the_selected_batch() {
+        let input_queue = InputQueue::new();
+        for index in 0..MAX_MAILBOX_ITEMS_PER_TURN {
+            input_queue
+                .enqueue_mailbox_communication(
+                    make_mail(
+                        AgentPath::root(),
+                        AgentPath::try_from("/root/worker").expect("agent path"),
+                        &format!("mail-{index}"),
+                        /*trigger_turn*/ false,
+                    ),
+                    Default::default(),
+                )
+                .await
+                .expect("bounded mail");
+        }
+        let durable_id = ResponseItemId::with_suffix("msg", "next-batch");
+        let mut durable = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "next batch",
+            /*trigger_turn*/ true,
+        );
+        durable.id = Some(durable_id.clone());
+        assert!(
+            input_queue
+                .prepare_persisted_mailbox_communication(
+                    durable,
+                    Default::default(),
+                    "next-fingerprint".to_string(),
+                    "next-turn".to_string(),
+                )
+                .await
+                .expect("valid durable mail")
+        );
+        assert!(
+            input_queue
+                .mark_mailbox_communication_persisted(&durable_id)
+                .await
+        );
+
+        assert_eq!(input_queue.pending_mailbox_turn_id().await, None);
     }
 
     #[tokio::test]
@@ -1052,7 +1294,8 @@ mod tests {
                             ..Default::default()
                         },
                     )
-                    .await;
+                    .await
+                    .expect("bounded mail");
             }
             let (_, start_options) = input_queue.drain_mailbox_input_items().await;
             assert_eq!(
@@ -1082,7 +1325,8 @@ mod tests {
                             ..Default::default()
                         },
                     )
-                    .await;
+                    .await
+                    .expect("bounded mail");
             }
             let (_, start_options) = input_queue.drain_mailbox_input_items().await;
             assert_eq!(start_options.cyber_access_program, latest);
@@ -1101,7 +1345,8 @@ mod tests {
         );
         input_queue
             .enqueue_mailbox_communication(queued_mail, Default::default())
-            .await;
+            .await
+            .expect("bounded mail");
         assert!(!input_queue.has_trigger_turn_mailbox_items().await);
 
         let trigger_mail = make_mail(
@@ -1112,7 +1357,8 @@ mod tests {
         );
         input_queue
             .enqueue_mailbox_communication(trigger_mail, Default::default())
-            .await;
+            .await
+            .expect("bounded mail");
         assert!(input_queue.has_trigger_turn_mailbox_items().await);
     }
 }

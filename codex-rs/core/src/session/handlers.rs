@@ -10,7 +10,6 @@ use tracing::Instrument;
 use tracing::debug_span;
 use tracing::info_span;
 
-use crate::session::DurableMailMetadata;
 use crate::session::input_queue::MAX_MAILBOX_MODEL_TOKENS_PER_TURN;
 use crate::session::input_queue::mailbox_model_token_estimate;
 use crate::session::session::Session;
@@ -89,9 +88,13 @@ pub async fn inter_agent_communication(
     communication: InterAgentCommunication,
     start_options: codex_protocol::turn_input::TurnStartOptions,
 ) {
-    let trigger_turn = sess
+    let Ok(trigger_turn) = sess
         .enqueue_inter_agent_communication(&sub_id, communication, start_options)
-        .await;
+        .await
+    else {
+        warn!("rejected oversized inter-agent communication");
+        return;
+    };
     if trigger_turn || sess.has_outstanding_durable_sleep() {
         sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
             .await;
@@ -190,13 +193,11 @@ impl Session {
                     ));
                 }
                 None => {
-                    self.record_inter_agent_communication(
+                    self.persist_durable_inter_agent_communication(
                         &turn_context,
-                        communication.clone(),
-                        Some(DurableMailMetadata {
-                            fingerprint: mail_fingerprint.clone(),
-                            start_options: start_options.clone(),
-                        }),
+                        &communication,
+                        &mail_fingerprint,
+                        &start_options,
                     )
                     .await?
                 }
@@ -210,7 +211,7 @@ impl Session {
                 mail_fingerprint,
                 turn_context.sub_id.clone(),
             )
-            .await
+            .await?
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -238,14 +239,14 @@ impl Session {
         sub_id: &'a str,
         communication: InterAgentCommunication,
         start_options: codex_protocol::turn_input::TurnStartOptions,
-    ) -> futures::future::BoxFuture<'a, bool> {
+    ) -> futures::future::BoxFuture<'a, std::io::Result<bool>> {
         Box::pin(async move {
             let trigger_turn = communication.trigger_turn;
             self.input_queue
                 .enqueue_mailbox_communication(communication, start_options)
-                .await;
+                .await?;
             crate::agent_communication::emit_agent_communication_receive(sub_id);
-            trigger_turn
+            Ok(trigger_turn)
         })
     }
 }

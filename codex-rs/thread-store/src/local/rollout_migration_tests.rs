@@ -1028,6 +1028,7 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
             rollout_response_item(delivery.to_model_input_item()),
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id: delivery_id.clone(),
+                communication: None,
                 fingerprint: "sha256:delivery".to_string(),
                 turn_id: "delivery-turn".to_string(),
             },
@@ -1059,6 +1060,7 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
                 communication_id,
                 fingerprint,
                 turn_id,
+                ..
             } if communication_id == &delivery_id
                 && fingerprint == "sha256:delivery"
                 && turn_id == "delivery-turn"

@@ -1,9 +1,11 @@
 use std::io;
 
 use codex_protocol::protocol::HistoryPosition;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::ModelContextScan;
+use codex_rollout::ModelContextScanMode;
 use codex_rollout::ModelContextScanProgress;
 use codex_rollout::ReverseJsonlScanner;
 use codex_rollout::RolloutItem;
@@ -130,7 +132,12 @@ fn scan_model_context_from_lineage_blocking(
     lineage: &RolloutLineage,
     session_meta: SessionMetaLine,
 ) -> io::Result<Vec<RolloutItem>> {
-    let mut scan = ModelContextScan::default();
+    let mode = if session_meta.meta.multi_agent_version == Some(MultiAgentVersion::V2) {
+        ModelContextScanMode::PreserveDurableAgentState
+    } else {
+        ModelContextScanMode::Bounded
+    };
+    let mut scan = ModelContextScan::new(mode);
     'segments: for segment in lineage.segments().iter().rev() {
         let file = codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
         let mut scanner = match segment.end.map(|end| end.end_byte_offset) {

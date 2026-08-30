@@ -1964,15 +1964,6 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .await
         .expect("followup_task should succeed");
 
-    let followup_communication = InterAgentCommunication::new_encrypted(
-        AgentPath::root(),
-        worker_path.clone(),
-        Vec::new(),
-        "continue".to_string(),
-        /*trigger_turn*/ true,
-    );
-    wait_for_recorded_inter_agent_communication(&thread, &followup_communication).await;
-
     let second_turn = thread.session.new_default_turn().await;
     thread
         .session
@@ -3033,7 +3024,8 @@ async fn multi_agent_v2_wait_agent_returns_on_mailbox_activity() {
             ),
             Default::default(),
         )
-        .await;
+        .await
+        .expect("bounded mail");
 
     let output = wait_task
         .await
@@ -3294,7 +3286,8 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
             ),
             Default::default(),
         )
-        .await;
+        .await
+        .expect("bounded mail");
 
     let wait_output = wait_task
         .await
@@ -3369,7 +3362,8 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
             ),
             Default::default(),
         )
-        .await;
+        .await
+        .expect("bounded mail");
 
     let output = timeout(
         Duration::from_millis(500),
@@ -3637,7 +3631,8 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
             ),
             Default::default(),
         )
-        .await;
+        .await
+        .expect("bounded mail");
 
     let output = wait_task
         .await
@@ -3727,7 +3722,8 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
             ),
             Default::default(),
         )
-        .await;
+        .await
+        .expect("bounded mail");
 
     let output = wait_task
         .await

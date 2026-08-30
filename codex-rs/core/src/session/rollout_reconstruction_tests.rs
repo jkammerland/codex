@@ -10,6 +10,7 @@ use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
 use codex_history::ResumedHistory;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -77,6 +78,107 @@ fn inter_agent_assistant_message(text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+#[tokio::test]
+async fn durable_claim_is_the_single_model_visible_mail_record() {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root().join("worker").expect("worker path"),
+        Vec::new(),
+        "claimed durable mail".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(ResponseItemId::with_suffix("msg", "claimed"));
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id: communication.id.clone().expect("message id"),
+                    communication: Some(communication.clone()),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-claimed".to_string(),
+                },
+                RolloutItem::DurableInterAgentCommunication {
+                    communication: communication.clone(),
+                    start_options: Default::default(),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-claimed".to_string(),
+                },
+                RolloutItem::ResponseItem(communication.to_model_input_item().into()),
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id: communication.id.clone().expect("message id"),
+                    communication: Some(communication.clone()),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-claimed".to_string(),
+                },
+                RolloutItem::DurableInterAgentCommunication {
+                    communication: communication.clone(),
+                    start_options: Default::default(),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-claimed".to_string(),
+                },
+                RolloutItem::ResponseItem(communication.to_model_input_item().into()),
+                RolloutItem::EventMsg(EventMsg::TurnStarted(
+                    codex_protocol::protocol::TurnStartedEvent {
+                        turn_id: "turn-claimed".to_string(),
+                        trace_id: None,
+                        started_at: None,
+                        model_context_window: None,
+                        collaboration_mode_kind: Default::default(),
+                    },
+                )),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction
+            .history
+            .into_iter()
+            .map(ResponseItemEnvelope::into_item)
+            .collect::<Vec<_>>(),
+        vec![communication.to_model_input_item()]
+    );
+}
+
+#[tokio::test]
+async fn durable_claim_without_started_turn_stays_out_of_model_history() {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root().join("worker").expect("worker path"),
+        Vec::new(),
+        "claimed durable mail".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(ResponseItemId::with_suffix("msg", "pending-claim"));
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id: communication.id.clone().expect("message id"),
+                    communication: Some(communication.clone()),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-not-started".to_string(),
+                },
+                RolloutItem::DurableInterAgentCommunication {
+                    communication: communication.clone(),
+                    start_options: Default::default(),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-not-started".to_string(),
+                },
+                RolloutItem::ResponseItem(communication.to_model_input_item().into()),
+            ],
+        )
+        .await;
+
+    assert_eq!(reconstruction.history, Vec::new());
 }
 
 fn completed_user_turn_rollout(

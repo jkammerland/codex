@@ -755,7 +755,8 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
             ),
             Default::default(),
         )
-        .await;
+        .await
+        .expect("bounded mail");
 
     let submission = submit_start_only(
         &session,

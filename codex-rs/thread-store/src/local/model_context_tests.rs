@@ -3,6 +3,8 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::items::TurnItem;
@@ -13,12 +15,15 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
@@ -78,6 +83,163 @@ async fn loads_latest_checkpoint_with_required_turn_metadata() {
     }));
     assert!(context.items.iter().any(|item| {
         matches!(item, RolloutItem::TurnContext(context) if context.turn_id.as_deref() == Some("turn-2"))
+    }));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_scan_preserves_durable_mail_behind_a_checkpoint() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1008);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "pending durable mail".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(ResponseItemId::with_suffix("msg", "pending"));
+    let path = write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-00-07",
+        uuid,
+        [
+            RolloutItem::DurableInterAgentCommunication {
+                communication: communication.clone(),
+                start_options: TurnStartOptions::default(),
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "mail-turn".to_string(),
+            },
+            turn_started("turn-1"),
+            user_message("newer turn"),
+            completed_user_message("turn-1", "newer turn"),
+            turn_context(home.path(), "turn-1"),
+            compacted("checkpoint", Some(Vec::new())),
+            turn_complete("turn-1"),
+        ],
+    );
+    set_multi_agent_version(path.as_path(), MultiAgentVersion::V2);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load model context");
+
+    assert!(context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::DurableInterAgentCommunication {
+                communication: recorded,
+                ..
+            } if recorded == &communication
+        )
+    }));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_scan_compacts_consumed_mail_behind_a_checkpoint() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1009);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "already consumed durable mail".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let communication_id = ResponseItemId::with_suffix("msg", "consumed");
+    let previously_compacted_id = ResponseItemId::with_suffix("msg", "previously-compacted");
+    communication.id = Some(communication_id.clone());
+    let path = write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-00-08",
+        uuid,
+        [
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+                mail_fingerprint: Some("previous-fingerprint".to_string()),
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: Some(previously_compacted_id.clone()),
+            },
+            RolloutItem::DurableInterAgentCommunication {
+                communication: communication.clone(),
+                start_options: TurnStartOptions::default(),
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "mail-turn".to_string(),
+            },
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: communication_id.clone(),
+                communication: Some(communication),
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "mail-turn".to_string(),
+            },
+            turn_started("mail-turn"),
+            turn_complete("mail-turn"),
+            turn_started("turn-1"),
+            user_message("newer turn"),
+            completed_user_message("turn-1", "newer turn"),
+            turn_context(home.path(), "turn-1"),
+            compacted("checkpoint", Some(Vec::new())),
+            turn_complete("turn-1"),
+        ],
+    );
+    set_multi_agent_version(path.as_path(), MultiAgentVersion::V2);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load model context");
+
+    assert!(context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::InterAgentCommunicationMetadata {
+                consumed_mail_id: Some(id),
+                mail_fingerprint: Some(fingerprint),
+                ..
+            } if id == &communication_id && fingerprint == "fingerprint"
+        )
+    }));
+    assert!(context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::InterAgentCommunicationMetadata {
+                consumed_mail_id: Some(id),
+                mail_fingerprint: Some(fingerprint),
+                ..
+            } if id == &previously_compacted_id && fingerprint == "previous-fingerprint"
+        )
+    }));
+    assert!(!context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication: Some(_),
+                ..
+            }
+        )
+    }));
+    assert!(!context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::DurableInterAgentCommunication {
+                communication,
+                ..
+            } if communication.id.as_ref() == Some(&communication_id)
+        )
     }));
 }
 
@@ -472,6 +634,22 @@ fn set_history_base(path: &Path, history_base: HistoryPosition) {
     }
     updated.push('\n');
     std::fs::write(path, updated).expect("write history base");
+}
+
+fn set_multi_agent_version(path: &Path, version: MultiAgentVersion) {
+    let contents = std::fs::read_to_string(path).expect("read rollout");
+    let mut lines = contents.lines();
+    let mut head: serde_json::Value =
+        serde_json::from_str(lines.next().expect("session meta line")).expect("parse head");
+    head["payload"]["multi_agent_version"] =
+        serde_json::to_value(version).expect("serialize multi-agent version");
+    let mut updated = serde_json::to_string(&head).expect("serialize head");
+    for line in lines {
+        updated.push('\n');
+        updated.push_str(line);
+    }
+    updated.push('\n');
+    std::fs::write(path, updated).expect("write multi-agent version");
 }
 
 fn history_position(

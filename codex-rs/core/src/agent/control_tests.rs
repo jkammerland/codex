@@ -1691,14 +1691,14 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
     );
 
     let history = thread.session.clone_history().await;
-    assert!(history_contains_agent_message(
+    assert!(!history_contains_agent_message(
         history.raw_items(),
         &expected_communication
     ));
 }
 
 #[tokio::test]
-async fn public_acknowledged_mail_op_completes_after_durable_delivery() {
+async fn public_acknowledged_mail_op_stays_model_invisible_until_claimed() {
     let harness = AgentControlHarness::new().await;
     let (_, thread) = harness.start_thread().await;
     let communication = InterAgentCommunication::new(
@@ -1722,7 +1722,7 @@ async fn public_acknowledged_mail_op_completes_after_durable_delivery() {
     assert!(!submission_id.is_empty());
     assert_eq!(acknowledged.await, Ok(()));
     let history = thread.session.clone_history().await;
-    assert!(history.raw_items().any(|item| {
+    assert!(!history.raw_items().any(|item| {
         matches!(
             item,
             ResponseItem::AgentMessage { content, .. }
@@ -1731,17 +1731,18 @@ async fn public_acknowledged_mail_op_completes_after_durable_delivery() {
                 }]
         )
     }));
+    assert!(thread.session.input_queue.has_pending_mailbox_items().await);
 }
 
 #[tokio::test]
 async fn oversized_durable_mail_is_rejected_before_persistence_or_acknowledgement() {
     let harness = AgentControlHarness::new().await;
     let (thread_id, thread) = harness.start_thread().await;
-    let mut communication = InterAgentCommunication::new(
+    let mut communication = InterAgentCommunication::new_encrypted(
         AgentPath::root(),
         AgentPath::try_from("/root/worker").expect("agent path"),
         Vec::new(),
-        "x".repeat(50_000),
+        "x".repeat(100_000),
         /*trigger_turn*/ true,
     );
     communication.id = Some(codex_protocol::ResponseItemId::with_suffix(
@@ -1870,8 +1871,8 @@ async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
             .raw_items()
             .filter(|item| item.id() == communication.id.as_ref())
             .count(),
-        1,
-        "append-success/flush-failure retry must not duplicate model history"
+        0,
+        "durable receipt and claim must remain model-invisible until the turn records the batch"
     );
     harness
         .control
@@ -1977,6 +1978,98 @@ async fn consumed_durable_mail_remains_idempotent_after_reload() {
     assert_eq!(
         reloaded.session.drain_mailbox_input_items().await.0,
         Vec::new()
+    );
+}
+
+#[tokio::test]
+async fn claimed_mail_recovered_into_a_different_turn_rewrites_the_claim() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "recover the interrupted claim".to_string(),
+        /*trigger_turn*/ false,
+    );
+    communication.id = Some(codex_protocol::ResponseItemId::with_suffix(
+        "msg",
+        "reclaimed-turn",
+    ));
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            communication.clone(),
+            AgentCommunicationContext::new(AgentCommunicationKind::Result, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect("mail should persist");
+    let interrupted_turn_id = thread
+        .session
+        .input_queue
+        .pending_mailbox_turn_id()
+        .await
+        .expect("mail should reserve a turn");
+    thread
+        .session
+        .claim_and_drain_mailbox_input_items(&interrupted_turn_id)
+        .await
+        .expect("the first claim should persist");
+    harness.manager.remove_thread(&thread_id).await;
+    drop(thread);
+    harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), thread_id, SessionSource::Exec)
+        .await
+        .expect("thread should reload");
+
+    let reloaded = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("reloaded thread should exist");
+    let replacement_turn_id = "replacement-turn";
+    assert_eq!(
+        reloaded
+            .session
+            .claim_and_drain_mailbox_input_items(replacement_turn_id)
+            .await
+            .expect("a different turn should reclaim the mail")
+            .0,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            communication.clone()
+        )]
+    );
+    reloaded
+        .flush_rollout()
+        .await
+        .expect("flush replacement claim");
+    let (rollout_items, _, parse_errors) = RolloutRecorder::load_rollout_items(
+        &reloaded
+            .rollout_path()
+            .expect("reloaded thread should have rollout path"),
+    )
+    .await
+    .expect("read recovered rollout");
+    assert_eq!(parse_errors, 0);
+    let claim_turn_ids = rollout_items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
+                turn_id,
+                ..
+            } if communication_id == communication.id.as_ref().expect("communication id") => {
+                Some(turn_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        claim_turn_ids,
+        vec![interrupted_turn_id, replacement_turn_id.to_string()]
     );
 }
 
@@ -2320,20 +2413,26 @@ async fn acknowledged_mail_wins_when_delivery_precedes_shutdown() {
     delivery.await.expect("delivery should win admission");
     shutdown.await.expect("shutdown should complete");
 
-    let history = thread.session.clone_history().await;
-    let recorded = history
-        .raw_items()
-        .find_map(|item| match item {
-            ResponseItem::AgentMessage { id, .. } => id.clone(),
-            _ => None,
-        })
-        .expect("acknowledged mail should have a durable response item id");
-    let mut expected_communication = communication;
-    expected_communication.id = Some(recorded);
-    assert!(history_contains_agent_message(
-        history.raw_items(),
-        &expected_communication
-    ));
+    let (rollout_items, _, parse_errors) = RolloutRecorder::load_rollout_items(
+        &thread
+            .rollout_path()
+            .expect("acknowledged mail should materialize a rollout"),
+    )
+    .await
+    .expect("read acknowledged mail rollout");
+    assert_eq!(parse_errors, 0);
+    assert!(rollout_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::DurableInterAgentCommunication {
+                communication: recorded,
+                ..
+            } if recorded.author == communication.author
+                && recorded.recipient == communication.recipient
+                && recorded.content == communication.content
+                && recorded.id.is_some()
+        )
+    }));
 }
 
 #[tokio::test]

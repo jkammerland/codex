@@ -120,6 +120,7 @@ pub use metadata::builder_from_items;
 pub use metadata::forked_from_ordinal_exclusive;
 pub use metadata::rollout_id_from_path;
 pub use model_context::ModelContextScan;
+pub use model_context::ModelContextScanMode;
 pub use model_context::ModelContextScanProgress;
 pub use persistence_metrics::RolloutPersistenceBatchMeasurement;
 pub use persistence_metrics::RolloutPersistenceTelemetry;

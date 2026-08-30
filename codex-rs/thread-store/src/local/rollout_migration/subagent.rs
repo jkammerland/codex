@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use codex_protocol::protocol::SessionMetaLine;
 use codex_rollout::ModelContextScan;
+use codex_rollout::ModelContextScanMode;
 use codex_rollout::ModelContextScanProgress;
 use codex_rollout::ReverseJsonlScanner;
 use codex_rollout::RolloutItem;
@@ -35,7 +36,7 @@ pub(super) async fn select_bounded_context(
         let mut scanner = ReverseJsonlScanner::new(file)
             .map_err(migration_error)?
             .with_max_record_bytes(super::MAX_ROLLOUT_LINE_BYTES);
-        let mut scan = ModelContextScan::default();
+        let mut scan = ModelContextScan::new(ModelContextScanMode::PreserveDurableAgentState);
 
         while let Some(outcome) = scanner.scan_next::<Value>().map_err(migration_error)? {
             let value = match outcome {
@@ -52,7 +53,13 @@ pub(super) async fn select_bounded_context(
             }
         }
 
-        Ok(None)
+        if scan.has_bounded_suffix() {
+            let mut items = scan.finish(session_meta);
+            items.retain(|item| !matches!(item, RolloutItem::SessionMeta(_)));
+            Ok(Some(items))
+        } else {
+            Ok(None)
+        }
     })
     .await
     .map_err(migration_error)?

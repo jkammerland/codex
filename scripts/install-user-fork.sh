@@ -255,8 +255,10 @@ case "$CURRENT_VERSION" in
         exit 1
       fi
     else
-      cp -p -- "$INSTALLED_CODEX" "$PREVIOUS_CODEX"
-      cp -p -- "$INSTALLED_CODE_MODE_HOST" "$PREVIOUS_CODE_MODE_HOST"
+      if ! create_release_rollback_pair; then
+        echo "Failed to create the release rollback pair." >&2
+        exit 1
+      fi
     fi
     ;;
 esac
@@ -295,16 +297,10 @@ ROLLBACK_CODEX_HASH=$(sha256sum "$ROLLBACK_CODEX" | awk '{print $1}')
 ROLLBACK_CODE_MODE_HOST_HASH=$(sha256sum "$ROLLBACK_CODE_MODE_HOST" | awk '{print $1}')
 ACTIVATION_PENDING=1
 
-if ! mv -f -- "$TEMP_CODE_MODE_HOST" "$INSTALLED_CODE_MODE_HOST"; then
-  echo "Could not activate the code-mode host." >&2
+if ! activate_staged_pair; then
+  echo "Could not activate the executable pair; the exit transaction will restore both binaries." >&2
   exit 1
 fi
-TEMP_CODE_MODE_HOST=""
-if ! mv -f -- "$TEMP_CODEX" "$INSTALLED_CODEX"; then
-  echo "Could not activate Codex; the exit transaction will restore both binaries." >&2
-  exit 1
-fi
-TEMP_CODEX=""
 
 ACTIVE_CODEX_AFTER=$(command -v codex || true)
 if [ "$ACTIVE_CODEX_AFTER" != "$COMMAND_CODEX" ]; then

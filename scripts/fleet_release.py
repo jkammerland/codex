@@ -586,7 +586,11 @@ activated=0; old_cli_hash=; old_host_hash=; restore_cli=; restore_host=; stage_c
 rollback_pair() {{
   [ "$activated" -eq 1 ] || return 0
   restore_cli=$(mktemp "$target_cli.rollback.XXXXXX"); restore_host=$(mktemp "$target_host.rollback.XXXXXX")
-  cp -p "$backup_cli" "$restore_cli"; cp -p "$backup_host" "$restore_host"
+  if ! cp -p "$backup_cli" "$restore_cli" || ! cp -p "$backup_host" "$restore_host"; then
+    rm -f "$restore_cli" "$restore_host"
+    restore_cli=; restore_host=
+    return 1
+  fi
   rollback_failed=0
   if ! mv -f "$restore_host" "$target_host"; then rollback_failed=1; fi
   restore_host=
@@ -633,7 +637,11 @@ if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")"
   stage_cli=$(mktemp "$target_cli.{release.name}.XXXXXX"); stage_host=$(mktemp "$target_host.{release.name}.XXXXXX")
   install -m 0755 "$source_cli" "$stage_cli"; install -m 0755 "$source_host" "$stage_host"
   [ "$(sha "$stage_cli")" = "$source_cli_hash" ] && [ "$(sha "$stage_host")" = "$source_host_hash" ]
-  cp -p "$target_cli" "$backup_cli"; cp -p "$target_host" "$backup_host"
+  if ! cp -p "$target_cli" "$backup_cli" || ! cp -p "$target_host" "$backup_host"; then
+    rm -f "$backup_cli" "$backup_host"
+    echo 'Failed to create the release rollback pair' >&2
+    exit 1
+  fi
   [ "$(sha "$backup_cli")" = "$old_cli_hash" ] && [ "$(sha "$backup_host")" = "$old_host_hash" ]
   activated=1
   mv -f "$stage_cli" "$target_cli"

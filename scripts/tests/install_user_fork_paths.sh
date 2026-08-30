@@ -93,3 +93,65 @@ if restore_activated_pair; then
   exit 1
 fi
 [ "$ACTIVATION_PENDING" -eq 1 ]
+
+printf 'old-host\n' >"$ROLLBACK_CODE_MODE_HOST"
+printf 'new-cli\n' >"$INSTALLED_CODEX"
+printf 'new-host\n' >"$INSTALLED_CODE_MODE_HOST"
+cp() {
+  if [ "$1" = "-p" ] && [ "$4" = "$RESTORE_CODE_MODE_HOST" ]; then
+    return 1
+  fi
+  command cp "$@"
+}
+ACTIVATION_PENDING=1
+if restore_activated_pair; then
+  echo "rollback accepted a failed restore copy" >&2
+  exit 1
+fi
+unset -f cp
+[ "$ACTIVATION_PENDING" -eq 1 ]
+[ "$(sed -n '1p' "$INSTALLED_CODEX")" = "new-cli" ]
+[ "$(sed -n '1p' "$INSTALLED_CODE_MODE_HOST")" = "new-host" ]
+[ -z "$RESTORE_CODEX" ]
+[ -z "$RESTORE_CODE_MODE_HOST" ]
+
+PREVIOUS_CODEX="$TRANSACTION_BIN/codex.release-previous"
+PREVIOUS_CODE_MODE_HOST="$TRANSACTION_BIN/codex-code-mode-host.release-previous"
+cp() {
+  if [ "$1" = "-p" ] && [ "$4" = "$PREVIOUS_CODE_MODE_HOST" ]; then
+    return 1
+  fi
+  command cp "$@"
+}
+if create_release_rollback_pair; then
+  echo "rollback backup accepted a failed second copy" >&2
+  exit 1
+fi
+unset -f cp
+[ ! -e "$PREVIOUS_CODEX" ]
+[ ! -e "$PREVIOUS_CODE_MODE_HOST" ]
+create_release_rollback_pair
+cmp -s "$INSTALLED_CODEX" "$PREVIOUS_CODEX"
+cmp -s "$INSTALLED_CODE_MODE_HOST" "$PREVIOUS_CODE_MODE_HOST"
+
+TEMP_CODEX="$TRANSACTION_BIN/codex.staged"
+TEMP_CODE_MODE_HOST="$TRANSACTION_BIN/codex-code-mode-host.staged"
+printf 'staged-cli\n' >"$TEMP_CODEX"
+printf 'staged-host\n' >"$TEMP_CODE_MODE_HOST"
+mv() {
+  if [ "$3" = "$TEMP_CODEX" ]; then
+    return 1
+  fi
+  command mv "$@"
+}
+if (
+  ACTIVATION_PENDING=1
+  trap 'saved_status=$?; trap - EXIT; restore_activated_pair || exit 1; exit "$saved_status"' EXIT
+  activate_staged_pair
+); then
+  echo "activation accepted a failed CLI move" >&2
+  exit 1
+fi
+unset -f mv
+cmp -s "$INSTALLED_CODEX" "$ROLLBACK_CODEX"
+cmp -s "$INSTALLED_CODE_MODE_HOST" "$ROLLBACK_CODE_MODE_HOST"

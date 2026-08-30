@@ -32,6 +32,11 @@ jobs:
       - name: Test standalone installer
         run: python3 -m unittest discover -s scripts/install -p 'test_*.py'
 
+      - name: Test custom fleet controller and transaction helpers
+        run: |
+          python3 -m unittest scripts/test_fleet_release.py
+          sh scripts/tests/install_user_fork_paths.sh
+
       - name: Test macOS notarization
         run: python3 -m unittest discover -s .github/scripts/macos-signing -p 'test_notarize_with_akv.py'
 

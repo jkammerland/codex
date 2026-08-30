@@ -164,13 +164,21 @@ pub enum RolloutItem {
 pub struct RolloutModelResponseProjection {
     compatibility_shadow_id: Option<ResponseItemId>,
     delivered_communication_ids: std::collections::HashSet<ResponseItemId>,
+    started_turn_ids: std::collections::HashSet<String>,
 }
 
 impl RolloutModelResponseProjection {
     /// Applies one rollout item in persistence order and returns its model-visible response, if any.
-    pub fn project<'a>(&mut self, item: &'a RolloutItem) -> Option<&'a ResponseItemEnvelope> {
+    pub fn project<'a>(
+        &mut self,
+        item: &'a RolloutItem,
+    ) -> Option<std::borrow::Cow<'a, ResponseItemEnvelope>> {
         let compatibility_shadow_id = self.compatibility_shadow_id.take();
         match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(started)) => {
+                self.started_turn_ids.insert(started.turn_id.clone());
+                None
+            }
             RolloutItem::DurableInterAgentCommunication {
                 communication,
                 compatibility_shadow: true,
@@ -186,7 +194,7 @@ impl RolloutModelResponseProjection {
             {
                 None
             }
-            RolloutItem::ResponseItem(response) => Some(response),
+            RolloutItem::ResponseItem(response) => Some(std::borrow::Cow::Borrowed(response)),
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
                 delivered_response: Some(response),
@@ -195,7 +203,26 @@ impl RolloutModelResponseProjection {
                 .delivered_communication_ids
                 .insert(communication_id.clone()) =>
             {
-                Some(response)
+                Some(std::borrow::Cow::Borrowed(response))
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
+                communication: Some(communication),
+                delivered_response: None,
+                turn_id,
+                ..
+            } if self.started_turn_ids.contains(turn_id)
+                && self
+                    .delivered_communication_ids
+                    .insert(communication_id.clone()) =>
+            {
+                let mut communication = communication.clone();
+                communication
+                    .id
+                    .get_or_insert_with(|| communication_id.clone());
+                Some(std::borrow::Cow::Owned(
+                    communication.to_model_input_item().into(),
+                ))
             }
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunication(_)

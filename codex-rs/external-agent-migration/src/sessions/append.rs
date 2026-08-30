@@ -159,8 +159,8 @@ pub async fn append_existing_session(
     )
 }
 
-struct SourceModelItem<'a> {
-    response_item: &'a ResponseItem,
+struct SourceModelItem {
+    response_item: ResponseItem,
     append_start_index: usize,
 }
 
@@ -178,7 +178,7 @@ fn plan_append(
         || history
             .iter()
             .zip(&source)
-            .any(|(history, source)| *history != source.response_item)
+            .any(|(history, source)| history != &source.response_item)
     {
         return None;
     }
@@ -211,17 +211,17 @@ fn model_transcripts_match(source_items: &[RolloutItem], history_items: &[Rollou
         && history
             .iter()
             .zip(&source)
-            .all(|(history, source)| *history == source.response_item)
+            .all(|(history, source)| history == &source.response_item)
 }
 
-fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem<'_>>> {
+fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem>> {
     let mut model_items = Vec::new();
     let mut append_start_index = None;
     let mut model_response_projection = RolloutModelResponseProjection::default();
     for (index, item) in items.iter().enumerate() {
         if let Some(response_item) = model_response_projection.project(item) {
             model_items.push(SourceModelItem {
-                response_item: &response_item.item,
+                response_item: response_item.item.clone(),
                 append_start_index: append_start_index.take().unwrap_or(index),
             });
             continue;
@@ -259,12 +259,12 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem<'_>>>
     Some(model_items)
 }
 
-fn history_model_items(items: &[RolloutItem]) -> Option<Vec<&ResponseItem>> {
+fn history_model_items(items: &[RolloutItem]) -> Option<Vec<ResponseItem>> {
     let mut model_items = Vec::new();
     let mut model_response_projection = RolloutModelResponseProjection::default();
     for item in items {
         if let Some(response_item) = model_response_projection.project(item) {
-            model_items.push(&response_item.item);
+            model_items.push(response_item.item.clone());
             continue;
         }
         match item {

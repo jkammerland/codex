@@ -86,7 +86,7 @@ fn model_response_projection_moves_durable_delivery_from_shadow_to_claim() {
     let mut projection = RolloutModelResponseProjection::default();
     let projected = items
         .iter()
-        .filter_map(|item| projection.project(item).cloned())
+        .filter_map(|item| projection.project(item).map(std::borrow::Cow::into_owned))
         .collect::<Vec<_>>();
 
     assert_eq!(projected, vec![before, delivered, after]);
@@ -115,10 +115,94 @@ fn model_response_projection_only_suppresses_an_adjacent_identified_shadow() {
     let mut projection = RolloutModelResponseProjection::default();
     let projected = items
         .iter()
-        .filter_map(|item| projection.project(item).cloned())
+        .filter_map(|item| projection.project(item).map(std::borrow::Cow::into_owned))
         .collect::<Vec<_>>();
 
     assert_eq!(projected, vec![response]);
+}
+
+#[test]
+fn model_response_projection_includes_started_legacy_claim_once() {
+    let mut communication = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "legacy delivered result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let id = ResponseItemId::with_suffix("msg", "legacy-claim");
+    communication.id = Some(id.clone());
+    let expected = ResponseItemEnvelope::new(communication.to_model_input_item());
+    let items = [
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: "legacy-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            },
+        )),
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: id.clone(),
+            communication: Some(communication.clone()),
+            delivered_response: None,
+            fingerprint: "legacy-fingerprint".to_string(),
+            turn_id: "legacy-turn".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: id,
+            communication: Some(communication),
+            delivered_response: Some(expected.clone()),
+            fingerprint: "legacy-fingerprint".to_string(),
+            turn_id: "replacement-turn".to_string(),
+        },
+    ];
+    let mut projection = RolloutModelResponseProjection::default();
+    let projected = items
+        .iter()
+        .filter_map(|item| projection.project(item).map(std::borrow::Cow::into_owned))
+        .collect::<Vec<_>>();
+
+    assert_eq!(projected, vec![expected]);
+}
+
+#[test]
+fn model_response_projection_does_not_apply_a_later_turn_start_to_a_claim() {
+    let communication = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "still pending".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let items = [
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: ResponseItemId::with_suffix("msg", "future-start"),
+            communication: Some(communication),
+            delivered_response: None,
+            fingerprint: "legacy-fingerprint".to_string(),
+            turn_id: "reused-turn".to_string(),
+        },
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: "reused-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            },
+        )),
+    ];
+    let mut projection = RolloutModelResponseProjection::default();
+
+    assert_eq!(
+        items
+            .iter()
+            .filter_map(|item| projection.project(item))
+            .count(),
+        0
+    );
 }
 
 #[test]

@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_durable_mail_once_at_its_claimed_delivery() {
+    fn serializes_legacy_claim_only_mail_once_at_its_claimed_delivery() {
         let mut communication = InterAgentCommunication::new(
             AgentPath::root(),
             AgentPath::root().join("worker").expect("agent path"),
@@ -874,11 +874,20 @@ mod tests {
                 turn_id: "turn-1".to_string(),
                 compatibility_shadow: true,
             },
-            RolloutItem::ResponseItem(response_envelope.clone()),
+            RolloutItem::ResponseItem(response_envelope),
+            RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::TurnStarted(
+                codex_protocol::protocol::TurnStartedEvent {
+                    turn_id: "turn-1".to_string(),
+                    trace_id: None,
+                    started_at: None,
+                    model_context_window: None,
+                    collaboration_mode_kind: Default::default(),
+                },
+            )),
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id: communication.id.clone().expect("communication id"),
                 communication: Some(communication),
-                delivered_response: Some(response_envelope),
+                delivered_response: None,
                 fingerprint: "fingerprint".to_string(),
                 turn_id: "turn-1".to_string(),
             },

@@ -103,7 +103,7 @@ fn requires_a_strict_nonempty_model_prefix() {
 }
 
 #[test]
-fn durable_delivery_compares_and_appends_at_the_claim_position() {
+fn legacy_claim_only_delivery_compares_and_appends_at_the_claim_position() {
     let history = rollout(&[(MessageRole::User, "first request")]);
     let mut source = history.clone();
     let mut communication = codex_protocol::protocol::InterAgentCommunication::new(
@@ -127,7 +127,7 @@ fn durable_delivery_compares_and_appends_at_the_claim_position() {
             turn_id: "turn-2".to_string(),
             compatibility_shadow: true,
         },
-        RolloutItem::ResponseItem(delivered_response.clone()),
+        RolloutItem::ResponseItem(delivered_response),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: "turn-2".to_string(),
@@ -140,7 +140,7 @@ fn durable_delivery_compares_and_appends_at_the_claim_position() {
         RolloutItem::DurableInterAgentCommunicationClaimed {
             communication_id: communication.id.clone().expect("communication id"),
             communication: Some(communication),
-            delivered_response: Some(delivered_response),
+            delivered_response: None,
             fingerprint: "fingerprint".to_string(),
             turn_id: "turn-2".to_string(),
         },
@@ -155,7 +155,7 @@ fn durable_delivery_compares_and_appends_at_the_claim_position() {
     assert!(matches!(
         suffix.last(),
         Some(RolloutItem::DurableInterAgentCommunicationClaimed {
-            delivered_response: Some(_),
+            delivered_response: None,
             ..
         })
     ));

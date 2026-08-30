@@ -497,6 +497,7 @@ pub struct InMemoryThreadStoreCalls {
 pub struct InMemoryThreadStore {
     state: tokio::sync::Mutex<InMemoryThreadStoreState>,
     omit_metadata_update_result: AtomicBool,
+    fail_next_flush: AtomicBool,
 }
 
 #[derive(Default)]
@@ -537,6 +538,11 @@ impl InMemoryThreadStore {
     pub fn omit_metadata_update_result_for_testing(&self) {
         self.omit_metadata_update_result
             .store(true, Ordering::Relaxed);
+    }
+
+    /// Causes the next flush call to fail after prior appends remain recorded.
+    pub fn fail_next_flush_for_testing(&self) {
+        self.fail_next_flush.store(true, Ordering::Release);
     }
 
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
@@ -876,6 +882,11 @@ impl ThreadStore for InMemoryThreadStore {
     fn flush_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             self.state.lock().await.calls.flush_thread += 1;
+            if self.fail_next_flush.swap(false, Ordering::AcqRel) {
+                return Err(ThreadStoreError::Internal {
+                    message: "injected flush failure".to_string(),
+                });
+            }
             Ok(())
         })
     }

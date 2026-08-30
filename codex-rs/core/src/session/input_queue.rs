@@ -4,12 +4,14 @@ use crate::state::TurnState;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -79,6 +81,13 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    persisted_mail_delivery: Mutex<HashMap<ResponseItemId, PersistedMailDelivery>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PersistedMailDelivery {
+    PendingPersistence,
+    Delivered,
 }
 
 struct PendingMailboxCommunication {
@@ -93,7 +102,48 @@ impl InputQueue {
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            persisted_mail_delivery: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) async fn mark_mail_persistence_pending(&self, id: ResponseItemId) {
+        self.persisted_mail_delivery
+            .lock()
+            .await
+            .insert(id, PersistedMailDelivery::PendingPersistence);
+    }
+
+    pub(crate) async fn recorded_mail_requires_delivery(&self, id: &ResponseItemId) -> bool {
+        matches!(
+            self.persisted_mail_delivery.lock().await.get(id),
+            Some(PersistedMailDelivery::PendingPersistence)
+        )
+    }
+
+    pub(crate) async fn enqueue_persisted_mailbox_communication(
+        &self,
+        communication: InterAgentCommunication,
+        start_options: TurnStartOptions,
+    ) -> bool {
+        let Some(id) = communication.id.clone() else {
+            return false;
+        };
+        let mut delivery = self.persisted_mail_delivery.lock().await;
+        if matches!(delivery.get(&id), Some(PersistedMailDelivery::Delivered)) {
+            return false;
+        }
+        self.mailbox_pending_mails
+            .lock()
+            .await
+            .push_back(PendingMailboxCommunication {
+                communication,
+                start_options,
+                _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
+            });
+        delivery.insert(id, PersistedMailDelivery::Delivered);
+        drop(delivery);
+        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
+        true
     }
 
     pub(crate) async fn subscribe_activity(

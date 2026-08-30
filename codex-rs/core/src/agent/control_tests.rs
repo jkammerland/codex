@@ -1316,6 +1316,92 @@ async fn public_acknowledged_mail_op_completes_after_durable_delivery() {
 }
 
 #[tokio::test]
+async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
+    let (home, config) = test_config().await;
+    let thread_store = Arc::new(InMemoryThreadStore::default());
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store.clone(),
+        /*agent_graph_store*/ None,
+        uuid::Uuid::new_v4().to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let control = manager.agent_control();
+    let harness = AgentControlHarness {
+        _home: home,
+        config,
+        state_db: None,
+        manager,
+        control,
+    };
+    let (thread_id, thread) = harness.start_thread().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "retry one durable result".to_string(),
+        /*trigger_turn*/ false,
+    );
+    communication.id = Some(codex_protocol::ResponseItemId::with_suffix(
+        "msg",
+        "flush-retry",
+    ));
+    thread_store.fail_next_flush_for_testing();
+
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            communication.clone(),
+            AgentCommunicationContext::new(AgentCommunicationKind::Result, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect_err("the injected flush failure must fail acknowledgement");
+    for _ in 0..2 {
+        harness
+            .control
+            .send_inter_agent_communication(
+                thread_id,
+                communication.clone(),
+                AgentCommunicationContext::new(AgentCommunicationKind::Result, ThreadId::new()),
+                Default::default(),
+            )
+            .await
+            .expect("same-ID retry should succeed");
+    }
+
+    let (items, _) = thread.session.input_queue.drain_mailbox_input_items().await;
+    assert_eq!(
+        items,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            communication.clone()
+        )]
+    );
+    assert_eq!(
+        thread
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .filter(|item| item.id() == communication.id.as_ref())
+            .count(),
+        1,
+        "append-success/flush-failure retry must not duplicate model history"
+    );
+}
+
+#[tokio::test]
 async fn public_acknowledged_mail_op_does_not_overtake_queued_shutdown() {
     let harness = AgentControlHarness::new().await;
     let (_, thread) = harness.start_thread().await;

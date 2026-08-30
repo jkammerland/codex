@@ -100,9 +100,6 @@ async fn inter_agent_communication_with_ack(
     start_options: codex_protocol::turn_input::TurnStartOptions,
     reply: tokio::sync::oneshot::Sender<()>,
 ) {
-    let Ok(_delivery_permit) = sess.agent_delivery_gate.clone().acquire_owned().await else {
-        return;
-    };
     let Ok(trigger_turn) = sess
         .persist_and_enqueue_inter_agent_communication(&sub_id, communication, start_options)
         .await
@@ -126,15 +123,42 @@ impl Session {
         if communication.id.as_ref().is_none_or(|id| id.is_empty()) {
             communication.id = Some(codex_protocol::ResponseItemId::new("msg"));
         }
+        let communication_id = communication
+            .id
+            .clone()
+            .expect("inter-agent communication ID was assigned above");
         let turn_context = self.new_default_turn().await;
         self.try_ensure_rollout_materialized(PersistContext::Standard)
             .await?;
-        self.record_inter_agent_communication(&turn_context, communication.clone())
-            .await?;
+        let already_recorded = self
+            .has_recorded_inter_agent_communication(&communication)
+            .await;
+        if already_recorded {
+            if !self
+                .input_queue
+                .recorded_mail_requires_delivery(&communication_id)
+                .await
+            {
+                return Ok(false);
+            }
+        } else {
+            self.record_inter_agent_communication(&turn_context, communication.clone())
+                .await?;
+            self.input_queue
+                .mark_mail_persistence_pending(communication_id)
+                .await;
+        }
         self.flush_rollout().await?;
-        Ok(self
-            .enqueue_inter_agent_communication(sub_id, communication, start_options)
-            .await)
+        let trigger_turn = communication.trigger_turn;
+        if !self
+            .input_queue
+            .enqueue_persisted_mailbox_communication(communication, start_options)
+            .await
+        {
+            return Ok(false);
+        }
+        crate::agent_communication::emit_agent_communication_receive(sub_id);
+        Ok(trigger_turn)
     }
 
     pub(crate) fn enqueue_inter_agent_communication<'a>(

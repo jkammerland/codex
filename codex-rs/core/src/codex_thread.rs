@@ -255,7 +255,7 @@ impl CodexThread {
     }
 
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
-        self.io.submit(op).await
+        self.submit_ordered(op, /*trace*/ None).await
     }
 
     /// Returns the session telemetry handle for thread-scoped production instrumentation.
@@ -333,11 +333,33 @@ impl CodexThread {
         op: Op,
         trace: Option<W3cTraceContext>,
     ) -> CodexResult<String> {
-        self.io
+        self.submit_ordered(op, trace).await
+    }
+
+    async fn submit_ordered(&self, op: Op, trace: Option<W3cTraceContext>) -> CodexResult<String> {
+        let delivery_permit = if matches!(&op, Op::InterAgentCommunicationWithAck { .. }) {
+            let permit = self
+                .session
+                .agent_delivery_gate
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| CodexErr::InternalAgentDied)?;
+            if !self.is_running() {
+                return Err(CodexErr::InternalAgentDied);
+            }
+            Some(permit)
+        } else {
+            None
+        };
+        let result = self
+            .io
             .submit_with_trace(
                 op, trace, /*parent_turn_id*/ None, /*root_turn_id*/ None,
             )
-            .await
+            .await;
+        drop(delivery_permit);
+        result
     }
 
     /// Submits turn input without requiring the caller to inspect thread state.

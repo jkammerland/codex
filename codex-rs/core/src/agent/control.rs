@@ -271,6 +271,31 @@ impl AgentControl {
         .await
     }
 
+    pub(crate) async fn is_open_thread_spawn_child(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let state = self.upgrade()?;
+        let Some(store) = state.agent_graph_store() else {
+            // Ephemeral and non-local configurations rely on the in-memory
+            // spawn admission barrier instead of a durable graph edge.
+            return Ok(true);
+        };
+        let children = store
+            .list_thread_spawn_children(
+                parent_thread_id,
+                Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
+            )
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to verify thread-spawn admission for {child_thread_id}: {err}"
+                ))
+            })?;
+        Ok(children.contains(&child_thread_id))
+    }
+
     pub(crate) async fn emit_sub_agent_activity(
         &self,
         thread_id: ThreadId,
@@ -352,44 +377,49 @@ impl AgentControl {
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
         let thread = state.get_thread(agent_id).await?;
-        let delivery_permit = thread
-            .session
-            .agent_delivery_gate
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| CodexErr::InternalAgentDied)?;
-        if !thread.is_running() {
-            return Err(CodexErr::InternalAgentDied);
-        }
-        let submission_id = Uuid::now_v7().to_string();
-        let trigger_turn = match durability {
-            AgentMailDurability::BeforeAcknowledgement => thread
-                .session
-                .persist_and_enqueue_inter_agent_communication(
-                    &submission_id,
-                    communication,
-                    start_options,
-                )
-                .await
-                .map_err(|err| {
+        let submission_id = match durability {
+            AgentMailDurability::BeforeAcknowledgement => {
+                let (reply, acknowledged) = tokio::sync::oneshot::channel();
+                let submission_id = thread
+                    .submit(Op::InterAgentCommunicationWithAck {
+                        communication,
+                        start_options,
+                        reply,
+                    })
+                    .await?;
+                acknowledged.await.map_err(|_| {
                     CodexErr::Fatal(format!(
-                        "failed to persist inter-agent communication for {agent_id}: {err}"
+                        "failed to persist inter-agent communication for {agent_id}"
                     ))
-                })?,
+                })?;
+                submission_id
+            }
             AgentMailDurability::SpawnAdmissionBarrier => {
-                thread
+                let delivery_permit = thread
+                    .session
+                    .agent_delivery_gate
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| CodexErr::InternalAgentDied)?;
+                if !thread.is_running() {
+                    return Err(CodexErr::InternalAgentDied);
+                }
+                let submission_id = Uuid::now_v7().to_string();
+                let trigger_turn = thread
                     .session
                     .enqueue_inter_agent_communication(&submission_id, communication, start_options)
-                    .await
+                    .await;
+                let should_schedule =
+                    trigger_turn || thread.session.has_outstanding_durable_sleep();
+                drop(delivery_permit);
+                if should_schedule {
+                    let session = Arc::clone(&thread.session);
+                    tokio::spawn(session.maybe_start_turn_for_pending_work());
+                }
+                submission_id
             }
         };
-        let should_schedule = trigger_turn || thread.session.has_outstanding_durable_sleep();
-        drop(delivery_permit);
-        if should_schedule {
-            let session = Arc::clone(&thread.session);
-            tokio::spawn(session.maybe_start_turn_for_pending_work());
-        }
         let result = Ok(submission_id);
         if let (Some(communication), Ok(communication_id)) =
             (communication_for_log, result.as_ref())

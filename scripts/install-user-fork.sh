@@ -57,6 +57,15 @@ cleanup() {
   exit "$saved_status"
 }
 
+restore_activated_pair() {
+  restore_codex=$(mktemp "$INSTALLED_CODEX.restore.XXXXXX")
+  restore_host=$(mktemp "$INSTALLED_CODE_MODE_HOST.restore.XXXXXX")
+  cp -p -- "$ROLLBACK_CODEX" "$restore_codex"
+  cp -p -- "$ROLLBACK_CODE_MODE_HOST" "$restore_host"
+  mv -f -- "$restore_host" "$INSTALLED_CODE_MODE_HOST"
+  mv -f -- "$restore_codex" "$INSTALLED_CODEX"
+}
+
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -88,9 +97,15 @@ COMMAND_CODEX=$(command -v codex || true)
 CODEX_STATE_DIR=${CODEX_HOME:-"$HOME/.codex"}
 if INSTALLED_BIN_DIR=$(resolve_standalone_codex_bin_dir "$COMMAND_CODEX" "$CODEX_STATE_DIR"); then
   :
+elif is_active_managed_standalone_codex "$COMMAND_CODEX" "$CODEX_STATE_DIR"; then
+  echo "The active standalone Codex install is incomplete; refusing to update a different installation." >&2
+  exit 1
 else
-  NPM_ROOT=$(npm root --global)
-  INSTALLED_BIN_DIR="$NPM_ROOT/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin"
+  NPM_ROOT=$(npm root --global 2>/dev/null || true)
+  if ! INSTALLED_BIN_DIR=$(resolve_npm_codex_bin_dir "$COMMAND_CODEX" "$NPM_ROOT"); then
+    echo "The active Codex executable is not the managed standalone or npm installation; refusing to update an inactive install." >&2
+    exit 1
+  fi
 fi
 INSTALLED_CODEX="$INSTALLED_BIN_DIR/codex"
 INSTALLED_CODE_MODE_HOST="$INSTALLED_BIN_DIR/codex-code-mode-host"
@@ -237,6 +252,22 @@ if ! mv -f -- "$TEMP_CODEX" "$INSTALLED_CODEX"; then
   exit 1
 fi
 TEMP_CODEX=""
+
+ACTIVE_CODEX_AFTER=$(command -v codex || true)
+if [ "$ACTIVE_CODEX_AFTER" != "$COMMAND_CODEX" ]; then
+  restore_activated_pair
+  echo "The active Codex command changed during installation; refusing to report successful activation." >&2
+  exit 1
+fi
+ACTIVE_VERSION=$(codex --version 2>/dev/null || true)
+case "$ACTIVE_VERSION" in
+  *"$FORK_MARKER"*) ;;
+  *)
+    restore_activated_pair
+    echo "The active Codex command did not select the installed fork: $ACTIVE_VERSION" >&2
+    exit 1
+    ;;
+esac
 
 printf 'Installed %s\n' "$STAGED_VERSION"
 sha256sum "$INSTALLED_CODEX" "$INSTALLED_CODE_MODE_HOST"

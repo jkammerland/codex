@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, run
 from unittest import mock
 
 
@@ -27,6 +27,19 @@ class FleetReleaseTest(unittest.TestCase):
             [host.rust_target for host in self.hosts],
             ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"],
         )
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer test")
+    def test_linux_installer_resolves_only_the_active_managed_install(self) -> None:
+        result = run(
+            [
+                "sh",
+                str(Path(__file__).parent / "tests" / "install_user_fork_paths.sh"),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_manifest_rejects_relative_host_paths(self) -> None:
         raw = json.loads(fleet_release.DEFAULT_MANIFEST.read_text())

@@ -18,6 +18,13 @@ use codex_extension_api::ExtensionDataInit;
 use codex_protocol::intersect_effective_permission_profiles;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_utils_path_uri::PathUri;
+use std::time::Duration;
+
+const SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+#[path = "spawn_rollback_tests.rs"]
+mod rollback_tests;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
@@ -369,6 +376,15 @@ impl AgentControl {
     }
 
     /// A provided parent enables owner-validated reloads; `None` preserves sender-driven reloads.
+    pub(crate) fn ensure_v2_agent_loaded_boxed(
+        &self,
+        config: Config,
+        thread_id: ThreadId,
+        parent: Option<Arc<CodexThread>>,
+    ) -> futures::future::BoxFuture<'_, CodexResult<()>> {
+        Box::pin(self.ensure_v2_agent_loaded(config, thread_id, parent))
+    }
+
     pub(crate) async fn ensure_v2_agent_loaded(
         &self,
         mut config: Config,
@@ -1096,10 +1112,7 @@ impl AgentControl {
         provisional_edge: Option<&ProvisionalSpawnEdge>,
     ) -> Result<(), String> {
         let thread_id = thread.session.thread_id;
-        thread
-            .shutdown_and_wait()
-            .await
-            .map_err(|err| format!("failed to shut down unpublished spawned agent: {err}"))?;
+        await_unpublished_spawn_shutdown(thread.shutdown_and_wait()).await?;
         let _ = state.remove_thread_if_matches(&thread_id, thread).await;
         match state.delete_stored_thread(thread_id).await {
             Ok(()) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {}
@@ -1604,5 +1617,21 @@ impl AgentControl {
         .await;
 
         Ok((resumed_thread.thread_id, multi_agent_version))
+    }
+}
+
+async fn await_unpublished_spawn_shutdown<F>(shutdown: F) -> Result<(), String>
+where
+    F: std::future::Future<Output = CodexResult<()>>,
+{
+    match tokio::time::timeout(SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT, shutdown).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(format!(
+            "failed to shut down unpublished spawned agent: {err}"
+        )),
+        Err(_) => Err(format!(
+            "timed out shutting down unpublished spawned agent after {}s; cleanup remains pending",
+            SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT.as_secs()
+        )),
     }
 }

@@ -47,6 +47,7 @@ use crate::session::turn_context::TurnEnvironment;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::skills_load_input_from_config;
 use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
+use crate::tools::handlers::multi_agents_common::build_agent_resume_config;
 use crate::turn_metadata::TurnMetadataState;
 use crate::turn_timing::now_unix_timestamp_ms;
 use async_channel::Receiver;
@@ -2198,6 +2199,22 @@ impl Session {
         );
         let context =
             AgentCommunicationContext::new(AgentCommunicationKind::Result, self.thread_id);
+        let resume_config = match build_agent_resume_config(turn_context) {
+            Ok(config) => config,
+            Err(err) => {
+                debug!("failed to build resume config for parent thread {parent_thread_id}: {err}");
+                return false;
+            }
+        };
+        if let Err(err) = self
+            .services
+            .agent_control
+            .ensure_v2_agent_loaded_boxed(resume_config, parent_thread_id, /*parent*/ None)
+            .await
+        {
+            debug!("failed to load parent thread {parent_thread_id}: {err}");
+            return false;
+        }
         if let Err(err) = Box::pin(self.services.agent_control.send_inter_agent_communication(
             parent_thread_id,
             communication,

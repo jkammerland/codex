@@ -2416,11 +2416,6 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
             trigger_turn: false,
             mail_fingerprint: None,
             delivery_id: None,
-            terminal_turn_id: None,
-            terminal_status: None,
-            mail_communication: None,
-            mail_start_options: None,
-            consumed_mail_id: None,
         },
         RolloutItem::ResponseItem(expected_item.clone().into()),
     ];
@@ -3456,6 +3451,9 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
+        | RolloutItem::DurableInterAgentCommunication { .. }
+        | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
@@ -3534,6 +3532,9 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         RolloutItem::SessionMeta(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
+        | RolloutItem::DurableInterAgentCommunication { .. }
+        | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
@@ -11487,9 +11488,9 @@ async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
         "queue-only mailbox mail should stay buffered once the current turn emitted its answer"
     );
     assert_eq!(
-        sess.input_queue
-            .get_pending_input(&sess.active_turn)
+        sess.get_pending_input_for_turn(&tc.sub_id)
             .await
+            .expect("answer-boundary check should not claim mailbox mail")
             .0,
         Vec::new()
     );
@@ -11497,7 +11498,10 @@ async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
     sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 
     assert_eq!(
-        (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
+        sess.get_pending_input_for_turn(&tc.sub_id)
+            .await
+            .expect("the next turn should claim mailbox mail")
+            .0,
         vec![TurnInput::InterAgentCommunication(communication)],
     );
 }

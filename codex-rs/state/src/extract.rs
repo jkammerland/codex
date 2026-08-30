@@ -23,7 +23,10 @@ pub fn apply_rollout_item(
         RolloutItem::EventMsg(event) => apply_event_msg(metadata, event),
         RolloutItem::ResponseItem(item) => apply_response_item(metadata, &item.item),
         RolloutItem::InterAgentCommunication(_)
-        | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
+        | RolloutItem::DurableInterAgentCommunication { .. }
+        | RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {}
         RolloutItem::Compacted(_) => {}
         RolloutItem::WorldState(_) => {}
         RolloutItem::SecurityRiskScore(_) => {}
@@ -53,6 +56,9 @@ pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
+        | RolloutItem::DurableInterAgentCommunication { .. }
+        | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::SecurityRiskScore(_)

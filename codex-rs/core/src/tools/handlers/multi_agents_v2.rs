@@ -79,7 +79,12 @@ fn communication_from_tool_message(
     } else {
         InterAgentMessageType::Message
     };
-    let content =
-        InterAgentMessage::new(message_type, recipient.clone(), author.clone(), message).render();
+    let content = InterAgentMessage::new(
+        message_type,
+        crate::session_prefix::bounded_completion_agent_path(&recipient),
+        crate::session_prefix::bounded_completion_agent_path(&author),
+        message,
+    )
+    .render();
     InterAgentCommunication::new(author, recipient, Vec::new(), content, trigger_turn)
 }

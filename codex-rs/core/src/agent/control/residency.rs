@@ -54,16 +54,6 @@ pub(super) struct V2ResidencySlot {
     active: bool,
 }
 
-pub(super) struct DeferredV2ResidencyRelease {
-    residency: Arc<V2Residency>,
-}
-
-impl Drop for DeferredV2ResidencyRelease {
-    fn drop(&mut self) {
-        self.residency.release_pending_slot();
-    }
-}
-
 impl V2ResidencySlot {
     pub(super) fn commit(mut self, thread_id: ThreadId) {
         self.residency.commit_slot(thread_id);
@@ -109,18 +99,6 @@ impl AgentControl {
 
     pub(super) fn forget_v2_residency(&self, thread_id: ThreadId) {
         self.v2_residency.remove(thread_id);
-    }
-
-    pub(super) fn retain_unpublished_v2_residency_slot(
-        &self,
-        thread: &CodexThread,
-    ) -> Option<DeferredV2ResidencyRelease> {
-        is_resident_candidate(thread).then(|| {
-            self.v2_residency.retain_pending_slot();
-            DeferredV2ResidencyRelease {
-                residency: Arc::clone(&self.v2_residency),
-            }
-        })
     }
 
     pub(super) fn reserve_v2_terminal_delivery_slot(&self) -> V2ResidencySlot {

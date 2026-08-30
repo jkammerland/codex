@@ -218,11 +218,6 @@ impl Session {
                     trigger_turn: false,
                     mail_fingerprint: None,
                     delivery_id: Some(delivery_id),
-                    terminal_turn_id: None,
-                    terminal_status: None,
-                    mail_communication: None,
-                    mail_start_options: None,
-                    consumed_mail_id: None,
                 }])
                 .await
                 .map_err(std::io::Error::other)?;
@@ -263,11 +258,9 @@ impl Session {
             );
         };
 
-        let bounded_parent_agent_path = bounded_completion_agent_path(&parent_agent_path);
-        let bounded_child_agent_path = bounded_completion_agent_path(child_agent_path);
         let Some(message) = format_inter_agent_completion_message(
-            bounded_parent_agent_path.clone(),
-            bounded_child_agent_path.clone(),
+            bounded_completion_agent_path(&parent_agent_path),
+            bounded_completion_agent_path(child_agent_path),
             &status,
         ) else {
             return ParentCompletionDelivery::PersistenceFailed(
@@ -282,8 +275,8 @@ impl Session {
             .is_enabled()
             .then(|| message.clone());
         let mut communication = InterAgentCommunication::new(
-            bounded_child_agent_path,
-            bounded_parent_agent_path,
+            child_agent_path.clone(),
+            parent_agent_path.clone(),
             Vec::new(),
             message,
             /*trigger_turn*/ false,
@@ -454,11 +447,7 @@ fn terminal_status_marker_from_rollout(
 ) -> Option<(&str, &AgentStatus)> {
     for item in rollout_items.iter().rev() {
         match item {
-            RolloutItem::InterAgentCommunicationMetadata {
-                terminal_turn_id: Some(turn_id),
-                terminal_status: Some(status),
-                ..
-            } => {
+            RolloutItem::TerminalAgentStatus { turn_id, status } => {
                 return Some((turn_id, status));
             }
             RolloutItem::EventMsg(EventMsg::TurnStarted(_) | EventMsg::ThreadRolledBack(_)) => {
@@ -479,11 +468,7 @@ pub(super) fn terminal_event_turn_id(event: &EventMsg) -> Option<&str> {
 }
 
 fn parent_completion_delivery_id(thread_id: ThreadId, turn_id: &str) -> ResponseItemId {
-    let identity = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_OID,
-        format!("{thread_id}\0{turn_id}").as_bytes(),
-    );
-    ResponseItemId::with_suffix("msg", format!("completion-{identity}"))
+    ResponseItemId::with_suffix("msg", format!("completion-{thread_id}-{turn_id}"))
 }
 
 #[cfg(test)]

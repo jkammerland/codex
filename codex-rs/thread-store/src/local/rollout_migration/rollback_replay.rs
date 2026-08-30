@@ -67,7 +67,8 @@ impl ModelReplayPlanner {
             }
             RolloutItem::TurnContext(context) => ReplayRecord::TurnContext(context.turn_id.clone()),
             RolloutItem::EventMsg(EventMsg::UserMessage(_))
-            | RolloutItem::InterAgentCommunication(_) => ReplayRecord::UserBoundary,
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::DurableInterAgentCommunication { .. } => ReplayRecord::UserBoundary,
             RolloutItem::ResponseItem(response) if rollback::counts_as_boundary(&response.item) => {
                 ReplayRecord::UserBoundary
             }
@@ -75,6 +76,8 @@ impl ModelReplayPlanner {
             | RolloutItem::ResponseItem(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TerminalAgentStatus { .. }
+            | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::WorldState(_) => return,

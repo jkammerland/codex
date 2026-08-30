@@ -303,6 +303,9 @@ impl ThreadMetadataSync {
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TerminalAgentStatus { .. }
+                | RolloutItem::DurableInterAgentCommunication { .. }
+                | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::SecurityRiskScore(_)

@@ -397,13 +397,13 @@ impl ThreadHistoryBuilder {
             RolloutItem::EventMsg(event) => self.handle_event(event),
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
             RolloutItem::ResponseItem(item) => self.handle_response_item(&item.item),
-            RolloutItem::InterAgentCommunicationMetadata {
-                terminal_turn_id: Some(turn_id),
-                terminal_status: Some(status),
-                ..
-            } => self.handle_terminal_agent_status(turn_id, status),
+            RolloutItem::TerminalAgentStatus { turn_id, status } => {
+                self.handle_terminal_agent_status(turn_id, status)
+            }
             RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::DurableInterAgentCommunication { .. }
+            | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
@@ -4004,15 +4004,9 @@ mod tests {
                 completed_at: None,
                 duration_ms: None,
             })),
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: false,
-                mail_fingerprint: None,
-                delivery_id: None,
-                terminal_turn_id: Some("turn-a".into()),
-                terminal_status: Some(AgentStatus::Errored("delivery failed".into())),
-                mail_communication: None,
-                mail_start_options: None,
-                consumed_mail_id: None,
+            RolloutItem::TerminalAgentStatus {
+                turn_id: "turn-a".into(),
+                status: AgentStatus::Errored("delivery failed".into()),
             },
         ];
 

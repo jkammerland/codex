@@ -193,14 +193,9 @@ impl RollbackPlanner {
                 self.start_boundary(index);
             }
             RolloutItem::InterAgentCommunicationMetadata {
-                delivery_id,
-                terminal_turn_id,
-                consumed_mail_id,
+                delivery_id: Some(_),
                 ..
-            } if delivery_id.is_some()
-                || terminal_turn_id.is_some()
-                || consumed_mail_id.is_some() =>
-            {
+            } => {
                 self.record_boundaries[index] = index
                     .checked_sub(1)
                     .and_then(|previous| self.record_boundaries[previous]);
@@ -208,6 +203,18 @@ impl RollbackPlanner {
             RolloutItem::InterAgentCommunicationMetadata { .. } => {
                 let boundary = self.start_boundary(index);
                 self.pending_delivery_boundary = Some(boundary);
+            }
+            RolloutItem::DurableInterAgentCommunication { .. } => {
+                let boundary = self.start_boundary(index);
+                self.pending_delivery_boundary = Some(boundary);
+            }
+            RolloutItem::TerminalAgentStatus { turn_id, .. } => {
+                self.assign_targeted_record(index, Some(turn_id));
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {
+                // A durable claim prevents automatic replay even if its model-visible turn is
+                // later rolled back.
+                self.record_boundaries[index] = None;
             }
             RolloutItem::Compacted(item) => {
                 let owner = self

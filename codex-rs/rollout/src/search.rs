@@ -291,6 +291,9 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
+        | RolloutItem::DurableInterAgentCommunication { .. }
+        | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::SecurityRiskScore(_)

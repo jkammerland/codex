@@ -1005,41 +1005,31 @@ async fn migration_keeps_late_completions_for_surviving_turns_across_rollback() 
 async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
-    let delivery = InterAgentCommunication::new(
+    let mut delivery = InterAgentCommunication::new(
         AgentPath::root(),
         AgentPath::root().join("worker").expect("worker path"),
         Vec::new(),
         "remove delivery".to_string(),
         /*trigger_turn*/ true,
     );
+    let delivery_id = codex_protocol::ResponseItemId::with_suffix("msg", "consumed-delivery");
+    delivery.id = Some(delivery_id.clone());
     let path = write_rollout(
         home.path(),
         thread_id,
         SessionSource::Cli,
         vec![
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: true,
-                mail_fingerprint: None,
-                delivery_id: None,
-                terminal_turn_id: None,
-                terminal_status: None,
-                mail_communication: None,
-                mail_start_options: None,
-                consumed_mail_id: None,
+            RolloutItem::DurableInterAgentCommunication {
+                communication: delivery.clone(),
+                start_options: Default::default(),
+                fingerprint: "sha256:delivery".to_string(),
+                turn_id: "delivery-turn".to_string(),
             },
             rollout_response_item(delivery.to_model_input_item()),
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: false,
-                mail_fingerprint: None,
-                delivery_id: None,
-                terminal_turn_id: None,
-                terminal_status: None,
-                mail_communication: None,
-                mail_start_options: None,
-                consumed_mail_id: Some(codex_protocol::ResponseItemId::with_suffix(
-                    "msg",
-                    "consumed-delivery",
-                )),
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: delivery_id.clone(),
+                fingerprint: "sha256:delivery".to_string(),
+                turn_id: "delivery-turn".to_string(),
             },
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,
@@ -1054,12 +1044,25 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
         .await
         .expect("migrate rolled-back inter-agent delivery");
 
-    assert!(!read_rollout(&path).iter().any(|line| match &line.item {
-        RolloutItem::InterAgentCommunicationMetadata { .. } => true,
+    let migrated = read_rollout(&path);
+    assert!(!migrated.iter().any(|line| match &line.item {
+        RolloutItem::DurableInterAgentCommunication { .. } => true,
         RolloutItem::ResponseItem(response_item) => {
             matches!(&response_item.item, ResponseItem::AgentMessage { .. })
         }
         _ => false,
+    }));
+    assert!(migrated.iter().any(|line| {
+        matches!(
+            &line.item,
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
+                fingerprint,
+                turn_id,
+            } if communication_id == &delivery_id
+                && fingerprint == "sha256:delivery"
+                && turn_id == "delivery-turn"
+        )
     }));
 }
 

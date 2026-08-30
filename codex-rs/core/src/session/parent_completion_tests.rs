@@ -11,15 +11,9 @@ use crate::agent::AgentStatus;
 #[test]
 fn terminal_marker_is_ignored_after_a_later_turn_starts() {
     let rollout_items = vec![
-        RolloutItem::InterAgentCommunicationMetadata {
-            trigger_turn: false,
-            mail_fingerprint: None,
-            delivery_id: None,
-            terminal_turn_id: Some("completed-turn".to_string()),
-            terminal_status: Some(AgentStatus::Completed(Some("done".to_string()))),
-            mail_communication: None,
-            mail_start_options: None,
-            consumed_mail_id: None,
+        RolloutItem::TerminalAgentStatus {
+            turn_id: "completed-turn".to_string(),
+            status: AgentStatus::Completed(Some("done".to_string())),
         },
         RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: "follow-up-turn".to_string(),
@@ -36,15 +30,9 @@ fn terminal_marker_is_ignored_after_a_later_turn_starts() {
 #[test]
 fn terminal_marker_is_ignored_after_a_rollback() {
     let rollout_items = vec![
-        RolloutItem::InterAgentCommunicationMetadata {
-            trigger_turn: false,
-            mail_fingerprint: None,
-            delivery_id: None,
-            terminal_turn_id: Some("rolled-back-turn".to_string()),
-            terminal_status: Some(AgentStatus::Completed(Some("stale".to_string()))),
-            mail_communication: None,
-            mail_start_options: None,
-            consumed_mail_id: None,
+        RolloutItem::TerminalAgentStatus {
+            turn_id: "rolled-back-turn".to_string(),
+            status: AgentStatus::Completed(Some("stale".to_string())),
         },
         RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
             codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
@@ -55,13 +43,15 @@ fn terminal_marker_is_ignored_after_a_rollback() {
 }
 
 #[test]
-fn parent_completion_delivery_id_bounds_untrusted_turn_id() {
+fn parent_completion_delivery_id_preserves_legacy_wire_identity() {
     let thread_id = ThreadId::from_u128(42);
-    let turn_id = "turn".repeat(50_000);
+    let turn_id = "turn-7";
 
-    let first = parent_completion_delivery_id(thread_id, &turn_id);
-    let second = parent_completion_delivery_id(thread_id, &turn_id);
-
-    assert_eq!(first, second);
-    assert!(first.as_str().len() < 80);
+    assert_eq!(
+        parent_completion_delivery_id(thread_id, turn_id),
+        codex_protocol::ResponseItemId::with_suffix(
+            "msg",
+            format!("completion-{thread_id}-{turn_id}"),
+        )
+    );
 }

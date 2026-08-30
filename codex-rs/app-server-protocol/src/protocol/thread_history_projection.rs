@@ -3,6 +3,7 @@
 //! This module is only for the new paginated rollout format that persists canonical
 //! `ItemCompleted(TurnItem)` records, not legacy event-only rollouts.
 
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
@@ -76,10 +77,32 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
             }],
             ..Default::default()
         },
+        RolloutItem::TerminalAgentStatus {
+            turn_id,
+            status: AgentStatus::Errored(message),
+        } => ThreadHistoryChangeSet {
+            changed_turns: vec![ThreadHistoryTurnChange {
+                turn_id: turn_id.clone(),
+                status: TurnStatus::Failed,
+                error: Some(TurnError {
+                    misalignment: None,
+                    message: message.clone(),
+                    codex_error_info: None,
+                    additional_details: None,
+                }),
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            }],
+            ..Default::default()
+        },
         RolloutItem::SessionMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
+        | RolloutItem::DurableInterAgentCommunication { .. }
+        | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)

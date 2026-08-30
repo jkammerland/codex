@@ -95,6 +95,7 @@ pub(crate) struct TurnState {
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(crate) pending_input: TurnInputQueue,
     mailbox_delivery_phase: MailboxDeliveryPhase,
+    mailbox_batch_reserved: bool,
     granted_permissions_by_environment_id: HashMap<String, AdditionalPermissionProfile>,
     strict_auto_review_enabled: bool,
     pub(crate) tool_calls: u64,
@@ -225,6 +226,14 @@ impl TurnState {
 
     pub(crate) fn set_mailbox_delivery_phase(&mut self, phase: MailboxDeliveryPhase) {
         self.mailbox_delivery_phase = phase;
+    }
+
+    pub(crate) fn reserve_mailbox_batch(&mut self) {
+        self.mailbox_batch_reserved = true;
+    }
+
+    pub(crate) fn mailbox_batch_is_reserved(&self) -> bool {
+        self.mailbox_batch_reserved
     }
 
     pub(crate) fn record_granted_permissions(

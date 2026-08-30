@@ -256,6 +256,9 @@ async fn persisted_originator(thread: &CodexThread) -> String {
             RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TerminalAgentStatus { .. }
+            | RolloutItem::DurableInterAgentCommunication { .. }
+            | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
             | RolloutItem::EventMsg(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
@@ -1025,6 +1028,106 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
 }
 
 #[tokio::test]
+async fn aborted_spawn_construction_rolls_back_admission_and_releases_capacity() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, parent) = harness.start_thread().await;
+    let child_source = || {
+        thread_spawn_source(
+            parent_thread_id,
+            &parent.session_source,
+            next_thread_spawn_depth(&parent.session_source),
+            /*agent_role*/ None,
+            Some("worker".to_string()),
+        )
+        .expect("child source")
+    };
+    let construction_started = Arc::new(tokio::sync::Notify::new());
+    let construction_release = Arc::new(tokio::sync::Notify::new());
+    let spawn = tokio::spawn({
+        let control = harness.control.clone();
+        let config = harness.config.clone();
+        let source = child_source();
+        let construction_started = Arc::clone(&construction_started);
+        let construction_release = Arc::clone(&construction_release);
+        async move {
+            control
+                .spawn_agent_with_metadata(
+                    config,
+                    text_input("child whose construction is aborted"),
+                    Some(source),
+                    SpawnAgentOptions {
+                        parent_thread_id: Some(parent_thread_id),
+                        construction_barrier: Some(
+                            crate::agent::control::InitialSubmissionBarrier {
+                                started: construction_started,
+                                release: construction_release,
+                            },
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }
+    });
+
+    construction_started.notified().await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    let pending_children = state_db
+        .list_pending_thread_spawn_children(parent_thread_id)
+        .await
+        .expect("pending child edges should load during construction");
+    assert!(
+        matches!(pending_children.as_slice(), [_]),
+        "construction should retain exactly one provisional child edge"
+    );
+    spawn.abort();
+    let _ = spawn.await;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if state_db
+                .list_pending_thread_spawn_children(parent_thread_id)
+                .await
+                .is_ok_and(|children| children.is_empty())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("construction drop guard should finish durable admission rollback");
+    assert_eq!(
+        harness.manager.list_thread_ids().await,
+        vec![parent_thread_id]
+    );
+
+    let spawned = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("retry after construction abort"),
+            Some(child_source()),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("construction rollback should release path and capacity");
+    assert_eq!(spawned.metadata.agent_path, child_source().get_agent_path());
+}
+
+#[tokio::test]
 async fn ephemeral_v2_blocked_prompt_is_not_published_without_graph_store() {
     let home = TempDir::new().expect("create temp dir");
     let hooks = serde_json::json!({
@@ -1573,7 +1676,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
     assert!(!submission_id.is_empty());
 
     assert!(thread.session.input_queue.has_pending_mailbox_items().await);
-    let (items, _) = thread.session.input_queue.drain_mailbox_input_items().await;
+    let (items, _) = thread.session.drain_mailbox_input_items().await;
     let crate::session::TurnInput::InterAgentCommunication(recorded_communication) = &items[0]
     else {
         panic!("expected inter-agent communication");
@@ -1628,6 +1731,45 @@ async fn public_acknowledged_mail_op_completes_after_durable_delivery() {
                 }]
         )
     }));
+}
+
+#[tokio::test]
+async fn oversized_durable_mail_is_rejected_before_persistence_or_acknowledgement() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "x".repeat(50_000),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(codex_protocol::ResponseItemId::with_suffix(
+        "msg",
+        "oversized",
+    ));
+
+    let error = harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            communication.clone(),
+            AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect_err("oversized durable mail must not be acknowledged");
+
+    assert!(error.to_string().contains("failed to persist"));
+    assert!(!thread.session.input_queue.has_pending_mailbox_items().await);
+    assert!(
+        !thread
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .any(|item| item.id() == communication.id.as_ref())
+    );
 }
 
 #[tokio::test]
@@ -1696,7 +1838,24 @@ async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
             .expect("same-ID retry should succeed");
     }
 
-    let (items, _) = thread.session.input_queue.drain_mailbox_input_items().await;
+    let turn_id = thread
+        .session
+        .input_queue
+        .pending_mailbox_turn_id()
+        .await
+        .expect("persisted mail should retain its intended turn");
+    thread_store.fail_next_flush_for_testing();
+    thread
+        .session
+        .claim_and_drain_mailbox_input_items(&turn_id)
+        .await
+        .expect_err("claim flush failure must not release durable mail to a turn");
+    assert!(thread.session.input_queue.has_pending_mailbox_items().await);
+    let (items, _) = thread
+        .session
+        .claim_and_drain_mailbox_input_items(&turn_id)
+        .await
+        .expect("retry should claim the original durable mail");
     assert_eq!(
         items,
         vec![crate::session::TurnInput::InterAgentCommunication(
@@ -1725,12 +1884,7 @@ async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
         .await
         .expect("same-ID retry after mailbox consumption should be acknowledged");
     assert_eq!(
-        thread
-            .session
-            .input_queue
-            .drain_mailbox_input_items()
-            .await
-            .0,
+        thread.session.drain_mailbox_input_items().await.0,
         Vec::new(),
         "a consumed durable mail must not be queued for a second model turn"
     );
@@ -1761,12 +1915,42 @@ async fn consumed_durable_mail_remains_idempotent_after_reload() {
         )
         .await
         .expect("mail should persist");
+    let turn_id = thread
+        .session
+        .input_queue
+        .pending_mailbox_turn_id()
+        .await
+        .expect("mail should reserve a turn");
     assert_eq!(
-        thread.session.drain_mailbox_input_items().await.0,
+        thread
+            .session
+            .claim_and_drain_mailbox_input_items(&turn_id)
+            .await
+            .expect("mail claim should persist")
+            .0,
         vec![crate::session::TurnInput::InterAgentCommunication(
             communication.clone()
         )]
     );
+    thread
+        .session
+        .live_thread()
+        .expect("thread should have a durable writer")
+        .append_items(&[RolloutItem::EventMsg(EventMsg::TurnStarted(
+            TurnStartedEvent {
+                turn_id,
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            },
+        ))])
+        .await
+        .expect("turn ownership should append");
+    thread
+        .flush_rollout()
+        .await
+        .expect("turn ownership should flush");
     harness.manager.remove_thread(&thread_id).await;
     drop(thread);
     harness
@@ -1825,6 +2009,12 @@ async fn pending_durable_mail_is_recovered_after_reload() {
         )
         .await
         .expect("mail should persist");
+    let intended_turn_id = thread
+        .session
+        .input_queue
+        .pending_mailbox_turn_id()
+        .await
+        .expect("durable mail should reserve a recovery turn");
     harness.manager.remove_thread(&thread_id).await;
     drop(thread);
     harness
@@ -1838,15 +2028,51 @@ async fn pending_durable_mail_is_recovered_after_reload() {
         .get_thread(thread_id)
         .await
         .expect("reloaded thread should exist");
-    assert_eq!(
-        reloaded.session.drain_mailbox_input_items().await,
-        (
-            vec![crate::session::TurnInput::InterAgentCommunication(
-                communication
-            )],
-            start_options,
-        )
-    );
+    let started_turn_id = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = reloaded.next_event().await.expect("event stream");
+            if let EventMsg::TurnStarted(event) = event.msg {
+                break event.turn_id;
+            }
+        }
+    })
+    .await
+    .expect("recovered trigger mail should schedule itself");
+    assert_eq!(started_turn_id, intended_turn_id);
+    reloaded.flush_rollout().await.expect("flush recovery turn");
+    let (rollout_items, _, parse_errors) = RolloutRecorder::load_rollout_items(
+        &reloaded
+            .rollout_path()
+            .expect("reloaded thread should have rollout path"),
+    )
+    .await
+    .expect("read recovered rollout");
+    assert_eq!(parse_errors, 0);
+    let claim_position = rollout_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
+                    turn_id,
+                    ..
+                } if communication_id == communication.id.as_ref().expect("communication id")
+                    && turn_id == &intended_turn_id
+            )
+        })
+        .expect("recovered mail claim should be durable");
+    let turn_position = rollout_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::TurnStarted(event))
+                    if event.turn_id == intended_turn_id
+            )
+        })
+        .expect("recovered turn start should be durable");
+    assert!(claim_position < turn_position);
 }
 
 #[tokio::test]
@@ -2507,17 +2733,9 @@ async fn reloaded_v2_child_replays_only_unacknowledged_terminal_outbox() {
         .expect("child should have a durable writer")
         .append_items(&[
             RolloutItem::EventMsg(terminal_event),
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: false,
-                mail_fingerprint: None,
-                delivery_id: None,
-                terminal_turn_id: Some(child_turn.sub_id.clone()),
-                terminal_status: Some(AgentStatus::Completed(Some(
-                    "persisted before crash".to_string(),
-                ))),
-                mail_communication: None,
-                mail_start_options: None,
-                consumed_mail_id: None,
+            RolloutItem::TerminalAgentStatus {
+                turn_id: child_turn.sub_id.clone(),
+                status: AgentStatus::Completed(Some("persisted before crash".to_string())),
             },
         ])
         .await
@@ -5319,7 +5537,14 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     let (worker_thread_id, worker_thread) = harness.start_thread().await;
     let mut tester_config = harness.config.clone();
     let _ = tester_config.features.enable(Feature::MultiAgentV2);
-    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
+    let worker_path = AgentPath::try_from(format!(
+        "/root/{}",
+        std::iter::repeat_n("worker", 12)
+            .collect::<Vec<_>>()
+            .join("/")
+    ))
+    .expect("long worker path");
+    assert!(worker_path.as_str().len() > 64);
     let tester_path = worker_path.join("tester").expect("tester path");
     let tester_thread_id = harness
         .control
@@ -5540,6 +5765,23 @@ async fn multi_agent_v2_completion_keeps_outbox_pending_after_parent_persistence
             }
         )
     }));
+    let terminal_markers = rollout_items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::TerminalAgentStatus { turn_id, status } => {
+                Some((turn_id.clone(), status.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_markers,
+        vec![(
+            child_turn.sub_id.clone(),
+            AgentStatus::Completed(Some("done".to_string()))
+        )],
+        "a failed delivery must not rewrite the immutable terminal outbox payload"
+    );
     let expected_message = crate::session_prefix::format_inter_agent_completion_message(
         parent_path.clone(),
         child_path.clone(),

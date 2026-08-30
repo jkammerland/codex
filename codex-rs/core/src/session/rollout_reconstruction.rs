@@ -284,7 +284,10 @@ impl Session {
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::SecurityRiskScore(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TerminalAgentStatus { .. }
+                | RolloutItem::DurableInterAgentCommunication { .. }
+                | RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {}
             }
 
             if base_replacement_history.is_some()
@@ -341,7 +344,10 @@ impl Session {
                         turn_context.model_info().truncation_policy.into(),
                     );
                 }
-                RolloutItem::InterAgentCommunicationMetadata { .. } => {}
+                RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TerminalAgentStatus { .. }
+                | RolloutItem::DurableInterAgentCommunication { .. }
+                | RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {}
                 RolloutItem::Compacted(compacted) => {
                     if let Some(replacement_history) = &compacted.replacement_history {
                         // This should actually never happen, because the reverse loop above (to build rollout_suffix)
@@ -412,6 +418,9 @@ impl Session {
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TerminalAgentStatus { .. }
+                | RolloutItem::DurableInterAgentCommunication { .. }
+                | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::SecurityRiskScore(_)

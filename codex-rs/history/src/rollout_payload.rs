@@ -36,6 +36,15 @@ pub(super) enum RolloutItemWire<'a> {
     InterAgentCommunicationMetadata {
         payload: InterAgentCommunicationMetadataPayload,
     },
+    TerminalAgentStatus {
+        payload: TerminalAgentStatusPayload,
+    },
+    DurableInterAgentCommunication {
+        payload: DurableInterAgentCommunicationPayload,
+    },
+    DurableInterAgentCommunicationClaimed {
+        payload: DurableInterAgentCommunicationClaimedPayload,
+    },
     Compacted {
         payload: Cow<'a, CompactedItem>,
     },
@@ -73,21 +82,41 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
                 trigger_turn,
                 mail_fingerprint,
                 delivery_id,
-                terminal_turn_id,
-                terminal_status,
-                mail_communication,
-                mail_start_options,
-                consumed_mail_id,
             } => Self::InterAgentCommunicationMetadata {
                 payload: InterAgentCommunicationMetadataPayload {
                     trigger_turn: *trigger_turn,
                     mail_fingerprint: mail_fingerprint.clone(),
                     delivery_id: delivery_id.clone(),
-                    terminal_turn_id: terminal_turn_id.clone(),
-                    terminal_status: terminal_status.clone(),
-                    mail_communication: mail_communication.clone(),
-                    mail_start_options: mail_start_options.clone(),
-                    consumed_mail_id: consumed_mail_id.clone(),
+                },
+            },
+            RolloutItem::TerminalAgentStatus { turn_id, status } => Self::TerminalAgentStatus {
+                payload: TerminalAgentStatusPayload {
+                    turn_id: turn_id.clone(),
+                    status: status.clone(),
+                },
+            },
+            RolloutItem::DurableInterAgentCommunication {
+                communication,
+                start_options,
+                fingerprint,
+                turn_id,
+            } => Self::DurableInterAgentCommunication {
+                payload: DurableInterAgentCommunicationPayload {
+                    communication: communication.clone(),
+                    start_options: start_options.clone(),
+                    fingerprint: fingerprint.clone(),
+                    turn_id: turn_id.clone(),
+                },
+            },
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
+                fingerprint,
+                turn_id,
+            } => Self::DurableInterAgentCommunicationClaimed {
+                payload: DurableInterAgentCommunicationClaimedPayload {
+                    communication_id: communication_id.clone(),
+                    fingerprint: fingerprint.clone(),
+                    turn_id: turn_id.clone(),
                 },
             },
             RolloutItem::Compacted(payload) => Self::Compacted {
@@ -130,11 +159,25 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
                     trigger_turn: payload.trigger_turn,
                     mail_fingerprint: payload.mail_fingerprint,
                     delivery_id: payload.delivery_id,
-                    terminal_turn_id: payload.terminal_turn_id,
-                    terminal_status: payload.terminal_status,
-                    mail_communication: payload.mail_communication,
-                    mail_start_options: payload.mail_start_options,
-                    consumed_mail_id: payload.consumed_mail_id,
+                }
+            }
+            RolloutItemWire::TerminalAgentStatus { payload } => Self::TerminalAgentStatus {
+                turn_id: payload.turn_id,
+                status: payload.status,
+            },
+            RolloutItemWire::DurableInterAgentCommunication { payload } => {
+                Self::DurableInterAgentCommunication {
+                    communication: payload.communication,
+                    start_options: payload.start_options,
+                    fingerprint: payload.fingerprint,
+                    turn_id: payload.turn_id,
+                }
+            }
+            RolloutItemWire::DurableInterAgentCommunicationClaimed { payload } => {
+                Self::DurableInterAgentCommunicationClaimed {
+                    communication_id: payload.communication_id,
+                    fingerprint: payload.fingerprint,
+                    turn_id: payload.turn_id,
                 }
             }
             RolloutItemWire::Compacted { payload } => Self::Compacted(payload.into_owned()),
@@ -156,16 +199,27 @@ pub(super) struct InterAgentCommunicationMetadataPayload {
     mail_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     delivery_id: Option<codex_protocol::ResponseItemId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    terminal_turn_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    terminal_status: Option<AgentStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    mail_communication: Option<InterAgentCommunication>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    mail_start_options: Option<codex_protocol::turn_input::TurnStartOptions>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    consumed_mail_id: Option<codex_protocol::ResponseItemId>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub(super) struct TerminalAgentStatusPayload {
+    turn_id: String,
+    status: AgentStatus,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub(super) struct DurableInterAgentCommunicationPayload {
+    communication: InterAgentCommunication,
+    start_options: codex_protocol::turn_input::TurnStartOptions,
+    fingerprint: String,
+    turn_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub(super) struct DurableInterAgentCommunicationClaimedPayload {
+    communication_id: codex_protocol::ResponseItemId,
+    fingerprint: String,
+    turn_id: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

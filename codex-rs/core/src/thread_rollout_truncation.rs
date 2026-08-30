@@ -89,7 +89,10 @@ fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
                     && idx.checked_sub(1).is_some_and(|previous_idx| {
                         matches!(
                             items.get(previous_idx),
-                            Some(RolloutItem::InterAgentCommunicationMetadata { .. })
+                            Some(
+                                RolloutItem::InterAgentCommunicationMetadata { .. }
+                                    | RolloutItem::DurableInterAgentCommunication { .. }
+                            )
                         )
                     });
                 if is_user_turn_boundary(item) && !has_delivery_metadata {
@@ -108,12 +111,9 @@ fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
             RolloutItem::InterAgentCommunicationMetadata {
                 trigger_turn,
                 delivery_id,
-                terminal_turn_id,
-                consumed_mail_id,
                 ..
             } => {
-                if delivery_id.is_some() || terminal_turn_id.is_some() || consumed_mail_id.is_some()
-                {
+                if delivery_id.is_some() {
                     continue;
                 }
                 rollback_turn_positions.push(idx);
@@ -121,6 +121,14 @@ fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
                     fork_turn_positions.push(idx);
                 }
             }
+            RolloutItem::DurableInterAgentCommunication { communication, .. } => {
+                rollback_turn_positions.push(idx);
+                if communication.trigger_turn {
+                    fork_turn_positions.push(idx);
+                }
+            }
+            RolloutItem::TerminalAgentStatus { .. }
+            | RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {}
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
                 let num_turns = usize::try_from(rollback.num_turns).unwrap_or(usize::MAX);
                 if num_turns == 0 {

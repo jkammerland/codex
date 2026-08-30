@@ -336,8 +336,43 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
             "type": "inter_agent_communication_metadata",
             "payload": {
                 "trigger_turn": true,
-                "terminal_turn_id": "turn-1",
-                "terminal_status": { "completed": "done" },
+            },
+        }),
+        json!({
+            "type": "terminal_agent_status",
+            "payload": {
+                "turn_id": "turn-1",
+                "status": { "completed": "done" },
+            },
+        }),
+        json!({
+            "type": "durable_inter_agent_communication",
+            "payload": {
+                "communication": {
+                    "author": "/root",
+                    "recipient": "/root/child",
+                    "other_recipients": [],
+                    "content": "durable",
+                    "trigger_turn": true,
+                },
+                "start_options": {
+                    "turn_trigger": null,
+                    "final_output_json_schema": null,
+                    "service_tier": null,
+                    "parent_turn_id": null,
+                    "root_turn_id": null,
+                    "cyber_access_program": null,
+                },
+                "fingerprint": "sha256:mail",
+                "turn_id": "turn-2",
+            },
+        }),
+        json!({
+            "type": "durable_inter_agent_communication_claimed",
+            "payload": {
+                "communication_id": "msg_1",
+                "fingerprint": "sha256:mail",
+                "turn_id": "turn-2",
             },
         }),
         json!({
@@ -395,7 +430,7 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
 fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
     let variants = schema["oneOf"].as_array().expect("rollout variants");
-    assert_eq!(variants.len(), 10);
+    assert_eq!(variants.len(), 13);
 
     for variant in variants {
         let required = variant["required"].as_array().expect("required fields");

@@ -331,11 +331,18 @@ ON CONFLICT(thread_id, turn_id) DO UPDATE SET
     rollout_end_byte_offset = excluded.rollout_end_byte_offset,
     status = excluded.status,
     error_json = excluded.error_json,
-    started_at = excluded.started_at,
-    completed_at = excluded.completed_at,
-    duration_ms = excluded.duration_ms
-WHERE thread_turns.rollout_end_ordinal IS NULL
-  AND thread_turns.status = 'inProgress'
+    started_at = COALESCE(excluded.started_at, thread_turns.started_at),
+    completed_at = COALESCE(excluded.completed_at, thread_turns.completed_at),
+    duration_ms = COALESCE(excluded.duration_ms, thread_turns.duration_ms)
+WHERE (
+    thread_turns.rollout_end_ordinal IS NULL
+    AND thread_turns.status = 'inProgress'
+)
+OR (
+    excluded.status = 'failed'
+    AND excluded.error_json IS NOT NULL
+    AND thread_turns.status IN ('completed', 'interrupted')
+)
             "#,
         )
         .bind(thread_id)

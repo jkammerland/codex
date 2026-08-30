@@ -14,6 +14,7 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -1957,6 +1958,56 @@ async fn synchronized_catch_up_does_not_replay_old_rows() {
             .await
             .expect("read projected turn");
     assert_eq!(status, "sentinel");
+}
+
+#[tokio::test]
+async fn terminal_agent_error_corrects_a_completed_paginated_turn() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                turn_completed("turn-1"),
+                RolloutItem::TerminalAgentStatus {
+                    turn_id: "turn-1".to_string(),
+                    status: AgentStatus::Errored("parent delivery failed".to_string()),
+                },
+            ],
+        })
+        .await
+        .expect("append corrected terminal status");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let row = sqlx::query_as::<_, (String, String, Option<i64>, Option<i64>)>(
+        "SELECT status, error_json, started_at, completed_at FROM thread_turns WHERE thread_id = ? AND turn_id = 'turn-1'",
+    )
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read corrected turn");
+    assert_eq!(
+        row,
+        (
+            "failed".to_string(),
+            serde_json::to_string(&codex_app_server_protocol::TurnError {
+                misalignment: None,
+                message: "parent delivery failed".to_string(),
+                codex_error_info: None,
+                additional_details: None,
+            })
+            .expect("serialize error"),
+            Some(10),
+            Some(20),
+        )
+    );
 }
 
 #[tokio::test]

@@ -13,3 +13,21 @@ async fn unpublished_spawn_shutdown_is_bounded() {
 
     assert_eq!(shutdown.await, Ok(UnpublishedSpawnShutdown::TimedOut));
 }
+
+#[tokio::test]
+async fn unpublished_spawn_shutdown_reports_failure_for_janitor_retry() {
+    let result = await_unpublished_spawn_shutdown(async {
+        Err(super::CodexErr::Fatal(
+            "injected shutdown failure".to_string(),
+        ))
+    })
+    .await;
+
+    assert_eq!(
+        result,
+        Err(
+            "failed to shut down unpublished spawned agent: Fatal error: injected shutdown failure"
+                .to_string()
+        )
+    );
+}

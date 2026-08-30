@@ -265,6 +265,11 @@ where
     }
 }
 
+enum MailboxBatchAtTaskStart {
+    ClaimPending,
+    AlreadyReserved,
+}
+
 impl Session {
     pub async fn spawn_task<T: SessionTask>(
         self: &Arc<Self>,
@@ -282,6 +287,22 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
+    ) {
+        self.start_task_inner(
+            turn_context,
+            input,
+            task,
+            MailboxBatchAtTaskStart::ClaimPending,
+        )
+        .await;
+    }
+
+    async fn start_task_inner<T: SessionTask>(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        input: Vec<TurnInput>,
+        task: T,
+        mailbox_batch: MailboxBatchAtTaskStart,
     ) {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
@@ -306,7 +327,16 @@ impl Session {
             .clear_turn(&turn_context.sub_id);
 
         // Reserved turn input already has its context; only newly arriving mail can change lineage.
-        let (pending_items, start_options) = self.drain_mailbox_input_items().await;
+        let (pending_items, start_options) = match mailbox_batch {
+            MailboxBatchAtTaskStart::ClaimPending => self
+                .claim_and_drain_mailbox_input_items(&turn_context.sub_id)
+                .await
+                .unwrap_or_else(|error| {
+                    warn!(%error, "failed to claim durable mailbox input at turn start");
+                    (Vec::new(), Default::default())
+                }),
+            MailboxBatchAtTaskStart::AlreadyReserved => (Vec::new(), Default::default()),
+        };
         if pending_items.iter().any(|item| {
             matches!(
                 item,
@@ -430,8 +460,13 @@ impl Session {
     pub(crate) fn maybe_start_turn_for_pending_work(self: &Arc<Self>) -> BoxFuture<'static, ()> {
         let session = Arc::clone(self);
         Box::pin(async move {
+            let sub_id = session
+                .input_queue
+                .pending_mailbox_turn_id()
+                .await
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             session
-                .maybe_start_turn_for_pending_work_with_sub_id(uuid::Uuid::new_v4().to_string())
+                .maybe_start_turn_for_pending_work_with_sub_id(sub_id)
                 .await;
         })
     }
@@ -461,7 +496,25 @@ impl Session {
             Arc::clone(&active_turn.turn_state)
         };
 
-        let (input, mut start_options) = self.get_pending_input().await;
+        let (mailbox_items, start_options) =
+            match self.claim_and_drain_mailbox_input_items(&sub_id).await {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    warn!(%error, "failed to claim durable mailbox input for pending turn");
+                    let mut active_turn = self.active_turn.lock().await;
+                    if active_turn.as_ref().is_some_and(|active_turn| {
+                        active_turn.task.is_none()
+                            && Arc::ptr_eq(&active_turn.turn_state, &turn_state)
+                    }) {
+                        *active_turn = None;
+                    }
+                    return;
+                }
+            };
+        let (input, mut start_options) = self
+            .input_queue
+            .get_pending_input_with_mailbox(&self.active_turn, mailbox_items, start_options)
+            .await;
         if !input.iter().any(
             |item| matches!(item, TurnInput::InterAgentCommunication(mail) if mail.trigger_turn),
         ) {
@@ -504,8 +557,13 @@ impl Session {
         self.input_queue
             .extend_pending_input_for_turn_state(turn_state.as_ref(), input)
             .await;
-        self.start_task(turn_context, Vec::new(), RegularTask::new())
-            .await;
+        self.start_task_inner(
+            turn_context,
+            Vec::new(),
+            RegularTask::new(),
+            MailboxBatchAtTaskStart::AlreadyReserved,
+        )
+        .await;
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {

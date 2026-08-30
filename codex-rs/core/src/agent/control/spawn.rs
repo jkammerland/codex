@@ -1,3 +1,4 @@
+use super::residency::V2ResidencySlot;
 use super::residency::is_v2_resident_session_source;
 use super::*;
 use crate::agent::role::apply_role_to_config;
@@ -52,23 +53,65 @@ struct ProvisionalSpawnEdge {
 
 struct UnpublishedSpawnDropGuard {
     state: Arc<ThreadManagerState>,
-    thread: Arc<CodexThread>,
+    thread: Option<Arc<CodexThread>>,
+    reserved_thread_id: Option<ThreadId>,
     provisional_edge: Option<ProvisionalSpawnEdge>,
+    reservation: Option<crate::agent::registry::SpawnReservation>,
+    residency_slot: Option<V2ResidencySlot>,
     armed: bool,
 }
 
 impl UnpublishedSpawnDropGuard {
     fn new(
         state: Arc<ThreadManagerState>,
-        thread: Arc<CodexThread>,
+        reserved_thread_id: Option<ThreadId>,
         provisional_edge: Option<ProvisionalSpawnEdge>,
+        reservation: crate::agent::registry::SpawnReservation,
+        residency_slot: Option<V2ResidencySlot>,
     ) -> Self {
         Self {
             state,
-            thread,
+            thread: None,
+            reserved_thread_id,
             provisional_edge,
+            reservation: Some(reservation),
+            residency_slot,
             armed: true,
         }
+    }
+
+    fn set_thread(&mut self, thread: Arc<CodexThread>) {
+        self.reserved_thread_id = Some(thread.session.thread_id);
+        self.thread = Some(thread);
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "an armed unpublished spawn owns its reservation until commit"
+    )]
+    fn reservation_mut(&mut self) -> &mut crate::agent::registry::SpawnReservation {
+        self.reservation
+            .as_mut()
+            .expect("spawn reservation must remain owned before publication")
+    }
+
+    fn residency_slot_mut(&mut self) -> &mut Option<V2ResidencySlot> {
+        &mut self.residency_slot
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "an armed unpublished spawn owns its reservation until commit"
+    )]
+    fn commit(&mut self, agent_metadata: AgentMetadata, thread_id: ThreadId) {
+        self.reservation
+            .take()
+            .expect("spawn reservation must remain owned before publication")
+            .commit(agent_metadata);
+        if let Some(residency_slot) = self.residency_slot.take() {
+            residency_slot.commit(thread_id);
+        }
+        self.armed = false;
     }
 
     fn disarm(&mut self) {
@@ -82,25 +125,83 @@ impl Drop for UnpublishedSpawnDropGuard {
             return;
         }
         let state = Arc::clone(&self.state);
-        let thread = Arc::clone(&self.thread);
-        let provisional_edge = self.provisional_edge.clone();
+        let thread = self.thread.take();
+        let thread_id = self
+            .reserved_thread_id
+            .or_else(|| thread.as_ref().map(|thread| thread.session.thread_id));
+        let provisional_edge = self.provisional_edge.take();
+        let registry_slot = self
+            .reservation
+            .as_mut()
+            .map(crate::agent::registry::SpawnReservation::defer_release);
+        let residency_slot = self.residency_slot.take();
         tokio::spawn(async move {
-            let _ = await_unpublished_spawn_shutdown(thread.shutdown_and_wait()).await;
-            loop {
-                match cleanup_unpublished_spawn_state(&state, &thread, provisional_edge.as_ref())
+            let thread = match thread {
+                Some(thread) => Some(thread),
+                None => match thread_id {
+                    Some(thread_id) => state.get_thread(thread_id).await.ok(),
+                    None => None,
+                },
+            };
+            if let Some(thread) = thread {
+                loop {
+                    match tokio::time::timeout(
+                        SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT,
+                        thread.shutdown_and_wait(),
+                    )
                     .await
-                {
-                    Ok(()) => break,
-                    Err(error) => {
-                        warn!(
+                    {
+                        Ok(Ok(())) => break,
+                        shutdown => warn!(
                             thread_id = %thread.session.thread_id,
-                            %error,
-                            "unpublished spawn drop cleanup remains pending"
-                        );
-                        tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
+                            ?shutdown,
+                            "unpublished spawn drop cleanup is retrying bounded session shutdown"
+                        ),
+                    }
+                    tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
+                }
+                loop {
+                    match cleanup_unpublished_spawn_state(
+                        &state,
+                        &thread,
+                        provisional_edge.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(()) => break,
+                        Err(error) => {
+                            warn!(
+                                thread_id = %thread.session.thread_id,
+                                %error,
+                                "unpublished spawn drop cleanup remains pending"
+                            );
+                            tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
+                        }
+                    }
+                }
+            } else if let Some(thread_id) = thread_id {
+                loop {
+                    match cleanup_unpublished_spawn_state_without_thread(
+                        &state,
+                        thread_id,
+                        provisional_edge.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(()) => break,
+                        Err(error) => {
+                            warn!(
+                                %thread_id,
+                                %error,
+                                "unpublished spawn construction cleanup remains pending"
+                            );
+                            tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
+                        }
                     }
                 }
             }
+            drop(residency_slot);
+            drop(registry_slot);
         });
     }
 }
@@ -196,6 +297,9 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         RolloutItem::RealtimeItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
+        | RolloutItem::DurableInterAgentCommunication { .. }
+        | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
         | RolloutItem::SecurityRiskScore(_) => false,
         // Full-history forks preserve the cached prompt prefix and can keep diffing
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
@@ -777,6 +881,11 @@ impl AgentControl {
                     );
                 }
                 state.notify_thread_created(reloaded_thread.thread_id);
+                reloaded_thread
+                    .thread
+                    .session
+                    .maybe_start_turn_for_pending_work()
+                    .await;
                 Ok(())
             }
             Err(err) => {
@@ -787,6 +896,7 @@ impl AgentControl {
                     self.state.clear_evicted_environments(thread_id);
                     drop(residency_slot);
                     self.touch_loaded_v2_residency(&state, thread_id).await;
+                    thread.session.maybe_start_turn_for_pending_work().await;
                     return Ok(());
                 }
                 Err(err)
@@ -806,6 +916,8 @@ impl AgentControl {
         }
         let state = self.upgrade()?;
         let spawn_cancellation = options.cancellation_token.clone();
+        #[cfg(test)]
+        let construction_barrier = options.construction_barrier.clone();
         #[cfg(test)]
         let initial_submission_barrier = options.initial_submission_barrier.clone();
         #[cfg(test)]
@@ -906,11 +1018,28 @@ impl AgentControl {
         } else {
             None
         };
-        let reserved_thread_id = provisional_edge.as_ref().map(|edge| edge.child_thread_id);
+        let reserved_thread_id = notification_source.as_ref().map(|_| {
+            provisional_edge
+                .as_ref()
+                .map(|edge| edge.child_thread_id)
+                .unwrap_or_else(|| self.generate_thread_id())
+        });
         let requires_spawn_admission_barrier = matches!(
             &notification_source,
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
         );
+        let mut unpublished_spawn_guard = UnpublishedSpawnDropGuard::new(
+            Arc::clone(&state),
+            reserved_thread_id,
+            provisional_edge.clone(),
+            reservation,
+            residency_slot,
+        );
+        #[cfg(test)]
+        if let Some(barrier) = construction_barrier {
+            barrier.started.notify_one();
+            barrier.release.notified().await;
+        }
 
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread_result = match (session_source, options.fork_mode.as_ref(), inheritance) {
@@ -959,24 +1088,37 @@ impl AgentControl {
         let new_thread = match new_thread_result {
             Ok(new_thread) => new_thread,
             Err(error) => {
-                if let Some(provisional_edge) = provisional_edge.as_ref()
-                    && let Err(cleanup_error) = provisional_edge.rollback().await
-                {
+                let cleanup_result = match reserved_thread_id {
+                    Some(thread_id) => {
+                        cleanup_unpublished_spawn_state_without_thread(
+                            &state,
+                            thread_id,
+                            provisional_edge.as_ref(),
+                        )
+                        .await
+                    }
+                    None => match provisional_edge.as_ref() {
+                        Some(provisional_edge) => provisional_edge
+                            .rollback()
+                            .await
+                            .map_err(|error| error.to_string()),
+                        None => Ok(()),
+                    },
+                };
+                if let Err(cleanup_error) = cleanup_result {
                     return Err(CodexErr::Fatal(format!(
                         "agent construction failed: {error}; admission rollback failed: {cleanup_error}"
                     )));
                 }
+                unpublished_spawn_guard.disarm();
                 return Err(error);
             }
         };
-        let mut unpublished_spawn_guard = UnpublishedSpawnDropGuard::new(
-            Arc::clone(&state),
-            Arc::clone(&new_thread.thread),
-            provisional_edge.clone(),
-        );
-        debug_assert_eq!(
-            reserved_thread_id,
-            provisional_edge.as_ref().map(|edge| edge.child_thread_id)
+        unpublished_spawn_guard.set_thread(Arc::clone(&new_thread.thread));
+        debug_assert!(
+            provisional_edge
+                .as_ref()
+                .is_none_or(|edge| reserved_thread_id == Some(edge.child_thread_id))
         );
         agent_metadata.agent_id = Some(new_thread.thread_id);
         #[cfg(test)]
@@ -984,16 +1126,16 @@ impl AgentControl {
             let _ = state.remove_thread(&new_thread.thread_id).await;
         }
         if spawn_cancellation.is_cancelled() {
-            unpublished_spawn_guard.disarm();
-            if let Err(cleanup_error) = self
+            let cleanup_result = self
                 .discard_unpublished_spawn(
                     &state,
-                    &mut reservation,
+                    &mut unpublished_spawn_guard,
                     &new_thread.thread,
                     provisional_edge.as_ref(),
                 )
-                .await
-            {
+                .await;
+            unpublished_spawn_guard.disarm();
+            if let Err(cleanup_error) = cleanup_result {
                 return Err(CodexErr::Fatal(format!(
                     "agent spawn cancellation rollback failed: {cleanup_error}"
                 )));
@@ -1050,16 +1192,16 @@ impl AgentControl {
             result = &mut initial_submission => result,
             _ = spawn_cancellation.cancelled() => {
                 drop(admission_barrier.take());
-                unpublished_spawn_guard.disarm();
-                if let Err(cleanup_error) = self
+                let cleanup_result = self
                     .discard_unpublished_spawn(
                         &state,
-                        &mut reservation,
+                        &mut unpublished_spawn_guard,
                         &new_thread.thread,
                         provisional_edge.as_ref(),
                     )
-                    .await
-                {
+                    .await;
+                unpublished_spawn_guard.disarm();
+                if let Err(cleanup_error) = cleanup_result {
                     return Err(CodexErr::Fatal(format!(
                         "agent spawn cancellation rollback remains pending: {cleanup_error}"
                     )));
@@ -1069,16 +1211,16 @@ impl AgentControl {
         };
         if let Err(error) = submission_result {
             drop(admission_barrier.take());
-            unpublished_spawn_guard.disarm();
-            if let Err(cleanup_error) = self
+            let cleanup_result = self
                 .discard_unpublished_spawn(
                     &state,
-                    &mut reservation,
+                    &mut unpublished_spawn_guard,
                     &new_thread.thread,
                     provisional_edge.as_ref(),
                 )
-                .await
-            {
+                .await;
+            unpublished_spawn_guard.disarm();
+            if let Err(cleanup_error) = cleanup_result {
                 return Err(CodexErr::Fatal(format!(
                     "initial agent submission failed: {error}; rollback remains pending: {cleanup_error}"
                 )));
@@ -1097,16 +1239,16 @@ impl AgentControl {
             };
             let Some(persistence) = persistence else {
                 drop(admission_barrier.take());
-                unpublished_spawn_guard.disarm();
-                if let Err(cleanup_error) = self
+                let cleanup_result = self
                     .discard_unpublished_spawn(
                         &state,
-                        &mut reservation,
+                        &mut unpublished_spawn_guard,
                         &new_thread.thread,
                         provisional_edge.as_ref(),
                     )
-                    .await
-                {
+                    .await;
+                unpublished_spawn_guard.disarm();
+                if let Err(cleanup_error) = cleanup_result {
                     return Err(CodexErr::Fatal(format!(
                         "agent spawn cancellation rollback remains pending: {cleanup_error}"
                     )));
@@ -1117,16 +1259,16 @@ impl AgentControl {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     drop(admission_barrier.take());
-                    unpublished_spawn_guard.disarm();
-                    if let Err(cleanup_error) = self
+                    let cleanup_result = self
                         .discard_unpublished_spawn(
                             &state,
-                            &mut reservation,
+                            &mut unpublished_spawn_guard,
                             &new_thread.thread,
                             provisional_edge.as_ref(),
                         )
-                        .await
-                    {
+                        .await;
+                    unpublished_spawn_guard.disarm();
+                    if let Err(cleanup_error) = cleanup_result {
                         return Err(CodexErr::Fatal(format!(
                             "initial agent task persistence failed: {error}; rollback remains pending: {cleanup_error}"
                         )));
@@ -1137,16 +1279,16 @@ impl AgentControl {
                 }
                 Err(_) => {
                     drop(admission_barrier.take());
-                    unpublished_spawn_guard.disarm();
-                    if let Err(cleanup_error) = self
+                    let cleanup_result = self
                         .discard_unpublished_spawn(
                             &state,
-                            &mut reservation,
+                            &mut unpublished_spawn_guard,
                             &new_thread.thread,
                             provisional_edge.as_ref(),
                         )
-                        .await
-                    {
+                        .await;
+                    unpublished_spawn_guard.disarm();
+                    if let Err(cleanup_error) = cleanup_result {
                         return Err(CodexErr::Fatal(format!(
                             "spawned agent ended before persisting its initial task; rollback remains pending: {cleanup_error}"
                         )));
@@ -1162,16 +1304,16 @@ impl AgentControl {
         }
         if spawn_cancellation.is_cancelled() {
             drop(admission_barrier.take());
-            unpublished_spawn_guard.disarm();
-            if let Err(cleanup_error) = self
+            let cleanup_result = self
                 .discard_unpublished_spawn(
                     &state,
-                    &mut reservation,
+                    &mut unpublished_spawn_guard,
                     &new_thread.thread,
                     provisional_edge.as_ref(),
                 )
-                .await
-            {
+                .await;
+            unpublished_spawn_guard.disarm();
+            if let Err(cleanup_error) = cleanup_result {
                 return Err(CodexErr::Fatal(format!(
                     "agent spawn cancellation rollback remains pending: {cleanup_error}"
                 )));
@@ -1182,16 +1324,16 @@ impl AgentControl {
             && let Err(err) = provisional_edge.mark_open().await
         {
             drop(admission_barrier.take());
-            unpublished_spawn_guard.disarm();
-            if let Err(cleanup_error) = self
+            let cleanup_result = self
                 .discard_unpublished_spawn(
                     &state,
-                    &mut reservation,
+                    &mut unpublished_spawn_guard,
                     &new_thread.thread,
                     Some(provisional_edge),
                 )
-                .await
-            {
+                .await;
+            unpublished_spawn_guard.disarm();
+            if let Err(cleanup_error) = cleanup_result {
                 return Err(CodexErr::Fatal(format!(
                     "failed to commit accepted agent spawn edge: {err}; rollback remains pending: {cleanup_error}"
                 )));
@@ -1201,11 +1343,7 @@ impl AgentControl {
             )));
         }
 
-        unpublished_spawn_guard.disarm();
-        reservation.commit(agent_metadata.clone());
-        if let Some(residency_slot) = residency_slot {
-            residency_slot.commit(new_thread.thread_id);
-        }
+        unpublished_spawn_guard.commit(agent_metadata.clone(), new_thread.thread_id);
         // Attach app-server listeners before the child can leave its admission
         // barrier. A fast child must not finish and become eligible for eviction
         // before clients learn that it exists.
@@ -1271,19 +1409,32 @@ impl AgentControl {
     async fn discard_unpublished_spawn(
         &self,
         state: &Arc<ThreadManagerState>,
-        reservation: &mut crate::agent::registry::SpawnReservation,
+        guard: &mut UnpublishedSpawnDropGuard,
         thread: &Arc<CodexThread>,
         provisional_edge: Option<&ProvisionalSpawnEdge>,
     ) -> Result<(), String> {
         let thread_id = thread.session.thread_id;
-        match await_unpublished_spawn_shutdown(thread.shutdown_and_wait()).await? {
-            UnpublishedSpawnShutdown::Complete => {
+        match await_unpublished_spawn_shutdown(thread.shutdown_and_wait()).await {
+            Err(error) => {
+                self.defer_unpublished_spawn_cleanup(
+                    state,
+                    guard,
+                    thread,
+                    provisional_edge,
+                    UnpublishedSpawnShutdown::TimedOut,
+                )
+                .await;
+                Err(format!(
+                    "{error}; cleanup continues in the background for unpublished spawned agent {thread_id}"
+                ))
+            }
+            Ok(UnpublishedSpawnShutdown::Complete) => {
                 match cleanup_unpublished_spawn_state(state, thread, provisional_edge).await {
                     Ok(()) => Ok(()),
                     Err(error) => {
                         self.defer_unpublished_spawn_cleanup(
                             state,
-                            reservation,
+                            guard,
                             thread,
                             provisional_edge,
                             UnpublishedSpawnShutdown::Complete,
@@ -1295,10 +1446,10 @@ impl AgentControl {
                     }
                 }
             }
-            UnpublishedSpawnShutdown::TimedOut => {
+            Ok(UnpublishedSpawnShutdown::TimedOut) => {
                 self.defer_unpublished_spawn_cleanup(
                     state,
-                    reservation,
+                    guard,
                     thread,
                     provisional_edge,
                     UnpublishedSpawnShutdown::TimedOut,
@@ -1315,14 +1466,14 @@ impl AgentControl {
     async fn defer_unpublished_spawn_cleanup(
         &self,
         state: &Arc<ThreadManagerState>,
-        reservation: &mut crate::agent::registry::SpawnReservation,
+        guard: &mut UnpublishedSpawnDropGuard,
         thread: &Arc<CodexThread>,
         provisional_edge: Option<&ProvisionalSpawnEdge>,
         shutdown_state: UnpublishedSpawnShutdown,
     ) {
         let thread_id = thread.session.thread_id;
-        let registry_slot = reservation.defer_release();
-        let residency_slot = self.retain_unpublished_v2_residency_slot(thread.as_ref());
+        let registry_slot = guard.reservation_mut().defer_release();
+        let residency_slot = guard.residency_slot_mut().take();
         let state = Arc::clone(state);
         let thread = Arc::clone(thread);
         let provisional_edge = provisional_edge.cloned();
@@ -1596,6 +1747,9 @@ impl AgentControl {
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
+                RolloutItem::TerminalAgentStatus { .. }
+                | RolloutItem::DurableInterAgentCommunication { .. }
+                | RolloutItem::DurableInterAgentCommunicationClaimed { .. } => false,
                 RolloutItem::SecurityRiskScore(_) => false,
             }
         });
@@ -1838,6 +1992,11 @@ impl AgentControl {
             Some(&notification_source),
         )
         .await;
+        resumed_thread
+            .thread
+            .session
+            .maybe_start_turn_for_pending_work()
+            .await;
 
         Ok((resumed_thread.thread_id, multi_agent_version))
     }
@@ -1850,6 +2009,23 @@ async fn cleanup_unpublished_spawn_state(
 ) -> Result<(), String> {
     let thread_id = thread.session.thread_id;
     let _ = state.remove_thread_if_matches(&thread_id, thread).await;
+    cleanup_unpublished_spawn_state_without_thread(state, thread_id, provisional_edge).await?;
+    if provisional_edge.is_none()
+        && let Some(state_db) = thread.state_db()
+        && let Err(err) = state_db.delete_thread(thread_id).await
+    {
+        return Err(format!(
+            "failed to delete unpublished spawned agent metadata: {err}"
+        ));
+    }
+    Ok(())
+}
+
+async fn cleanup_unpublished_spawn_state_without_thread(
+    state: &Arc<ThreadManagerState>,
+    thread_id: ThreadId,
+    provisional_edge: Option<&ProvisionalSpawnEdge>,
+) -> Result<(), String> {
     match state.delete_stored_thread(thread_id).await {
         Ok(()) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {}
         Err(err) => {
@@ -1868,12 +2044,6 @@ async fn cleanup_unpublished_spawn_state(
             .delete_unpublished_thread_state(thread_id)
             .await
             .map_err(|err| format!("failed to delete unpublished spawned agent metadata: {err}"))?;
-    } else if let Some(state_db) = thread.state_db()
-        && let Err(err) = state_db.delete_thread(thread_id).await
-    {
-        return Err(format!(
-            "failed to delete unpublished spawned agent metadata: {err}"
-        ));
     }
     Ok(())
 }

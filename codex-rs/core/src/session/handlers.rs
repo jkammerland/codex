@@ -11,6 +11,8 @@ use tracing::debug_span;
 use tracing::info_span;
 
 use crate::session::DurableMailMetadata;
+use crate::session::input_queue::MAX_MAILBOX_MODEL_TOKENS_PER_TURN;
+use crate::session::input_queue::mailbox_model_token_estimate;
 use crate::session::session::Session;
 use crate::session::thread_settings;
 use crate::session::turn_input;
@@ -111,8 +113,7 @@ async fn inter_agent_communication_with_ack(
     };
     let _ = reply.send(());
     if trigger_turn || sess.has_outstanding_durable_sleep() {
-        sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
-            .await;
+        sess.maybe_start_turn_for_pending_work().await;
     }
 }
 
@@ -129,6 +130,15 @@ impl Session {
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| codex_protocol::ResponseItemId::new("msg"));
         communication.id = Some(communication_id.clone());
+        let model_tokens = mailbox_model_token_estimate(&communication);
+        if model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "inter-agent communication {communication_id} is too large for model context ({model_tokens} estimated tokens; maximum {MAX_MAILBOX_MODEL_TOKENS_PER_TURN})"
+                ),
+            ));
+        }
         let mail_fingerprint = durable_mail_fingerprint(&communication, &start_options);
         let turn_context = self.new_default_turn().await;
         self.try_ensure_rollout_materialized(PersistContext::Standard)
@@ -194,7 +204,12 @@ impl Session {
         }
         if !self
             .input_queue
-            .prepare_persisted_mailbox_communication(communication, start_options, mail_fingerprint)
+            .prepare_persisted_mailbox_communication(
+                communication,
+                start_options,
+                mail_fingerprint,
+                turn_context.sub_id.clone(),
+            )
             .await
         {
             return Err(std::io::Error::new(

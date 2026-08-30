@@ -113,6 +113,8 @@ pub(crate) struct SpawnAgentOptions {
     #[cfg(test)]
     pub(crate) remove_thread_before_initial_submission: bool,
     #[cfg(test)]
+    pub(crate) construction_barrier: Option<InitialSubmissionBarrier>,
+    #[cfg(test)]
     pub(crate) initial_submission_barrier: Option<InitialSubmissionBarrier>,
     #[cfg(test)]
     pub(crate) admission_commit_barrier: Option<AdmissionCommitBarrier>,
@@ -723,15 +725,15 @@ impl AgentControl {
                 let bounded_parent_agent_path = bounded_completion_agent_path(&parent_agent_path);
                 let bounded_child_agent_path = bounded_completion_agent_path(&child_agent_path);
                 let Some(message) = format_inter_agent_completion_message(
-                    bounded_parent_agent_path.clone(),
-                    bounded_child_agent_path.clone(),
+                    bounded_parent_agent_path,
+                    bounded_child_agent_path,
                     &status,
                 ) else {
                     return;
                 };
                 let communication = InterAgentCommunication::new(
-                    bounded_child_agent_path,
-                    bounded_parent_agent_path,
+                    child_agent_path,
+                    parent_agent_path,
                     Vec::new(),
                     message,
                     /*trigger_turn*/ false,

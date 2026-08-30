@@ -29,25 +29,54 @@ fn wait_for_file_source(path: &Path) -> Result<String> {
     ))
 }
 
-fn write_stale_nested_tool_hook(home: &Path, command_marker: &str, context: &str) -> Result<()> {
+fn write_nested_tool_hooks(
+    home: &Path,
+    stale_command_marker: &str,
+    stale_context: &str,
+    current_command_marker: &str,
+    current_context: &str,
+) -> Result<()> {
     let script_path = home.join("stale_nested_tool_hook.py");
+    let events_path = home.join("nested_tool_hook_events.txt");
     let script = format!(
         r#"import json
 import sys
 
 payload = json.load(sys.stdin)
-if {command_marker:?} in payload.get("tool_input", {{}}).get("command", ""):
+command = payload.get("tool_input", {{}}).get("command", "")
+if {stale_command_marker:?} in command:
+    label = "stale"
+    context = {stale_context:?}
+elif {current_command_marker:?} in command:
+    label = "current"
+    context = {current_context:?}
+else:
+    sys.exit(0)
+
+event_name = payload.get("hook_event_name")
+with open({events_path:?}, "a", encoding="utf-8") as events:
+    events.write(f"{{label}}:{{event_name}}\n")
+if event_name in ("PreToolUse", "PostToolUse"):
     print(json.dumps({{
         "hookSpecificOutput": {{
-            "hookEventName": "PreToolUse",
-            "additionalContext": {context:?}
+            "hookEventName": event_name,
+            "additionalContext": context
         }}
     }}))
-"#
+"#,
+        events_path = events_path.to_string_lossy(),
     );
+    let hook = serde_json::json!([{
+        "matcher": "^Bash$",
+        "hooks": [{
+            "type": "command",
+            "command": format!("python3 {}", script_path.display()),
+        }]
+    }]);
     let hooks = serde_json::json!({
         "hooks": {
-            "PreToolUse": [{
+            "PreToolUse": hook,
+            "PostToolUse": [{
                 "matcher": "^Bash$",
                 "hooks": [{
                     "type": "command",
@@ -121,10 +150,18 @@ async fn yielded_cell_keeps_its_originating_turn_environment() -> Result<()> {
     let server = responses::start_mock_server().await;
     const STALE_HOOK_CONTEXT: &str = "context from the originating code-mode turn";
     const STALE_COMMAND_MARKER: &str = "cross-turn-observed-cwd";
+    const CURRENT_HOOK_CONTEXT: &str = "context from the currently active code-mode turn";
+    const CURRENT_COMMAND_MARKER: &str = "current-turn-nested-tool";
     let mut builder = test_codex()
         .with_pre_build_hook(|home| {
-            write_stale_nested_tool_hook(home, STALE_COMMAND_MARKER, STALE_HOOK_CONTEXT)
-                .expect("write stale nested tool hook");
+            write_nested_tool_hooks(
+                home,
+                STALE_COMMAND_MARKER,
+                STALE_HOOK_CONTEXT,
+                CURRENT_COMMAND_MARKER,
+                CURRENT_HOOK_CONTEXT,
+            )
+            .expect("write nested tool hooks");
         })
         .with_config(move |config| {
             let _ = config.features.enable(Feature::CodeMode);
@@ -138,6 +175,7 @@ async fn yielded_cell_keeps_its_originating_turn_environment() -> Result<()> {
     let completion_gate = test.workspace_path("cross-turn-completion.ready");
     let first_cell_progressed = test.workspace_path("first-cell-progressed.txt");
     let second_cell_started = test.workspace_path("second-cell-started.txt");
+    let current_tool_marker = test.workspace_path(CURRENT_COMMAND_MARKER);
     let second_completion_gate = test.workspace_path("second-cell-completion.ready");
     let observed_cwd = test.workspace_path("cross-turn-observed-cwd.txt");
     let completion_wait = wait_for_file_source(&completion_gate)?;
@@ -147,6 +185,8 @@ async fn yielded_cell_keeps_its_originating_turn_environment() -> Result<()> {
         shlex::try_join([first_cell_progressed.to_string_lossy().as_ref()])?;
     let second_cell_started_quoted =
         shlex::try_join([second_cell_started.to_string_lossy().as_ref()])?;
+    let current_tool_marker_quoted =
+        shlex::try_join([current_tool_marker.to_string_lossy().as_ref()])?;
     let record_cwd =
         format!("pwd > {observed_cwd_quoted}; printf done > {first_cell_progressed_quoted}");
     let code = format!(
@@ -165,7 +205,9 @@ await tools.exec_command({{ cmd: {:?} }});
 {second_completion_wait}
 text("second cell done");
 "#,
-        format!("printf started > {second_cell_started_quoted}")
+        format!(
+            "printf started > {second_cell_started_quoted}; printf current > {current_tool_marker_quoted}"
+        )
     );
 
     responses::mount_sse_once(
@@ -229,11 +271,23 @@ text("second cell done");
     fs::write(&second_completion_gate, "ready")?;
     second_turn.await?;
     fs_wait::wait_for_path_exists(&observed_cwd, Duration::from_secs(5)).await?;
+    let hook_events_path = test.codex_home_path().join("nested_tool_hook_events.txt");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fs::read_to_string(&hook_events_path).is_ok_and(|events| events.lines().count() == 4)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
     assert_eq!(
         fs::read_to_string(observed_cwd)?.trim(),
         first_cwd.to_string_lossy()
     );
     let second_request = second_followup.single_request();
+    let developer_messages = second_request.message_input_texts("developer");
     assert!(
         !second_request
             .inputs_of_type("custom_tool_call_output")
@@ -246,10 +300,26 @@ text("second cell done");
         "a resumed cell must not inject its notification into another active turn"
     );
     assert!(
-        !second_request
-            .message_input_texts("developer")
-            .contains(&STALE_HOOK_CONTEXT.to_string()),
+        !developer_messages.contains(&STALE_HOOK_CONTEXT.to_string()),
         "a resumed cell must not inject tool-hook context into another active turn"
+    );
+    assert!(
+        developer_messages.contains(&CURRENT_HOOK_CONTEXT.to_string()),
+        "nested tool hooks from the active turn must still inject their context"
+    );
+    let mut hook_events = fs::read_to_string(hook_events_path)?
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    hook_events.sort();
+    assert_eq!(
+        hook_events,
+        vec![
+            "current:PostToolUse".to_string(),
+            "current:PreToolUse".to_string(),
+            "stale:PostToolUse".to_string(),
+            "stale:PreToolUse".to_string(),
+        ]
     );
 
     Ok(())

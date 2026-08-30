@@ -8,6 +8,7 @@ use anyhow::Result;
 use codex_features::Feature;
 use core_test_support::PathBufExt;
 use core_test_support::fs_wait;
+use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -26,6 +27,38 @@ fn wait_for_file_source(path: &Path) -> Result<String> {
         r#"while ((await tools.exec_command({{ cmd: {command:?} }})).output !== "ready") {{
 }}"#
     ))
+}
+
+fn write_stale_nested_tool_hook(home: &Path, command_marker: &str, context: &str) -> Result<()> {
+    let script_path = home.join("stale_nested_tool_hook.py");
+    let script = format!(
+        r#"import json
+import sys
+
+payload = json.load(sys.stdin)
+if {command_marker:?} in payload.get("tool_input", {{}}).get("command", ""):
+    print(json.dumps({{
+        "hookSpecificOutput": {{
+            "hookEventName": "PreToolUse",
+            "additionalContext": {context:?}
+        }}
+    }}))
+"#
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "^Bash$",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                }]
+            }]
+        }
+    });
+    fs::write(script_path, script)?;
+    fs::write(home.join("hooks.json"), hooks.to_string())?;
+    Ok(())
 }
 
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
@@ -86,9 +119,17 @@ async fn yielded_cell_keeps_its_originating_turn_environment() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let mut builder = test_codex().with_config(move |config| {
-        let _ = config.features.enable(Feature::CodeMode);
-    });
+    const STALE_HOOK_CONTEXT: &str = "context from the originating code-mode turn";
+    const STALE_COMMAND_MARKER: &str = "cross-turn-observed-cwd";
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_stale_nested_tool_hook(home, STALE_COMMAND_MARKER, STALE_HOOK_CONTEXT)
+                .expect("write stale nested tool hook");
+        })
+        .with_config(move |config| {
+            let _ = config.features.enable(Feature::CodeMode);
+            trust_discovered_hooks(config);
+        });
     let test = builder.build(&server).await?;
     let first_cwd = test.workspace_path("first-turn");
     let second_cwd = test.workspace_path("second-turn");
@@ -203,6 +244,12 @@ text("second cell done");
                     .is_some_and(|output| output.contains("notice from the originating cell"))
             }),
         "a resumed cell must not inject its notification into another active turn"
+    );
+    assert!(
+        !second_request
+            .message_input_texts("developer")
+            .contains(&STALE_HOOK_CONTEXT.to_string()),
+        "a resumed cell must not inject tool-hook context into another active turn"
     );
 
     Ok(())

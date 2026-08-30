@@ -4,6 +4,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/../lib/install-user-fork-paths.sh"
+. "$SCRIPT_DIR/../lib/install-user-fork-transaction.sh"
 
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEST_DIR"' EXIT HUP INT TERM
@@ -62,3 +63,33 @@ if resolve_npm_codex_bin_dir "$UNRELATED_BIN/codex" "$NPM_ROOT" >/dev/null; then
   echo "unrelated PATH executable was accepted as the npm-managed install" >&2
   exit 1
 fi
+
+TRANSACTION_BIN="$TEST_DIR/transaction/bin"
+mkdir -p "$TRANSACTION_BIN"
+INSTALLED_CODEX="$TRANSACTION_BIN/codex"
+INSTALLED_CODE_MODE_HOST="$TRANSACTION_BIN/codex-code-mode-host"
+ROLLBACK_CODEX="$TRANSACTION_BIN/codex.rollback"
+ROLLBACK_CODE_MODE_HOST="$TRANSACTION_BIN/codex-code-mode-host.rollback"
+RESTORE_CODEX=""
+RESTORE_CODE_MODE_HOST=""
+printf 'old-cli\n' >"$ROLLBACK_CODEX"
+printf 'old-host\n' >"$ROLLBACK_CODE_MODE_HOST"
+printf 'new-cli\n' >"$INSTALLED_CODEX"
+printf 'new-host\n' >"$INSTALLED_CODE_MODE_HOST"
+ROLLBACK_CODEX_HASH=$(sha256sum "$ROLLBACK_CODEX" | awk '{print $1}')
+ROLLBACK_CODE_MODE_HOST_HASH=$(sha256sum "$ROLLBACK_CODE_MODE_HOST" | awk '{print $1}')
+ACTIVATION_PENDING=1
+
+restore_activated_pair
+
+[ "$ACTIVATION_PENDING" -eq 0 ]
+cmp -s "$INSTALLED_CODEX" "$ROLLBACK_CODEX"
+cmp -s "$INSTALLED_CODE_MODE_HOST" "$ROLLBACK_CODE_MODE_HOST"
+
+rm -f "$ROLLBACK_CODE_MODE_HOST"
+ACTIVATION_PENDING=1
+if restore_activated_pair; then
+  echo "incomplete rollback pair was accepted" >&2
+  exit 1
+fi
+[ "$ACTIVATION_PENDING" -eq 1 ]

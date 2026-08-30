@@ -8,7 +8,9 @@ RUSTY_V8_PROFILE="ptrcomp_sandbox_release"
 RUST_TARGET="x86_64-unknown-linux-gnu"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+RELEASE_MANIFEST="$REPO_ROOT/fleet/release.json"
 . "$SCRIPT_DIR/lib/install-user-fork-paths.sh"
+. "$SCRIPT_DIR/lib/install-user-fork-transaction.sh"
 BUILT_CODEX="$REPO_ROOT/codex-rs/target/release/codex"
 BUILT_CODE_MODE_HOST="$REPO_ROOT/codex-rs/target/release/codex-code-mode-host"
 RUSTY_V8_DIR="$REPO_ROOT/codex-rs/target/fork-rusty-v8/$RUSTY_V8_VERSION/$RUST_TARGET"
@@ -21,7 +23,13 @@ TEMP_CODEX=""
 TEMP_CODE_MODE_HOST=""
 ROLLBACK_CODEX=""
 ROLLBACK_CODE_MODE_HOST=""
+RESTORE_CODEX=""
+RESTORE_CODE_MODE_HOST=""
 DOWNLOAD_TEMP=""
+ACTIVATION_PENDING=0
+KEEP_ROLLBACK=0
+ROLLBACK_CODEX_HASH=""
+ROLLBACK_CODE_MODE_HOST_HASH=""
 
 normalize_generated_release_lock() {
   status=$(git -C "$REPO_ROOT" status --short --untracked-files=all)
@@ -45,8 +53,18 @@ normalize_generated_release_lock() {
 cleanup() {
   saved_status=$?
   trap - EXIT HUP INT TERM
+  if [ "$ACTIVATION_PENDING" -eq 1 ] && ! restore_activated_pair; then
+    KEEP_ROLLBACK=1
+    saved_status=1
+    echo "Activation rollback incomplete; recovery copies: $ROLLBACK_CODEX, $ROLLBACK_CODE_MODE_HOST" >&2
+  fi
   for path in "$TEMP_CODEX" "$TEMP_CODE_MODE_HOST" "$ROLLBACK_CODEX" \
-    "$ROLLBACK_CODE_MODE_HOST" "$DOWNLOAD_TEMP"; do
+    "$ROLLBACK_CODE_MODE_HOST" "$RESTORE_CODEX" "$RESTORE_CODE_MODE_HOST" \
+    "$DOWNLOAD_TEMP"; do
+    if [ "$KEEP_ROLLBACK" -eq 1 ] && \
+      { [ "$path" = "$ROLLBACK_CODEX" ] || [ "$path" = "$ROLLBACK_CODE_MODE_HOST" ]; }; then
+      continue
+    fi
     if [ -n "$path" ] && [ -e "$path" ]; then
       rm -f -- "$path"
     fi
@@ -55,15 +73,6 @@ cleanup() {
     saved_status=1
   fi
   exit "$saved_status"
-}
-
-restore_activated_pair() {
-  restore_codex=$(mktemp "$INSTALLED_CODEX.restore.XXXXXX")
-  restore_host=$(mktemp "$INSTALLED_CODE_MODE_HOST.restore.XXXXXX")
-  cp -p -- "$ROLLBACK_CODEX" "$restore_codex"
-  cp -p -- "$ROLLBACK_CODE_MODE_HOST" "$restore_host"
-  mv -f -- "$restore_host" "$INSTALLED_CODE_MODE_HOST"
-  mv -f -- "$restore_codex" "$INSTALLED_CODEX"
 }
 
 trap cleanup EXIT
@@ -79,6 +88,25 @@ fi
 normalize_generated_release_lock
 if [ -n "$(git -C "$REPO_ROOT" status --porcelain=v1)" ]; then
   echo "Refusing to install from a dirty fork worktree: $REPO_ROOT" >&2
+  exit 1
+fi
+if [ ! -f "$RELEASE_MANIFEST" ] || ! command -v python3 >/dev/null 2>&1; then
+  echo "The checked-in fleet release manifest and python3 are required for source verification." >&2
+  exit 1
+fi
+EXPECTED_FORK_COMMIT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["forkCommit"])' "$RELEASE_MANIFEST")
+EXPECTED_CLI_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["expectedCliVersion"])' "$RELEASE_MANIFEST")
+EXPECTED_RELEASE_NAME=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["name"])' "$RELEASE_MANIFEST")
+if [ "$FORK_MARKER" != "+$EXPECTED_RELEASE_NAME" ]; then
+  echo "Installer marker does not match the fleet release manifest." >&2
+  exit 1
+fi
+if ! git -C "$REPO_ROOT" cat-file -e "$EXPECTED_FORK_COMMIT^{commit}" || \
+  ! git -C "$REPO_ROOT" merge-base --is-ancestor "$EXPECTED_FORK_COMMIT" HEAD || \
+  ! git -C "$REPO_ROOT" diff --quiet "$EXPECTED_FORK_COMMIT" -- \
+    codex-rs scripts/install-user-fork.sh scripts/lib/install-user-fork-paths.sh \
+    scripts/lib/install-user-fork-transaction.sh; then
+  echo "Fork source does not match the reviewed fleet release commit: $EXPECTED_FORK_COMMIT" >&2
   exit 1
 fi
 
@@ -165,13 +193,10 @@ if [ ! -x "$BUILT_CODE_MODE_HOST" ]; then
 fi
 
 BUILT_VERSION=$($BUILT_CODEX --version)
-case "$BUILT_VERSION" in
-  *"$FORK_MARKER"*) ;;
-  *)
-    echo "Release build is missing fork identity: $BUILT_VERSION" >&2
-    exit 1
-    ;;
-esac
+if [ "$BUILT_VERSION" != "$EXPECTED_CLI_VERSION" ]; then
+  echo "Release build identity mismatch: $BUILT_VERSION" >&2
+  exit 1
+fi
 
 ACTIVE_CODEX_BEFORE=$(command -v codex || true)
 if [ "$ACTIVE_CODEX_BEFORE" != "$COMMAND_CODEX" ]; then
@@ -253,13 +278,10 @@ if command -v strip >/dev/null 2>&1; then
 fi
 
 STAGED_VERSION=$($TEMP_CODEX --version)
-case "$STAGED_VERSION" in
-  *"$FORK_MARKER"*) ;;
-  *)
-    echo "Staged executable lost fork identity: $STAGED_VERSION" >&2
-    exit 1
-    ;;
-esac
+if [ "$STAGED_VERSION" != "$EXPECTED_CLI_VERSION" ]; then
+  echo "Staged executable identity mismatch: $STAGED_VERSION" >&2
+  exit 1
+fi
 if ! "$TEMP_CODEX" agents --help >/dev/null 2>&1; then
   echo "Staged executable does not support codex agents." >&2
   exit 1
@@ -269,6 +291,9 @@ ROLLBACK_CODEX=$(mktemp "$INSTALLED_CODEX.rollback.XXXXXX")
 ROLLBACK_CODE_MODE_HOST=$(mktemp "$INSTALLED_CODE_MODE_HOST.rollback.XXXXXX")
 cp -p -- "$INSTALLED_CODEX" "$ROLLBACK_CODEX"
 cp -p -- "$INSTALLED_CODE_MODE_HOST" "$ROLLBACK_CODE_MODE_HOST"
+ROLLBACK_CODEX_HASH=$(sha256sum "$ROLLBACK_CODEX" | awk '{print $1}')
+ROLLBACK_CODE_MODE_HOST_HASH=$(sha256sum "$ROLLBACK_CODE_MODE_HOST" | awk '{print $1}')
+ACTIVATION_PENDING=1
 
 if ! mv -f -- "$TEMP_CODE_MODE_HOST" "$INSTALLED_CODE_MODE_HOST"; then
   echo "Could not activate the code-mode host." >&2
@@ -276,18 +301,14 @@ if ! mv -f -- "$TEMP_CODE_MODE_HOST" "$INSTALLED_CODE_MODE_HOST"; then
 fi
 TEMP_CODE_MODE_HOST=""
 if ! mv -f -- "$TEMP_CODEX" "$INSTALLED_CODEX"; then
-  restore_host=$(mktemp "$INSTALLED_CODE_MODE_HOST.restore.XXXXXX")
-  cp -p -- "$ROLLBACK_CODE_MODE_HOST" "$restore_host"
-  mv -f -- "$restore_host" "$INSTALLED_CODE_MODE_HOST"
-  echo "Could not activate Codex; restored the previous code-mode host." >&2
+  echo "Could not activate Codex; the exit transaction will restore both binaries." >&2
   exit 1
 fi
 TEMP_CODEX=""
 
 ACTIVE_CODEX_AFTER=$(command -v codex || true)
 if [ "$ACTIVE_CODEX_AFTER" != "$COMMAND_CODEX" ]; then
-  restore_activated_pair
-  echo "The active Codex command changed during installation; refusing to report successful activation." >&2
+  echo "The active Codex command changed during installation; the exit transaction will restore the selected target." >&2
   exit 1
 fi
 case "$INSTALL_KIND" in
@@ -299,24 +320,19 @@ case "$INSTALL_KIND" in
     ;;
 esac
 if [ "$ACTIVE_BIN_DIR_AFTER" != "$INSTALLED_BIN_DIR" ]; then
-  restore_activated_pair
-  echo "The active Codex installation target changed during installation; restored the selected target." >&2
+  echo "The active Codex installation target changed during installation; the exit transaction will restore the selected target." >&2
   exit 1
 fi
 ACTIVE_VERSION=$(codex --version 2>/dev/null || true)
-case "$ACTIVE_VERSION" in
-  *"$FORK_MARKER"*) ;;
-  *)
-    restore_activated_pair
-    echo "The active Codex command did not select the installed fork: $ACTIVE_VERSION" >&2
-    exit 1
-    ;;
-esac
+if [ "$ACTIVE_VERSION" != "$EXPECTED_CLI_VERSION" ]; then
+  echo "The active Codex command did not select the exact installed fork: $ACTIVE_VERSION" >&2
+  exit 1
+fi
 if ! codex agents --help >/dev/null 2>&1; then
-  restore_activated_pair
-  echo "The active fork does not support codex agents; restored the selected target." >&2
+  echo "The active fork does not support codex agents; the exit transaction will restore the selected target." >&2
   exit 1
 fi
 
+ACTIVATION_PENDING=0
 printf 'Installed %s\n' "$STAGED_VERSION"
 sha256sum "$INSTALLED_CODEX" "$INSTALLED_CODE_MODE_HOST"

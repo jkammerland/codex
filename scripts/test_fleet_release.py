@@ -1,6 +1,7 @@
 """Tests for the manifest-driven native offload fleet controller."""
 
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -110,7 +111,13 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn("agents --help", mac_script)
         self.assertIn("agents --help", windows_script)
         self.assertIn("rollback_pair", mac_script)
-        self.assertIn("Restore $targetHost $backupHost", windows_script)
+        self.assertIn("Restore-One $targetHost $backupHost", windows_script)
+        self.assertIn(
+            "MCP server is not clean at the compatible manifest commit", mac_script
+        )
+        self.assertIn(
+            "MCP server is not clean at the compatible manifest commit", windows_script
+        )
 
     @unittest.skipUnless(shutil.which("shasum"), "requires shasum")
     def test_mac_activation_restores_pair_after_version_verification_failure(
@@ -162,6 +169,8 @@ class FleetReleaseTest(unittest.TestCase):
                 ["git", "-C", str(canonical), "worktree", "add", "-q", str(build)],
                 check=True,
             )
+            server = root / "server"
+            run(["git", "clone", "-q", str(canonical), str(server)], check=True)
             source_dir = build / "codex-rs" / "target" / "release"
             target_dir = root / "bin"
             source_dir.mkdir(parents=True)
@@ -184,7 +193,7 @@ class FleetReleaseTest(unittest.TestCase):
                 fork_ref="refs/tags/test",
                 fork_remote="unused",
                 cli_version="codex-cli expected",
-                server_commit="0" * 40,
+                server_commit=commit,
                 rusty_v8_version="150.4.0",
             )
             host = fleet_release.Host(
@@ -193,7 +202,7 @@ class FleetReleaseTest(unittest.TestCase):
                 ssh_target="unused",
                 source_root=str(canonical),
                 build_root=str(build),
-                server_root=str(root / "server"),
+                server_root=str(server),
                 cli_binary=str(target_cli),
                 code_mode_host_binary=str(target_host),
                 rust_toolchain="unused",
@@ -211,6 +220,180 @@ class FleetReleaseTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(target_cli.read_bytes(), original_cli)
             self.assertEqual(target_host.read_bytes(), original_host)
+            self.assertFalse(Path(f"{target_cli}.test.release-previous").exists())
+            self.assertFalse(Path(f"{target_host}.test.release-previous").exists())
+
+            source_cli.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = --version ]; then echo 'codex-cli expected'; exit 0; fi\n"
+                'if [ "$1" = agents ] && [ "$2" = --help ]; then exit 0; fi\n'
+                "exit 1\n"
+            )
+            source_cli.chmod(0o755)
+            retry = run(
+                ["sh", "-c", fleet_release.activation_script(host, release)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(retry.returncode, 0, retry.stderr)
+            self.assertEqual(target_cli.read_bytes(), source_cli.read_bytes())
+            self.assertEqual(target_host.read_bytes(), source_host.read_bytes())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows activation test")
+    def test_windows_activation_restores_pair_after_version_verification_failure(
+        self,
+    ) -> None:
+        fixture_cli = Path(
+            os.environ.get("CODEX_FLEET_WINDOWS_FIXTURE_CLI", self.hosts[1].cli_binary)
+        )
+        fixture_host = Path(
+            os.environ.get(
+                "CODEX_FLEET_WINDOWS_FIXTURE_HOST",
+                self.hosts[1].code_mode_host_binary,
+            )
+        )
+        if not fixture_cli.is_file() or not fixture_host.is_file():
+            self.skipTest("maintained Windows Codex fixture binaries are unavailable")
+        fixture_version = run(
+            [str(fixture_cli), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical = root / "canonical"
+            build = root / "build"
+            canonical.mkdir()
+            (canonical / ".gitignore").write_text("codex-rs/target/\n")
+            run(["git", "init", "-q", str(canonical)], check=True)
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "-c",
+                    "user.name=Fleet Test",
+                    "-c",
+                    "user.email=fleet@example.invalid",
+                    "add",
+                    ".gitignore",
+                ],
+                check=True,
+            )
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "-c",
+                    "user.name=Fleet Test",
+                    "-c",
+                    "user.email=fleet@example.invalid",
+                    "commit",
+                    "-qm",
+                    "test fixture",
+                ],
+                check=True,
+            )
+            commit = run(
+                ["git", "-C", str(canonical), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            run(
+                ["git", "-C", str(canonical), "worktree", "add", "-q", str(build)],
+                check=True,
+            )
+            server = root / "server"
+            run(["git", "clone", "-q", str(canonical), str(server)], check=True)
+            source_dir = build / "codex-rs" / "target" / "release"
+            target_dir = root / "bin"
+            source_dir.mkdir(parents=True)
+            target_dir.mkdir()
+            source_cli = source_dir / "codex.exe"
+            source_host = source_dir / "codex-code-mode-host.exe"
+            target_cli = target_dir / "codex.exe"
+            target_host = target_dir / "codex-code-mode-host.exe"
+            original_cli = fixture_cli.read_bytes()
+            original_host = fixture_host.read_bytes()
+            target_cli.write_bytes(original_cli)
+            target_host.write_bytes(original_host)
+            source_cli.write_bytes(original_cli + b"fleet-source-cli")
+            source_host.write_bytes(original_host + b"fleet-source-host")
+            host = fleet_release.Host(
+                name="windows",
+                platform="windows",
+                ssh_target="unused",
+                source_root=str(canonical),
+                build_root=str(build),
+                server_root=str(server),
+                cli_binary=str(target_cli),
+                code_mode_host_binary=str(target_host),
+                rust_toolchain="unused",
+                rust_target="x86_64-pc-windows-msvc",
+                rustup=None,
+            )
+            release = fleet_release.Release(
+                name="test.release",
+                fork_commit=commit,
+                fork_ref="refs/tags/test",
+                fork_remote="unused",
+                cli_version="codex-cli intentionally-wrong",
+                server_commit=commit,
+                rusty_v8_version="150.4.0",
+            )
+
+            failed = run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    fleet_release.activation_script(host, release),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(target_cli.read_bytes(), original_cli)
+            self.assertEqual(target_host.read_bytes(), original_host)
+            self.assertFalse(Path(f"{target_cli}.test.release-previous").exists())
+            self.assertFalse(Path(f"{target_host}.test.release-previous").exists())
+
+            release = fleet_release.Release(
+                name=release.name,
+                fork_commit=release.fork_commit,
+                fork_ref=release.fork_ref,
+                fork_remote=release.fork_remote,
+                cli_version=fixture_version,
+                server_commit=release.server_commit,
+                rusty_v8_version=release.rusty_v8_version,
+            )
+            retry = run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    fleet_release.activation_script(host, release),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(retry.returncode, 0, retry.stderr)
+            self.assertEqual(target_cli.read_bytes(), source_cli.read_bytes())
+            self.assertEqual(target_host.read_bytes(), source_host.read_bytes())
 
     def test_bundle_build_scripts_verify_the_pinned_commit(self) -> None:
         mac_script = fleet_release.build_script(self.hosts[0], self.release, True)

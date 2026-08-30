@@ -511,41 +511,68 @@ public static class FleetFileOps {{ [DllImport("kernel32.dll", SetLastError=true
 '@
 function Hash($Path) {{ (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }}
 function Replace($Target, $Source, $Backup) {{
-  if (Test-Path -LiteralPath $Backup) {{ throw "Rollback binary exists: $Backup" }}
-  $sourceHash = Hash $Source; $oldHash = Hash $Target; $stage = "$Target.{release.name}-$([guid]::NewGuid().ToString('N'))"
-  Copy-Item -LiteralPath $Source -Destination $stage
-  if ((Hash $stage) -ne $sourceHash -or -not [FleetFileOps]::ReplaceFile($Target, $stage, $Backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Atomic replacement failed: $Target" }}
-  if ((Hash $Target) -ne $sourceHash -or (Hash $Backup) -ne $oldHash) {{ throw "Replacement verification failed: $Target" }}
+  $stage = "$Target.{release.name}-$([guid]::NewGuid().ToString('N'))"
+  try {{
+    Copy-Item -LiteralPath $Source -Destination $stage
+    if ((Hash $stage) -ne (Hash $Source)) {{ throw "Staging verification failed: $Target" }}
+    if (-not [FleetFileOps]::ReplaceFile($Target, $stage, $Backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Atomic replacement failed: $Target" }}
+  }} finally {{
+    if (Test-Path -LiteralPath $stage) {{ Remove-Item -Force -LiteralPath $stage }}
+  }}
 }}
-function Restore($Target, $Backup) {{
+function Restore-One($Target, $Backup) {{
   $stage = "$Target.rollback-$([guid]::NewGuid().ToString('N'))"
-  Copy-Item -LiteralPath $Backup -Destination $stage
-  if (-not [FleetFileOps]::ReplaceFile($Target, $stage, $null, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Rollback failed: $Target" }}
+  try {{
+    Copy-Item -LiteralPath $Backup -Destination $stage
+    if (-not [FleetFileOps]::ReplaceFile($Target, $stage, $null, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Rollback failed: $Target" }}
+  }} finally {{
+    if (Test-Path -LiteralPath $stage) {{ Remove-Item -Force -LiteralPath $stage }}
+  }}
 }}
 $canonical = {quote_ps(host.source_root)}; $build = {quote_ps(host.build_root)}; $sourceCli = {quote_ps(source_cli)}; $sourceHost = {quote_ps(source_host)}
 $targetCli = {quote_ps(host.cli_binary)}; $targetHost = {quote_ps(host.code_mode_host_binary)}
 $backupCli = {quote_ps(backup_cli)}; $backupHost = {quote_ps(backup_host)}
-$activated = $false
+$server = {quote_ps(host.server_root)}
 if ((git -C $canonical rev-parse HEAD) -ne {quote_ps(release.fork_commit)} -or -not [string]::IsNullOrEmpty((git -C $canonical status --porcelain))) {{ throw 'Canonical checkout is not clean at the manifest commit' }}
 if ((git -C $build rev-parse HEAD) -ne {quote_ps(release.fork_commit)} -or -not [string]::IsNullOrEmpty((git -C $build status --porcelain))) {{ throw 'Build worktree is not clean at the manifest commit' }}
+if ((git -C $server rev-parse HEAD) -ne {quote_ps(release.server_commit)} -or -not [string]::IsNullOrEmpty((git -C $server status --porcelain))) {{ throw 'MCP server is not clean at the compatible manifest commit' }}
 foreach ($path in @($sourceCli, $sourceHost, $targetCli, $targetHost)) {{ if (-not (Test-Path -LiteralPath $path)) {{ throw "Missing binary: $path" }} }}
-if ((Hash $targetCli) -ne (Hash $sourceCli) -or (Hash $targetHost) -ne (Hash $sourceHost)) {{
-  Replace $targetCli $sourceCli $backupCli
-  try {{ Replace $targetHost $sourceHost $backupHost }} catch {{
-    $rollback = "$targetCli.rollback-$([guid]::NewGuid().ToString('N'))"; Copy-Item -LiteralPath $backupCli -Destination $rollback
-    if (-not [FleetFileOps]::ReplaceFile($targetCli, $rollback, $null, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Host activation and CLI rollback failed: $($_.Exception.Message)" }}
-    throw "Code-mode host activation failed; CLI rolled back: $($_.Exception.Message)"
+$sourceCliHash = Hash $sourceCli; $sourceHostHash = Hash $sourceHost
+$needsActivation = (Hash $targetCli) -ne $sourceCliHash -or (Hash $targetHost) -ne $sourceHostHash
+if ($needsActivation) {{
+  $backupCliExists = Test-Path -LiteralPath $backupCli
+  $backupHostExists = Test-Path -LiteralPath $backupHost
+  if ($backupCliExists -ne $backupHostExists) {{ throw 'Release rollback pair is incomplete' }}
+  if ($backupCliExists) {{
+    if ((Hash $targetCli) -ne (Hash $backupCli) -or (Hash $targetHost) -ne (Hash $backupHost)) {{ throw 'Release rollback pair does not match the active binaries' }}
+    Remove-Item -Force -LiteralPath $backupCli, $backupHost
   }}
-  $activated = $true
-}}
-try {{
+  $oldCliHash = Hash $targetCli; $oldHostHash = Hash $targetHost
+  try {{
+    Replace $targetCli $sourceCli $backupCli
+    if ((Hash $targetCli) -ne $sourceCliHash -or (Hash $backupCli) -ne $oldCliHash) {{ throw 'CLI replacement verification failed' }}
+    Replace $targetHost $sourceHost $backupHost
+    if ((Hash $targetHost) -ne $sourceHostHash -or (Hash $backupHost) -ne $oldHostHash) {{ throw 'Code-mode host replacement verification failed' }}
+    $version = & $targetCli --version
+    if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
+    & $targetCli agents --help *> $null
+    if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
+  }} catch {{
+    $activationError = $_.Exception.Message
+    $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $backupHost) {{ try {{ Restore-One $targetHost $backupHost }} catch {{ $rollbackErrors.Add($_.Exception.Message) }} }}
+    if (Test-Path -LiteralPath $backupCli) {{ try {{ Restore-One $targetCli $backupCli }} catch {{ $rollbackErrors.Add($_.Exception.Message) }} }}
+    if ((Hash $targetCli) -ne $oldCliHash) {{ $rollbackErrors.Add('CLI rollback hash mismatch') }}
+    if ((Hash $targetHost) -ne $oldHostHash) {{ $rollbackErrors.Add('Code-mode host rollback hash mismatch') }}
+    if ($rollbackErrors.Count -eq 0) {{ Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $backupCli, $backupHost }}
+    if ($rollbackErrors.Count -ne 0) {{ throw "Activation failed: $activationError; rollback failed: $($rollbackErrors -join '; '); recovery copies: $backupCli, $backupHost" }}
+    throw "Activation failed and both binaries were restored: $activationError"
+  }}
+}} else {{
   $version = & $targetCli --version
   if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
   & $targetCli agents --help *> $null
   if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
-}} catch {{
-  if ($activated) {{ Restore $targetHost $backupHost; Restore $targetCli $backupCli }}
-  throw
 }}
 Write-Output "activated-version=$version"
 """
@@ -554,44 +581,80 @@ sha() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
 canonical={shlex.quote(host.source_root)}; build={shlex.quote(host.build_root)}; source_cli={shlex.quote(source_cli)}; source_host={shlex.quote(source_host)}
 target_cli={shlex.quote(host.cli_binary)}; target_host={shlex.quote(host.code_mode_host_binary)}
 backup_cli={shlex.quote(backup_cli)}; backup_host={shlex.quote(backup_host)}
-activated=0
+server={shlex.quote(host.server_root)}
+activated=0; old_cli_hash=; old_host_hash=; restore_cli=; restore_host=; stage_cli=; stage_host=
 rollback_pair() {{
   [ "$activated" -eq 1 ] || return 0
   restore_cli=$(mktemp "$target_cli.rollback.XXXXXX"); restore_host=$(mktemp "$target_host.rollback.XXXXXX")
   cp -p "$backup_cli" "$restore_cli"; cp -p "$backup_host" "$restore_host"
-  mv -f "$restore_host" "$target_host"; mv -f "$restore_cli" "$target_cli"
+  rollback_failed=0
+  if ! mv -f "$restore_host" "$target_host"; then rollback_failed=1; fi
+  restore_host=
+  if ! mv -f "$restore_cli" "$target_cli"; then rollback_failed=1; fi
+  restore_cli=
+  [ "$(sha "$target_cli")" = "$old_cli_hash" ] || rollback_failed=1
+  [ "$(sha "$target_host")" = "$old_host_hash" ] || rollback_failed=1
+  if [ "$rollback_failed" -eq 0 ]; then
+    activated=0
+    rm -f "$backup_cli" "$backup_host"
+    return 0
+  fi
+  return 1
 }}
+finish_activation() {{
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$activated" -eq 1 ] && ! rollback_pair; then
+    echo "Activation rollback incomplete; recovery copies: $backup_cli, $backup_host" >&2
+    status=1
+  fi
+  [ -z "$restore_cli" ] || rm -f "$restore_cli"
+  [ -z "$restore_host" ] || rm -f "$restore_host"
+  [ -z "$stage_cli" ] || rm -f "$stage_cli"
+  [ -z "$stage_host" ] || rm -f "$stage_host"
+  exit "$status"
+}}
+trap finish_activation EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 [ "$(git -C "$canonical" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$canonical" status --porcelain)" ]
 [ "$(git -C "$build" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$build" status --porcelain)" ] || {{ echo 'Build worktree is not clean at the manifest commit' >&2; exit 1; }}
+[ "$(git -C "$server" rev-parse HEAD)" = {release.server_commit} ] && [ -z "$(git -C "$server" status --porcelain)" ] || {{ echo 'MCP server is not clean at the compatible manifest commit' >&2; exit 1; }}
 [ -x "$source_cli" ] && [ -x "$source_host" ] && [ -f "$target_cli" ] && [ -f "$target_host" ]
 source_cli_hash=$(sha "$source_cli"); source_host_hash=$(sha "$source_host")
 if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
-  [ ! -e "$backup_cli" ] && [ ! -e "$backup_host" ]
+  if [ -e "$backup_cli" ] || [ -e "$backup_host" ]; then
+    [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}
+    cmp -s "$target_cli" "$backup_cli" && cmp -s "$target_host" "$backup_host" || {{ echo 'Release rollback pair does not match the active binaries' >&2; exit 1; }}
+    rm -f "$backup_cli" "$backup_host"
+  fi
   old_cli_hash=$(sha "$target_cli"); old_host_hash=$(sha "$target_host")
   stage_cli=$(mktemp "$target_cli.{release.name}.XXXXXX"); stage_host=$(mktemp "$target_host.{release.name}.XXXXXX")
   install -m 0755 "$source_cli" "$stage_cli"; install -m 0755 "$source_host" "$stage_host"
   [ "$(sha "$stage_cli")" = "$source_cli_hash" ] && [ "$(sha "$stage_host")" = "$source_host_hash" ]
   cp -p "$target_cli" "$backup_cli"; cp -p "$target_host" "$backup_host"
   [ "$(sha "$backup_cli")" = "$old_cli_hash" ] && [ "$(sha "$backup_host")" = "$old_host_hash" ]
-  mv -f "$stage_cli" "$target_cli"
-  if ! mv -f "$stage_host" "$target_host"; then rollback=$(mktemp "$target_cli.rollback.XXXXXX"); cp -p "$backup_cli" "$rollback"; mv -f "$rollback" "$target_cli"; exit 1; fi
   activated=1
+  mv -f "$stage_cli" "$target_cli"
+  stage_cli=
+  mv -f "$stage_host" "$target_host"
+  stage_host=
 fi
 if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
-  rollback_pair
   echo 'Activated binary hash verification failed' >&2
   exit 1
 fi
 if ! version=$($target_cli --version) || [ "$version" != {shlex.quote(release.cli_version)} ]; then
-  rollback_pair
   echo "Unexpected fork version: ${{version:-missing}}" >&2
   exit 1
 fi
 if ! $target_cli agents --help >/dev/null; then
-  rollback_pair
   echo 'Activated fork does not support codex agents' >&2
   exit 1
 fi
+activated=0
+trap - EXIT HUP INT TERM
 printf 'activated-version=%s\\n' "$version"
 """
 

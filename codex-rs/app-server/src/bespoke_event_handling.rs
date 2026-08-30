@@ -1574,13 +1574,17 @@ async fn handle_turn_interrupted(
     thread_state: &Arc<Mutex<ThreadState>>,
 ) {
     let turn_summary = find_and_remove_turn_summary(conversation_id, thread_state).await;
+    let (status, error) = match turn_summary.last_error {
+        Some(error) => (TurnStatus::Failed, Some(error)),
+        None => (TurnStatus::Interrupted, None),
+    };
 
     emit_turn_completed_with_status(
         conversation_id,
         event_turn_id,
         TurnCompletionMetadata {
-            status: TurnStatus::Interrupted,
-            error: None,
+            status,
+            error,
             last_agent_message: None,
             started_at: turn_summary.started_at,
             completed_at: turn_aborted_event.completed_at,
@@ -3808,7 +3812,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_turn_interrupted_emits_interrupted_without_error() -> Result<()> {
+    async fn test_handle_turn_interrupted_preserves_preceding_error() -> Result<()> {
         let conversation_id = ThreadId::new();
         let event_turn_id = "interrupt1".to_string();
         let thread_state = new_thread_state();
@@ -3847,8 +3851,16 @@ mod tests {
         match msg {
             ServerNotification::TurnCompleted(n) => {
                 assert_eq!(n.turn.id, event_turn_id);
-                assert_eq!(n.turn.status, TurnStatus::Interrupted);
-                assert_eq!(n.turn.error, None);
+                assert_eq!(n.turn.status, TurnStatus::Failed);
+                assert_eq!(
+                    n.turn.error,
+                    Some(TurnError {
+                        misalignment: None,
+                        message: "oops".to_string(),
+                        codex_error_info: None,
+                        additional_details: None,
+                    })
+                );
                 assert_eq!(n.turn.completed_at, Some(TEST_TURN_COMPLETED_AT));
                 assert_eq!(n.turn.duration_ms, Some(TEST_TURN_DURATION_MS));
             }

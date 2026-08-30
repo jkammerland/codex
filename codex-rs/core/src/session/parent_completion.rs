@@ -24,10 +24,12 @@ use crate::agent::agent_status_from_event;
 use crate::agent::status::is_final;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
+use crate::session_prefix::bounded_completion_agent_path;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::tools::handlers::multi_agents_common::build_agent_resume_config;
 
 const PARENT_COMPLETION_DELIVERY_ATTEMPTS: usize = 3;
+const PARENT_COMPLETION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPLETION_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,11 +46,11 @@ impl Session {
         turn_context: &TurnContext,
         msg: &EventMsg,
         status: AgentStatus,
-    ) {
+    ) -> Result<(), String> {
         if turn_context.multi_agent_version != MultiAgentVersion::V2
             || !matches!(msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
         {
-            return;
+            return Ok(());
         }
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
@@ -56,10 +58,10 @@ impl Session {
             ..
         }) = &turn_context.session_source
         else {
-            return;
+            return Ok(());
         };
         if !is_final(&status) {
-            return;
+            return Ok(());
         }
         let completion_turn_id = terminal_event_turn_id(msg).unwrap_or(&turn_context.sub_id);
         self.deliver_and_record_parent_completion(
@@ -69,7 +71,7 @@ impl Session {
             child_agent_path,
             status,
         )
-        .await;
+        .await
     }
 
     /// Replays a durable child outbox entry only when its deterministic acknowledgement is absent.
@@ -77,21 +79,20 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
-    ) {
+    ) -> Result<(), String> {
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
             ..
         }) = &turn_context.session_source
         else {
-            return;
+            return Ok(());
         };
-        let Some(status) = terminal_status_from_rollout(rollout_items) else {
-            return;
+        let Some((completion_turn_id, status)) = terminal_status_marker_from_rollout(rollout_items)
+        else {
+            return Ok(());
         };
-        let completion_turn_id = terminal_turn_id_from_rollout(rollout_items)
-            .unwrap_or_else(|| turn_context.sub_id.clone());
-        let delivery_id = parent_completion_delivery_id(self.thread_id, &completion_turn_id);
+        let delivery_id = parent_completion_delivery_id(self.thread_id, completion_turn_id);
         if rollout_items.iter().any(|item| {
             matches!(
                 item,
@@ -101,16 +102,16 @@ impl Session {
                 } if recorded_id == &delivery_id
             )
         }) {
-            return;
+            return Ok(());
         }
         self.deliver_and_record_parent_completion(
             turn_context,
-            &completion_turn_id,
+            completion_turn_id,
             *parent_thread_id,
             child_agent_path,
-            status,
+            status.clone(),
         )
-        .await;
+        .await
     }
 
     async fn deliver_and_record_parent_completion(
@@ -120,62 +121,91 @@ impl Session {
         parent_thread_id: ThreadId,
         child_agent_path: &AgentPath,
         status: AgentStatus,
-    ) {
+    ) -> Result<(), String> {
         let delivery_id = {
             let mut handled_id = None;
+            let mut last_error = None;
             for attempt in 1..=PARENT_COMPLETION_DELIVERY_ATTEMPTS {
-                match self
-                    .forward_child_completion_to_parent(
+                let delivery = tokio::time::timeout(
+                    PARENT_COMPLETION_ATTEMPT_TIMEOUT,
+                    self.forward_child_completion_to_parent(
                         turn_context,
                         completion_turn_id,
                         parent_thread_id,
                         child_agent_path,
                         status.clone(),
-                    )
-                    .await
-                {
-                    ParentCompletionDelivery::Delivered(delivery_id) => {
+                    ),
+                )
+                .await;
+                match delivery {
+                    Err(_) => {
+                        let error = format!(
+                            "parent completion delivery attempt timed out after {PARENT_COMPLETION_ATTEMPT_TIMEOUT:?}"
+                        );
+                        last_error = Some(error.clone());
+                        warn!(
+                            child_thread_id = %self.thread_id,
+                            %parent_thread_id,
+                            attempt,
+                            max_attempts = PARENT_COMPLETION_DELIVERY_ATTEMPTS,
+                            %error,
+                            "terminal child delivery remains pending"
+                        );
+                    }
+                    Ok(ParentCompletionDelivery::Delivered(delivery_id)) => {
                         handled_id = Some(delivery_id);
                         break;
                     }
-                    ParentCompletionDelivery::NotPublished => {
+                    Ok(ParentCompletionDelivery::NotPublished) => {
                         handled_id = Some(parent_completion_delivery_id(
                             self.thread_id,
                             completion_turn_id,
                         ));
                         break;
                     }
-                    ParentCompletionDelivery::PersistenceFailed(error) => warn!(
-                        child_thread_id = %self.thread_id,
-                        %parent_thread_id,
-                        attempt,
-                        max_attempts = PARENT_COMPLETION_DELIVERY_ATTEMPTS,
-                        %error,
-                        "terminal child delivery remains pending"
-                    ),
+                    Ok(ParentCompletionDelivery::PersistenceFailed(error)) => {
+                        last_error = Some(error.clone());
+                        warn!(
+                            child_thread_id = %self.thread_id,
+                            %parent_thread_id,
+                            attempt,
+                            max_attempts = PARENT_COMPLETION_DELIVERY_ATTEMPTS,
+                            %error,
+                            "terminal child delivery remains pending"
+                        );
+                    }
                 }
             }
-            handled_id
+            handled_id.ok_or_else(|| {
+                last_error.unwrap_or_else(|| "parent completion delivery failed".to_string())
+            })?
         };
-        let Some(delivery_id) = delivery_id else {
-            return;
-        };
+        let mut last_error = None;
         for attempt in 1..=PARENT_COMPLETION_DELIVERY_ATTEMPTS {
-            match self
-                .record_parent_completion_delivery(delivery_id.clone())
-                .await
-            {
-                Ok(()) => return,
-                Err(error) => warn!(
-                    child_thread_id = %self.thread_id,
-                    %parent_thread_id,
-                    attempt,
-                    max_attempts = PARENT_COMPLETION_DELIVERY_ATTEMPTS,
-                    %error,
-                    "terminal child delivery acknowledgement remains pending"
-                ),
+            let acknowledgement = tokio::time::timeout(
+                PARENT_COMPLETION_ATTEMPT_TIMEOUT,
+                self.record_parent_completion_delivery(delivery_id.clone()),
+            )
+            .await;
+            match acknowledgement {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(error)) => last_error = Some(error.to_string()),
+                Err(_) => {
+                    last_error = Some(format!(
+                        "parent completion acknowledgement timed out after {PARENT_COMPLETION_ATTEMPT_TIMEOUT:?}"
+                    ));
+                }
             }
+            warn!(
+                child_thread_id = %self.thread_id,
+                %parent_thread_id,
+                attempt,
+                max_attempts = PARENT_COMPLETION_DELIVERY_ATTEMPTS,
+                error = %last_error.as_deref().unwrap_or("unknown acknowledgement failure"),
+                "terminal child delivery acknowledgement remains pending"
+            );
         }
+        Err(last_error.unwrap_or_else(|| "parent completion acknowledgement failed".to_string()))
     }
 
     async fn record_parent_completion_delivery(
@@ -188,6 +218,11 @@ impl Session {
                     trigger_turn: false,
                     mail_fingerprint: None,
                     delivery_id: Some(delivery_id),
+                    terminal_turn_id: None,
+                    terminal_status: None,
+                    mail_communication: None,
+                    mail_start_options: None,
+                    consumed_mail_id: None,
                 }])
                 .await
                 .map_err(std::io::Error::other)?;
@@ -228,9 +263,11 @@ impl Session {
             );
         };
 
+        let bounded_parent_agent_path = bounded_completion_agent_path(&parent_agent_path);
+        let bounded_child_agent_path = bounded_completion_agent_path(child_agent_path);
         let Some(message) = format_inter_agent_completion_message(
-            parent_agent_path.clone(),
-            child_agent_path.clone(),
+            bounded_parent_agent_path.clone(),
+            bounded_child_agent_path.clone(),
             &status,
         ) else {
             return ParentCompletionDelivery::PersistenceFailed(
@@ -245,8 +282,8 @@ impl Session {
             .is_enabled()
             .then(|| message.clone());
         let mut communication = InterAgentCommunication::new(
-            child_agent_path.clone(),
-            parent_agent_path.clone(),
+            bounded_child_agent_path,
+            bounded_parent_agent_path,
             Vec::new(),
             message,
             /*trigger_turn*/ false,
@@ -383,15 +420,17 @@ pub(super) fn terminal_status_from_rollout(rollout_items: &[RolloutItem]) -> Opt
             RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
         )
     })?;
+    if rollout_items[terminal_index + 1..].iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_) | EventMsg::ThreadRolledBack(_))
+        )
+    }) {
+        return None;
+    }
     let RolloutItem::EventMsg(terminal_event) = &rollout_items[terminal_index] else {
         return None;
     };
-    if rollout_items[terminal_index + 1..]
-        .iter()
-        .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))))
-    {
-        return None;
-    }
     let preceding_error = rollout_items[..terminal_index]
         .iter()
         .rev()
@@ -415,26 +454,16 @@ fn terminal_status_marker_from_rollout(
 ) -> Option<(&str, &AgentStatus)> {
     for item in rollout_items.iter().rev() {
         match item {
-            RolloutItem::TerminalAgentStatus { turn_id, status } => {
+            RolloutItem::InterAgentCommunicationMetadata {
+                terminal_turn_id: Some(turn_id),
+                terminal_status: Some(status),
+                ..
+            } => {
                 return Some((turn_id, status));
             }
-            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
-fn terminal_turn_id_from_rollout(rollout_items: &[RolloutItem]) -> Option<String> {
-    if let Some((turn_id, _)) = terminal_status_marker_from_rollout(rollout_items) {
-        return Some(turn_id.to_string());
-    }
-    for item in rollout_items.iter().rev() {
-        match item {
-            RolloutItem::EventMsg(
-                event @ (EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)),
-            ) => return terminal_event_turn_id(event).map(ToString::to_string),
-            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => return None,
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_) | EventMsg::ThreadRolledBack(_)) => {
+                return None;
+            }
             _ => {}
         }
     }
@@ -450,7 +479,11 @@ pub(super) fn terminal_event_turn_id(event: &EventMsg) -> Option<&str> {
 }
 
 fn parent_completion_delivery_id(thread_id: ThreadId, turn_id: &str) -> ResponseItemId {
-    ResponseItemId::with_suffix("msg", format!("completion-{thread_id}-{turn_id}"))
+    let identity = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{thread_id}\0{turn_id}").as_bytes(),
+    );
+    ResponseItemId::with_suffix("msg", format!("completion-{identity}"))
 }
 
 #[cfg(test)]

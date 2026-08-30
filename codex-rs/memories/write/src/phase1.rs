@@ -415,7 +415,6 @@ mod job {
                 }
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
-                | RolloutItem::TerminalAgentStatus { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::RealtimeItem(_)
@@ -829,6 +828,11 @@ mod tests {
                 trigger_turn: true,
                 mail_fingerprint: None,
                 delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: None,
             },
             RolloutItem::ResponseItem(response_item.clone().into()),
         ])

@@ -72,6 +72,14 @@ pub(crate) fn user_message_positions_in_rollout(items: &[RolloutItem]) -> Vec<us
 /// removes the stale suffix starting at the earliest rolled-back instruction-turn boundary instead
 /// of simply truncating the mixed fork-boundary list.
 pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize> {
+    rollout_turn_positions(items).1
+}
+
+pub(crate) fn instruction_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize> {
+    rollout_turn_positions(items).0
+}
+
+fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
     let mut rollback_turn_positions = Vec::new();
     let mut fork_turn_positions = Vec::new();
     for (idx, item) in items.iter().enumerate() {
@@ -100,9 +108,12 @@ pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize
             RolloutItem::InterAgentCommunicationMetadata {
                 trigger_turn,
                 delivery_id,
+                terminal_turn_id,
+                consumed_mail_id,
                 ..
             } => {
-                if delivery_id.is_some() {
+                if delivery_id.is_some() || terminal_turn_id.is_some() || consumed_mail_id.is_some()
+                {
                     continue;
                 }
                 rollback_turn_positions.push(idx);
@@ -130,7 +141,7 @@ pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize
             _ => {}
         }
     }
-    fork_turn_positions
+    (rollback_turn_positions, fork_turn_positions)
 }
 
 /// Return a prefix of `items` obtained by cutting strictly before the nth user message.

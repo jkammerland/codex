@@ -397,9 +397,13 @@ impl ThreadHistoryBuilder {
             RolloutItem::EventMsg(event) => self.handle_event(event),
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
             RolloutItem::ResponseItem(item) => self.handle_response_item(&item.item),
+            RolloutItem::InterAgentCommunicationMetadata {
+                terminal_turn_id: Some(turn_id),
+                terminal_status: Some(status),
+                ..
+            } => self.handle_terminal_agent_status(turn_id, status),
             RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::TerminalAgentStatus { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
@@ -1236,6 +1240,31 @@ impl ThreadHistoryBuilder {
         // If the event has no ID (or refers to an unknown turn), fall back to the active turn.
         if let Some(turn) = self.current_turn.as_mut() {
             let changed_turn = apply_abort(turn);
+            self.record_changed_turn(changed_turn);
+        }
+    }
+
+    fn handle_terminal_agent_status(&mut self, turn_id: &str, status: &AgentStatus) {
+        let AgentStatus::Errored(message) = status else {
+            return;
+        };
+        let error = || V2TurnError {
+            misalignment: None,
+            message: message.clone(),
+            codex_error_info: None,
+            additional_details: None,
+        };
+        if let Some(turn) = self.current_turn.as_mut().filter(|turn| turn.id == turn_id) {
+            turn.status = TurnStatus::Failed;
+            turn.error = Some(error());
+            let changed_turn = ThreadHistoryTurnChange::from_pending_turn(turn);
+            self.record_changed_turn(changed_turn);
+            return;
+        }
+        if let Some(turn) = self.turns.iter_mut().find(|turn| turn.id == turn_id) {
+            turn.status = TurnStatus::Failed;
+            turn.error = Some(error());
+            let changed_turn = ThreadHistoryTurnChange::from_turn(turn);
             self.record_changed_turn(changed_turn);
         }
     }
@@ -3956,6 +3985,51 @@ mod tests {
         assert_eq!(turns[1].id, "turn-b");
         assert_eq!(turns[1].status, TurnStatus::InProgress);
         assert_eq!(turns[1].items.len(), 2);
+    }
+
+    #[test]
+    fn terminal_agent_error_marker_overrides_interrupted_history_projection() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id: Some("turn-a".into()),
+                started_at: None,
+                reason: TurnAbortReason::Interrupted,
+                completed_at: None,
+                duration_ms: None,
+            })),
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+                mail_fingerprint: None,
+                delivery_id: None,
+                terminal_turn_id: Some("turn-a".into()),
+                terminal_status: Some(AgentStatus::Errored("delivery failed".into())),
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: None,
+            },
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(
+            (turns[0].status.clone(), turns[0].error.clone()),
+            (
+                TurnStatus::Failed,
+                Some(V2TurnError {
+                    misalignment: None,
+                    message: "delivery failed".into(),
+                    codex_error_info: None,
+                    additional_details: None,
+                }),
+            )
+        );
     }
 
     #[test]

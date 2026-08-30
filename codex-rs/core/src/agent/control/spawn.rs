@@ -50,6 +50,61 @@ struct ProvisionalSpawnEdge {
     child_thread_id: ThreadId,
 }
 
+struct UnpublishedSpawnDropGuard {
+    state: Arc<ThreadManagerState>,
+    thread: Arc<CodexThread>,
+    provisional_edge: Option<ProvisionalSpawnEdge>,
+    armed: bool,
+}
+
+impl UnpublishedSpawnDropGuard {
+    fn new(
+        state: Arc<ThreadManagerState>,
+        thread: Arc<CodexThread>,
+        provisional_edge: Option<ProvisionalSpawnEdge>,
+    ) -> Self {
+        Self {
+            state,
+            thread,
+            provisional_edge,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnpublishedSpawnDropGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        let thread = Arc::clone(&self.thread);
+        let provisional_edge = self.provisional_edge.clone();
+        tokio::spawn(async move {
+            let _ = await_unpublished_spawn_shutdown(thread.shutdown_and_wait()).await;
+            loop {
+                match cleanup_unpublished_spawn_state(&state, &thread, provisional_edge.as_ref())
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(error) => {
+                        warn!(
+                            thread_id = %thread.session.thread_id,
+                            %error,
+                            "unpublished spawn drop cleanup remains pending"
+                        );
+                        tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
+                    }
+                }
+            }
+        });
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UnpublishedSpawnShutdown {
     Complete,
@@ -141,7 +196,6 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         RolloutItem::RealtimeItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::TerminalAgentStatus { .. }
         | RolloutItem::SecurityRiskScore(_) => false,
         // Full-history forks preserve the cached prompt prefix and can keep diffing
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
@@ -915,6 +969,11 @@ impl AgentControl {
                 return Err(error);
             }
         };
+        let mut unpublished_spawn_guard = UnpublishedSpawnDropGuard::new(
+            Arc::clone(&state),
+            Arc::clone(&new_thread.thread),
+            provisional_edge.clone(),
+        );
         debug_assert_eq!(
             reserved_thread_id,
             provisional_edge.as_ref().map(|edge| edge.child_thread_id)
@@ -925,6 +984,7 @@ impl AgentControl {
             let _ = state.remove_thread(&new_thread.thread_id).await;
         }
         if spawn_cancellation.is_cancelled() {
+            unpublished_spawn_guard.disarm();
             if let Err(cleanup_error) = self
                 .discard_unpublished_spawn(
                     &state,
@@ -990,6 +1050,7 @@ impl AgentControl {
             result = &mut initial_submission => result,
             _ = spawn_cancellation.cancelled() => {
                 drop(admission_barrier.take());
+                unpublished_spawn_guard.disarm();
                 if let Err(cleanup_error) = self
                     .discard_unpublished_spawn(
                         &state,
@@ -1008,6 +1069,7 @@ impl AgentControl {
         };
         if let Err(error) = submission_result {
             drop(admission_barrier.take());
+            unpublished_spawn_guard.disarm();
             if let Err(cleanup_error) = self
                 .discard_unpublished_spawn(
                     &state,
@@ -1035,6 +1097,7 @@ impl AgentControl {
             };
             let Some(persistence) = persistence else {
                 drop(admission_barrier.take());
+                unpublished_spawn_guard.disarm();
                 if let Err(cleanup_error) = self
                     .discard_unpublished_spawn(
                         &state,
@@ -1054,6 +1117,7 @@ impl AgentControl {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     drop(admission_barrier.take());
+                    unpublished_spawn_guard.disarm();
                     if let Err(cleanup_error) = self
                         .discard_unpublished_spawn(
                             &state,
@@ -1073,6 +1137,7 @@ impl AgentControl {
                 }
                 Err(_) => {
                     drop(admission_barrier.take());
+                    unpublished_spawn_guard.disarm();
                     if let Err(cleanup_error) = self
                         .discard_unpublished_spawn(
                             &state,
@@ -1097,6 +1162,7 @@ impl AgentControl {
         }
         if spawn_cancellation.is_cancelled() {
             drop(admission_barrier.take());
+            unpublished_spawn_guard.disarm();
             if let Err(cleanup_error) = self
                 .discard_unpublished_spawn(
                     &state,
@@ -1116,6 +1182,7 @@ impl AgentControl {
             && let Err(err) = provisional_edge.mark_open().await
         {
             drop(admission_barrier.take());
+            unpublished_spawn_guard.disarm();
             if let Err(cleanup_error) = self
                 .discard_unpublished_spawn(
                     &state,
@@ -1134,6 +1201,7 @@ impl AgentControl {
             )));
         }
 
+        unpublished_spawn_guard.disarm();
         reservation.commit(agent_metadata.clone());
         if let Some(residency_slot) = residency_slot {
             residency_slot.commit(new_thread.thread_id);
@@ -1527,8 +1595,7 @@ impl AgentControl {
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. }
-                | RolloutItem::TerminalAgentStatus { .. } => true,
+                | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
                 RolloutItem::SecurityRiskScore(_) => false,
             }
         });

@@ -2407,7 +2407,6 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
                 RolloutItem::ResponseItem(_)
                     | RolloutItem::InterAgentCommunication(_)
                     | RolloutItem::InterAgentCommunicationMetadata { .. }
-                    | RolloutItem::TerminalAgentStatus { .. }
             )
         })
         .cloned()
@@ -2417,6 +2416,11 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
             trigger_turn: false,
             mail_fingerprint: None,
             delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: None,
         },
         RolloutItem::ResponseItem(expected_item.clone().into()),
     ];
@@ -3452,7 +3456,6 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::TerminalAgentStatus { .. }
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
@@ -3531,7 +3534,6 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         RolloutItem::SessionMeta(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::TerminalAgentStatus { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)

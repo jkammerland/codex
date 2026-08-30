@@ -10,6 +10,7 @@ use tracing::Instrument;
 use tracing::debug_span;
 use tracing::info_span;
 
+use crate::session::DurableMailMetadata;
 use crate::session::session::Session;
 use crate::session::thread_settings;
 use crate::session::turn_input;
@@ -132,11 +133,15 @@ impl Session {
         let turn_context = self.new_default_turn().await;
         self.try_ensure_rollout_materialized(PersistContext::Standard)
             .await?;
-        match self
+        let recorded_fingerprint = self
             .input_queue
             .recorded_durable_mail_fingerprint(&communication_id)
             .await
-        {
+            .or(self
+                .input_queue
+                .pending_durable_mail_fingerprint(&communication_id)
+                .await);
+        match recorded_fingerprint {
             Some(recorded_fingerprint) if recorded_fingerprint != mail_fingerprint => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -144,6 +149,14 @@ impl Session {
                         "inter-agent communication {communication_id} was retried with a different payload or turn-start options"
                     ),
                 ));
+            }
+            Some(_)
+                if self
+                    .input_queue
+                    .durable_mail_was_consumed(&communication_id)
+                    .await =>
+            {
+                return Ok(false);
             }
             Some(_) => {}
             None => match self
@@ -158,18 +171,27 @@ impl Session {
                         ),
                     ));
                 }
-                Some(true) => {}
+                Some(true) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "inter-agent communication {communication_id} has legacy durable state that cannot prove matching turn-start options"
+                        ),
+                    ));
+                }
                 None => {
                     self.record_inter_agent_communication(
                         &turn_context,
                         communication.clone(),
-                        Some(mail_fingerprint.clone()),
+                        Some(DurableMailMetadata {
+                            fingerprint: mail_fingerprint.clone(),
+                            start_options: start_options.clone(),
+                        }),
                     )
                     .await?
                 }
             },
         }
-        let trigger_turn = communication.trigger_turn;
         if !self
             .input_queue
             .prepare_persisted_mailbox_communication(communication, start_options, mail_fingerprint)
@@ -193,7 +215,7 @@ impl Session {
             )));
         }
         crate::agent_communication::emit_agent_communication_receive(sub_id);
-        Ok(trigger_turn)
+        Ok(self.input_queue.has_trigger_turn_mailbox_items().await)
     }
 
     pub(crate) fn enqueue_inter_agent_communication<'a>(

@@ -306,7 +306,7 @@ impl Session {
             .clear_turn(&turn_context.sub_id);
 
         // Reserved turn input already has its context; only newly arriving mail can change lineage.
-        let (pending_items, start_options) = self.input_queue.drain_mailbox_input_items().await;
+        let (pending_items, start_options) = self.drain_mailbox_input_items().await;
         if pending_items.iter().any(|item| {
             matches!(
                 item,
@@ -461,8 +461,7 @@ impl Session {
             Arc::clone(&active_turn.turn_state)
         };
 
-        let (input, mut start_options) =
-            self.input_queue.get_pending_input(&self.active_turn).await;
+        let (input, mut start_options) = self.get_pending_input().await;
         if !input.iter().any(
             |item| matches!(item, TurnInput::InterAgentCommunication(mail) if mail.trigger_turn),
         ) {

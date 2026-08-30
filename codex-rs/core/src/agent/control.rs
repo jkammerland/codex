@@ -17,6 +17,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::rollout_budget::RolloutBudget;
 use crate::session::emit_subagent_session_started;
 use crate::session::multi_agents::ResolvedMultiAgentV2UsageHints;
+use crate::session_prefix::bounded_completion_agent_path;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::session_prefix::format_subagent_context_line;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
@@ -719,16 +720,18 @@ impl AgentControl {
                 else {
                     return;
                 };
+                let bounded_parent_agent_path = bounded_completion_agent_path(&parent_agent_path);
+                let bounded_child_agent_path = bounded_completion_agent_path(&child_agent_path);
                 let Some(message) = format_inter_agent_completion_message(
-                    parent_agent_path.clone(),
-                    child_agent_path.clone(),
+                    bounded_parent_agent_path.clone(),
+                    bounded_child_agent_path.clone(),
                     &status,
                 ) else {
                     return;
                 };
                 let communication = InterAgentCommunication::new(
-                    child_agent_path,
-                    parent_agent_path,
+                    bounded_child_agent_path,
+                    bounded_parent_agent_path,
                     Vec::new(),
                     message,
                     /*trigger_turn*/ false,

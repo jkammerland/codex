@@ -334,13 +334,10 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
         }),
         json!({
             "type": "inter_agent_communication_metadata",
-            "payload": { "trigger_turn": true },
-        }),
-        json!({
-            "type": "terminal_agent_status",
             "payload": {
-                "turn_id": "turn-1",
-                "status": { "completed": "done" },
+                "trigger_turn": true,
+                "terminal_turn_id": "turn-1",
+                "terminal_status": { "completed": "done" },
             },
         }),
         json!({
@@ -398,7 +395,7 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
 fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
     let variants = schema["oneOf"].as_array().expect("rollout variants");
-    assert_eq!(variants.len(), 11);
+    assert_eq!(variants.len(), 10);
 
     for variant in variants {
         let required = variant["required"].as_array().expect("required fields");

@@ -106,11 +106,16 @@ pub enum RolloutItem {
         /// Deterministic message ID after a spawned child's terminal outbox entry is handled.
         /// This acknowledgement is never model-visible.
         delivery_id: Option<ResponseItemId>,
-    },
-    /// Model-invisible terminal status recorded alongside the raw terminal event.
-    TerminalAgentStatus {
-        turn_id: String,
-        status: AgentStatus,
+        /// Turn owning a model-invisible terminal child outbox marker.
+        terminal_turn_id: Option<String>,
+        /// Exact terminal child status paired with `terminal_turn_id`.
+        terminal_status: Option<AgentStatus>,
+        /// Durable mailbox payload retained until a turn takes ownership of it.
+        mail_communication: Option<InterAgentCommunication>,
+        /// Turn lineage and settings paired with `mail_communication`.
+        mail_start_options: Option<codex_protocol::turn_input::TurnStartOptions>,
+        /// Durable mailbox message whose queued delivery has been consumed by a turn.
+        consumed_mail_id: Option<ResponseItemId>,
     },
     Compacted(CompactedItem),
     TurnContext(TurnContextItem),
@@ -429,7 +434,6 @@ fn multi_agent_version_from_items(
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::TerminalAgentStatus { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)

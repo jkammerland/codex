@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 
 static PENDING_MAILBOX_MESSAGES: Gauge = Gauge::new("core.mailbox.pending");
+const MAX_RECORDED_DURABLE_MAIL: usize = 4_096;
 
 /// Input consumed by a regular turn.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,7 +87,37 @@ pub(crate) struct InputQueue {
 #[derive(Default)]
 struct MailboxState {
     pending_mails: VecDeque<PendingMailboxCommunication>,
-    recorded_durable_mail: HashMap<ResponseItemId, String>,
+    recorded_durable_mail: HashMap<ResponseItemId, RecordedDurableMail>,
+    pending_consumption_markers: VecDeque<ResponseItemId>,
+}
+
+struct RecordedDurableMail {
+    fingerprint: String,
+    consumed: bool,
+}
+
+impl MailboxState {
+    fn record_durable_mail(&mut self, id: ResponseItemId, fingerprint: String, consumed: bool) {
+        if !self.recorded_durable_mail.contains_key(&id)
+            && self.recorded_durable_mail.len() >= MAX_RECORDED_DURABLE_MAIL
+        {
+            let evict = self
+                .recorded_durable_mail
+                .iter()
+                .find_map(|(id, mail)| mail.consumed.then(|| id.clone()));
+            let Some(evict) = evict else {
+                return;
+            };
+            self.recorded_durable_mail.remove(&evict);
+        }
+        self.recorded_durable_mail.insert(
+            id,
+            RecordedDurableMail {
+                fingerprint,
+                consumed,
+            },
+        );
+    }
 }
 
 struct PendingMailboxCommunication {
@@ -114,8 +145,7 @@ impl InputQueue {
         self.mailbox
             .lock()
             .await
-            .recorded_durable_mail
-            .insert(id, fingerprint);
+            .record_durable_mail(id, fingerprint, /*consumed*/ true);
     }
 
     pub(crate) async fn recorded_durable_mail_fingerprint(
@@ -127,7 +157,29 @@ impl InputQueue {
             .await
             .recorded_durable_mail
             .get(id)
-            .cloned()
+            .map(|mail| mail.fingerprint.clone())
+    }
+
+    pub(crate) async fn pending_durable_mail_fingerprint(
+        &self,
+        id: &ResponseItemId,
+    ) -> Option<String> {
+        self.mailbox
+            .lock()
+            .await
+            .pending_mails
+            .iter()
+            .find(|mail| mail.communication.id.as_ref() == Some(id))
+            .and_then(|mail| mail.fingerprint.clone())
+    }
+
+    pub(crate) async fn durable_mail_was_consumed(&self, id: &ResponseItemId) -> bool {
+        self.mailbox
+            .lock()
+            .await
+            .recorded_durable_mail
+            .get(id)
+            .is_some_and(|mail| mail.consumed)
     }
 
     pub(crate) async fn prepare_persisted_mailbox_communication(
@@ -170,9 +222,7 @@ impl InputQueue {
         };
         pending.persisted = true;
         if let Some(fingerprint) = pending.fingerprint.clone() {
-            mailbox
-                .recorded_durable_mail
-                .insert(id.clone(), fingerprint);
+            mailbox.record_durable_mail(id.clone(), fingerprint, /*consumed*/ false);
         }
         drop(mailbox);
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
@@ -252,10 +302,25 @@ impl InputQueue {
                 .iter()
                 .take_while(|mail| mail.persisted)
                 .count();
-            mailbox
+            let pending_mails = mailbox
                 .pending_mails
                 .drain(..deliverable_count)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            for mail in &pending_mails {
+                if let (Some(id), Some(fingerprint)) =
+                    (mail.communication.id.as_ref(), mail.fingerprint.as_ref())
+                {
+                    mailbox.record_durable_mail(
+                        id.clone(),
+                        fingerprint.clone(),
+                        /*consumed*/ true,
+                    );
+                    if !mailbox.pending_consumption_markers.contains(id) {
+                        mailbox.pending_consumption_markers.push_back(id.clone());
+                    }
+                }
+            }
+            pending_mails
         };
         // A later follow-up supersedes the earlier choice, including an omitted choice.
         let mut start_options = pending_mails
@@ -287,6 +352,23 @@ impl InputQueue {
             .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
             .collect();
         (items, start_options)
+    }
+
+    pub(crate) async fn pending_consumption_markers(&self) -> Vec<ResponseItemId> {
+        self.mailbox
+            .lock()
+            .await
+            .pending_consumption_markers
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) async fn mark_consumption_markers_persisted(&self, ids: &[ResponseItemId]) {
+        let mut mailbox = self.mailbox.lock().await;
+        mailbox
+            .pending_consumption_markers
+            .retain(|id| !ids.contains(id));
     }
 
     pub(crate) async fn turn_state_for_sub_id(

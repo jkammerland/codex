@@ -7,9 +7,10 @@ use crate::context::ContextualUserFragment;
 use crate::context::InterAgentCompletionMessage;
 
 const COMPLETION_MESSAGE_MAX_TOKENS: usize = 1_000;
-const COMPLETION_MESSAGE_ENVELOPE_TOKEN_RESERVE: usize = 100;
+const COMPLETION_MESSAGE_ENVELOPE_TOKEN_RESERVE: usize = 400;
 const COMPLETION_PAYLOAD_MAX_TOKENS: usize =
     COMPLETION_MESSAGE_MAX_TOKENS - COMPLETION_MESSAGE_ENVELOPE_TOKEN_RESERVE;
+const COMPLETION_AGENT_PATH_MAX_BYTES: usize = 64;
 const ERROR_NEXT_ACTION: &str = "This agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task.";
 
 // Helpers for model-visible session state markers that are stored in user-role
@@ -21,6 +22,8 @@ pub(crate) fn format_inter_agent_completion_message(
     sender: AgentPath,
     status: &AgentStatus,
 ) -> Option<String> {
+    let task_name = bounded_completion_agent_path(&task_name);
+    let sender = bounded_completion_agent_path(&sender);
     let payload = match status {
         AgentStatus::Completed(Some(message)) => truncate_text(
             message,
@@ -38,11 +41,18 @@ pub(crate) fn format_inter_agent_completion_message(
         AgentStatus::NotFound => "Agent was not found.".to_string(),
         AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => return None,
     };
-    let message = InterAgentCompletionMessage::new(task_name, sender, payload).render();
-    Some(truncate_text(
-        &message,
-        TruncationPolicy::Tokens(COMPLETION_PAYLOAD_MAX_TOKENS),
-    ))
+    Some(InterAgentCompletionMessage::new(task_name, sender, payload).render())
+}
+
+pub(crate) fn bounded_completion_agent_path(path: &AgentPath) -> AgentPath {
+    if path.as_str().len() <= COMPLETION_AGENT_PATH_MAX_BYTES {
+        return path.clone();
+    }
+    let digest = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, path.as_str().as_bytes());
+    match AgentPath::root().join(&format!("truncated_{}", digest.simple())) {
+        Ok(path) => path,
+        Err(_) => AgentPath::root(),
+    }
 }
 
 #[cfg(test)]

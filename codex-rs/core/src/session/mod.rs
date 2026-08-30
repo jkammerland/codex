@@ -242,6 +242,11 @@ use self::handlers::submission_loop;
 pub(crate) use self::input_queue::InputQueueActivity;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
+
+pub(crate) struct DurableMailMetadata {
+    pub(crate) fingerprint: String,
+    pub(crate) start_options: codex_protocol::turn_input::TurnStartOptions,
+}
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -339,6 +344,7 @@ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::DeprecationNoticeEvent;
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
@@ -1371,10 +1377,31 @@ impl Session {
             InitialHistory::Resumed(resumed_history) => {
                 let turn_context = self.new_default_turn().await;
                 let rollout_items = resumed_history.history;
-                for pair in rollout_items.windows(2) {
+                let consumed_durable_mail = rollout_items
+                    .iter()
+                    .filter_map(|item| match item {
+                        RolloutItem::InterAgentCommunicationMetadata {
+                            consumed_mail_id: Some(id),
+                            ..
+                        } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect::<HashSet<_>>();
+                let effective_instruction_turns =
+                    crate::thread_rollout_truncation::instruction_turn_positions_in_rollout(
+                        &rollout_items,
+                    )
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                for (metadata_index, pair) in rollout_items.windows(2).enumerate() {
+                    if !effective_instruction_turns.contains(&metadata_index) {
+                        continue;
+                    }
                     let [
                         RolloutItem::InterAgentCommunicationMetadata {
                             mail_fingerprint: Some(fingerprint),
+                            mail_communication,
+                            mail_start_options,
                             ..
                         },
                         RolloutItem::ResponseItem(response_item),
@@ -1383,9 +1410,32 @@ impl Session {
                         continue;
                     };
                     if let Some(id) = response_item.id().cloned() {
-                        self.input_queue
-                            .restore_recorded_durable_mail(id, fingerprint.clone())
-                            .await;
+                        if consumed_durable_mail.contains(&id) {
+                            self.input_queue
+                                .restore_recorded_durable_mail(id, fingerprint.clone())
+                                .await;
+                        } else if let (Some(communication), Some(start_options)) =
+                            (mail_communication.clone(), mail_start_options.clone())
+                            && communication.id.as_ref() == Some(&id)
+                            && self
+                                .input_queue
+                                .prepare_persisted_mailbox_communication(
+                                    communication,
+                                    start_options,
+                                    fingerprint.clone(),
+                                )
+                                .await
+                        {
+                            let _ = self
+                                .input_queue
+                                .mark_mailbox_communication_persisted(&id)
+                                .await;
+                        } else {
+                            // Legacy records do not retain enough lineage to replay safely.
+                            self.input_queue
+                                .restore_recorded_durable_mail(id, fingerprint.clone())
+                                .await;
+                        }
                     }
                 }
                 let restore_terminal_v2_child = self.multi_agent_version()
@@ -1402,18 +1452,28 @@ impl Session {
                         _ => None,
                     })
                 };
+                let previous_turn_settings = self
+                    .apply_rollout_reconstruction(&turn_context, &rollout_items)
+                    .await;
+                let restored_agent_status = if restore_terminal_v2_child {
+                    self.resume_pending_parent_completion(&turn_context, &rollout_items)
+                        .await
+                        .map_or_else(
+                            |error| {
+                                Some(AgentStatus::Errored(format!(
+                                    "terminal child completion delivery failed: {error}"
+                                )))
+                            },
+                            |()| restored_agent_status,
+                        )
+                } else {
+                    restored_agent_status
+                };
                 if let Some(status) = restored_agent_status
                     && (matches!(status, AgentStatus::Interrupted)
                         || (restore_terminal_v2_child && crate::agent::status::is_final(&status)))
                 {
                     self.agent_status.send_replace(status);
-                }
-                let previous_turn_settings = self
-                    .apply_rollout_reconstruction(&turn_context, &rollout_items)
-                    .await;
-                if restore_terminal_v2_child {
-                    self.resume_pending_parent_completion(&turn_context, &rollout_items)
-                        .await;
                 }
 
                 // If resuming, warn when the last recorded model differs from the current one.
@@ -2084,15 +2144,19 @@ impl Session {
                 let turn_id = parent_completion::terminal_event_turn_id(&event.msg)
                     .unwrap_or(&turn_context.sub_id)
                     .to_string();
-                rollout_items.push(RolloutItem::TerminalAgentStatus { turn_id, status });
+                rollout_items.push(RolloutItem::InterAgentCommunicationMetadata {
+                    trigger_turn: false,
+                    mail_fingerprint: None,
+                    delivery_id: None,
+                    terminal_turn_id: Some(turn_id),
+                    terminal_status: Some(status),
+                    mail_communication: None,
+                    mail_start_options: None,
+                    consumed_mail_id: None,
+                });
             }
-            let persistence_succeeded =
-                self.try_persist_rollout_items(&rollout_items).await.is_ok();
-            self.services
-                .rollout_thread_trace
-                .record_protocol_event(&event.msg);
-            if persistence_succeeded {
-                match self.flush_rollout().await {
+            let terminal_result = match self.try_persist_rollout_items(&rollout_items).await {
+                Ok(()) => match self.flush_rollout().await {
                     Ok(()) => {
                         if let Some(status) = v2_child_terminal_status.clone() {
                             self.maybe_notify_parent_of_terminal_turn(
@@ -2100,18 +2164,63 @@ impl Session {
                                 &legacy_source,
                                 status,
                             )
-                            .await;
+                            .await
+                        } else {
+                            Ok(())
                         }
                     }
-                    Err(error) => warn!(
-                        child_thread_id = %self.thread_id,
-                        %error,
-                        "terminal child event is not durable; parent delivery remains pending"
-                    ),
+                    Err(error) => Err(format!("terminal rollout flush failed: {error}")),
+                },
+                Err(error) => Err(format!("terminal rollout append failed: {error}")),
+            };
+            self.services
+                .rollout_thread_trace
+                .record_protocol_event(&event.msg);
+            let terminal_failure = terminal_result
+                .err()
+                .map(|error| format!("terminal child completion delivery failed: {error}"));
+            if let Some(error) = &terminal_failure {
+                warn!(
+                    child_thread_id = %self.thread_id,
+                    %error,
+                    "terminal child completion could not be made durable"
+                );
+                let turn_id = parent_completion::terminal_event_turn_id(&event.msg)
+                    .unwrap_or(&turn_context.sub_id)
+                    .to_string();
+                let failure_marker = RolloutItem::InterAgentCommunicationMetadata {
+                    trigger_turn: false,
+                    mail_fingerprint: None,
+                    delivery_id: None,
+                    terminal_turn_id: Some(turn_id),
+                    terminal_status: Some(AgentStatus::Errored(error.clone())),
+                    mail_communication: None,
+                    mail_start_options: None,
+                    consumed_mail_id: None,
+                };
+                if self
+                    .try_persist_rollout_items(&[failure_marker])
+                    .await
+                    .is_ok()
+                {
+                    let _ = self.flush_rollout().await;
                 }
+                self.deliver_event_raw_with_status_update(
+                    Event {
+                        id: turn_context.sub_id.clone(),
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: error.clone(),
+                            codex_error_info: None,
+                            misalignment: None,
+                        }),
+                    },
+                    AgentStatusUpdate::Defer,
+                )
+                .await;
             }
-            let status_update = v2_child_terminal_status
-                .map(AgentStatusUpdate::Override)
+            let status_update = terminal_failure
+                .map(|error| AgentStatusUpdate::Override(AgentStatus::Errored(error)))
+                .or_else(|| v2_child_terminal_status.map(AgentStatusUpdate::Override))
                 .unwrap_or(AgentStatusUpdate::Apply);
             self.deliver_event_raw_with_status_update(event, status_update)
                 .await;
@@ -3437,8 +3546,13 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         communication: InterAgentCommunication,
-        mail_fingerprint: Option<String>,
+        durable_mail: Option<DurableMailMetadata>,
     ) -> std::io::Result<()> {
+        let mail_fingerprint = durable_mail
+            .as_ref()
+            .map(|metadata| metadata.fingerprint.clone());
+        let mail_communication = durable_mail.as_ref().map(|_| communication.clone());
+        let mail_start_options = durable_mail.map(|metadata| metadata.start_options);
         let response_item = communication.to_model_input_item();
         let (items, _) = self.prepare_conversation_items_for_history(
             turn_context,
@@ -3453,6 +3567,11 @@ impl Session {
                         trigger_turn: communication.trigger_turn,
                         mail_fingerprint,
                         delivery_id: None,
+                        terminal_turn_id: None,
+                        terminal_status: None,
+                        mail_communication,
+                        mail_start_options,
+                        consumed_mail_id: None,
                     },
                     RolloutItem::ResponseItem(response_item.into()),
                 ])
@@ -3469,6 +3588,60 @@ impl Session {
         }
         self.send_raw_response_items(turn_context, items).await;
         Ok(())
+    }
+
+    async fn persist_pending_mailbox_consumption_markers(&self) -> std::io::Result<()> {
+        let ids = self.input_queue.pending_consumption_markers().await;
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if let Some(live_thread) = self.live_thread() {
+            let items = ids
+                .iter()
+                .cloned()
+                .map(
+                    |consumed_mail_id| RolloutItem::InterAgentCommunicationMetadata {
+                        trigger_turn: false,
+                        mail_fingerprint: None,
+                        delivery_id: None,
+                        terminal_turn_id: None,
+                        terminal_status: None,
+                        mail_communication: None,
+                        mail_start_options: None,
+                        consumed_mail_id: Some(consumed_mail_id),
+                    },
+                )
+                .collect::<Vec<_>>();
+            live_thread
+                .append_items(&items)
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        self.flush_rollout().await?;
+        self.input_queue
+            .mark_consumption_markers_persisted(&ids)
+            .await;
+        Ok(())
+    }
+
+    pub(crate) async fn drain_mailbox_input_items(
+        &self,
+    ) -> (Vec<TurnInput>, codex_protocol::turn_input::TurnStartOptions) {
+        let drained = self.input_queue.drain_mailbox_input_items().await;
+        if let Err(error) = self.persist_pending_mailbox_consumption_markers().await {
+            warn!(%error, "failed to persist durable mailbox consumption markers");
+        }
+        drained
+    }
+
+    pub(crate) async fn get_pending_input(
+        &self,
+    ) -> (Vec<TurnInput>, codex_protocol::turn_input::TurnStartOptions) {
+        let pending = self.input_queue.get_pending_input(&self.active_turn).await;
+        if let Err(error) = self.persist_pending_mailbox_consumption_markers().await {
+            warn!(%error, "failed to persist durable mailbox consumption markers");
+        }
+        pending
     }
 
     pub(crate) async fn has_recorded_inter_agent_communication(

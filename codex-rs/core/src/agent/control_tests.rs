@@ -256,7 +256,6 @@ async fn persisted_originator(thread: &CodexThread) -> String {
             RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::TerminalAgentStatus { .. }
             | RolloutItem::EventMsg(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
@@ -1111,6 +1110,7 @@ async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
         .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
     let persisted = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
+    let parent_source = parent.session_source.clone();
     let spawn = tokio::spawn({
         let control = harness.control.clone();
         let config = harness.config.clone();
@@ -1124,8 +1124,8 @@ async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
                     Some(
                         thread_spawn_source(
                             parent_thread_id,
-                            &parent.session_source,
-                            next_thread_spawn_depth(&parent.session_source),
+                            &parent_source,
+                            next_thread_spawn_depth(&parent_source),
                             /*agent_role*/ None,
                             Some("worker".to_string()),
                         )
@@ -1237,6 +1237,117 @@ async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should complete");
+}
+
+#[tokio::test]
+async fn aborting_spawn_future_after_child_construction_cleans_pending_admission() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, parent) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
+    let persisted = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let parent_source = parent.session_source.clone();
+    let spawn = tokio::spawn({
+        let control = harness.control.clone();
+        let config = harness.config.clone();
+        let persisted = Arc::clone(&persisted);
+        let release = Arc::clone(&release);
+        async move {
+            control
+                .spawn_agent_with_metadata(
+                    config,
+                    text_input("abort owning spawn future"),
+                    Some(
+                        thread_spawn_source(
+                            parent_thread_id,
+                            &parent_source,
+                            next_thread_spawn_depth(&parent_source),
+                            /*agent_role*/ None,
+                            Some("worker".to_string()),
+                        )
+                        .expect("child source"),
+                    ),
+                    SpawnAgentOptions {
+                        parent_thread_id: Some(parent_thread_id),
+                        admission_commit_barrier: Some(
+                            crate::agent::control::AdmissionCommitBarrier { persisted, release },
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }
+    });
+    persisted.notified().await;
+    let child_thread_id = harness
+        .manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .find(|thread_id| *thread_id != parent_thread_id)
+        .expect("constructed child should be loaded");
+
+    spawn.abort();
+    let _ = spawn.await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let loaded = harness.manager.list_thread_ids().await;
+            let pending = state_db
+                .list_pending_thread_spawn_children(parent_thread_id)
+                .await
+                .expect("pending edge query");
+            let stored = state_db
+                .get_thread(child_thread_id)
+                .await
+                .expect("child metadata query");
+            if loaded == vec![parent_thread_id] && pending.is_empty() && stored.is_none() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop guard should clean the unpublished child");
+
+    let replacement = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("capacity should be reusable"),
+            Some(
+                thread_spawn_source(
+                    parent_thread_id,
+                    &parent.session_source,
+                    next_thread_spawn_depth(&parent.session_source),
+                    /*agent_role*/ None,
+                    Some("replacement".to_string()),
+                )
+                .expect("replacement child source"),
+            ),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("cleaned admission should release spawn capacity");
+    harness
+        .control
+        .shutdown_live_agent(replacement.thread_id)
+        .await
+        .expect("replacement shutdown should complete");
 }
 
 #[tokio::test]
@@ -1602,6 +1713,139 @@ async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
             .count(),
         1,
         "append-success/flush-failure retry must not duplicate model history"
+    );
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            communication,
+            AgentCommunicationContext::new(AgentCommunicationKind::Result, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect("same-ID retry after mailbox consumption should be acknowledged");
+    assert_eq!(
+        thread
+            .session
+            .input_queue
+            .drain_mailbox_input_items()
+            .await
+            .0,
+        Vec::new(),
+        "a consumed durable mail must not be queued for a second model turn"
+    );
+}
+
+#[tokio::test]
+async fn consumed_durable_mail_remains_idempotent_after_reload() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "deliver exactly once".to_string(),
+        /*trigger_turn*/ false,
+    );
+    communication.id = Some(codex_protocol::ResponseItemId::with_suffix(
+        "msg",
+        "consumed-reload",
+    ));
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            communication.clone(),
+            AgentCommunicationContext::new(AgentCommunicationKind::Result, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect("mail should persist");
+    assert_eq!(
+        thread.session.drain_mailbox_input_items().await.0,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            communication.clone()
+        )]
+    );
+    harness.manager.remove_thread(&thread_id).await;
+    drop(thread);
+    harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), thread_id, SessionSource::Exec)
+        .await
+        .expect("thread should reload");
+
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            communication,
+            AgentCommunicationContext::new(AgentCommunicationKind::Result, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect("consumed same-ID retry should acknowledge");
+    let reloaded = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("reloaded thread should exist");
+    assert_eq!(
+        reloaded.session.drain_mailbox_input_items().await.0,
+        Vec::new()
+    );
+}
+
+#[tokio::test]
+async fn pending_durable_mail_is_recovered_after_reload() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "recover pending delivery".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(codex_protocol::ResponseItemId::with_suffix(
+        "msg",
+        "pending-reload",
+    ));
+    let start_options = TurnStartOptions {
+        parent_turn_id: Some("parent-turn".to_string()),
+        root_turn_id: Some("root-turn".to_string()),
+        ..Default::default()
+    };
+    thread
+        .session
+        .persist_and_enqueue_inter_agent_communication(
+            "pending-reload",
+            communication.clone(),
+            start_options.clone(),
+        )
+        .await
+        .expect("mail should persist");
+    harness.manager.remove_thread(&thread_id).await;
+    drop(thread);
+    harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), thread_id, SessionSource::Exec)
+        .await
+        .expect("thread should reload");
+
+    let reloaded = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("reloaded thread should exist");
+    assert_eq!(
+        reloaded.session.drain_mailbox_input_items().await,
+        (
+            vec![crate::session::TurnInput::InterAgentCommunication(
+                communication
+            )],
+            start_options,
+        )
     );
 }
 
@@ -2261,7 +2505,21 @@ async fn reloaded_v2_child_replays_only_unacknowledged_terminal_outbox() {
         .session
         .live_thread()
         .expect("child should have a durable writer")
-        .append_items(&[RolloutItem::EventMsg(terminal_event)])
+        .append_items(&[
+            RolloutItem::EventMsg(terminal_event),
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+                mail_fingerprint: None,
+                delivery_id: None,
+                terminal_turn_id: Some(child_turn.sub_id.clone()),
+                terminal_status: Some(AgentStatus::Completed(Some(
+                    "persisted before crash".to_string(),
+                ))),
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: None,
+            },
+        ])
         .await
         .expect("terminal outbox entry should append");
     child_thread
@@ -4870,7 +5128,9 @@ async fn multi_agent_v2_completion_preserves_terminal_status_when_parent_is_dead
 
     assert_eq!(
         tester_thread.agent_status().await,
-        AgentStatus::Completed(Some("done".to_string()))
+        AgentStatus::Errored(format!(
+            "terminal child completion delivery failed: no thread with id: {worker_thread_id}"
+        ))
     );
 
     assert!(
@@ -5247,7 +5507,9 @@ async fn multi_agent_v2_completion_keeps_outbox_pending_after_parent_persistence
 
     assert_eq!(
         child_thread.agent_status().await,
-        AgentStatus::Completed(Some("done".to_string()))
+        AgentStatus::Errored(format!(
+            "terminal child completion delivery failed: Fatal error: failed to persist inter-agent communication for {parent_thread_id}"
+        ))
     );
     child_thread
         .session

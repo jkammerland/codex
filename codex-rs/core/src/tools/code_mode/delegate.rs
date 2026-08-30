@@ -45,6 +45,7 @@ struct DispatchHostState {
 
 struct CellDispatchGate {
     ready: watch::Sender<bool>,
+    host: Option<Arc<CoreTurnHost>>,
     // Keep the original exec item when later waits resume this cell.
     originating_item_id: Option<ResponseItemId>,
 }
@@ -72,6 +73,12 @@ impl CodeModeDispatchBroker {
         cell_id: &CellId,
         originating_item_id: Option<ResponseItemId>,
     ) {
+        let host = self
+            .host_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .host
+            .clone();
         let ready = {
             let mut dispatch_gates = self
                 .dispatch_gates
@@ -81,8 +88,10 @@ impl CodeModeDispatchBroker {
                 .entry(cell_id.clone())
                 .or_insert_with(|| CellDispatchGate {
                     ready: watch::channel(false).0,
+                    host: None,
                     originating_item_id: None,
                 });
+            gate.host = host;
             gate.originating_item_id = originating_item_id;
             gate.ready.clone()
         };
@@ -169,7 +178,6 @@ impl CodeModeDispatchBroker {
         {
             let dispatch_rx = self.dispatch_rx.clone();
             let dispatch_gates = Arc::clone(&self.dispatch_gates);
-            let host_state = Arc::clone(&self.host_state);
             let dispatcher_shutdown = self.dispatcher_shutdown.clone();
             tokio::spawn(async move {
                 loop {
@@ -180,15 +188,6 @@ impl CodeModeDispatchBroker {
                     };
                     let Some(message) = message else {
                         break;
-                    };
-                    let host = host_state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .host
-                        .clone();
-                    let Some(host) = host else {
-                        tracing::warn!("dropping code-mode dispatch without an active host");
-                        continue;
                     };
                     match message {
                         DispatchMessage::Notify {
@@ -205,7 +204,12 @@ impl CodeModeDispatchBroker {
                             )
                             .await
                             {
-                                host.notify(call_id, cell_id, text).await
+                                match dispatch_host(&dispatch_gates, &cell_id) {
+                                    Some(host) => host.notify(call_id, cell_id, text).await,
+                                    None => Err(format!(
+                                        "code-mode cell {cell_id} has no originating dispatch host"
+                                    )),
+                                }
                             } else {
                                 remove_dispatch_gate(&dispatch_gates, &cell_id);
                                 Err("code mode notification cancelled".to_string())
@@ -229,6 +233,12 @@ impl CodeModeDispatchBroker {
                                 remove_dispatch_gate(&dispatch_gates, &cell_id);
                                 continue;
                             }
+                            let Some(host) = dispatch_host(&dispatch_gates, &cell_id) else {
+                                let _ = response_tx.send(Err(format!(
+                                    "code-mode cell {cell_id} has no originating dispatch host"
+                                )));
+                                continue;
+                            };
                             let dispatch_gates = Arc::clone(&dispatch_gates);
                             tokio::spawn(async move {
                                 let invocation = {
@@ -271,6 +281,10 @@ impl CodeModeDispatchBroker {
 
     pub(super) fn shutdown(&self) {
         self.dispatcher_shutdown.cancel();
+        self.dispatch_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         let mut host_state = self
             .host_state
             .lock()
@@ -292,10 +306,22 @@ fn dispatch_gate(
         .entry(cell_id.clone())
         .or_insert_with(|| CellDispatchGate {
             ready: watch::channel(false).0,
+            host: None,
             originating_item_id: None,
         })
         .ready
         .clone()
+}
+
+fn dispatch_host(
+    dispatch_gates: &Mutex<HashMap<CellId, CellDispatchGate>>,
+    cell_id: &CellId,
+) -> Option<Arc<CoreTurnHost>> {
+    dispatch_gates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(cell_id)
+        .and_then(|gate| gate.host.clone())
 }
 
 fn remove_dispatch_gate(

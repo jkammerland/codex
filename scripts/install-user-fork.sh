@@ -2,7 +2,7 @@
 
 set -eu
 
-FORK_MARKER="+jkammerland.mcp.8"
+FORK_MARKER="+jkammerland.mcp.9"
 RUSTY_V8_VERSION="150.4.0"
 RUSTY_V8_PROFILE="ptrcomp_sandbox_release"
 RUST_TARGET="x86_64-unknown-linux-gnu"
@@ -83,18 +83,28 @@ if [ "$RUST_HOST" != "$RUST_TARGET" ]; then
   exit 1
 fi
 
-NPM_ROOT=$(npm root --global)
-INSTALLED_BIN_DIR="$NPM_ROOT/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin"
+COMMAND_CODEX=$(command -v codex || true)
+RESOLVED_CODEX=""
+if [ -n "$COMMAND_CODEX" ]; then
+  RESOLVED_CODEX=$(readlink -f -- "$COMMAND_CODEX")
+fi
+
+if [ -n "$RESOLVED_CODEX" ] && [ -x "$(dirname -- "$RESOLVED_CODEX")/codex-code-mode-host" ]; then
+  INSTALLED_BIN_DIR=$(dirname -- "$RESOLVED_CODEX")
+else
+  NPM_ROOT=$(npm root --global)
+  INSTALLED_BIN_DIR="$NPM_ROOT/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin"
+fi
 INSTALLED_CODEX="$INSTALLED_BIN_DIR/codex"
 INSTALLED_CODE_MODE_HOST="$INSTALLED_BIN_DIR/codex-code-mode-host"
 
 if [ ! -x "$INSTALLED_CODEX" ]; then
-  echo "Could not find the npm-managed native Codex executable at: $INSTALLED_CODEX" >&2
+  echo "Could not find the active standalone or npm-managed native Codex executable at: $INSTALLED_CODEX" >&2
   exit 1
 fi
 
 if [ ! -x "$INSTALLED_CODE_MODE_HOST" ]; then
-  echo "Could not find the npm-managed code-mode host at: $INSTALLED_CODE_MODE_HOST" >&2
+  echo "Could not find the active standalone or npm-managed code-mode host at: $INSTALLED_CODE_MODE_HOST" >&2
   exit 1
 fi
 

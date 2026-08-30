@@ -35,12 +35,30 @@ pub(crate) type McpEventStreamReady = oneshot::Receiver<Result<(), JSONRPCErrorE
 #[derive(Debug)]
 struct McpEventStreamTask {
     thread_id: ThreadId,
-    task: JoinHandle<()>,
+    state: McpEventStreamTaskState,
+}
+
+impl McpEventStreamTask {
+    fn is_finished(&self) -> bool {
+        match &self.state {
+            McpEventStreamTaskState::Running(task) => task.is_finished(),
+            McpEventStreamTaskState::Stopping { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum McpEventStreamTaskState {
+    Running(JoinHandle<()>),
+    Stopping {
+        completed: watch::Receiver<bool>,
+        lease: Arc<()>,
+    },
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct McpEventStreams {
-    tasks: Mutex<HashMap<String, McpEventStreamTask>>,
+    tasks: Arc<Mutex<HashMap<String, McpEventStreamTask>>>,
 }
 
 impl McpEventStreams {
@@ -122,31 +140,59 @@ impl McpEventStreams {
         thread_id: ThreadId,
         spawn_task: impl FnOnce() -> JoinHandle<()>,
     ) -> Result<(), JSONRPCErrorError> {
-        {
-            let mut tasks = self.tasks.lock().await;
-            // A subscription ID remains leased until its forwarding task has
-            // finished sending the terminal notification. This prevents a
-            // delayed terminal event from being attributed to a same-ID
-            // replacement.
-            tasks.retain(|_, task| !task.task.is_finished());
-            if tasks.contains_key(&subscription_id) {
-                return Err(invalid_request(format!(
-                    "MCP event subscription '{subscription_id}' already exists"
-                )));
+        let mut spawn_task = Some(spawn_task);
+        loop {
+            let stopping = {
+                let mut tasks = self.tasks.lock().await;
+                // A subscription ID remains leased until its forwarding task has
+                // finished sending the terminal notification. This prevents a
+                // delayed terminal event from being attributed to a same-ID
+                // replacement.
+                tasks.retain(|_, task| !task.is_finished());
+                if let Some(task) = tasks.get(&subscription_id) {
+                    match &task.state {
+                        McpEventStreamTaskState::Running(_) => {
+                            return Err(invalid_request(format!(
+                                "MCP event subscription '{subscription_id}' already exists"
+                            )));
+                        }
+                        McpEventStreamTaskState::Stopping { completed, .. } => {
+                            Some(completed.clone())
+                        }
+                    }
+                } else {
+                    if tasks.len() >= MAX_MCP_EVENT_STREAMS_PER_CONNECTION {
+                        return Err(JSONRPCErrorError {
+                            code: OVERLOADED_ERROR_CODE,
+                            message: format!(
+                                "MCP event subscription limit of {MAX_MCP_EVENT_STREAMS_PER_CONNECTION} reached"
+                            ),
+                            data: None,
+                        });
+                    }
+                    let Some(spawn_task) = spawn_task.take() else {
+                        return Err(internal_error(
+                            "MCP event subscription task was already started",
+                        ));
+                    };
+                    let task = spawn_task();
+                    tasks.insert(
+                        subscription_id.clone(),
+                        McpEventStreamTask {
+                            thread_id,
+                            state: McpEventStreamTaskState::Running(task),
+                        },
+                    );
+                    None
+                }
+            };
+            let Some(mut stopping) = stopping else {
+                return Ok(());
+            };
+            if !*stopping.borrow() {
+                let _ = stopping.changed().await;
             }
-            if tasks.len() >= MAX_MCP_EVENT_STREAMS_PER_CONNECTION {
-                return Err(JSONRPCErrorError {
-                    code: OVERLOADED_ERROR_CODE,
-                    message: format!(
-                        "MCP event subscription limit of {MAX_MCP_EVENT_STREAMS_PER_CONNECTION} reached"
-                    ),
-                    data: None,
-                });
-            }
-            let task = spawn_task();
-            tasks.insert(subscription_id, McpEventStreamTask { thread_id, task });
         }
-        Ok(())
     }
 
     pub(crate) async fn wait_for_activation(
@@ -167,32 +213,76 @@ impl McpEventStreams {
     }
 
     pub(crate) async fn stop(&self, subscription_id: &str) {
-        let task = self.tasks.lock().await.remove(subscription_id);
-        if let Some(task) = task {
-            task.task.abort();
-            let _ = task.task.await;
-        }
+        self.stop_where(|id, _| id == subscription_id).await;
     }
 
     pub(crate) async fn stop_thread(&self, thread_id: ThreadId) {
-        self.stop_matching(Some(thread_id)).await;
+        self.stop_where(|_, task| task.thread_id == thread_id).await;
     }
 
     pub(crate) async fn clear(&self) {
-        self.stop_matching(/*thread_id*/ None).await;
+        self.stop_where(|_, _| true).await;
     }
 
-    async fn stop_matching(&self, thread_id: Option<ThreadId>) {
-        let tasks = self
-            .tasks
-            .lock()
-            .await
-            .extract_if(|_, task| thread_id.is_none_or(|id| task.thread_id == id))
-            .map(|(_, task)| task)
-            .collect::<Vec<_>>();
-        for task in tasks {
-            task.task.abort();
-            let _ = task.task.await;
+    async fn stop_where(&self, matches: impl Fn(&str, &McpEventStreamTask) -> bool) {
+        let mut completions = Vec::new();
+        {
+            let mut tasks = self.tasks.lock().await;
+            let matching_ids = tasks
+                .iter()
+                .filter(|(id, task)| matches(id, task))
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for subscription_id in matching_ids {
+                let Some(task) = tasks.get_mut(&subscription_id) else {
+                    continue;
+                };
+                if let McpEventStreamTaskState::Stopping { completed, .. } = &task.state {
+                    completions.push(completed.clone());
+                    continue;
+                }
+
+                let (completed_tx, completed_rx) = watch::channel(false);
+                let lease = Arc::new(());
+                let previous = std::mem::replace(
+                    &mut task.state,
+                    McpEventStreamTaskState::Stopping {
+                        completed: completed_rx.clone(),
+                        lease: Arc::clone(&lease),
+                    },
+                );
+                let McpEventStreamTaskState::Running(task) = previous else {
+                    continue;
+                };
+                task.abort();
+                completions.push(completed_rx);
+
+                let tasks = Arc::clone(&self.tasks);
+                let _cleanup_task = tokio::spawn(async move {
+                    let _ = task.await;
+                    let mut tasks = tasks.lock().await;
+                    let owns_lease =
+                        tasks
+                            .get(&subscription_id)
+                            .is_some_and(|task| match &task.state {
+                                McpEventStreamTaskState::Running(_) => false,
+                                McpEventStreamTaskState::Stopping {
+                                    lease: current_lease,
+                                    ..
+                                } => Arc::ptr_eq(current_lease, &lease),
+                            });
+                    if owns_lease {
+                        tasks.remove(&subscription_id);
+                    }
+                    drop(tasks);
+                    let _ = completed_tx.send(true);
+                });
+            }
+        }
+        for mut completion in completions {
+            if !*completion.borrow() {
+                let _ = completion.changed().await;
+            }
         }
     }
 }

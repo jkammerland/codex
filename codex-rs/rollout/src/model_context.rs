@@ -133,8 +133,37 @@ impl ModelContextScan {
             && self.has_context_cutoff()
         {
             self.bounded_suffix_len = Some(self.items_newest_first.len());
+            self.seed_older_turn_start_retention_from_bounded_suffix();
         }
         progress
+    }
+
+    fn seed_older_turn_start_retention_from_bounded_suffix(&mut self) {
+        let suffix_started_turn_ids = self
+            .items_newest_first
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TurnStarted(started)) => {
+                    Some(started.turn_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        self.older_claim_turn_ids_awaiting_start
+            .extend(
+                self.items_newest_first
+                    .iter()
+                    .filter_map(|item| match item {
+                        RolloutItem::DurableInterAgentCommunicationClaimed { turn_id, .. }
+                            if !suffix_started_turn_ids.contains(turn_id) =>
+                        {
+                            Some(turn_id.clone())
+                        }
+                        _ => None,
+                    }),
+            );
+        self.retained_started_turn_ids
+            .extend(suffix_started_turn_ids);
     }
 
     /// Returns the collected items in chronological order with canonical head metadata.
@@ -381,26 +410,22 @@ struct DurablePayload {
 
 #[derive(Clone)]
 struct DurableClaim {
+    communication_id: ResponseItemId,
+    fingerprint: String,
     communication: Option<InterAgentCommunication>,
     turn_id: String,
     from_older_history: bool,
     delivered: bool,
+    turn_started: bool,
 }
 
 fn compact_durable_agent_state(
     older_items: &[RolloutItem],
     bounded_suffix: &[RolloutItem],
 ) -> Vec<RolloutItem> {
-    let all_items = older_items.iter().chain(bounded_suffix);
-    let started_turn_ids = all_items
-        .clone()
-        .filter_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.clone()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    let legacy_consumed_ids = all_items
-        .clone()
+    let legacy_consumed_ids = older_items
+        .iter()
+        .chain(bounded_suffix)
         .filter_map(|item| match item {
             RolloutItem::InterAgentCommunicationMetadata {
                 consumed_mail_id: Some(id),
@@ -409,29 +434,38 @@ fn compact_durable_agent_state(
             _ => None,
         })
         .collect::<HashSet<_>>();
-    let mut claims = HashMap::new();
+    let mut claims = Vec::new();
+    let mut claim_indices = HashMap::new();
+    let mut started_turn_ids = HashSet::new();
     for (from_older_history, item) in older_items
         .iter()
         .map(|item| (true, item))
         .chain(bounded_suffix.iter().map(|item| (false, item)))
     {
-        if let RolloutItem::DurableInterAgentCommunicationClaimed {
-            communication_id,
-            communication,
-            delivered_response,
-            fingerprint,
-            turn_id,
-        } = item
-        {
-            claims.insert(
-                (communication_id.clone(), fingerprint.clone()),
-                DurableClaim {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                started_turn_ids.insert(event.turn_id.clone());
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
+                communication,
+                delivered_response,
+                fingerprint,
+                turn_id,
+            } => {
+                let index = claims.len();
+                claims.push(DurableClaim {
+                    communication_id: communication_id.clone(),
+                    fingerprint: fingerprint.clone(),
                     communication: communication.clone(),
                     turn_id: turn_id.clone(),
                     from_older_history,
                     delivered: delivered_response.is_some(),
-                },
-            );
+                    turn_started: started_turn_ids.contains(turn_id),
+                });
+                claim_indices.insert((communication_id.clone(), fingerprint.clone()), index);
+            }
+            _ => {}
         }
     }
 
@@ -471,7 +505,26 @@ fn compact_durable_agent_state(
         }
     }
 
-    let mut compacted = Vec::new();
+    let bounded_claim_turn_ids = bounded_suffix
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::DurableInterAgentCommunicationClaimed { turn_id, .. } => {
+                Some(turn_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut compacted = older_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::TurnStarted(started))
+                    if bounded_claim_turn_ids.contains(started.turn_id.as_str())
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let mut represented_ids = HashSet::new();
     for payload in payloads {
         let Some(id) = payload.communication.id.clone() else {
@@ -480,10 +533,11 @@ fn compact_durable_agent_state(
         if !represented_ids.insert(id.clone()) {
             continue;
         }
-        let claim = claims.get(&(id.clone(), payload.fingerprint.clone()));
+        let claim = claim_indices
+            .get(&(id.clone(), payload.fingerprint.clone()))
+            .and_then(|index| claims.get(*index));
         let consumed = legacy_consumed_ids.contains(&id)
-            || claim
-                .is_some_and(|claim| claim.delivered || started_turn_ids.contains(&claim.turn_id));
+            || claim.is_some_and(|claim| claim.delivered || claim.turn_started);
         if consumed {
             compacted.push(consumed_mail_marker(id, payload.fingerprint));
         } else {
@@ -542,17 +596,29 @@ fn compact_durable_agent_state(
         }
     }
 
-    for ((id, fingerprint), claim) in claims {
-        if claim.from_older_history && represented_ids.insert(id.clone()) {
-            if claim.delivered || started_turn_ids.contains(&claim.turn_id) {
+    for (index, claim) in claims.into_iter().enumerate() {
+        let DurableClaim {
+            communication_id: id,
+            fingerprint,
+            communication,
+            turn_id,
+            from_older_history,
+            delivered,
+            turn_started,
+        } = claim;
+        if claim_indices.get(&(id.clone(), fingerprint.clone())) != Some(&index) {
+            continue;
+        }
+        if from_older_history && represented_ids.insert(id.clone()) {
+            if delivered || turn_started {
                 compacted.push(consumed_mail_marker(id, fingerprint));
             } else {
                 compacted.push(RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication_id: id,
-                    communication: claim.communication,
+                    communication,
                     delivered_response: None,
                     fingerprint,
-                    turn_id: claim.turn_id,
+                    turn_id,
                 });
             }
         }

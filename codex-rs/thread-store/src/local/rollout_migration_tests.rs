@@ -1027,9 +1027,16 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
                 compatibility_shadow: false,
             },
             rollout_response_item(delivery.to_model_input_item()),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "delivery-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id: delivery_id.clone(),
-                communication: None,
+                communication: Some(delivery.clone()),
                 delivered_response: None,
                 fingerprint: "sha256:delivery".to_string(),
                 turn_id: "delivery-turn".to_string(),
@@ -1055,19 +1062,14 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
         }
         _ => false,
     }));
-    assert!(migrated.iter().any(|line| {
-        matches!(
-            &line.item,
-            RolloutItem::DurableInterAgentCommunicationClaimed {
-                communication_id,
-                fingerprint,
-                turn_id,
-                ..
-            } if communication_id == &delivery_id
-                && fingerprint == "sha256:delivery"
-                && turn_id == "delivery-turn"
-        )
-    }));
+    assert!(migrated.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::InterAgentCommunicationMetadata {
+            consumed_mail_id: Some(communication_id),
+            mail_fingerprint: Some(fingerprint),
+            ..
+        } if communication_id == &delivery_id && fingerprint == "sha256:delivery"
+    )));
 }
 
 #[tokio::test]

@@ -25,6 +25,7 @@ pub struct ReverseJsonlScanner<R> {
     record_reversed: Vec<u8>,
     max_record_bytes: Option<usize>,
     discarding_oversized_record: bool,
+    reject_oversized_records: bool,
 }
 
 impl<R> ReverseJsonlScanner<R>
@@ -56,12 +57,19 @@ where
             record_reversed: Vec::new(),
             max_record_bytes: None,
             discarding_oversized_record: false,
+            reject_oversized_records: false,
         })
     }
 
     /// Skips records larger than the configured limit without buffering or parsing them.
     pub fn with_max_record_bytes(mut self, max_record_bytes: usize) -> Self {
         self.max_record_bytes = Some(max_record_bytes);
+        self
+    }
+
+    /// Fails the scan when a record exceeds the configured byte limit instead of skipping it.
+    pub fn with_oversized_records_rejected(mut self) -> Self {
+        self.reject_oversized_records = true;
         self
     }
 
@@ -78,6 +86,9 @@ where
                 if self.next_chunk_end == 0 {
                     if self.discarding_oversized_record {
                         self.discarding_oversized_record = false;
+                        if self.reject_oversized_records {
+                            return Err(self.oversized_record_error());
+                        }
                         return Ok(None);
                     }
                     return Ok(self.finish_record());
@@ -107,6 +118,9 @@ where
                 self.chunk_position = newline_position;
                 if self.discarding_oversized_record {
                     self.discarding_oversized_record = false;
+                    if self.reject_oversized_records {
+                        return Err(self.oversized_record_error());
+                    }
                     continue;
                 }
                 if let Some(outcome) = self.finish_record() {
@@ -126,6 +140,16 @@ where
                 self.chunk_position = 0;
             }
         }
+    }
+
+    fn oversized_record_error(&self) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "reverse JSONL record exceeds the configured {} byte limit",
+                self.max_record_bytes.unwrap_or_default()
+            ),
+        )
     }
 
     fn finish_record<T>(&mut self) -> Option<ScanOutcome<T>>

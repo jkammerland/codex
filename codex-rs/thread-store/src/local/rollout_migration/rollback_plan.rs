@@ -72,7 +72,6 @@ impl RollbackPlan {
         if boundary.is_some_and(|boundary| !self.boundary_alive[boundary]) {
             if let RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
-                delivered_response: Some(_),
                 fingerprint,
                 ..
             } = line.item
@@ -248,6 +247,16 @@ impl RollbackPlanner {
                 ..
             } => {
                 self.start_boundary(index);
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed { .. }
+                if response_is_model_visible =>
+            {
+                if let Some(boundary) = self.boundary_stack.last().copied() {
+                    self.record_boundaries[index] = Some(boundary);
+                    self.bind_active_turn(boundary);
+                } else {
+                    self.start_boundary(index);
+                }
             }
             RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {
                 // A durable claim prevents automatic replay even if its model-visible turn is

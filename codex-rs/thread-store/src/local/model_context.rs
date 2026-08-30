@@ -132,19 +132,31 @@ fn scan_model_context_from_lineage_blocking(
     lineage: &RolloutLineage,
     session_meta: SessionMetaLine,
 ) -> io::Result<Vec<RolloutItem>> {
+    const MAX_MODEL_CONTEXT_ROLLOUT_LINE_BYTES: usize = 16 * 1024 * 1024;
     let mode = if session_meta.meta.multi_agent_version == Some(MultiAgentVersion::V2) {
         ModelContextScanMode::PreserveDurableAgentState
     } else {
         ModelContextScanMode::Bounded
     };
     let mut scan = ModelContextScan::new(mode);
+    let mut inspected_records = 0usize;
     'segments: for segment in lineage.segments().iter().rev() {
         let file = codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
-        let mut scanner = match segment.end.map(|end| end.end_byte_offset) {
+        let scanner = match segment.end.map(|end| end.end_byte_offset) {
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
             None => ReverseJsonlScanner::new(file)?,
         };
+        let mut scanner = scanner
+            .with_max_record_bytes(MAX_MODEL_CONTEXT_ROLLOUT_LINE_BYTES)
+            .with_oversized_records_rejected();
         while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
+            inspected_records = inspected_records.saturating_add(1);
+            if inspected_records > codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "model-context scan exceeded its physical record limit",
+                ));
+            }
             let ScanOutcome::Parsed(line) = outcome else {
                 continue;
             };

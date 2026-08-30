@@ -4,13 +4,20 @@ use super::MAX_PRESERVED_DURABLE_STATE_ITEMS;
 use super::ModelContextScan;
 use super::ModelContextScanMode;
 use super::ModelContextScanProgress;
+use crate::CompactedItem;
 use crate::RolloutItem;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 
 fn model_invisible_mail_metadata() -> RolloutItem {
@@ -59,6 +66,48 @@ fn finish(scan: ModelContextScan) -> Vec<RolloutItem> {
         meta: SessionMeta::default(),
         git: None,
     })
+}
+
+fn completed_turn_context(turn_id: &str) -> RolloutItem {
+    RolloutItem::TurnContext(TurnContextItem {
+        turn_id: Some(turn_id.to_string()),
+        cwd: serde_json::from_value(serde_json::json!("/tmp")).expect("absolute cwd"),
+        workspace_roots: None,
+        current_date: None,
+        timezone: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: None,
+        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        permission_profile: None,
+        active_permission_profile: None,
+        network: None,
+        file_system_sandbox_policy: None,
+        model: "test-model".to_string(),
+        comp_hash: None,
+        personality: None,
+        collaboration_mode: None,
+        multi_agent_version: None,
+        multi_agent_mode: None,
+        realtime_active: None,
+        cyber_access_program: None,
+        effort: None,
+        summary: ReasoningSummary::Auto,
+    })
+}
+
+fn agent_response() -> RolloutItem {
+    RolloutItem::ResponseItem(
+        ResponseItem::AgentMessage {
+            id: None,
+            author: "assistant".to_string(),
+            recipient: "user".to_string(),
+            content: vec![AgentMessageInputContent::InputText {
+                text: "done".to_string(),
+            }],
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    )
 }
 
 #[test]
@@ -164,6 +213,81 @@ fn durable_scan_retains_a_turn_start_older_than_its_legacy_claim() {
         } if consumed_id == &id
     )));
     assert!(!items.iter().any(|item| matches!(
+        item,
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            ..
+        } if communication_id == &id
+    )));
+}
+
+#[test]
+fn durable_scan_does_not_apply_a_newer_turn_start_to_an_older_claim() {
+    let id = ResponseItemId::with_suffix("msg", "future-start");
+    let mut scan = ModelContextScan::new(ModelContextScanMode::PreserveDurableAgentState);
+    scan.bounded_suffix_len = Some(0);
+
+    assert_eq!(
+        scan.push(turn_started("reused-turn")),
+        ModelContextScanProgress::Continue
+    );
+    assert_eq!(
+        scan.push(legacy_claim(&id, "reused-turn")),
+        ModelContextScanProgress::Continue
+    );
+
+    let items = finish(scan);
+    assert!(items.iter().any(|item| matches!(
+        item,
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            ..
+        } if communication_id == &id
+    )));
+    assert!(!items.iter().any(|item| matches!(
+        item,
+        RolloutItem::InterAgentCommunicationMetadata {
+            consumed_mail_id: Some(consumed_id),
+            ..
+        } if consumed_id == &id
+    )));
+}
+
+#[test]
+fn production_cutoff_retains_start_older_than_claim_in_bounded_suffix() {
+    let id = ResponseItemId::with_suffix("msg", "cutoff-split");
+    let mut scan = ModelContextScan::new(ModelContextScanMode::PreserveDurableAgentState);
+
+    for item in [
+        agent_response(),
+        completed_turn_context("newest-turn"),
+        turn_started("newest-turn"),
+        legacy_claim(&id, "legacy-turn"),
+        RolloutItem::Compacted(CompactedItem {
+            message: "checkpoint".to_string(),
+            replacement_history: Some(Vec::new()),
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+        }),
+    ] {
+        assert_eq!(scan.push(item), ModelContextScanProgress::Continue);
+    }
+    assert!(scan.has_bounded_suffix());
+    assert_eq!(
+        scan.push(turn_started("legacy-turn")),
+        ModelContextScanProgress::Continue
+    );
+
+    let items = finish(scan);
+    assert!(items.iter().any(|item| matches!(
+        item,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(started))
+            if started.turn_id == "legacy-turn"
+    )));
+    assert!(items.iter().any(|item| matches!(
         item,
         RolloutItem::DurableInterAgentCommunicationClaimed {
             communication_id,

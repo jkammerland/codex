@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -142,6 +143,34 @@ async fn multi_agent_v2_scan_preserves_durable_mail_behind_a_checkpoint() {
 }
 
 #[tokio::test]
+async fn model_context_scan_bounds_rejected_physical_records() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1010);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_paginated_rollout(home.path(), "2025-01-03T13-00-09", uuid, []);
+    let file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open rollout for malformed suffix");
+    let mut writer = BufWriter::new(file);
+    for _ in 0..=codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS {
+        writeln!(writer, "not-json").expect("append rejected rollout record");
+    }
+    writer.flush().expect("flush malformed suffix");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let error = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect_err("rejected physical records must not permit an unbounded reverse scan");
+
+    assert!(error.to_string().contains("physical record limit"));
+}
+
+#[tokio::test]
 async fn multi_agent_v2_scan_compacts_consumed_mail_behind_a_checkpoint() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1009);
@@ -178,6 +207,7 @@ async fn multi_agent_v2_scan_compacts_consumed_mail_behind_a_checkpoint() {
                 turn_id: "mail-turn".to_string(),
                 compatibility_shadow: false,
             },
+            turn_started("mail-turn"),
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id: communication_id.clone(),
                 communication: Some(communication),
@@ -185,7 +215,6 @@ async fn multi_agent_v2_scan_compacts_consumed_mail_behind_a_checkpoint() {
                 fingerprint: "fingerprint".to_string(),
                 turn_id: "mail-turn".to_string(),
             },
-            turn_started("mail-turn"),
             turn_complete("mail-turn"),
             turn_started("turn-1"),
             user_message("newer turn"),

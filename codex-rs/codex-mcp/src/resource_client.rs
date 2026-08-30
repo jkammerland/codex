@@ -162,7 +162,7 @@ impl McpEventStream {
                     {
                         continue;
                     }
-                    self.drain_pending_notifications();
+                    self.close_and_drain_pending_notifications();
                     self.cancel();
                     self.pending_end = Some(if latest.is_some() {
                         Ok(McpEventStreamEnd::ConnectionSuperseded)
@@ -174,7 +174,7 @@ impl McpEventStream {
                     return Ok(McpEventStreamItem::Notification(notification));
                 }
                 Next::Finished(result) => {
-                    self.drain_pending_notifications();
+                    self.close_and_drain_pending_notifications();
                     self.request = None;
                     self.connection = None;
                     self.pending_end = Some(result);
@@ -183,10 +183,11 @@ impl McpEventStream {
         }
     }
 
-    fn drain_pending_notifications(&mut self) {
+    fn close_and_drain_pending_notifications(&mut self) {
         let Some(request) = self.request.as_mut() else {
             return;
         };
+        request.notifications.close();
         while let Ok(notification) = request.notifications.try_recv() {
             self.pending_notifications
                 .push_back(event_notification(notification));

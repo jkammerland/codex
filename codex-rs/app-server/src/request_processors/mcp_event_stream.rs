@@ -258,6 +258,9 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
         };
         let active = notification.method == "notifications/events/active";
         let terminated = notification.method == "notifications/events/terminated";
+        if terminated {
+            retired.store(true, Ordering::Release);
+        }
         if !send(McpServerEventNotification {
             method: notification.method,
             params: notification
@@ -273,7 +276,6 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
             let _ = ready.send(Ok(()));
         }
         if terminated {
-            retired.store(true, Ordering::Release);
             return;
         }
     };
@@ -283,12 +285,14 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
             "MCP event stream ended before becoming active: {termination_reason}"
         ))));
     } else {
+        // Make a same-ID replacement admissible before the client can observe this terminal
+        // notification. The old request has already ended and will not emit another event.
+        retired.store(true, Ordering::Release);
         send(McpServerEventNotification {
             method: "notifications/events/terminated".to_string(),
             params: serde_json::json!({ "reason": termination_reason }),
         })
         .await;
-        retired.store(true, Ordering::Release);
     }
 }
 

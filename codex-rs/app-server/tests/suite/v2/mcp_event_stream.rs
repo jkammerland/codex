@@ -45,18 +45,31 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+struct StreamClosed {
+    path: String,
+    closed: mpsc::UnboundedSender<String>,
+}
+
+impl Drop for StreamClosed {
+    fn drop(&mut self) {
+        let _ = self.closed.send(self.path.clone());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> Result<()> {
     let responses_server = responses::start_mock_server().await;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let apps_url = format!("http://{}", listener.local_addr()?);
     let (stream_started_tx, mut stream_started_rx) = mpsc::unbounded_channel::<(String, Value)>();
+    let (stream_closed_tx, mut stream_closed_rx) = mpsc::unbounded_channel::<String>();
     let allow_activation = Arc::new(Notify::new());
     let activation_gate = Arc::clone(&allow_activation);
     let stream_count = Arc::new(AtomicUsize::new(0));
     let fail_once_count = Arc::new(AtomicUsize::new(0));
     let handler = post(move |uri: Uri, Json(message): Json<Value>| {
         let stream_started_tx = stream_started_tx.clone();
+        let stream_closed_tx = stream_closed_tx.clone();
         let allow_activation = Arc::clone(&activation_gate);
         let stream_count = Arc::clone(&stream_count);
         let fail_once_count = Arc::clone(&fail_once_count);
@@ -87,6 +100,7 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                 }))
                 .into_response(),
                 Some("events/stream") => {
+                    let stream_path = uri.path().to_string();
                     let stream_number = stream_count.fetch_add(1, Ordering::AcqRel);
                     let quiet_after_active = uri.path().contains("/quiet");
                     let end_after_active = uri.path().contains("/ended");
@@ -94,7 +108,7 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                     let close_after_active = uri.path().contains("/transport-close");
                     let flood_after_active = uri.path().contains("/flood");
                     stream_started_tx
-                        .send((uri.path().to_string(), message.clone()))
+                        .send((stream_path.clone(), message.clone()))
                         .expect("stream-start receiver must remain open");
                     if uri.path().contains("/fail-once")
                         && fail_once_count.fetch_add(1, Ordering::AcqRel) == 0
@@ -196,7 +210,15 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                             )
                         };
 
-                    Sse::new(events).into_response()
+                    let closed = StreamClosed {
+                        path: stream_path,
+                        closed: stream_closed_tx,
+                    };
+                    Sse::new(events.map(move |event| {
+                        let _ = &closed;
+                        event
+                    }))
+                    .into_response()
                 }
                 method => panic!("unexpected MCP request: {method:?}"),
             }
@@ -461,6 +483,54 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                 "data": { "issue": 42 },
             }),
         }
+    );
+
+    let _: McpServerEventStreamStopResponse = app_server
+        .request(|request_id| ClientRequest::McpServerEventStreamStop {
+            request_id,
+            params: McpServerEventStreamStopParams {
+                subscription_id: "subscription-1".to_string(),
+            },
+        })
+        .await?;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if stream_closed_rx.recv().await.as_deref() == Some("/changed2/api/codex/ps/mcp") {
+                return;
+            }
+        }
+    })
+    .await
+    .context("stopping a live subscription did not close its transport")?;
+    let restarted_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
+    let (restarted_path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+        .await?
+        .context("same-ID subscription did not restart after a live stop")?;
+    assert_eq!(restarted_path, "/changed2/api/codex/ps/mcp");
+    let _: McpServerEventStreamStartResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(restarted_request_id),
+    )
+    .await??;
+    let restarted_active: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        restarted_active.notification.method,
+        "notifications/events/active"
+    );
+    let restarted_event: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        restarted_event.notification.method,
+        "notifications/events/event"
     );
 
     let flood1_url = format!("{apps_url}/flood1");
@@ -731,6 +801,31 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
             params: json!({ "reason": "serverEnded" }),
         }
     );
+    let ended_restart_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
+    let (ended_restart_path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+        .await?
+        .context("same-ID subscription did not restart after terminal delivery")?;
+    assert_eq!(ended_restart_path, "/buffered-ended/api/codex/ps/mcp");
+    let _: McpServerEventStreamStartResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(ended_restart_request_id),
+    )
+    .await??;
+    for expected_method in [
+        "notifications/events/active",
+        "notifications/events/event",
+        "notifications/events/event",
+        "notifications/events/terminated",
+    ] {
+        let notification: McpServerEventStreamNotification = timeout(
+            Duration::from_secs(5),
+            app_server.read_notification("mcpServer/event/stream/notification"),
+        )
+        .await??;
+        assert_eq!(notification.notification.method, expected_method);
+    }
     assert!(
         timeout(Duration::from_millis(1_200), stream_started_rx.recv())
             .await

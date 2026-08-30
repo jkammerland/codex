@@ -74,6 +74,12 @@ impl EventNotificationSender {
 }
 
 impl EventNotificationReceiver {
+    /// Stops accepting new notifications while retaining notifications that are already queued.
+    pub fn close(&mut self) {
+        self.notifications.close();
+        self.available_bytes.close();
+    }
+
     pub async fn recv(&mut self) -> Option<CustomNotification> {
         self.notifications
             .recv()
@@ -90,9 +96,13 @@ impl EventNotificationReceiver {
 
 impl Drop for EventNotificationReceiver {
     fn drop(&mut self) {
-        self.available_bytes.close();
+        self.close();
     }
 }
+
+#[cfg(test)]
+#[path = "event_notification_transport_tests.rs"]
+mod tests;
 
 /// Consumes Plugin Runtime event notifications before rmcp can log their payloads.
 pub(crate) fn capture_event_notifications<T, E, A>(

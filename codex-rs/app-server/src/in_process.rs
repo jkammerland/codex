@@ -208,12 +208,49 @@ enum InProcessClientMessage {
     #[cfg(test)]
     InjectGuaranteedNotificationBackpressure {
         second_send_started: oneshot::Sender<()>,
+        completion: BackpressureCompletion,
+    },
+}
+
+#[cfg(test)]
+enum BackpressureCompletion {
+    KeepRunning,
+    FailProcessor {
+        pending_response_tx: oneshot::Sender<PendingClientRequestResponse>,
     },
 }
 
 enum ProcessorCommand {
     Request(Box<ClientRequest>),
     Notification(ClientNotification),
+}
+
+enum GuaranteedEventSendResult {
+    Delivered,
+    ConsumerClosed,
+    ProcessorExited(std::result::Result<(), tokio::task::JoinError>),
+    OutboundExited(std::result::Result<(), tokio::task::JoinError>),
+}
+
+async fn send_guaranteed_event(
+    event_tx: &mpsc::Sender<InProcessServerEvent>,
+    event: InProcessServerEvent,
+    processor_handle: &mut tokio::task::JoinHandle<()>,
+    outbound_handle: &mut tokio::task::JoinHandle<()>,
+) -> GuaranteedEventSendResult {
+    let send = event_tx.send(event);
+    tokio::pin!(send);
+    tokio::select! {
+        result = processor_handle => GuaranteedEventSendResult::ProcessorExited(result),
+        result = outbound_handle => GuaranteedEventSendResult::OutboundExited(result),
+        result = &mut send => {
+            if result.is_ok() {
+                GuaranteedEventSendResult::Delivered
+            } else {
+                GuaranteedEventSendResult::ConsumerClosed
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -685,7 +722,18 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                         #[cfg(test)]
                         Some(InProcessClientMessage::InjectGuaranteedNotificationBackpressure {
                             second_send_started,
+                            completion,
                         }) => {
+                            if let BackpressureCompletion::FailProcessor {
+                                pending_response_tx,
+                            } = completion
+                            {
+                                pending_request_responses.insert(
+                                    RequestId::Integer(78),
+                                    pending_response_tx,
+                                );
+                                processor_handle.abort();
+                            }
                             let first = InProcessServerEvent::ServerNotification(Box::new(
                                 ServerNotification::ThreadQueueChanged(
                                     codex_app_server_protocol::ThreadQueueChangedNotification {
@@ -698,15 +746,31 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                                 Err(mpsc::error::TrySendError::Closed(_)) => break,
                             }
                             let _ = second_send_started.send(());
-                            let _ = event_tx
-                                .send(InProcessServerEvent::ServerNotification(Box::new(
+                            match send_guaranteed_event(
+                                &event_tx,
+                                InProcessServerEvent::ServerNotification(Box::new(
                                     ServerNotification::ThreadQueueChanged(
                                         codex_app_server_protocol::ThreadQueueChangedNotification {
                                             thread_id: "backpressure-second".to_string(),
                                         },
                                     ),
-                                )))
-                                .await;
+                                )),
+                                &mut processor_handle,
+                                &mut outbound_handle,
+                            )
+                            .await
+                            {
+                                GuaranteedEventSendResult::Delivered => {}
+                                GuaranteedEventSendResult::ConsumerClosed => break,
+                                GuaranteedEventSendResult::ProcessorExited(result) => {
+                                    processor_task_result = Some(result);
+                                    break;
+                                }
+                                GuaranteedEventSendResult::OutboundExited(result) => {
+                                    outbound_task_result = Some(result);
+                                    break;
+                                }
+                            }
                         }
                         None => {
                             break;
@@ -777,23 +841,23 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                         OutgoingMessage::AppServerNotification(envelope) => {
                             let notification = envelope.notification;
                             if server_notification_requires_delivery(&notification) {
-                                let send = event_tx.send(
+                                match send_guaranteed_event(
+                                    &event_tx,
                                     InProcessServerEvent::ServerNotification(Box::new(notification)),
-                                );
-                                tokio::pin!(send);
-                                tokio::select! {
-                                    result = &mut processor_handle => {
+                                    &mut processor_handle,
+                                    &mut outbound_handle,
+                                )
+                                .await
+                                {
+                                    GuaranteedEventSendResult::Delivered => {}
+                                    GuaranteedEventSendResult::ConsumerClosed => break 'runtime,
+                                    GuaranteedEventSendResult::ProcessorExited(result) => {
                                         processor_task_result = Some(result);
                                         break 'runtime;
                                     }
-                                    result = &mut outbound_handle => {
+                                    GuaranteedEventSendResult::OutboundExited(result) => {
                                         outbound_task_result = Some(result);
                                         break 'runtime;
-                                    }
-                                    result = &mut send => {
-                                        if result.is_err() {
-                                            break 'runtime;
-                                        }
                                     }
                                 }
                             } else if let Err(send_error) =
@@ -1011,36 +1075,35 @@ mod tests {
 
     #[tokio::test]
     async fn guaranteed_notification_backpressure_does_not_hide_processor_failure() {
-        let client = start_test_client_with_capacity_and_failure(
-            SessionSource::Cli,
-            /*channel_capacity*/ 1,
-            /*fail_processor_after_initialized*/ true,
+        let mut client =
+            start_test_client_with_capacity(SessionSource::Cli, /*channel_capacity*/ 1).await;
+        while client.event_rx.try_recv().is_ok() {}
+        let (second_send_started, second_send_started_rx) = oneshot::channel();
+        let (pending_response_tx, pending_response_rx) = oneshot::channel();
+        timeout(
+            Duration::from_secs(2),
+            client.client.client_tx.send(
+                InProcessClientMessage::InjectGuaranteedNotificationBackpressure {
+                    second_send_started,
+                    completion: BackpressureCompletion::FailProcessor {
+                        pending_response_tx,
+                    },
+                },
+            ),
         )
-        .await;
-
-        let result = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match client
-                    .request(ClientRequest::ConfigRequirementsRead {
-                        request_id: RequestId::Integer(78),
-                        params: None,
-                    })
-                    .await
-                {
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                        tokio::task::yield_now().await;
-                    }
-                    result => break result,
-                }
-            }
-        })
         .await
-        .expect("backpressured guaranteed events must not hide processor failure");
-        match result {
-            Ok(Err(error)) => assert!(error.message.contains("processor")),
-            Err(error) => panic!("pending request escaped runtime failure handling: {error}"),
-            Ok(Ok(_)) => panic!("request unexpectedly succeeded after processor failure"),
-        }
+        .expect("backpressure injection should reach the runtime")
+        .expect("runtime should accept the backpressure injection");
+        timeout(Duration::from_secs(2), second_send_started_rx)
+            .await
+            .expect("runtime should attempt the blocked guaranteed event")
+            .expect("runtime should retain the backpressure signal");
+        let result = timeout(Duration::from_secs(2), pending_response_rx)
+            .await
+            .expect("backpressured guaranteed events must not hide processor failure")
+            .expect("runtime should close its pending response");
+        let error = result.expect_err("injected processor failure must reject the request");
+        assert!(error.message.contains("processor"));
     }
 
     #[tokio::test]
@@ -1055,6 +1118,7 @@ mod tests {
             client.client.client_tx.send(
                 InProcessClientMessage::InjectGuaranteedNotificationBackpressure {
                     second_send_started,
+                    completion: BackpressureCompletion::KeepRunning,
                 },
             ),
         )

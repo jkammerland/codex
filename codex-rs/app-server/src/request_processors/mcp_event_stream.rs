@@ -59,28 +59,8 @@ impl McpEventStreams {
             .map_err(|error| invalid_request(format!("invalid thread id: {error}")))?;
         let subscription_id = params.subscription_id.clone();
         let (ready_tx, ready_rx) = oneshot::channel();
-        {
-            let mut tasks = self.tasks.lock().await;
-            // A subscription ID remains leased until its forwarding task has
-            // finished sending the terminal notification. This prevents a
-            // delayed terminal event from being attributed to a same-ID
-            // replacement.
-            tasks.retain(|_, task| !task.task.is_finished());
-            if tasks.contains_key(&subscription_id) {
-                return Err(invalid_request(format!(
-                    "MCP event subscription '{subscription_id}' already exists"
-                )));
-            }
-            if tasks.len() >= MAX_MCP_EVENT_STREAMS_PER_CONNECTION {
-                return Err(JSONRPCErrorError {
-                    code: OVERLOADED_ERROR_CODE,
-                    message: format!(
-                        "MCP event subscription limit of {MAX_MCP_EVENT_STREAMS_PER_CONNECTION} reached"
-                    ),
-                    data: None,
-                });
-            }
-            let task = tokio::spawn(async move {
+        self.start_task(subscription_id, thread_id, || {
+            tokio::spawn(async move {
                 let mut auth_changes =
                     McpEventStreamAuthChanges::new(Arc::clone(&processor.auth_manager));
                 let opened = tokio::select! {
@@ -130,10 +110,43 @@ impl McpEventStreams {
                         let _ = ready_tx.send(Err(error));
                     }
                 }
-            });
+            })
+        })
+        .await?;
+        Ok(ready_rx)
+    }
+
+    async fn start_task(
+        &self,
+        subscription_id: String,
+        thread_id: ThreadId,
+        spawn_task: impl FnOnce() -> JoinHandle<()>,
+    ) -> Result<(), JSONRPCErrorError> {
+        {
+            let mut tasks = self.tasks.lock().await;
+            // A subscription ID remains leased until its forwarding task has
+            // finished sending the terminal notification. This prevents a
+            // delayed terminal event from being attributed to a same-ID
+            // replacement.
+            tasks.retain(|_, task| !task.task.is_finished());
+            if tasks.contains_key(&subscription_id) {
+                return Err(invalid_request(format!(
+                    "MCP event subscription '{subscription_id}' already exists"
+                )));
+            }
+            if tasks.len() >= MAX_MCP_EVENT_STREAMS_PER_CONNECTION {
+                return Err(JSONRPCErrorError {
+                    code: OVERLOADED_ERROR_CODE,
+                    message: format!(
+                        "MCP event subscription limit of {MAX_MCP_EVENT_STREAMS_PER_CONNECTION} reached"
+                    ),
+                    data: None,
+                });
+            }
+            let task = spawn_task();
             tasks.insert(subscription_id, McpEventStreamTask { thread_id, task });
         }
-        Ok(ready_rx)
+        Ok(())
     }
 
     pub(crate) async fn wait_for_activation(
@@ -183,6 +196,10 @@ impl McpEventStreams {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_event_stream_tests.rs"]
+mod tests;
 
 struct McpEventForwarder<'a> {
     connection_id: ConnectionId,

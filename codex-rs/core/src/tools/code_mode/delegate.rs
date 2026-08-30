@@ -140,6 +140,7 @@ impl CodeModeDispatchBroker {
                     DispatchMessage::Notify {
                         call_id,
                         cell_id,
+                        originating_turn_id,
                         text,
                         output_token_limit,
                         cancellation_token,
@@ -152,7 +153,7 @@ impl CodeModeDispatchBroker {
                         )
                         .await
                         {
-                            host.notify(call_id, cell_id, text, output_token_limit)
+                            host.notify(call_id, cell_id, originating_turn_id, text, output_token_limit)
                                 .await
                         } else {
                             remove_dispatch_gate(&dispatch_gates, &cell_id);
@@ -374,6 +375,7 @@ impl CodeModeSessionDelegate for CodeModeCellDelegate {
                 .send(DispatchMessage::Notify {
                     call_id,
                     cell_id,
+                    originating_turn_id: self.step_context.turn.sub_id.clone(),
                     text,
                     output_token_limit: with_serialization_allowance(
                         self.step_context
@@ -415,6 +417,7 @@ enum DispatchMessage {
     Notify {
         call_id: String,
         cell_id: CellId,
+        originating_turn_id: String,
         text: String,
         output_token_limit: usize,
         cancellation_token: CancellationToken,
@@ -463,6 +466,7 @@ impl CoreTurnHost {
         &self,
         call_id: String,
         cell_id: CellId,
+        originating_turn_id: String,
         text: String,
         output_token_limit: usize,
     ) -> Result<(), String> {
@@ -470,7 +474,7 @@ impl CoreTurnHost {
             return Ok(());
         }
         self.session
-            .inject_if_running(vec![ResponseItemEnvelope {
+            .inject_if_running_for_turn(&originating_turn_id, vec![ResponseItemEnvelope {
                 item: ResponseItem::CustomToolCallOutput {
                     id: None,
                     call_id,
@@ -485,7 +489,9 @@ impl CoreTurnHost {
             }])
             .await
             .map_err(|_| {
-                format!("failed to inject exec notify message for cell {cell_id}: no active turn")
+                format!(
+                    "failed to inject exec notify message for cell {cell_id}: originating turn is not active"
+                )
             })
     }
 }

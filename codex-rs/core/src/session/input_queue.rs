@@ -11,7 +11,7 @@ use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -80,14 +80,13 @@ pub(crate) struct TurnInputQueue {
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
-    mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
-    persisted_mail_delivery: Mutex<HashMap<ResponseItemId, PersistedMailDelivery>>,
+    mailbox: Mutex<MailboxState>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PersistedMailDelivery {
-    PendingPersistence,
-    Delivered,
+#[derive(Default)]
+struct MailboxState {
+    pending_mails: VecDeque<PendingMailboxCommunication>,
+    pending_persisted_mail: HashSet<ResponseItemId>,
 }
 
 struct PendingMailboxCommunication {
@@ -101,23 +100,20 @@ impl InputQueue {
         let (activity_tx, _) = watch::channel(InputQueueActivity::Mailbox);
         Self {
             activity_tx,
-            mailbox_pending_mails: Mutex::new(VecDeque::new()),
-            persisted_mail_delivery: Mutex::new(HashMap::new()),
+            mailbox: Mutex::new(MailboxState::default()),
         }
     }
 
     pub(crate) async fn mark_mail_persistence_pending(&self, id: ResponseItemId) {
-        self.persisted_mail_delivery
-            .lock()
-            .await
-            .insert(id, PersistedMailDelivery::PendingPersistence);
+        self.mailbox.lock().await.pending_persisted_mail.insert(id);
     }
 
     pub(crate) async fn recorded_mail_requires_delivery(&self, id: &ResponseItemId) -> bool {
-        matches!(
-            self.persisted_mail_delivery.lock().await.get(id),
-            Some(PersistedMailDelivery::PendingPersistence)
-        )
+        self.mailbox
+            .lock()
+            .await
+            .pending_persisted_mail
+            .contains(id)
     }
 
     pub(crate) async fn enqueue_persisted_mailbox_communication(
@@ -128,20 +124,18 @@ impl InputQueue {
         let Some(id) = communication.id.clone() else {
             return false;
         };
-        let mut delivery = self.persisted_mail_delivery.lock().await;
-        if matches!(delivery.get(&id), Some(PersistedMailDelivery::Delivered)) {
+        let mut mailbox = self.mailbox.lock().await;
+        if !mailbox.pending_persisted_mail.remove(&id) {
             return false;
         }
-        self.mailbox_pending_mails
-            .lock()
-            .await
+        mailbox
+            .pending_mails
             .push_back(PendingMailboxCommunication {
                 communication,
                 start_options,
                 _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
             });
-        delivery.insert(id, PersistedMailDelivery::Delivered);
-        drop(delivery);
+        drop(mailbox);
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
         true
     }
@@ -174,9 +168,10 @@ impl InputQueue {
         communication: InterAgentCommunication,
         start_options: TurnStartOptions,
     ) {
-        self.mailbox_pending_mails
+        self.mailbox
             .lock()
             .await
+            .pending_mails
             .push_back(PendingMailboxCommunication {
                 communication,
                 start_options,
@@ -186,22 +181,24 @@ impl InputQueue {
     }
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
-        !self.mailbox_pending_mails.lock().await.is_empty()
+        !self.mailbox.lock().await.pending_mails.is_empty()
     }
 
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
-        self.mailbox_pending_mails
+        self.mailbox
             .lock()
             .await
+            .pending_mails
             .iter()
             .any(|mail| mail.communication.trigger_turn)
     }
 
     pub(crate) async fn drain_mailbox_input_items(&self) -> (Vec<TurnInput>, TurnStartOptions) {
         let pending_mails = self
-            .mailbox_pending_mails
+            .mailbox
             .lock()
             .await
+            .pending_mails
             .drain(..)
             .collect::<Vec<_>>();
         // A later follow-up supersedes the earlier choice, including an omitted choice.

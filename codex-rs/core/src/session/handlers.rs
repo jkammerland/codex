@@ -120,13 +120,12 @@ impl Session {
         mut communication: InterAgentCommunication,
         start_options: codex_protocol::turn_input::TurnStartOptions,
     ) -> std::io::Result<bool> {
-        if communication.id.as_ref().is_none_or(|id| id.is_empty()) {
-            communication.id = Some(codex_protocol::ResponseItemId::new("msg"));
-        }
         let communication_id = communication
             .id
-            .clone()
-            .expect("inter-agent communication ID was assigned above");
+            .take()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| codex_protocol::ResponseItemId::new("msg"));
+        communication.id = Some(communication_id.clone());
         let turn_context = self.new_default_turn().await;
         self.try_ensure_rollout_materialized(PersistContext::Standard)
             .await?;

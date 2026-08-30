@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "release": {
     "name": "jkammerland.mcp.14",
-    "forkCommit": "714dc4e3726ba7918bf960466710a61a4c26721c",
+    "forkCommit": "8adc6eddb4a165e961f9c4d817876038309dc798",
     "forkRef": "fleet/jkammerland.mcp.14-source",
     "forkRemote": "https://github.com/jkammerland/codex.git",
     "expectedCliVersion": "codex-cli 0.0.0+jkammerland.mcp.14",

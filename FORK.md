@@ -5,9 +5,9 @@ maintained separately from upstream releases.
 
 ## Identity
 
-- Branch: `release/jkammerland.mcp.12`
+- Branch: `release/jkammerland.mcp.13`
 - Upstream base: `60fc6995608e8188c0c9f8407d6cd98676efa247` (`origin/main`)
-- User-visible suffix: `+jkammerland.mcp.12`
+- User-visible suffix: `+jkammerland.mcp.13`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal
@@ -46,10 +46,28 @@ not prompt for an npm update that would overwrite the fork.
 15. Completion envelopes are bounded even when agent paths are unusually long.
 16. User and fleet installers verify the selected checkout, active target,
     fork identity, and `codex agents` support before reporting activation.
+17. Durable mail claims retain a bounded `.mcp.12` payload/response shadow so a
+    binary rollback can reconstruct the delivery; current builds de-duplicate
+    that shadow and expose the mail only after its claimed turn starts.
 
-The terminal-status marker is intentionally model-invisible. Older binaries can
-skip it and continue reading the adjacent raw terminal event; after a downgrade,
-only the exact `Error` followed by `Interrupted` status reconstruction is lost.
+The terminal-status marker is intentionally model-invisible. Current builds can
+recover both the dedicated marker and the overloaded `.mcp.11` metadata form.
+Older binaries can skip the dedicated marker and continue reading the adjacent
+raw terminal event; after a downgrade, only the exact `Error` followed by
+`Interrupted` status reconstruction is lost.
+
+## Release layout
+
+Each fleet release uses two commits because a commit cannot contain its own Git
+object ID:
+
+1. The reviewed source commit contains the versioned code and installer marker.
+2. Its direct manifest descendant pins that source commit in `fleet/release.json`.
+
+Run fleet preparation and installation from the manifest commit. The controller
+checks out and builds the pinned source commit; the source commit is not expected
+to contain the descendant manifest pin. Both hashes belong in release-review
+evidence, and neither commit is pushed automatically.
 
 ## Validate
 

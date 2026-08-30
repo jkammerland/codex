@@ -5,9 +5,9 @@ maintained separately from upstream releases.
 
 ## Identity
 
-- Branch: `release/jkammerland.mcp.10`
+- Branch: `release/jkammerland.mcp.11`
 - Upstream base: `60fc6995608e8188c0c9f8407d6cd98676efa247` (`origin/main`)
-- User-visible suffix: `+jkammerland.mcp.10`
+- User-visible suffix: `+jkammerland.mcp.11`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal

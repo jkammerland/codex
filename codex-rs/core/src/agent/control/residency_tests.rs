@@ -148,6 +148,13 @@ async fn residency_admission_cancels_while_waiting_for_delivery_gate() {
         )
         .await
         .expect("cancellation must not leak residency capacity");
+    match manager.get_thread(first.thread_id).await {
+        Err(err) => match err.details() {
+            CodexErrorDetails::ThreadNotFound(thread_id) => assert_eq!(*thread_id, first.thread_id),
+            _ => panic!("expected retry to evict the original resident, got {err:?}"),
+        },
+        Ok(_) => panic!("cancelled scan lost the resident from capacity accounting"),
+    }
     drop(retry);
 }
 
@@ -337,6 +344,27 @@ async fn residency_does_not_evict_parent_before_nonterminal_child_reports_comple
     );
     assert!(manager.get_thread(parent.thread_id).await.is_ok());
     assert!(manager.get_thread(child.thread_id).await.is_ok());
+
+    mark_thread_completed(child.thread.as_ref()).await;
+    let replacement_slot = control
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("terminal child must make an idle resident evictable");
+    match manager.get_thread(parent.thread_id).await {
+        Err(err) => match err.details() {
+            CodexErrorDetails::ThreadNotFound(thread_id) => {
+                assert_eq!(*thread_id, parent.thread_id)
+            }
+            _ => panic!("expected idle parent to be evicted, got {err:?}"),
+        },
+        Ok(_) => panic!("terminal child did not unblock parent eviction"),
+    }
+    drop(replacement_slot);
 }
 
 async fn spawn_v2_subagent(

@@ -1,4 +1,5 @@
 use super::SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT;
+use super::UnpublishedSpawnShutdown;
 use super::await_unpublished_spawn_shutdown;
 use pretty_assertions::assert_eq;
 
@@ -10,11 +11,5 @@ async fn unpublished_spawn_shutdown_is_bounded() {
     assert!(futures::poll!(&mut shutdown).is_pending());
     tokio::time::advance(SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT).await;
 
-    assert_eq!(
-        shutdown.await,
-        Err(
-            "timed out shutting down unpublished spawned agent after 5s; cleanup remains pending"
-                .to_string()
-        )
-    );
+    assert_eq!(shutdown.await, Ok(UnpublishedSpawnShutdown::TimedOut));
 }

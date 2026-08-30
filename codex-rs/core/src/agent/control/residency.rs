@@ -29,9 +29,39 @@ struct V2ResidencyState {
     pending_slots: usize,
 }
 
+struct PoppedResident<'a> {
+    residency: &'a V2Residency,
+    thread_id: ThreadId,
+    restore_on_drop: bool,
+}
+
+impl PoppedResident<'_> {
+    fn discard(mut self) {
+        self.restore_on_drop = false;
+    }
+}
+
+impl Drop for PoppedResident<'_> {
+    fn drop(&mut self) {
+        if self.restore_on_drop {
+            self.residency.touch(self.thread_id);
+        }
+    }
+}
+
 pub(super) struct V2ResidencySlot {
     residency: Arc<V2Residency>,
     active: bool,
+}
+
+pub(super) struct DeferredV2ResidencyRelease {
+    residency: Arc<V2Residency>,
+}
+
+impl Drop for DeferredV2ResidencyRelease {
+    fn drop(&mut self) {
+        self.residency.release_pending_slot();
+    }
 }
 
 impl V2ResidencySlot {
@@ -79,6 +109,18 @@ impl AgentControl {
 
     pub(super) fn forget_v2_residency(&self, thread_id: ThreadId) {
         self.v2_residency.remove(thread_id);
+    }
+
+    pub(super) fn retain_unpublished_v2_residency_slot(
+        &self,
+        thread: &CodexThread,
+    ) -> Option<DeferredV2ResidencyRelease> {
+        is_resident_candidate(thread).then(|| {
+            self.v2_residency.retain_pending_slot();
+            DeferredV2ResidencyRelease {
+                residency: Arc::clone(&self.v2_residency),
+            }
+        })
     }
 }
 
@@ -137,6 +179,11 @@ impl V2Residency {
             let Some(candidate_thread_id) = self.pop_lru_candidate(protected_thread_id) else {
                 return Ok(false);
             };
+            let popped_resident = PoppedResident {
+                residency: self,
+                thread_id: candidate_thread_id,
+                restore_on_drop: true,
+            };
             let candidate_thread = tokio::select! {
                 biased;
                 _ = cancellation_token.cancelled() => return Err(CodexErr::Interrupted),
@@ -146,6 +193,7 @@ impl V2Residency {
                 .ok()
                 .filter(|thread| is_resident_candidate(thread))
             else {
+                popped_resident.discard();
                 continue;
             };
             let delivery_permit = candidate_thread.session.agent_delivery_gate.clone();
@@ -154,7 +202,6 @@ impl V2Residency {
                 _ = cancellation_token.cancelled() => return Err(CodexErr::Interrupted),
                 permit = delivery_permit.acquire_owned() => permit,
             }) else {
-                self.touch(candidate_thread_id);
                 continue;
             };
             let has_nonterminal_child = tokio::select! {
@@ -163,7 +210,6 @@ impl V2Residency {
                 has_child = has_nonterminal_loaded_child(manager, candidate_thread_id) => has_child,
             };
             if has_nonterminal_child {
-                self.touch(candidate_thread_id);
                 continue;
             }
             let unloadable = tokio::select! {
@@ -172,7 +218,6 @@ impl V2Residency {
                 unloadable = is_unloadable(candidate_thread.as_ref()) => unloadable,
             };
             if !unloadable {
-                self.touch(candidate_thread_id);
                 continue;
             }
             if cancellation_token.is_cancelled() {
@@ -190,7 +235,6 @@ impl V2Residency {
                 warn!(
                     "failed to shut down v2 resident thread before unloading {candidate_thread_id}: {shutdown:?}"
                 );
-                self.touch(candidate_thread_id);
                 continue;
             }
             let environments = candidate_thread.environment_selections().await;
@@ -201,6 +245,7 @@ impl V2Residency {
                 .state
                 .save_evicted_environments(candidate_thread_id, environments);
             let _ = manager.remove_thread(&candidate_thread_id).await;
+            popped_resident.discard();
             return Ok(true);
         }
         Ok(false)
@@ -262,6 +307,13 @@ impl V2Residency {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.pending_slots = state.pending_slots.saturating_sub(1);
+    }
+
+    fn retain_pending_slot(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_slots += 1;
     }
 }
 

@@ -190,11 +190,17 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
         &self,
         child_thread_id: ThreadId,
     ) -> anyhow::Result<()> {
-        self.set_thread_spawn_edge_status(
-            child_thread_id,
-            crate::DirectionalThreadSpawnEdgeStatus::Open,
+        let result = sqlx::query(
+            "UPDATE thread_spawn_edges SET status = 'open' WHERE child_thread_id = ? AND status = 'pending'",
         )
-        .await
+        .bind(child_thread_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "spawn admission for child {child_thread_id} was not pending"
+        );
+        Ok(())
     }
 
     /// List unpublished direct children that need recovery cleanup.
@@ -3541,6 +3547,37 @@ mod tests {
             .await
             .expect("all descendants should load");
         assert_eq!(all_descendants, vec![child_thread_id, grandchild_thread_id]);
+    }
+
+    #[tokio::test]
+    async fn thread_spawn_admission_commit_requires_one_pending_edge() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let parent_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000920").expect("valid thread id");
+        let child_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000921").expect("valid thread id");
+
+        runtime
+            .begin_thread_spawn_admission(parent_thread_id, child_thread_id)
+            .await
+            .expect("pending edge insert should succeed");
+        sqlx::query("DELETE FROM thread_spawn_edges WHERE child_thread_id = ?")
+            .bind(child_thread_id.to_string())
+            .execute(runtime.pool.as_ref())
+            .await
+            .expect("simulated concurrent rollback should succeed");
+
+        let error = runtime
+            .commit_thread_spawn_admission(child_thread_id)
+            .await
+            .expect_err("a deleted pending edge must not commit as a no-op");
+        assert!(error.to_string().contains("was not pending"));
     }
 
     #[tokio::test]

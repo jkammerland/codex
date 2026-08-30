@@ -17,6 +17,7 @@ use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::intersect_effective_permission_profiles;
 use codex_protocol::protocol::EnvironmentConfigState;
+use codex_protocol::protocol::TurnAbortReason;
 use codex_utils_path_uri::PathUri;
 use std::time::Duration;
 
@@ -43,9 +44,16 @@ struct ForkedThreadSpawn<'a> {
     reserved_thread_id: Option<ThreadId>,
 }
 
+#[derive(Clone)]
 struct ProvisionalSpawnEdge {
     store: Arc<dyn codex_agent_graph_store::AgentGraphStore>,
     child_thread_id: ThreadId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnpublishedSpawnShutdown {
+    Complete,
+    TimedOut,
 }
 
 impl ProvisionalSpawnEdge {
@@ -1112,35 +1120,51 @@ impl AgentControl {
         provisional_edge: Option<&ProvisionalSpawnEdge>,
     ) -> Result<(), String> {
         let thread_id = thread.session.thread_id;
-        await_unpublished_spawn_shutdown(thread.shutdown_and_wait()).await?;
-        let _ = state.remove_thread_if_matches(&thread_id, thread).await;
-        match state.delete_stored_thread(thread_id).await {
-            Ok(()) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {}
-            Err(err) => {
-                return Err(format!(
-                    "failed to delete unpublished spawned agent state: {err}"
-                ));
+        match await_unpublished_spawn_shutdown(thread.shutdown_and_wait()).await? {
+            UnpublishedSpawnShutdown::Complete => {
+                cleanup_unpublished_spawn_state(state, thread, provisional_edge).await
+            }
+            UnpublishedSpawnShutdown::TimedOut => {
+                // Keep both admission counters occupied until the janitor has stopped the
+                // unpublished runtime and removed its durable state. The caller's original
+                // reservation guards are dropped when this method returns.
+                let registry_slot = self.state.retain_unpublished_spawn_slot();
+                let residency_slot = self.retain_unpublished_v2_residency_slot(thread.as_ref());
+                let state = Arc::clone(state);
+                let thread = Arc::clone(thread);
+                let provisional_edge = provisional_edge.cloned();
+                let _ = state.remove_thread_if_matches(&thread_id, &thread).await;
+                tokio::spawn(async move {
+                    thread
+                        .session
+                        .abort_all_tasks(TurnAbortReason::Replaced)
+                        .await;
+                    if let Err(err) = thread.shutdown_and_wait().await {
+                        warn!(
+                            %thread_id,
+                            %err,
+                            "unpublished spawn janitor could not observe session shutdown"
+                        );
+                    }
+                    if let Err(err) =
+                        cleanup_unpublished_spawn_state(&state, &thread, provisional_edge.as_ref())
+                            .await
+                    {
+                        warn!(
+                            %thread_id,
+                            %err,
+                            "unpublished spawn janitor could not remove durable state"
+                        );
+                    }
+                    drop(residency_slot);
+                    drop(registry_slot);
+                });
+                Err(format!(
+                    "timed out shutting down unpublished spawned agent after {}s; cleanup continues in the background",
+                    SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT.as_secs()
+                ))
             }
         }
-        if let Some(provisional_edge) = provisional_edge {
-            provisional_edge.rollback().await.map_err(|err| {
-                format!("failed to roll back provisional thread-spawn edge: {err}")
-            })?;
-        } else if let Some(agent_graph_store) = state.agent_graph_store() {
-            agent_graph_store
-                .delete_unpublished_thread_state(thread_id)
-                .await
-                .map_err(|err| {
-                    format!("failed to delete unpublished spawned agent metadata: {err}")
-                })?;
-        } else if let Some(state_db) = thread.state_db()
-            && let Err(err) = state_db.delete_thread(thread_id).await
-        {
-            return Err(format!(
-                "failed to delete unpublished spawned agent metadata: {err}"
-            ));
-        }
-        Ok(())
     }
 
     async fn spawn_forked_thread(
@@ -1620,18 +1644,52 @@ impl AgentControl {
     }
 }
 
-async fn await_unpublished_spawn_shutdown<F>(shutdown: F) -> Result<(), String>
+async fn cleanup_unpublished_spawn_state(
+    state: &Arc<ThreadManagerState>,
+    thread: &Arc<CodexThread>,
+    provisional_edge: Option<&ProvisionalSpawnEdge>,
+) -> Result<(), String> {
+    let thread_id = thread.session.thread_id;
+    let _ = state.remove_thread_if_matches(&thread_id, thread).await;
+    match state.delete_stored_thread(thread_id).await {
+        Ok(()) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {}
+        Err(err) => {
+            return Err(format!(
+                "failed to delete unpublished spawned agent state: {err}"
+            ));
+        }
+    }
+    if let Some(provisional_edge) = provisional_edge {
+        provisional_edge
+            .rollback()
+            .await
+            .map_err(|err| format!("failed to roll back provisional thread-spawn edge: {err}"))?;
+    } else if let Some(agent_graph_store) = state.agent_graph_store() {
+        agent_graph_store
+            .delete_unpublished_thread_state(thread_id)
+            .await
+            .map_err(|err| format!("failed to delete unpublished spawned agent metadata: {err}"))?;
+    } else if let Some(state_db) = thread.state_db()
+        && let Err(err) = state_db.delete_thread(thread_id).await
+    {
+        return Err(format!(
+            "failed to delete unpublished spawned agent metadata: {err}"
+        ));
+    }
+    Ok(())
+}
+
+async fn await_unpublished_spawn_shutdown<F>(
+    shutdown: F,
+) -> Result<UnpublishedSpawnShutdown, String>
 where
     F: std::future::Future<Output = CodexResult<()>>,
 {
     match tokio::time::timeout(SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT, shutdown).await {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => Ok(UnpublishedSpawnShutdown::Complete),
         Ok(Err(err)) => Err(format!(
             "failed to shut down unpublished spawned agent: {err}"
         )),
-        Err(_) => Err(format!(
-            "timed out shutting down unpublished spawned agent after {}s; cleanup remains pending",
-            SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT.as_secs()
-        )),
+        Err(_) => Ok(UnpublishedSpawnShutdown::TimedOut),
     }
 }

@@ -360,6 +360,16 @@ pub(crate) struct SpawnReservation {
     reserved_agent_path: Option<AgentPath>,
 }
 
+pub(crate) struct DeferredSpawnRelease {
+    state: Arc<AgentRegistry>,
+}
+
+impl Drop for DeferredSpawnRelease {
+    fn drop(&mut self) {
+        self.state.total_count.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 impl SpawnReservation {
     pub(crate) fn reserve_agent_nickname_with_preference(
         &mut self,
@@ -387,6 +397,15 @@ impl SpawnReservation {
         self.reserved_agent_path = None;
         self.state.register_spawned_thread(agent_metadata);
         self.active = false;
+    }
+}
+
+impl AgentRegistry {
+    pub(crate) fn retain_unpublished_spawn_slot(self: &Arc<Self>) -> DeferredSpawnRelease {
+        self.total_count.fetch_add(1, Ordering::AcqRel);
+        DeferredSpawnRelease {
+            state: Arc::clone(self),
+        }
     }
 }
 

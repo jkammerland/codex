@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -37,7 +35,6 @@ pub(crate) type McpEventStreamReady = oneshot::Receiver<Result<(), JSONRPCErrorE
 #[derive(Debug)]
 struct McpEventStreamTask {
     thread_id: ThreadId,
-    retired: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
 
@@ -64,9 +61,11 @@ impl McpEventStreams {
         let (ready_tx, ready_rx) = oneshot::channel();
         {
             let mut tasks = self.tasks.lock().await;
-            tasks.retain(|_, task| {
-                !task.retired.load(Ordering::Acquire) && !task.task.is_finished()
-            });
+            // A subscription ID remains leased until its forwarding task has
+            // finished sending the terminal notification. This prevents a
+            // delayed terminal event from being attributed to a same-ID
+            // replacement.
+            tasks.retain(|_, task| !task.task.is_finished());
             if tasks.contains_key(&subscription_id) {
                 return Err(invalid_request(format!(
                     "MCP event subscription '{subscription_id}' already exists"
@@ -81,8 +80,6 @@ impl McpEventStreams {
                     data: None,
                 });
             }
-            let retired = Arc::new(AtomicBool::new(false));
-            let task_retired = Arc::clone(&retired);
             let task = tokio::spawn(async move {
                 let mut auth_changes =
                     McpEventStreamAuthChanges::new(Arc::clone(&processor.auth_manager));
@@ -126,24 +123,15 @@ impl McpEventStreams {
                             stream,
                             auth_changes,
                             ready: Some(ready_tx),
-                            retired: Arc::clone(&task_retired),
                         })
                         .await;
                     }
                     Err(error) => {
-                        task_retired.store(true, Ordering::Release);
                         let _ = ready_tx.send(Err(error));
                     }
                 }
             });
-            tasks.insert(
-                subscription_id,
-                McpEventStreamTask {
-                    thread_id,
-                    retired,
-                    task,
-                },
-            );
+            tasks.insert(subscription_id, McpEventStreamTask { thread_id, task });
         }
         Ok(ready_rx)
     }
@@ -204,7 +192,6 @@ struct McpEventForwarder<'a> {
     stream: McpEventStream,
     auth_changes: McpEventStreamAuthChanges,
     ready: Option<oneshot::Sender<Result<(), JSONRPCErrorError>>>,
-    retired: Arc<AtomicBool>,
 }
 
 async fn forward_events(forwarder: McpEventForwarder<'_>) {
@@ -216,7 +203,6 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
         mut stream,
         mut auth_changes,
         mut ready,
-        retired,
     } = forwarder;
     let send = |notification| {
         outgoing.send_server_notification_to_connection_and_wait(
@@ -249,7 +235,6 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
                 }
                 Err(error) => {
                     if let Some(ready) = ready.take() {
-                        retired.store(true, Ordering::Release);
                         let _ = ready.send(Err(internal_error(format!("{error:#}"))));
                     }
                     break "streamError";
@@ -258,9 +243,6 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
         };
         let active = notification.method == "notifications/events/active";
         let terminated = notification.method == "notifications/events/terminated";
-        if terminated {
-            retired.store(true, Ordering::Release);
-        }
         if !send(McpServerEventNotification {
             method: notification.method,
             params: notification
@@ -269,7 +251,6 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
         })
         .await
         {
-            retired.store(true, Ordering::Release);
             return;
         }
         if active && let Some(ready) = ready.take() {
@@ -280,14 +261,10 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
         }
     };
     if let Some(ready) = ready {
-        retired.store(true, Ordering::Release);
         let _ = ready.send(Err(internal_error(format!(
             "MCP event stream ended before becoming active: {termination_reason}"
         ))));
     } else {
-        // Make a same-ID replacement admissible before the client can observe this terminal
-        // notification. The old request has already ended and will not emit another event.
-        retired.store(true, Ordering::Release);
         send(McpServerEventNotification {
             method: "notifications/events/terminated".to_string(),
             params: serde_json::json!({ "reason": termination_reason }),

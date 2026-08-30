@@ -789,6 +789,11 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         [json!(42), json!(43)],
         "all notifications buffered before the terminal response must be delivered in order"
     );
+    // Pipeline a same-ID start before the client consumes the old terminal
+    // notification. Wire ordering must retire the old generation first.
+    let ended_restart_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
+        .await?;
     let ended: McpServerEventStreamNotification = timeout(
         Duration::from_secs(5),
         app_server.read_notification("mcpServer/event/stream/notification"),
@@ -801,9 +806,6 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
             params: json!({ "reason": "serverEnded" }),
         }
     );
-    let ended_restart_request_id = app_server
-        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
-        .await?;
     let (ended_restart_path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
         .await?
         .context("same-ID subscription did not restart after terminal delivery")?;

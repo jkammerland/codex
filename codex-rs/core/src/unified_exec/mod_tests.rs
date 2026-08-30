@@ -278,6 +278,37 @@ async fn wait_process_non_tty_ignores_output_until_nonzero_exit() -> anyhow::Res
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn wait_process_completes_after_root_exit_when_descendant_keeps_pipe_open()
+-> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let started = exec_command_with_tty(
+        &session,
+        &turn,
+        "sleep 0.5; sleep 2 & printf 'root exited'",
+        /*yield_time_ms*/ 10,
+        /*workdir*/ None,
+        /*tty*/ false,
+    )
+    .await?;
+    let process_id = started.process_id.expect("root command should start alive");
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+
+    let waited = tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_process_for_test(&session, process_id, &mut activity_rx),
+    )
+    .await
+    .expect("root exit must not wait for a descendant-owned output descriptor")?;
+
+    assert_eq!(waited.wait_reason, Some(ProcessWaitReason::Completed));
+    assert_eq!(waited.exit_code, Some(0));
+    assert_eq!(waited.process_id, None);
+    assert_eq!(String::from_utf8_lossy(&waited.raw_output), "root exited");
+    Ok(())
+}
+
 #[tokio::test]
 async fn wait_process_tty_wakes_on_output_then_completion() -> anyhow::Result<()> {
     let (session, turn) = test_session_and_turn().await;

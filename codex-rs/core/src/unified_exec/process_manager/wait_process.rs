@@ -106,7 +106,13 @@ impl UnifiedExecProcessManager {
         };
 
         let collected_output = if wait_reason == ProcessWaitReason::Completed {
-            Self::collect_output_until_closed(&output, &cancellation_token).await?
+            Self::collect_output_until_deadline(
+                &output,
+                /*pause_state*/ None,
+                Instant::now() + POST_EXIT_CLOSE_WAIT_CAP,
+                &cancellation_token,
+            )
+            .await?
         } else {
             Self::collect_output_until_deadline(
                 &output,
@@ -194,12 +200,12 @@ impl UnifiedExecProcessManager {
         })
     }
 
-    /// Drains all process output through the terminal `Closed` event.
+    /// Test-only exact drain through the terminal `Closed` event.
     ///
-    /// `Exited` can precede final output from remote executors, so completion
-    /// must not be represented by a timer. Producers publish each chunk before
-    /// setting `output_closed`, making the close state an acquire/release final
-    /// drain boundary.
+    /// Production completion uses a bounded post-exit grace period because a descendant can keep
+    /// an inherited output descriptor open after the managed root process exits. This helper keeps
+    /// the notification protocol independently testable without reintroducing that liveness risk.
+    #[cfg(test)]
     pub(super) async fn collect_output_until_closed(
         output: &OutputHandles,
         cancellation_token: &CancellationToken,

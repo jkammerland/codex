@@ -9,6 +9,8 @@ use std::sync::atomic::Ordering;
 use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::Instant;
+
+const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -1467,8 +1469,6 @@ impl UnifiedExecProcessManager {
         mut deadline: Instant,
         invocation_cancellation: &CancellationToken,
     ) -> Result<HeadTailBuffer<MAX_BYTES>, UnifiedExecError> {
-        const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
-
         let OutputHandles {
             output_buffer,
             output_notify,

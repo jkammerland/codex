@@ -435,6 +435,8 @@ cmd.exe /d /s /c $command; if ($LASTEXITCODE -ne 0) {{ throw 'Cargo build failed
 Normalize-ReleaseLock $build
 $version = & {quote_ps(host.build_binary("codex"))} --version
 if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
+& {quote_ps(host.build_binary("codex"))} agents --help *> $null
+if ($LASTEXITCODE -ne 0) {{ throw 'Built fork does not support codex agents' }}
 Write-Output "build-version=$version"
 """
     assert host.rustup is not None
@@ -490,6 +492,7 @@ PATH="$toolchain_bin:$PATH" \\
   "$toolchain_bin/cargo" build --release --bin codex --bin codex-code-mode-host
 normalize_release_lock "$build"
 version=$(target/release/codex --version)
+target/release/codex agents --help >/dev/null
 [ "$version" = {shlex.quote(release.cli_version)} ] || {{ echo "Unexpected fork version: $version" >&2; exit 1; }}
 printf 'build-version=%s\\n' "$version"
 """
@@ -514,10 +517,11 @@ function Replace($Target, $Source, $Backup) {{
   if ((Hash $stage) -ne $sourceHash -or -not [FleetFileOps]::ReplaceFile($Target, $stage, $Backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Atomic replacement failed: $Target" }}
   if ((Hash $Target) -ne $sourceHash -or (Hash $Backup) -ne $oldHash) {{ throw "Replacement verification failed: $Target" }}
 }}
-$canonical = {quote_ps(host.source_root)}; $sourceCli = {quote_ps(source_cli)}; $sourceHost = {quote_ps(source_host)}
+$canonical = {quote_ps(host.source_root)}; $build = {quote_ps(host.build_root)}; $sourceCli = {quote_ps(source_cli)}; $sourceHost = {quote_ps(source_host)}
 $targetCli = {quote_ps(host.cli_binary)}; $targetHost = {quote_ps(host.code_mode_host_binary)}
 $backupCli = {quote_ps(backup_cli)}; $backupHost = {quote_ps(backup_host)}
 if ((git -C $canonical rev-parse HEAD) -ne {quote_ps(release.fork_commit)} -or -not [string]::IsNullOrEmpty((git -C $canonical status --porcelain))) {{ throw 'Canonical checkout is not clean at the manifest commit' }}
+if ((git -C $build rev-parse HEAD) -ne {quote_ps(release.fork_commit)} -or -not [string]::IsNullOrEmpty((git -C $build status --porcelain))) {{ throw 'Build worktree is not clean at the manifest commit' }}
 foreach ($path in @($sourceCli, $sourceHost, $targetCli, $targetHost)) {{ if (-not (Test-Path -LiteralPath $path)) {{ throw "Missing binary: $path" }} }}
 if ((Hash $targetCli) -ne (Hash $sourceCli) -or (Hash $targetHost) -ne (Hash $sourceHost)) {{
   Replace $targetCli $sourceCli $backupCli
@@ -529,14 +533,17 @@ if ((Hash $targetCli) -ne (Hash $sourceCli) -or (Hash $targetHost) -ne (Hash $so
 }}
 $version = & $targetCli --version
 if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
+& $targetCli agents --help *> $null
+if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
 Write-Output "activated-version=$version"
 """
     return f"""set -eu
 sha() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
-canonical={shlex.quote(host.source_root)}; source_cli={shlex.quote(source_cli)}; source_host={shlex.quote(source_host)}
+canonical={shlex.quote(host.source_root)}; build={shlex.quote(host.build_root)}; source_cli={shlex.quote(source_cli)}; source_host={shlex.quote(source_host)}
 target_cli={shlex.quote(host.cli_binary)}; target_host={shlex.quote(host.code_mode_host_binary)}
 backup_cli={shlex.quote(backup_cli)}; backup_host={shlex.quote(backup_host)}
 [ "$(git -C "$canonical" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$canonical" status --porcelain)" ]
+[ "$(git -C "$build" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$build" status --porcelain)" ] || {{ echo 'Build worktree is not clean at the manifest commit' >&2; exit 1; }}
 [ -x "$source_cli" ] && [ -x "$source_host" ] && [ -f "$target_cli" ] && [ -f "$target_host" ]
 source_cli_hash=$(sha "$source_cli"); source_host_hash=$(sha "$source_host")
 if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
@@ -552,6 +559,7 @@ if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")"
 fi
 [ "$(sha "$target_cli")" = "$source_cli_hash" ] && [ "$(sha "$target_host")" = "$source_host_hash" ]
 version=$($target_cli --version)
+$target_cli agents --help >/dev/null
 [ "$version" = {shlex.quote(release.cli_version)} ] || {{ echo "Unexpected fork version: $version" >&2; exit 1; }}
 printf 'activated-version=%s\\n' "$version"
 """

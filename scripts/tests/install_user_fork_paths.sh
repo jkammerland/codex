@@ -40,6 +40,16 @@ if resolve_standalone_codex_bin_dir "$CURRENT_BIN/codex" "$STATE_DIR" >/dev/null
 fi
 is_active_managed_standalone_codex "$CURRENT_BIN/codex" "$STATE_DIR"
 
+SECOND_RELEASE_ROOT="$STATE_DIR/packages/standalone/releases/0.152.0"
+SECOND_RELEASE_BIN="$SECOND_RELEASE_ROOT/bin"
+mkdir -p "$SECOND_RELEASE_BIN"
+touch "$SECOND_RELEASE_BIN/codex" "$SECOND_RELEASE_BIN/codex-code-mode-host"
+chmod +x "$SECOND_RELEASE_BIN/codex" "$SECOND_RELEASE_BIN/codex-code-mode-host"
+ln -sfn "$SECOND_RELEASE_ROOT" "$(dirname -- "$CURRENT_BIN")"
+resolved_after_retarget=$(resolve_standalone_codex_bin_dir "$CURRENT_BIN/codex" "$STATE_DIR")
+[ "$resolved_after_retarget" = "$SECOND_RELEASE_BIN" ]
+[ "$resolved_after_retarget" != "$RELEASE_BIN" ]
+
 mkdir -p "$(dirname -- "$NPM_LAUNCHER")" "$NPM_BIN" "$TEST_DIR/npm/bin"
 touch "$NPM_LAUNCHER" "$NPM_BIN/codex" "$NPM_BIN/codex-code-mode-host"
 chmod +x "$NPM_LAUNCHER" "$NPM_BIN/codex" "$NPM_BIN/codex-code-mode-host"

@@ -20,7 +20,7 @@ class FleetReleaseTest(unittest.TestCase):
         )
 
     def test_checked_in_manifest_is_valid(self) -> None:
-        self.assertEqual(self.release.marker, "+jkammerland.mcp.9")
+        self.assertEqual(self.release.marker, "+jkammerland.mcp.10")
         self.assertEqual(self.release.rusty_v8_version, "150.4.0")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
         self.assertEqual(
@@ -95,10 +95,16 @@ class FleetReleaseTest(unittest.TestCase):
     ) -> None:
         mac_script = fleet_release.activation_script(self.hosts[0], self.release)
         windows_script = fleet_release.activation_script(self.hosts[1], self.release)
-        self.assertIn(".jkammerland.mcp.9-previous", mac_script)
+        self.assertIn(".jkammerland.mcp.10-previous", mac_script)
         self.assertIn("mv -f", mac_script)
         self.assertIn("ReplaceFile", windows_script)
-        self.assertIn(".jkammerland.mcp.9-previous", windows_script)
+        self.assertIn(".jkammerland.mcp.10-previous", windows_script)
+        self.assertIn("Build worktree is not clean at the manifest commit", mac_script)
+        self.assertIn(
+            "Build worktree is not clean at the manifest commit", windows_script
+        )
+        self.assertIn("agents --help", mac_script)
+        self.assertIn("agents --help", windows_script)
 
     def test_bundle_build_scripts_verify_the_pinned_commit(self) -> None:
         mac_script = fleet_release.build_script(self.hosts[0], self.release, True)
@@ -107,6 +113,8 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn(self.release.fork_commit, windows_script)
         self.assertIn('"$toolchain_bin/cargo" build --release', mac_script)
         self.assertIn('normalize_release_lock "$build"', mac_script)
+        self.assertIn("agents --help", mac_script)
+        self.assertIn("agents --help", windows_script)
         self.assertIn("0\\.0\\.0|0\\.0\\.0", mac_script)
         self.assertIn("refs/remotes/fleet/", mac_script)
         self.assertIn("rustup which --toolchain", mac_script)

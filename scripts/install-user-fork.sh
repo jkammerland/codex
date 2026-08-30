@@ -2,7 +2,7 @@
 
 set -eu
 
-FORK_MARKER="+jkammerland.mcp.9"
+FORK_MARKER="+jkammerland.mcp.10"
 RUSTY_V8_VERSION="150.4.0"
 RUSTY_V8_PROFILE="ptrcomp_sandbox_release"
 RUST_TARGET="x86_64-unknown-linux-gnu"
@@ -96,7 +96,7 @@ fi
 COMMAND_CODEX=$(command -v codex || true)
 CODEX_STATE_DIR=${CODEX_HOME:-"$HOME/.codex"}
 if INSTALLED_BIN_DIR=$(resolve_standalone_codex_bin_dir "$COMMAND_CODEX" "$CODEX_STATE_DIR"); then
-  :
+  INSTALL_KIND=standalone
 elif is_active_managed_standalone_codex "$COMMAND_CODEX" "$CODEX_STATE_DIR"; then
   echo "The active standalone Codex install is incomplete; refusing to update a different installation." >&2
   exit 1
@@ -106,6 +106,7 @@ else
     echo "The active Codex executable is not the managed standalone or npm installation; refusing to update an inactive install." >&2
     exit 1
   fi
+  INSTALL_KIND=npm
 fi
 INSTALLED_CODEX="$INSTALLED_BIN_DIR/codex"
 INSTALLED_CODE_MODE_HOST="$INSTALLED_BIN_DIR/codex-code-mode-host"
@@ -233,6 +234,10 @@ case "$STAGED_VERSION" in
     exit 1
     ;;
 esac
+if ! "$TEMP_CODEX" agents --help >/dev/null 2>&1; then
+  echo "Staged executable does not support codex agents." >&2
+  exit 1
+fi
 
 ROLLBACK_CODEX=$(mktemp "$INSTALLED_CODEX.rollback.XXXXXX")
 ROLLBACK_CODE_MODE_HOST=$(mktemp "$INSTALLED_CODE_MODE_HOST.rollback.XXXXXX")
@@ -259,6 +264,19 @@ if [ "$ACTIVE_CODEX_AFTER" != "$COMMAND_CODEX" ]; then
   echo "The active Codex command changed during installation; refusing to report successful activation." >&2
   exit 1
 fi
+case "$INSTALL_KIND" in
+  standalone)
+    ACTIVE_BIN_DIR_AFTER=$(resolve_standalone_codex_bin_dir "$ACTIVE_CODEX_AFTER" "$CODEX_STATE_DIR" || true)
+    ;;
+  npm)
+    ACTIVE_BIN_DIR_AFTER=$(resolve_npm_codex_bin_dir "$ACTIVE_CODEX_AFTER" "$NPM_ROOT" || true)
+    ;;
+esac
+if [ "$ACTIVE_BIN_DIR_AFTER" != "$INSTALLED_BIN_DIR" ]; then
+  restore_activated_pair
+  echo "The active Codex installation target changed during installation; restored the selected target." >&2
+  exit 1
+fi
 ACTIVE_VERSION=$(codex --version 2>/dev/null || true)
 case "$ACTIVE_VERSION" in
   *"$FORK_MARKER"*) ;;
@@ -268,6 +286,11 @@ case "$ACTIVE_VERSION" in
     exit 1
     ;;
 esac
+if ! codex agents --help >/dev/null 2>&1; then
+  restore_activated_pair
+  echo "The active fork does not support codex agents; restored the selected target." >&2
+  exit 1
+fi
 
 printf 'Installed %s\n' "$STAGED_VERSION"
 sha256sum "$INSTALLED_CODEX" "$INSTALLED_CODE_MODE_HOST"

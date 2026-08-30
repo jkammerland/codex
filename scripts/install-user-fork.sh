@@ -8,6 +8,7 @@ RUSTY_V8_PROFILE="ptrcomp_sandbox_release"
 RUST_TARGET="x86_64-unknown-linux-gnu"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+. "$SCRIPT_DIR/lib/install-user-fork-paths.sh"
 BUILT_CODEX="$REPO_ROOT/codex-rs/target/release/codex"
 BUILT_CODE_MODE_HOST="$REPO_ROOT/codex-rs/target/release/codex-code-mode-host"
 RUSTY_V8_DIR="$REPO_ROOT/codex-rs/target/fork-rusty-v8/$RUSTY_V8_VERSION/$RUST_TARGET"
@@ -84,13 +85,9 @@ if [ "$RUST_HOST" != "$RUST_TARGET" ]; then
 fi
 
 COMMAND_CODEX=$(command -v codex || true)
-RESOLVED_CODEX=""
-if [ -n "$COMMAND_CODEX" ]; then
-  RESOLVED_CODEX=$(readlink -f -- "$COMMAND_CODEX")
-fi
-
-if [ -n "$RESOLVED_CODEX" ] && [ -x "$(dirname -- "$RESOLVED_CODEX")/codex-code-mode-host" ]; then
-  INSTALLED_BIN_DIR=$(dirname -- "$RESOLVED_CODEX")
+CODEX_STATE_DIR=${CODEX_HOME:-"$HOME/.codex"}
+if INSTALLED_BIN_DIR=$(resolve_standalone_codex_bin_dir "$COMMAND_CODEX" "$CODEX_STATE_DIR"); then
+  :
 else
   NPM_ROOT=$(npm root --global)
   INSTALLED_BIN_DIR="$NPM_ROOT/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin"

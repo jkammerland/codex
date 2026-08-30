@@ -517,9 +517,15 @@ function Replace($Target, $Source, $Backup) {{
   if ((Hash $stage) -ne $sourceHash -or -not [FleetFileOps]::ReplaceFile($Target, $stage, $Backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Atomic replacement failed: $Target" }}
   if ((Hash $Target) -ne $sourceHash -or (Hash $Backup) -ne $oldHash) {{ throw "Replacement verification failed: $Target" }}
 }}
+function Restore($Target, $Backup) {{
+  $stage = "$Target.rollback-$([guid]::NewGuid().ToString('N'))"
+  Copy-Item -LiteralPath $Backup -Destination $stage
+  if (-not [FleetFileOps]::ReplaceFile($Target, $stage, $null, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Rollback failed: $Target" }}
+}}
 $canonical = {quote_ps(host.source_root)}; $build = {quote_ps(host.build_root)}; $sourceCli = {quote_ps(source_cli)}; $sourceHost = {quote_ps(source_host)}
 $targetCli = {quote_ps(host.cli_binary)}; $targetHost = {quote_ps(host.code_mode_host_binary)}
 $backupCli = {quote_ps(backup_cli)}; $backupHost = {quote_ps(backup_host)}
+$activated = $false
 if ((git -C $canonical rev-parse HEAD) -ne {quote_ps(release.fork_commit)} -or -not [string]::IsNullOrEmpty((git -C $canonical status --porcelain))) {{ throw 'Canonical checkout is not clean at the manifest commit' }}
 if ((git -C $build rev-parse HEAD) -ne {quote_ps(release.fork_commit)} -or -not [string]::IsNullOrEmpty((git -C $build status --porcelain))) {{ throw 'Build worktree is not clean at the manifest commit' }}
 foreach ($path in @($sourceCli, $sourceHost, $targetCli, $targetHost)) {{ if (-not (Test-Path -LiteralPath $path)) {{ throw "Missing binary: $path" }} }}
@@ -530,11 +536,17 @@ if ((Hash $targetCli) -ne (Hash $sourceCli) -or (Hash $targetHost) -ne (Hash $so
     if (-not [FleetFileOps]::ReplaceFile($targetCli, $rollback, $null, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Host activation and CLI rollback failed: $($_.Exception.Message)" }}
     throw "Code-mode host activation failed; CLI rolled back: $($_.Exception.Message)"
   }}
+  $activated = $true
 }}
-$version = & $targetCli --version
-if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
-& $targetCli agents --help *> $null
-if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
+try {{
+  $version = & $targetCli --version
+  if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
+  & $targetCli agents --help *> $null
+  if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
+}} catch {{
+  if ($activated) {{ Restore $targetHost $backupHost; Restore $targetCli $backupCli }}
+  throw
+}}
 Write-Output "activated-version=$version"
 """
     return f"""set -eu
@@ -542,6 +554,13 @@ sha() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
 canonical={shlex.quote(host.source_root)}; build={shlex.quote(host.build_root)}; source_cli={shlex.quote(source_cli)}; source_host={shlex.quote(source_host)}
 target_cli={shlex.quote(host.cli_binary)}; target_host={shlex.quote(host.code_mode_host_binary)}
 backup_cli={shlex.quote(backup_cli)}; backup_host={shlex.quote(backup_host)}
+activated=0
+rollback_pair() {{
+  [ "$activated" -eq 1 ] || return 0
+  restore_cli=$(mktemp "$target_cli.rollback.XXXXXX"); restore_host=$(mktemp "$target_host.rollback.XXXXXX")
+  cp -p "$backup_cli" "$restore_cli"; cp -p "$backup_host" "$restore_host"
+  mv -f "$restore_host" "$target_host"; mv -f "$restore_cli" "$target_cli"
+}}
 [ "$(git -C "$canonical" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$canonical" status --porcelain)" ]
 [ "$(git -C "$build" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$build" status --porcelain)" ] || {{ echo 'Build worktree is not clean at the manifest commit' >&2; exit 1; }}
 [ -x "$source_cli" ] && [ -x "$source_host" ] && [ -f "$target_cli" ] && [ -f "$target_host" ]
@@ -556,11 +575,23 @@ if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")"
   [ "$(sha "$backup_cli")" = "$old_cli_hash" ] && [ "$(sha "$backup_host")" = "$old_host_hash" ]
   mv -f "$stage_cli" "$target_cli"
   if ! mv -f "$stage_host" "$target_host"; then rollback=$(mktemp "$target_cli.rollback.XXXXXX"); cp -p "$backup_cli" "$rollback"; mv -f "$rollback" "$target_cli"; exit 1; fi
+  activated=1
 fi
-[ "$(sha "$target_cli")" = "$source_cli_hash" ] && [ "$(sha "$target_host")" = "$source_host_hash" ]
-version=$($target_cli --version)
-$target_cli agents --help >/dev/null
-[ "$version" = {shlex.quote(release.cli_version)} ] || {{ echo "Unexpected fork version: $version" >&2; exit 1; }}
+if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
+  rollback_pair
+  echo 'Activated binary hash verification failed' >&2
+  exit 1
+fi
+if ! version=$($target_cli --version) || [ "$version" != {shlex.quote(release.cli_version)} ]; then
+  rollback_pair
+  echo "Unexpected fork version: ${{version:-missing}}" >&2
+  exit 1
+fi
+if ! $target_cli agents --help >/dev/null; then
+  rollback_pair
+  echo 'Activated fork does not support codex agents' >&2
+  exit 1
+fi
 printf 'activated-version=%s\\n' "$version"
 """
 

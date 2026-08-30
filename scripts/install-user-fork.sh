@@ -121,6 +121,9 @@ if [ ! -x "$INSTALLED_CODE_MODE_HOST" ]; then
   exit 1
 fi
 
+SELECTED_CODEX_HASH=$(sha256sum "$INSTALLED_CODEX" | awk '{print $1}')
+SELECTED_CODE_MODE_HOST_HASH=$(sha256sum "$INSTALLED_CODE_MODE_HOST" | awk '{print $1}')
+
 mkdir -p "$RUSTY_V8_DIR"
 download_v8_artifact() {
   name=$1
@@ -169,6 +172,29 @@ case "$BUILT_VERSION" in
     exit 1
     ;;
 esac
+
+ACTIVE_CODEX_BEFORE=$(command -v codex || true)
+if [ "$ACTIVE_CODEX_BEFORE" != "$COMMAND_CODEX" ]; then
+  echo "The active Codex command changed during the build; refusing activation." >&2
+  exit 1
+fi
+case "$INSTALL_KIND" in
+  standalone)
+    ACTIVE_BIN_DIR_BEFORE=$(resolve_standalone_codex_bin_dir "$ACTIVE_CODEX_BEFORE" "$CODEX_STATE_DIR" || true)
+    ;;
+  npm)
+    ACTIVE_BIN_DIR_BEFORE=$(resolve_npm_codex_bin_dir "$ACTIVE_CODEX_BEFORE" "$NPM_ROOT" || true)
+    ;;
+esac
+if [ "$ACTIVE_BIN_DIR_BEFORE" != "$INSTALLED_BIN_DIR" ]; then
+  echo "The active Codex installation target changed during the build; refusing activation." >&2
+  exit 1
+fi
+if [ "$(sha256sum "$INSTALLED_CODEX" | awk '{print $1}')" != "$SELECTED_CODEX_HASH" ] || \
+  [ "$(sha256sum "$INSTALLED_CODE_MODE_HOST" | awk '{print $1}')" != "$SELECTED_CODE_MODE_HOST_HASH" ]; then
+  echo "The selected Codex binaries changed during the build; refusing activation." >&2
+  exit 1
+fi
 
 UPSTREAM_VERSION=$(printf '%s\n' "$BUILT_VERSION" | sed -E 's/^codex-cli ([^+]+).*/\1/')
 UPSTREAM_BACKUP="$INSTALLED_CODEX.$UPSTREAM_VERSION-upstream"

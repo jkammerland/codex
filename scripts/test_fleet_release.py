@@ -1,6 +1,7 @@
 """Tests for the manifest-driven native offload fleet controller."""
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -40,6 +41,9 @@ class FleetReleaseTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        installer = (Path(__file__).parent / "install-user-fork.sh").read_text()
+        self.assertIn("SELECTED_CODEX_HASH", installer)
+        self.assertIn("selected Codex binaries changed during the build", installer)
 
     def test_manifest_rejects_relative_host_paths(self) -> None:
         raw = json.loads(fleet_release.DEFAULT_MANIFEST.read_text())
@@ -105,6 +109,108 @@ class FleetReleaseTest(unittest.TestCase):
         )
         self.assertIn("agents --help", mac_script)
         self.assertIn("agents --help", windows_script)
+        self.assertIn("rollback_pair", mac_script)
+        self.assertIn("Restore $targetHost $backupHost", windows_script)
+
+    @unittest.skipUnless(shutil.which("shasum"), "requires shasum")
+    def test_mac_activation_restores_pair_after_version_verification_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical = root / "canonical"
+            build = root / "build"
+            canonical.mkdir()
+            (canonical / ".gitignore").write_text("codex-rs/target/\n")
+            run(["git", "init", "-q", str(canonical)], check=True)
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "-c",
+                    "user.name=Fleet Test",
+                    "-c",
+                    "user.email=fleet@example.invalid",
+                    "add",
+                    ".gitignore",
+                ],
+                check=True,
+            )
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(canonical),
+                    "-c",
+                    "user.name=Fleet Test",
+                    "-c",
+                    "user.email=fleet@example.invalid",
+                    "commit",
+                    "-qm",
+                    "test fixture",
+                ],
+                check=True,
+            )
+            commit = run(
+                ["git", "-C", str(canonical), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            run(
+                ["git", "-C", str(canonical), "worktree", "add", "-q", str(build)],
+                check=True,
+            )
+            source_dir = build / "codex-rs" / "target" / "release"
+            target_dir = root / "bin"
+            source_dir.mkdir(parents=True)
+            target_dir.mkdir()
+            source_cli = source_dir / "codex"
+            source_host = source_dir / "codex-code-mode-host"
+            target_cli = target_dir / "codex"
+            target_host = target_dir / "codex-code-mode-host"
+            source_cli.write_text("#!/bin/sh\necho 'codex-cli wrong'\n")
+            source_host.write_text("#!/bin/sh\nexit 0\n")
+            target_cli.write_text("#!/bin/sh\necho 'codex-cli old'\n")
+            target_host.write_text("#!/bin/sh\necho old-host\n")
+            for path in (source_cli, source_host, target_cli, target_host):
+                path.chmod(0o755)
+            original_cli = target_cli.read_bytes()
+            original_host = target_host.read_bytes()
+            release = fleet_release.Release(
+                name="test.release",
+                fork_commit=commit,
+                fork_ref="refs/tags/test",
+                fork_remote="unused",
+                cli_version="codex-cli expected",
+                server_commit="0" * 40,
+                rusty_v8_version="150.4.0",
+            )
+            host = fleet_release.Host(
+                name="mac",
+                platform="darwin",
+                ssh_target="unused",
+                source_root=str(canonical),
+                build_root=str(build),
+                server_root=str(root / "server"),
+                cli_binary=str(target_cli),
+                code_mode_host_binary=str(target_host),
+                rust_toolchain="unused",
+                rust_target="aarch64-apple-darwin",
+                rustup=None,
+            )
+
+            result = run(
+                ["sh", "-c", fleet_release.activation_script(host, release)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(target_cli.read_bytes(), original_cli)
+            self.assertEqual(target_host.read_bytes(), original_host)
 
     def test_bundle_build_scripts_verify_the_pinned_commit(self) -> None:
         mac_script = fleet_release.build_script(self.hosts[0], self.release, True)

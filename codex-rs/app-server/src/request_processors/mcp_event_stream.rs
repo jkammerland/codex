@@ -258,9 +258,6 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
         };
         let active = notification.method == "notifications/events/active";
         let terminated = notification.method == "notifications/events/terminated";
-        if terminated {
-            retired.store(true, Ordering::Release);
-        }
         if !send(McpServerEventNotification {
             method: notification.method,
             params: notification
@@ -276,11 +273,12 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
             let _ = ready.send(Ok(()));
         }
         if terminated {
+            retired.store(true, Ordering::Release);
             return;
         }
     };
-    retired.store(true, Ordering::Release);
     if let Some(ready) = ready {
+        retired.store(true, Ordering::Release);
         let _ = ready.send(Err(internal_error(format!(
             "MCP event stream ended before becoming active: {termination_reason}"
         ))));
@@ -290,6 +288,7 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
             params: serde_json::json!({ "reason": termination_reason }),
         })
         .await;
+        retired.store(true, Ordering::Release);
     }
 }
 

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::time::Duration;
@@ -86,6 +87,7 @@ pub enum McpEventStreamItem {
 /// Owns an MCP event subscription and cancels its request when dropped.
 pub struct McpEventStream {
     request: Option<CancellableEventStreamRequest>,
+    pending_notifications: VecDeque<McpEventNotification>,
     pending_end: Option<Result<McpEventStreamEnd>>,
     runtime_handle: Handle,
     connection: Option<Arc<McpServerConnection>>,
@@ -113,6 +115,9 @@ impl McpEventStream {
         }
 
         loop {
+            if let Some(notification) = self.pending_notifications.pop_front() {
+                return Ok(McpEventStreamItem::Notification(notification));
+            }
             if let Some(result) = self.pending_end.take() {
                 return result.map(McpEventStreamItem::Ended);
             }
@@ -157,41 +162,34 @@ impl McpEventStream {
                     {
                         continue;
                     }
-                    let queued = self
-                        .request
-                        .as_mut()
-                        .and_then(|request| request.notifications.try_recv().ok())
-                        .map(event_notification);
+                    self.drain_pending_notifications();
                     self.cancel();
-                    let end = if latest.is_some() {
+                    self.pending_end = Some(if latest.is_some() {
                         Ok(McpEventStreamEnd::ConnectionSuperseded)
                     } else {
                         Err(anyhow!("hosted MCP event server was removed"))
-                    };
-                    if let Some(notification) = queued {
-                        self.pending_end = Some(end);
-                        return Ok(McpEventStreamItem::Notification(notification));
-                    }
-                    return end.map(McpEventStreamItem::Ended);
+                    });
                 }
                 Next::Notification(notification) => {
                     return Ok(McpEventStreamItem::Notification(notification));
                 }
                 Next::Finished(result) => {
-                    let queued = self
-                        .request
-                        .as_mut()
-                        .and_then(|request| request.notifications.try_recv().ok())
-                        .map(event_notification);
+                    self.drain_pending_notifications();
                     self.request = None;
                     self.connection = None;
-                    if let Some(notification) = queued {
-                        self.pending_end = Some(result);
-                        return Ok(McpEventStreamItem::Notification(notification));
-                    }
-                    return result.map(McpEventStreamItem::Ended);
+                    self.pending_end = Some(result);
                 }
             }
+        }
+    }
+
+    fn drain_pending_notifications(&mut self) {
+        let Some(request) = self.request.as_mut() else {
+            return;
+        };
+        while let Ok(notification) = request.notifications.try_recv() {
+            self.pending_notifications
+                .push_back(event_notification(notification));
         }
     }
 
@@ -367,6 +365,7 @@ impl McpResourceClient {
 
         Ok(McpEventStream {
             request: Some(request),
+            pending_notifications: VecDeque::new(),
             pending_end: None,
             runtime_handle: Handle::current(),
             connection: Some(connection),

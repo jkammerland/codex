@@ -90,6 +90,8 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                     let stream_number = stream_count.fetch_add(1, Ordering::AcqRel);
                     let quiet_after_active = uri.path().contains("/quiet");
                     let end_after_active = uri.path().contains("/ended");
+                    let buffer_before_end = uri.path().contains("/buffered-ended");
+                    let close_after_active = uri.path().contains("/transport-close");
                     let flood_after_active = uri.path().contains("/flood");
                     stream_started_tx
                         .send((uri.path().to_string(), message.clone()))
@@ -117,6 +119,15 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                             "data": { "issue": 42 },
                         },
                     });
+                    let second_event = json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/events/event",
+                        "params": {
+                            "_meta": metadata,
+                            "name": "issue.updated",
+                            "data": { "issue": 43 },
+                        },
+                    });
                     let completed = json!({
                         "jsonrpc": "2.0",
                         "id": message["id"],
@@ -131,7 +142,27 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
                         )
                     });
                     let events: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
-                        if end_after_active {
+                        if buffer_before_end {
+                            Box::pin(
+                                active_event.chain(stream::iter([
+                                    Ok::<_, Infallible>(
+                                        Event::default().event("message").data(event.to_string()),
+                                    ),
+                                    Ok::<_, Infallible>(
+                                        Event::default()
+                                            .event("message")
+                                            .data(second_event.to_string()),
+                                    ),
+                                    Ok::<_, Infallible>(
+                                        Event::default()
+                                            .event("message")
+                                            .data(completed.to_string()),
+                                    ),
+                                ])),
+                            )
+                        } else if close_after_active {
+                            Box::pin(active_event)
+                        } else if end_after_active {
                             Box::pin(active_event.chain(stream::once(async move {
                                 Ok::<_, Infallible>(
                                     Event::default()
@@ -182,6 +213,8 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         .route("/flood1/api/codex/ps/mcp", handler.clone())
         .route("/flood2/api/codex/ps/mcp", handler.clone())
         .route("/fail-once/api/codex/ps/mcp", handler.clone())
+        .route("/buffered-ended/api/codex/ps/mcp", handler.clone())
+        .route("/transport-close/api/codex/ps/mcp", handler.clone())
         .route("/ended/api/codex/ps/mcp", handler);
     let mcp_server = tokio::spawn(async move { axum::serve(listener, router).await });
 
@@ -629,7 +662,7 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         "notifications/events/event"
     );
 
-    let ended_url = format!("{apps_url}/ended");
+    let ended_url = format!("{apps_url}/buffered-ended");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(&config_path, config.replace(&fail_once_url, &ended_url))?;
     let reload_request_id = app_server
@@ -650,12 +683,12 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         "notifications/events/terminated"
     );
     let ended_start_request_id = app_server
-        .send_raw_request("mcpServer/event/stream/start", Some(start_params))
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
         .await?;
     let (ended_path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
         .await?
         .context("server-ended stream did not start")?;
-    assert_eq!(ended_path, "/ended/api/codex/ps/mcp");
+    assert_eq!(ended_path, "/buffered-ended/api/codex/ps/mcp");
     let _: McpServerEventStreamStartResponse = timeout(
         Duration::from_secs(5),
         app_server.read_response(ended_start_request_id),
@@ -669,6 +702,22 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
     assert_eq!(
         ended_active.notification.method,
         "notifications/events/active"
+    );
+    let first_buffered: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    let second_buffered: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        [first_buffered.notification, second_buffered.notification]
+            .map(|notification| notification.params["data"]["issue"].clone()),
+        [json!(42), json!(43)],
+        "all notifications buffered before the terminal response must be delivered in order"
     );
     let ended: McpServerEventStreamNotification = timeout(
         Duration::from_secs(5),
@@ -687,6 +736,60 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
             .await
             .is_err(),
         "server-ended event streams must not reconnect"
+    );
+
+    let transport_close_url = format!("{apps_url}/transport-close");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        &config_path,
+        config.replace(&ended_url, &transport_close_url),
+    )?;
+    let reload_request_id = app_server
+        .send_raw_request("config/mcpServer/reload", /*params*/ None)
+        .await?;
+    let _: McpServerRefreshResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(reload_request_id),
+    )
+    .await??;
+    let transport_start_request_id = app_server
+        .send_raw_request("mcpServer/event/stream/start", Some(start_params))
+        .await?;
+    let (transport_path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
+        .await?
+        .context("transport-close stream did not start")?;
+    assert_eq!(transport_path, "/transport-close/api/codex/ps/mcp");
+    let _: McpServerEventStreamStartResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(transport_start_request_id),
+    )
+    .await??;
+    let transport_active: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        transport_active.notification.method,
+        "notifications/events/active"
+    );
+    let transport_terminated: McpServerEventStreamNotification = timeout(
+        Duration::from_secs(5),
+        app_server.read_notification("mcpServer/event/stream/notification"),
+    )
+    .await??;
+    assert_eq!(
+        transport_terminated.notification,
+        McpServerEventNotification {
+            method: "notifications/events/terminated".to_string(),
+            params: json!({ "reason": "transportClosed" }),
+        }
+    );
+    assert!(
+        timeout(Duration::from_millis(1_200), stream_started_rx.recv())
+            .await
+            .is_err(),
+        "transport loss must terminate without replaying the ambiguous subscription"
     );
 
     let _: McpServerEventStreamStopResponse = app_server

@@ -18,6 +18,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio::task::AbortHandle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -30,6 +31,7 @@ use crate::outgoing_message::OutgoingMessageSender;
 
 const MAX_MCP_EVENT_STREAMS_PER_CONNECTION: usize = 64;
 const MCP_EVENT_STREAM_STARTUP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 90);
+const MCP_EVENT_STREAM_STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
 
 pub(crate) type McpEventStreamReady = oneshot::Receiver<Result<(), JSONRPCErrorError>>;
 
@@ -57,6 +59,7 @@ enum McpEventStreamTaskState {
     Stopping {
         completed: watch::Receiver<bool>,
         lease: Arc<()>,
+        abort: AbortHandle,
     },
 }
 
@@ -201,8 +204,14 @@ impl McpEventStreams {
             let Some(mut stopping) = stopping else {
                 return Ok(());
             };
-            if !*stopping.borrow() {
-                let _ = stopping.changed().await;
+            if !*stopping.borrow()
+                && tokio::time::timeout(MCP_EVENT_STREAM_STOP_WAIT_TIMEOUT, stopping.changed())
+                    .await
+                    .is_err()
+            {
+                return Err(internal_error(format!(
+                    "MCP event subscription '{subscription_id}' is still stopping"
+                )));
             }
         }
     }
@@ -232,8 +241,28 @@ impl McpEventStreams {
         self.stop_where(|_, task| task.thread_id == thread_id).await;
     }
 
+    #[cfg(test)]
     pub(crate) async fn clear(&self) {
         self.stop_where(|_, _| true).await;
+    }
+
+    /// Aborts all forwarding tasks for a connection that is already known to be closed.
+    /// Unlike explicit stop, no subscription ID can be reused on that connection, so retaining
+    /// leases until physical write acknowledgement would only delay cleanup.
+    pub(crate) async fn abort_for_connection_shutdown(&self) {
+        let tasks = {
+            let mut tasks = self.tasks.lock().await;
+            tasks.drain().map(|(_, task)| task).collect::<Vec<_>>()
+        };
+        for task in tasks {
+            match task.state {
+                McpEventStreamTaskState::Running { task, cancellation } => {
+                    cancellation.cancel();
+                    task.abort();
+                }
+                McpEventStreamTaskState::Stopping { abort, .. } => abort.abort(),
+            }
+        }
     }
 
     async fn stop_where(&self, matches: impl Fn(&str, &McpEventStreamTask) -> bool) {
@@ -256,11 +285,16 @@ impl McpEventStreams {
 
                 let (completed_tx, completed_rx) = watch::channel(false);
                 let lease = Arc::new(());
+                let abort = match &task.state {
+                    McpEventStreamTaskState::Running { task, .. } => task.abort_handle(),
+                    McpEventStreamTaskState::Stopping { abort, .. } => abort.clone(),
+                };
                 let previous = std::mem::replace(
                     &mut task.state,
                     McpEventStreamTaskState::Stopping {
                         completed: completed_rx.clone(),
                         lease: Arc::clone(&lease),
+                        abort,
                     },
                 );
                 let McpEventStreamTaskState::Running { task, cancellation } = previous else {
@@ -292,8 +326,15 @@ impl McpEventStreams {
             }
         }
         for mut completion in completions {
-            if !*completion.borrow() {
-                let _ = completion.changed().await;
+            if !*completion.borrow()
+                && tokio::time::timeout(MCP_EVENT_STREAM_STOP_WAIT_TIMEOUT, completion.changed())
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(
+                    timeout_seconds = MCP_EVENT_STREAM_STOP_WAIT_TIMEOUT.as_secs(),
+                    "timed out waiting for an MCP event stream write to finish"
+                );
             }
         }
     }

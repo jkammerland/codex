@@ -15,6 +15,16 @@ struct SlowTaskDrop {
     drop_started: Option<oneshot::Sender<()>>,
 }
 
+struct DropSignal(Option<oneshot::Sender<()>>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
 impl Drop for SlowTaskDrop {
     fn drop(&mut self) {
         if let Some(drop_started) = self.drop_started.take() {
@@ -45,7 +55,9 @@ async fn subscription_id_remains_leased_during_terminal_write() {
         })
         .await
         .expect("first subscription should reserve its ID");
-    terminal_write_started.notified().await;
+    timeout(Duration::from_secs(1), terminal_write_started.notified())
+        .await
+        .expect("terminal write should start");
 
     let error = streams
         .start_task("shared".to_string(), thread_id, |_cancellation| {
@@ -83,6 +95,38 @@ async fn subscription_id_remains_leased_during_terminal_write() {
 }
 
 #[tokio::test]
+async fn stop_during_startup_releases_the_readiness_waiter() {
+    let streams = Arc::new(McpEventStreams::default());
+    let thread_id = ThreadId::new();
+    let (ready_tx, ready_rx) = oneshot::channel();
+    streams
+        .start_task("starting".to_string(), thread_id, move |cancellation| {
+            tokio::spawn(async move {
+                cancellation.cancelled().await;
+                let _ = ready_tx.send(Err(super::internal_error(
+                    "MCP event stream stopped during startup",
+                )));
+            })
+        })
+        .await
+        .expect("starting subscription should reserve its ID");
+
+    let activation = tokio::spawn({
+        let streams = Arc::clone(&streams);
+        async move { streams.wait_for_activation("starting", ready_rx).await }
+    });
+    timeout(Duration::from_secs(1), streams.stop("starting"))
+        .await
+        .expect("stop should cancel the startup task");
+    let error = timeout(Duration::from_secs(1), activation)
+        .await
+        .expect("readiness waiter should be released by stop")
+        .expect("activation task should join")
+        .expect_err("stopped startup must not activate");
+    assert!(error.message.contains("stopped during startup"));
+}
+
+#[tokio::test]
 async fn explicit_stop_keeps_subscription_leased_until_in_flight_write_completes() {
     let streams = Arc::new(McpEventStreams::default());
     let thread_id = ThreadId::new();
@@ -102,26 +146,32 @@ async fn explicit_stop_keeps_subscription_leased_until_in_flight_write_completes
         })
         .await
         .expect("first subscription should start");
-    write_started.notified().await;
+    timeout(Duration::from_secs(1), write_started.notified())
+        .await
+        .expect("in-flight write should start");
 
     let stop = tokio::spawn({
         let streams = Arc::clone(&streams);
         async move { streams.stop("shared").await }
     });
-    loop {
-        let stopping = streams
-            .tasks
-            .lock()
-            .await
-            .get("shared")
-            .is_some_and(|task| {
-                matches!(&task.state, super::McpEventStreamTaskState::Stopping { .. })
-            });
-        if stopping {
-            break;
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let stopping = streams
+                .tasks
+                .lock()
+                .await
+                .get("shared")
+                .is_some_and(|task| {
+                    matches!(&task.state, super::McpEventStreamTaskState::Stopping { .. })
+                });
+            if stopping {
+                break;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .expect("subscription should enter stopping state");
     let replacement = tokio::spawn({
         let streams = Arc::clone(&streams);
         async move {
@@ -144,9 +194,13 @@ async fn explicit_stop_keeps_subscription_leased_until_in_flight_write_completes
         "stop and same-ID replacement must wait for the queued write acknowledgement"
     );
     write_completed.notify_one();
-    stop.await.expect("stop task should join");
-    replacement
+    timeout(Duration::from_secs(1), stop)
         .await
+        .expect("stop should finish after write acknowledgement")
+        .expect("stop task should join");
+    timeout(Duration::from_secs(1), replacement)
+        .await
+        .expect("replacement should finish after write acknowledgement")
         .expect("replacement task should join")
         .expect("replacement should start after the physical write completes");
     streams.clear().await;
@@ -180,8 +234,9 @@ async fn subscription_id_remains_leased_until_explicit_stop_joins_task() {
 
     let stopping_streams = Arc::clone(&streams);
     let stop = tokio::spawn(async move { stopping_streams.stop("shared").await });
-    drop_started_rx
+    timeout(Duration::from_secs(1), drop_started_rx)
         .await
+        .expect("task drop should start")
         .expect("aborted task should begin dropping");
     let starting_streams = Arc::clone(&streams);
     let replacement_active = Arc::clone(&active);
@@ -201,9 +256,13 @@ async fn subscription_id_remains_leased_until_explicit_stop_joins_task() {
             })
             .await
     });
-    stop.await.expect("stop task should join");
-    replacement
+    timeout(Duration::from_secs(1), stop)
         .await
+        .expect("stop should finish")
+        .expect("stop task should join");
+    timeout(Duration::from_secs(1), replacement)
+        .await
+        .expect("replacement should finish")
         .expect("replacement task should join")
         .expect("replacement should start after stop releases the ID");
 
@@ -239,13 +298,15 @@ async fn cancelling_stop_waiter_keeps_subscription_id_leased() {
 
     let stopping_streams = Arc::clone(&streams);
     let stop = tokio::spawn(async move { stopping_streams.stop("shared").await });
-    drop_started_rx
+    timeout(Duration::from_secs(1), drop_started_rx)
         .await
+        .expect("task drop should start")
         .expect("aborted task should begin dropping");
     stop.abort();
 
-    streams
-        .start_task("shared".to_string(), thread_id, {
+    timeout(
+        Duration::from_secs(1),
+        streams.start_task("shared".to_string(), thread_id, {
             let active = Arc::clone(&active);
             let maximum_active = Arc::clone(&maximum_active);
             move |cancellation| {
@@ -255,10 +316,77 @@ async fn cancelling_stop_waiter_keeps_subscription_id_leased() {
                     cancellation.cancelled().await;
                 })
             }
-        })
-        .await
-        .expect("replacement should start after detached cleanup releases the ID");
+        }),
+    )
+    .await
+    .expect("replacement should not hang")
+    .expect("replacement should start after detached cleanup releases the ID");
 
     assert_eq!(maximum_active.load(Ordering::Acquire), 1);
     streams.clear().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_shutdown_aborts_a_forwarder_blocked_after_explicit_stop() {
+    let streams = Arc::new(McpEventStreams::default());
+    let thread_id = ThreadId::new();
+    let started = Arc::new(Notify::new());
+    let never_finishes = Arc::new(Notify::new());
+    let (dropped_tx, dropped_rx) = oneshot::channel();
+    streams
+        .start_task("blocked".to_string(), thread_id, {
+            let started = Arc::clone(&started);
+            let never_finishes = Arc::clone(&never_finishes);
+            move |_cancellation| {
+                tokio::spawn(async move {
+                    let _drop_signal = DropSignal(Some(dropped_tx));
+                    started.notify_one();
+                    never_finishes.notified().await;
+                })
+            }
+        })
+        .await
+        .expect("subscription should start");
+    timeout(Duration::from_secs(1), started.notified())
+        .await
+        .expect("forwarder should start");
+
+    let stop = tokio::spawn({
+        let streams = Arc::clone(&streams);
+        async move { streams.stop("blocked").await }
+    });
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if streams
+                .tasks
+                .lock()
+                .await
+                .get("blocked")
+                .is_some_and(|task| {
+                    matches!(&task.state, super::McpEventStreamTaskState::Stopping { .. })
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("subscription should enter stopping state");
+
+    timeout(
+        Duration::from_secs(1),
+        streams.abort_for_connection_shutdown(),
+    )
+    .await
+    .expect("connection shutdown must not await the blocked forwarder");
+    timeout(Duration::from_secs(1), dropped_rx)
+        .await
+        .expect("aborted forwarder should drop")
+        .expect("drop signal should be delivered");
+    timeout(Duration::from_secs(1), stop)
+        .await
+        .expect("explicit stop waiter should be released")
+        .expect("stop task should join");
+    assert!(streams.tasks.lock().await.is_empty());
 }

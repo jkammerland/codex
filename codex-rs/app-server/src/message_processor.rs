@@ -791,7 +791,10 @@ impl MessageProcessor {
         session_state: &ConnectionSessionState,
     ) {
         session_state.rpc_gate.close().await;
-        session_state.mcp_event_streams.clear().await;
+        session_state
+            .mcp_event_streams
+            .abort_for_connection_shutdown()
+            .await;
         if timeout(
             CONNECTION_RPC_DRAIN_TIMEOUT,
             session_state.rpc_gate.shutdown(),

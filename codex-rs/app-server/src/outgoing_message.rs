@@ -1259,6 +1259,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_server_notification_to_connection_and_wait_handles_dropped_ack() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(4);
+        let outgoing =
+            OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
+        let send_task = tokio::spawn(async move {
+            outgoing
+                .send_server_notification_to_connection_and_wait(
+                    ConnectionId(42),
+                    ServerNotification::ModelRerouted(ModelReroutedNotification {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        from_model: "gpt-5.3-codex".to_string(),
+                        to_model: "gpt-5.2".to_string(),
+                        reason: ModelRerouteReason::HighRiskCyberActivity,
+                    }),
+                )
+                .await
+        });
+
+        let envelope = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("should receive envelope before timeout")
+            .expect("channel should contain one message");
+        let OutgoingEnvelope::ToConnection {
+            write_complete_tx, ..
+        } = envelope
+        else {
+            panic!("expected targeted server notification envelope");
+        };
+        drop(write_complete_tx);
+
+        let acknowledged = timeout(Duration::from_secs(1), send_task)
+            .await
+            .expect("dropped acknowledgement should release the sender")
+            .expect("send task should not panic");
+        assert!(!acknowledged);
+    }
+
+    #[tokio::test]
     async fn connection_closed_clears_registered_request_contexts() {
         let (tx, _rx) = mpsc::channel::<OutgoingEnvelope>(4);
         let outgoing =

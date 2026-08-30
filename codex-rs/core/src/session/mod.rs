@@ -1372,14 +1372,22 @@ impl Session {
             InitialHistory::Resumed(resumed_history) => {
                 let turn_context = self.new_default_turn().await;
                 let rollout_items = resumed_history.history;
-                if matches!(
+                let restored_agent_status =
                     rollout_items.iter().rev().find_map(|item| match item {
                         RolloutItem::EventMsg(event) => agent_status_from_event(event),
                         _ => None,
-                    }),
-                    Some(AgentStatus::Interrupted)
-                ) {
-                    self.agent_status.send_replace(AgentStatus::Interrupted);
+                    });
+                let restore_terminal_v2_child = self.multi_agent_version()
+                    == Some(MultiAgentVersion::V2)
+                    && matches!(
+                        &turn_context.session_source,
+                        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+                    );
+                if let Some(status) = restored_agent_status
+                    && (matches!(status, AgentStatus::Interrupted)
+                        || (restore_terminal_v2_child && crate::agent::status::is_final(&status)))
+                {
+                    self.agent_status.send_replace(status);
                 }
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)

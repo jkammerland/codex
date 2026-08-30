@@ -1667,6 +1667,79 @@ async fn ensure_v2_child_loaded_preserves_evicted_parent_authority() {
     check_v2_agent_reload(V2ReloadRoute::NestedParent).await;
 }
 
+#[tokio::test]
+async fn reloaded_v2_child_restores_persisted_terminal_status() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let root = harness
+        .manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    let child =
+        spawn_v2_reload_test_child(&harness.control, config.clone(), &root.thread, "worker").await;
+    let child_thread = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_turn = child_thread.session.new_default_turn().await;
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("persisted result".to_string()),
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    // The fixture does not run a model task to consume the initial prompt and
+    // clear its active-turn marker. Model the state after a real terminal turn
+    // so shutdown does not append a synthetic interruption after completion.
+    *child_thread.session.active_turn.lock().await = None;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("terminal child rollout should flush");
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("terminal child should shut down");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&child.thread_id)
+            .await
+            .is_some()
+    );
+    harness.control.forget_v2_residency(child.thread_id);
+
+    harness
+        .control
+        .ensure_v2_agent_loaded(config, child.thread_id, /*parent*/ None)
+        .await
+        .expect("terminal child should reload");
+    let reloaded_child = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("reloaded child should exist");
+
+    assert_eq!(
+        reloaded_child.agent_status().await,
+        AgentStatus::Completed(Some("persisted result".to_string()))
+    );
+}
+
 #[derive(Clone, Copy)]
 enum V2ReloadRoute {
     Sender,

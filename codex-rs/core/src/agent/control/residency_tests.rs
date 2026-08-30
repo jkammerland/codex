@@ -235,6 +235,62 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
 }
 
 #[tokio::test]
+async fn shutdown_v2_agent_is_evictable_after_a_late_shutdown_completion() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+    let state = control.upgrade().expect("thread manager should be live");
+    let first_slot = control
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("first resident slot");
+    let first =
+        spawn_v2_subagent(&control, &state, config.clone(), root.thread_id, "worker-1").await;
+    first_slot.commit(first.thread_id);
+    first
+        .thread
+        .session
+        .send_event_raw(codex_protocol::protocol::Event {
+            id: "late-shutdown".to_string(),
+            msg: EventMsg::ShutdownComplete,
+        })
+        .await;
+    clear_active_turn(first.thread.as_ref()).await;
+
+    let replacement_slot = control
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("late shutdown completion should be evictable");
+
+    assert!(manager.get_thread(first.thread_id).await.is_err());
+    drop(replacement_slot);
+}
+
+#[tokio::test]
 async fn residency_does_not_evict_parent_before_nonterminal_child_reports_completion() {
     let mut config = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);

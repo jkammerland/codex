@@ -122,6 +122,14 @@ impl AgentControl {
             }
         })
     }
+
+    pub(super) fn reserve_v2_terminal_delivery_slot(&self) -> V2ResidencySlot {
+        self.v2_residency.retain_pending_slot();
+        V2ResidencySlot {
+            residency: Arc::clone(&self.v2_residency),
+            active: true,
+        }
+    }
 }
 
 impl V2Residency {
@@ -353,7 +361,10 @@ async fn has_nonterminal_loaded_child(
 async fn is_unloadable(thread: &CodexThread) -> bool {
     matches!(
         thread.agent_status().await,
-        AgentStatus::Completed(_) | AgentStatus::Errored(_) | AgentStatus::Interrupted
+        AgentStatus::Completed(_)
+            | AgentStatus::Errored(_)
+            | AgentStatus::Interrupted
+            | AgentStatus::Shutdown
     ) && thread.session.active_turn.lock().await.is_none()
         && !thread.session.input_queue.has_pending_mailbox_items().await
 }

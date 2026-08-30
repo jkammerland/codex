@@ -82,6 +82,40 @@ fn reservation_drop_releases_slot() {
 }
 
 #[test]
+fn deferred_release_retains_exact_spawn_slot_and_agent_path() {
+    let registry = Arc::new(AgentRegistry::default());
+    let worker_path = agent_path("/root/worker");
+    let mut reservation = registry.reserve_spawn_slot(Some(1)).expect("reserve slot");
+    reservation
+        .reserve_agent_path(&worker_path)
+        .expect("reserve worker path");
+    let deferred = reservation.defer_release();
+    drop(reservation);
+
+    let capacity_error = match registry.reserve_spawn_slot(Some(1)) {
+        Ok(_) => panic!("deferred cleanup must retain capacity"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        capacity_error.details(),
+        CodexErrorDetails::AgentLimitReached { max_threads: 1 }
+    ));
+    let mut path_probe = registry
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("probe path reservation");
+    assert!(path_probe.reserve_agent_path(&worker_path).is_err());
+    drop(path_probe);
+
+    drop(deferred);
+    let mut retry = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("cleanup should release capacity");
+    retry
+        .reserve_agent_path(&worker_path)
+        .expect("cleanup should release the exact path");
+}
+
+#[test]
 fn commit_holds_slot_until_release() {
     let registry = Arc::new(AgentRegistry::default());
     let reservation = registry.reserve_spawn_slot(Some(1)).expect("reserve slot");

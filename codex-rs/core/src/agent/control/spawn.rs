@@ -22,6 +22,7 @@ use codex_utils_path_uri::PathUri;
 use std::time::Duration;
 
 const SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const SPAWN_ROLLBACK_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 #[path = "spawn_rollback_tests.rs"]
@@ -54,6 +55,12 @@ struct ProvisionalSpawnEdge {
 enum UnpublishedSpawnShutdown {
     Complete,
     TimedOut,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum V2LoadAdmission {
+    Normal,
+    TerminalDelivery,
 }
 
 impl ProvisionalSpawnEdge {
@@ -384,6 +391,20 @@ impl AgentControl {
     }
 
     /// A provided parent enables owner-validated reloads; `None` preserves sender-driven reloads.
+    pub(crate) fn ensure_v2_agent_loaded_for_terminal_delivery_boxed(
+        &self,
+        config: Config,
+        thread_id: ThreadId,
+        parent: Option<Arc<CodexThread>>,
+    ) -> futures::future::BoxFuture<'_, CodexResult<()>> {
+        Box::pin(self.ensure_v2_agent_loaded_with_admission(
+            config,
+            thread_id,
+            parent,
+            V2LoadAdmission::TerminalDelivery,
+        ))
+    }
+
     pub(crate) fn ensure_v2_agent_loaded_boxed(
         &self,
         config: Config,
@@ -395,9 +416,25 @@ impl AgentControl {
 
     pub(crate) async fn ensure_v2_agent_loaded(
         &self,
+        config: Config,
+        thread_id: ThreadId,
+        parent: Option<Arc<CodexThread>>,
+    ) -> CodexResult<()> {
+        self.ensure_v2_agent_loaded_with_admission(
+            config,
+            thread_id,
+            parent,
+            V2LoadAdmission::Normal,
+        )
+        .await
+    }
+
+    async fn ensure_v2_agent_loaded_with_admission(
+        &self,
         mut config: Config,
         thread_id: ThreadId,
         parent: Option<Arc<CodexThread>>,
+        admission: V2LoadAdmission,
     ) -> CodexResult<()> {
         let state = self.upgrade()?;
         let parent = if let Some(parent) = parent {
@@ -639,10 +676,23 @@ impl AgentControl {
             )
         };
         // Reserving a slot can evict an idle nested parent. Keep its authority captured above.
-        let residency_cancellation = CancellationToken::new();
-        let residency_slot = self
-            .reserve_v2_residency_slot(&state, &config, Some(thread_id), &residency_cancellation)
-            .await?;
+        let residency_slot = match admission {
+            V2LoadAdmission::Normal => {
+                let residency_cancellation = CancellationToken::new();
+                self.reserve_v2_residency_slot(
+                    &state,
+                    &config,
+                    Some(thread_id),
+                    &residency_cancellation,
+                )
+                .await?
+            }
+            // A nonterminal child can occupy the last ordinary slot while it
+            // reloads an evicted parent to deliver its terminal result. Permit
+            // that one parent to overcommit capacity until the child becomes
+            // evictable instead of losing the result to admission pressure.
+            V2LoadAdmission::TerminalDelivery => self.reserve_v2_terminal_delivery_slot(),
+        };
 
         match state
             .resume_thread_with_history_with_source(ResumeThreadWithHistoryOptions {
@@ -795,6 +845,11 @@ impl AgentControl {
             None
         };
         let reserved_thread_id = provisional_edge.as_ref().map(|edge| edge.child_thread_id);
+        let requires_spawn_admission_barrier = multi_agent_version == MultiAgentVersion::V2
+            && matches!(
+                &notification_source,
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
+            );
 
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread_result = match (session_source, options.fork_mode.as_ref(), inheritance) {
@@ -864,7 +919,12 @@ impl AgentControl {
         }
         if spawn_cancellation.is_cancelled() {
             if let Err(cleanup_error) = self
-                .discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
+                .discard_unpublished_spawn(
+                    &state,
+                    &mut reservation,
+                    &new_thread.thread,
+                    provisional_edge.as_ref(),
+                )
                 .await
             {
                 return Err(CodexErr::Fatal(format!(
@@ -873,7 +933,7 @@ impl AgentControl {
             }
             return Err(CodexErr::Interrupted);
         }
-        let mut admission_barrier = if provisional_edge.is_some() {
+        let mut admission_barrier = if requires_spawn_admission_barrier {
             Some(
                 new_thread
                     .thread
@@ -884,9 +944,8 @@ impl AgentControl {
         } else {
             None
         };
-        debug_assert_eq!(
-            reserved_thread_id,
-            Some(new_thread.thread_id).filter(|_| provisional_edge.is_some())
+        debug_assert!(
+            reserved_thread_id.is_none() || reserved_thread_id == Some(new_thread.thread_id)
         );
         let start_options = TurnStartOptions {
             parent_turn_id: options.parent_turn_id,
@@ -927,6 +986,7 @@ impl AgentControl {
                 if let Err(cleanup_error) = self
                     .discard_unpublished_spawn(
                         &state,
+                        &mut reservation,
                         &new_thread.thread,
                         provisional_edge.as_ref(),
                     )
@@ -942,7 +1002,12 @@ impl AgentControl {
         if let Err(error) = submission_result {
             drop(admission_barrier.take());
             if let Err(cleanup_error) = self
-                .discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
+                .discard_unpublished_spawn(
+                    &state,
+                    &mut reservation,
+                    &new_thread.thread,
+                    provisional_edge.as_ref(),
+                )
                 .await
             {
                 return Err(CodexErr::Fatal(format!(
@@ -966,6 +1031,7 @@ impl AgentControl {
                 if let Err(cleanup_error) = self
                     .discard_unpublished_spawn(
                         &state,
+                        &mut reservation,
                         &new_thread.thread,
                         provisional_edge.as_ref(),
                     )
@@ -984,6 +1050,7 @@ impl AgentControl {
                     if let Err(cleanup_error) = self
                         .discard_unpublished_spawn(
                             &state,
+                            &mut reservation,
                             &new_thread.thread,
                             provisional_edge.as_ref(),
                         )
@@ -1002,6 +1069,7 @@ impl AgentControl {
                     if let Err(cleanup_error) = self
                         .discard_unpublished_spawn(
                             &state,
+                            &mut reservation,
                             &new_thread.thread,
                             provisional_edge.as_ref(),
                         )
@@ -1023,7 +1091,12 @@ impl AgentControl {
         if spawn_cancellation.is_cancelled() {
             drop(admission_barrier.take());
             if let Err(cleanup_error) = self
-                .discard_unpublished_spawn(&state, &new_thread.thread, provisional_edge.as_ref())
+                .discard_unpublished_spawn(
+                    &state,
+                    &mut reservation,
+                    &new_thread.thread,
+                    provisional_edge.as_ref(),
+                )
                 .await
             {
                 return Err(CodexErr::Fatal(format!(
@@ -1037,7 +1110,12 @@ impl AgentControl {
         {
             drop(admission_barrier.take());
             if let Err(cleanup_error) = self
-                .discard_unpublished_spawn(&state, &new_thread.thread, Some(provisional_edge))
+                .discard_unpublished_spawn(
+                    &state,
+                    &mut reservation,
+                    &new_thread.thread,
+                    Some(provisional_edge),
+                )
                 .await
             {
                 return Err(CodexErr::Fatal(format!(
@@ -1053,6 +1131,10 @@ impl AgentControl {
         if let Some(residency_slot) = residency_slot {
             residency_slot.commit(new_thread.thread_id);
         }
+        // Attach app-server listeners before the child can leave its admission
+        // barrier. A fast child must not finish and become eligible for eviction
+        // before clients learn that it exists.
+        state.notify_thread_created(new_thread.thread_id);
         if let Some((_, release)) = admission_barrier.take() {
             let _ = release.send(());
         }
@@ -1090,8 +1172,6 @@ impl AgentControl {
             );
         }
 
-        // Publish the thread only after its initial turn has been accepted.
-        state.notify_thread_created(new_thread.thread_id);
         if multi_agent_version != MultiAgentVersion::V2 {
             let child_reference = agent_metadata
                 .agent_path
@@ -1116,6 +1196,7 @@ impl AgentControl {
     async fn discard_unpublished_spawn(
         &self,
         state: &Arc<ThreadManagerState>,
+        reservation: &mut crate::agent::registry::SpawnReservation,
         thread: &Arc<CodexThread>,
         provisional_edge: Option<&ProvisionalSpawnEdge>,
     ) -> Result<(), String> {
@@ -1125,36 +1206,54 @@ impl AgentControl {
                 cleanup_unpublished_spawn_state(state, thread, provisional_edge).await
             }
             UnpublishedSpawnShutdown::TimedOut => {
-                // Keep both admission counters occupied until the janitor has stopped the
-                // unpublished runtime and removed its durable state. The caller's original
-                // reservation guards are dropped when this method returns.
-                let registry_slot = self.state.retain_unpublished_spawn_slot();
+                // Transfer the exact count and canonical-path reservation to
+                // the janitor. A retry cannot reuse either while the old
+                // runtime or durable state still exists.
+                let registry_slot = reservation.defer_release();
                 let residency_slot = self.retain_unpublished_v2_residency_slot(thread.as_ref());
                 let state = Arc::clone(state);
                 let thread = Arc::clone(thread);
                 let provisional_edge = provisional_edge.cloned();
                 let _ = state.remove_thread_if_matches(&thread_id, &thread).await;
                 tokio::spawn(async move {
-                    thread
-                        .session
-                        .abort_all_tasks(TurnAbortReason::Replaced)
-                        .await;
-                    if let Err(err) = thread.shutdown_and_wait().await {
+                    loop {
+                        thread
+                            .session
+                            .abort_all_tasks(TurnAbortReason::Replaced)
+                            .await;
+                        if tokio::time::timeout(
+                            SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT,
+                            thread.wait_until_terminated(),
+                        )
+                        .await
+                        .is_ok()
+                        {
+                            break;
+                        }
                         warn!(
                             %thread_id,
-                            %err,
-                            "unpublished spawn janitor could not observe session shutdown"
+                            "unpublished spawn janitor is still waiting for bounded session shutdown"
                         );
+                        tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
                     }
-                    if let Err(err) =
-                        cleanup_unpublished_spawn_state(&state, &thread, provisional_edge.as_ref())
-                            .await
-                    {
-                        warn!(
-                            %thread_id,
-                            %err,
-                            "unpublished spawn janitor could not remove durable state"
-                        );
+                    loop {
+                        match cleanup_unpublished_spawn_state(
+                            &state,
+                            &thread,
+                            provisional_edge.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(()) => break,
+                            Err(err) => {
+                                warn!(
+                                    %thread_id,
+                                    %err,
+                                    "unpublished spawn janitor is retaining admission while durable cleanup retries"
+                                );
+                                tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
+                            }
+                        }
                     }
                     drop(residency_slot);
                     drop(registry_slot);

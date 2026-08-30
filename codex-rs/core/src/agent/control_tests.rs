@@ -922,6 +922,85 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
 }
 
 #[tokio::test]
+async fn ephemeral_v2_spawn_still_installs_an_admission_barrier() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    config.ephemeral = true;
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, parent) = harness.start_thread().await;
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let spawn = tokio::spawn({
+        let control = harness.control.clone();
+        let config = harness.config.clone();
+        let cancellation = cancellation.clone();
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        async move {
+            control
+                .spawn_agent_with_metadata(
+                    config,
+                    text_input("ephemeral child task"),
+                    Some(
+                        thread_spawn_source(
+                            parent_thread_id,
+                            &parent.session_source,
+                            next_thread_spawn_depth(&parent.session_source),
+                            /*agent_role*/ None,
+                            Some("worker".to_string()),
+                        )
+                        .expect("child source"),
+                    ),
+                    SpawnAgentOptions {
+                        parent_thread_id: Some(parent_thread_id),
+                        cancellation_token: cancellation,
+                        initial_submission_barrier: Some(
+                            crate::agent::control::InitialSubmissionBarrier { started, release },
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }
+    });
+
+    started.notified().await;
+    let child_thread_id = harness
+        .manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .find(|thread_id| *thread_id != parent_thread_id)
+        .expect("ephemeral child should be constructed");
+    let child = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("ephemeral child should be loaded");
+    assert!(
+        child.session.take_spawn_admission_barrier().await.is_some(),
+        "V2 hook and task durability admission must not depend on a graph store"
+    );
+
+    cancellation.cancel();
+    release.notify_one();
+    let error = spawn
+        .await
+        .expect("spawn task should join")
+        .expect_err("cancelled ephemeral admission should fail");
+    assert!(matches!(error.details(), CodexErrorDetails::Interrupted));
+    assert_eq!(
+        harness.manager.list_thread_ids().await,
+        vec![parent_thread_id]
+    );
+}
+
+#[tokio::test]
 async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
     let (home, mut config) = test_config().await;
     config

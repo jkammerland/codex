@@ -362,10 +362,14 @@ pub(crate) struct SpawnReservation {
 
 pub(crate) struct DeferredSpawnRelease {
     state: Arc<AgentRegistry>,
+    reserved_agent_path: Option<AgentPath>,
 }
 
 impl Drop for DeferredSpawnRelease {
     fn drop(&mut self) {
+        if let Some(agent_path) = self.reserved_agent_path.take() {
+            self.state.release_reserved_agent_path(&agent_path);
+        }
         self.state.total_count.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -398,13 +402,13 @@ impl SpawnReservation {
         self.state.register_spawned_thread(agent_metadata);
         self.active = false;
     }
-}
 
-impl AgentRegistry {
-    pub(crate) fn retain_unpublished_spawn_slot(self: &Arc<Self>) -> DeferredSpawnRelease {
-        self.total_count.fetch_add(1, Ordering::AcqRel);
+    pub(crate) fn defer_release(&mut self) -> DeferredSpawnRelease {
+        debug_assert!(self.active);
+        self.active = false;
         DeferredSpawnRelease {
-            state: Arc::clone(self),
+            state: Arc::clone(&self.state),
+            reserved_agent_path: self.reserved_agent_path.take(),
         }
     }
 }

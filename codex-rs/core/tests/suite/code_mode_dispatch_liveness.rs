@@ -95,18 +95,36 @@ async fn yielded_cell_keeps_its_originating_turn_environment() -> Result<()> {
     fs::create_dir_all(&first_cwd)?;
     fs::create_dir_all(&second_cwd)?;
     let completion_gate = test.workspace_path("cross-turn-completion.ready");
+    let first_cell_progressed = test.workspace_path("first-cell-progressed.txt");
+    let second_cell_started = test.workspace_path("second-cell-started.txt");
+    let second_completion_gate = test.workspace_path("second-cell-completion.ready");
     let observed_cwd = test.workspace_path("cross-turn-observed-cwd.txt");
     let completion_wait = wait_for_file_source(&completion_gate)?;
+    let second_completion_wait = wait_for_file_source(&second_completion_gate)?;
     let observed_cwd_quoted = shlex::try_join([observed_cwd.to_string_lossy().as_ref()])?;
-    let record_cwd = format!("pwd > {observed_cwd_quoted}");
+    let first_cell_progressed_quoted =
+        shlex::try_join([first_cell_progressed.to_string_lossy().as_ref()])?;
+    let second_cell_started_quoted =
+        shlex::try_join([second_cell_started.to_string_lossy().as_ref()])?;
+    let record_cwd =
+        format!("pwd > {observed_cwd_quoted}; printf done > {first_cell_progressed_quoted}");
     let code = format!(
         r#"
 text("cell waiting");
 yield_control();
 {completion_wait}
+notify("notice from the originating cell");
 await tools.exec_command({{ cmd: {record_cwd:?} }});
 text("cell done");
 "#
+    );
+    let second_code = format!(
+        r#"
+await tools.exec_command({{ cmd: {:?} }});
+{second_completion_wait}
+text("second cell done");
+"#,
+        format!("printf started > {second_cell_started_quoted}")
     );
 
     responses::mount_sse_once(
@@ -129,8 +147,17 @@ text("cell done");
     responses::mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("msg-2", "second turn complete"),
+            ev_response_created("resp-3"),
+            ev_custom_tool_call("call-2", "exec", &second_code),
             ev_completed("resp-3"),
+        ]),
+    )
+    .await;
+    let second_followup = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-2", "second turn complete"),
+            ev_completed("resp-4"),
         ]),
     )
     .await;
@@ -140,17 +167,42 @@ text("cell done");
         Some(vec![local(first_cwd.abs())]),
     )
     .await?;
-    test.submit_turn_with_environments(
+    let second_turn = test.submit_turn_with_environments(
         "run an unrelated turn in another environment",
         Some(vec![local(second_cwd.abs())]),
-    )
-    .await?;
+    );
+    tokio::pin!(second_turn);
+    tokio::select! {
+        result = &mut second_turn => {
+            result?;
+            anyhow::bail!("second turn completed before its code cell was released");
+        }
+        result = fs_wait::wait_for_path_exists(&second_cell_started, Duration::from_secs(5)) => {
+            result?;
+        }
+    }
 
     fs::write(&completion_gate, "ready")?;
+    fs_wait::wait_for_path_exists(&first_cell_progressed, Duration::from_secs(5)).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fs::write(&second_completion_gate, "ready")?;
+    second_turn.await?;
     fs_wait::wait_for_path_exists(&observed_cwd, Duration::from_secs(5)).await?;
     assert_eq!(
         fs::read_to_string(observed_cwd)?.trim(),
         first_cwd.to_string_lossy()
+    );
+    let second_request = second_followup.single_request();
+    assert!(
+        !second_request
+            .inputs_of_type("custom_tool_call_output")
+            .iter()
+            .any(|item| {
+                item.get("output")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|output| output.contains("notice from the originating cell"))
+            }),
+        "a resumed cell must not inject its notification into another active turn"
     );
 
     Ok(())

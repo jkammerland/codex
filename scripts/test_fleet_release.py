@@ -23,6 +23,9 @@ class FleetReleaseTest(unittest.TestCase):
 
     def test_checked_in_manifest_is_valid(self) -> None:
         self.assertEqual(self.release.marker, "+jkammerland.mcp.14")
+        self.assertEqual(
+            self.release.fork_ref, "fleet/jkammerland.mcp.14-source"
+        )
         self.assertEqual(self.release.rusty_v8_version, "150.4.0")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
         self.assertEqual(

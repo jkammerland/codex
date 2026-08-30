@@ -14,6 +14,7 @@ use crate::context::ManagedDeveloperInstructions;
 use crate::context::MultiAgentRoleInstructions;
 use crate::context::SubagentNotification;
 use crate::init_state_db;
+use crate::rollout::recorder::RolloutRecorder;
 use crate::thread_manager::StartThreadOptions;
 use crate::tools::handlers::multi_agents_common::thread_spawn_source;
 use assert_matches::assert_matches;
@@ -4136,7 +4137,7 @@ async fn spawn_child_completion_notifies_parent_history() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
+async fn multi_agent_v2_completion_reports_dead_direct_parent() {
     let harness = AgentControlHarness::new().await;
     let mut config = harness.config.clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
@@ -4209,11 +4210,11 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
 
     sleep(Duration::from_millis(100)).await;
 
-    assert_eq!(
-        tester_thread.agent_status().await,
-        AgentStatus::Completed(Some("done".to_string())),
-        "parent delivery failure must not withhold the child's terminal status"
-    );
+    let AgentStatus::Errored(error) = tester_thread.agent_status().await else {
+        panic!("a dead parent must produce an explicit terminal delivery failure");
+    };
+    assert!(error.contains("could not be durably delivered"));
+    assert!(error.contains(&worker_thread_id.to_string()));
 
     assert!(
         !harness
@@ -4314,6 +4315,22 @@ async fn multi_agent_v2_completion_reloads_evicted_direct_parent() {
             .is_some()
     );
     harness.control.forget_v2_residency(worker_thread_id);
+    let sibling_path = AgentPath::root().join("sibling").expect("sibling path");
+    let sibling_thread_id = harness
+        .control
+        .spawn_agent(
+            config.clone(),
+            text_input("keep the ordinary residency slot occupied"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root_thread_id,
+                depth: 1,
+                agent_path: Some(sibling_path),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
+        .await
+        .expect("sibling should fill the released residency slot");
     let tester_thread = harness
         .manager
         .get_thread(tester_thread_id)
@@ -4341,6 +4358,10 @@ async fn multi_agent_v2_completion_reloads_evicted_direct_parent() {
         .get_thread(worker_thread_id)
         .await
         .expect("terminal delivery should reload the evicted direct parent");
+    assert!(
+        harness.manager.get_thread(sibling_thread_id).await.is_ok(),
+        "terminal parent reload must not evict an unrelated nonterminal resident"
+    );
     let (items, _) = reloaded_worker
         .session
         .input_queue
@@ -4542,6 +4563,26 @@ async fn multi_agent_v2_completion_reports_persistent_parent_delivery_failure() 
     };
     assert!(error.contains("could not be durably delivered"));
     assert!(error.contains("after 3 attempts"));
+    child_thread
+        .session
+        .flush_rollout()
+        .await
+        .expect("child terminal failure should flush");
+    let rollout_path = child_thread
+        .rollout_path()
+        .expect("child terminal failure should have a rollout");
+    let (rollout_items, _, parse_errors) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read child rollout");
+    assert_eq!(parse_errors, 0);
+    assert!(rollout_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event))
+                if event.turn_id == child_turn.sub_id
+                    && event.error.as_ref().is_some_and(|event| event.message == error)
+        )
+    }));
     let expected_message = crate::session_prefix::format_inter_agent_completion_message(
         parent_path.clone(),
         child_path.clone(),

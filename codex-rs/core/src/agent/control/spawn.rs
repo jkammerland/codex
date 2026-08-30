@@ -405,15 +405,6 @@ impl AgentControl {
         ))
     }
 
-    pub(crate) fn ensure_v2_agent_loaded_boxed(
-        &self,
-        config: Config,
-        thread_id: ThreadId,
-        parent: Option<Arc<CodexThread>>,
-    ) -> futures::future::BoxFuture<'_, CodexResult<()>> {
-        Box::pin(self.ensure_v2_agent_loaded(config, thread_id, parent))
-    }
-
     pub(crate) async fn ensure_v2_agent_loaded(
         &self,
         config: Config,

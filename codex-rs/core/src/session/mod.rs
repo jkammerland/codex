@@ -115,6 +115,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::HistoryPosition;
@@ -131,6 +132,7 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnContextNetworkItem;
 use codex_protocol::protocol::TurnEnvironmentSelection;
@@ -1984,9 +1986,8 @@ impl Session {
     }
 
     /// Persist the event to rollout and send it to clients.
-    pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
-        let legacy_source = msg.clone();
-        if let EventMsg::Error(error) = &legacy_source
+    pub(crate) async fn send_event(&self, turn_context: &TurnContext, mut msg: EventMsg) {
+        if let EventMsg::Error(error) = &msg
             && error.affects_turn_status()
         {
             let mut terminal_error = turn_context.terminal_error.lock().await;
@@ -1994,6 +1995,50 @@ impl Session {
                 *terminal_error = Some(error.clone());
             }
         }
+        let is_v2_spawn_child = turn_context.multi_agent_version == MultiAgentVersion::V2
+            && matches!(
+                &turn_context.session_source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    agent_path: Some(_),
+                    ..
+                })
+            );
+        let parent_completion = if is_v2_spawn_child
+            && matches!(&msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
+        {
+            self.maybe_notify_parent_of_terminal_turn(turn_context, &msg)
+                .await
+        } else {
+            None
+        };
+        if let Some(parent_completion) = parent_completion
+            && let AgentStatus::Errored(error) = parent_completion.status
+        {
+            let error = ErrorEvent {
+                message: error,
+                codex_error_info: None,
+                misalignment: None,
+            };
+            match &mut msg {
+                EventMsg::TurnComplete(event) => event.error = Some(error),
+                EventMsg::TurnAborted(event) => {
+                    msg = EventMsg::TurnComplete(TurnCompleteEvent {
+                        turn_id: event
+                            .turn_id
+                            .clone()
+                            .unwrap_or_else(|| turn_context.sub_id.clone()),
+                        last_agent_message: None,
+                        error: Some(error),
+                        started_at: event.started_at,
+                        completed_at: event.completed_at,
+                        duration_ms: event.duration_ms,
+                        time_to_first_token_ms: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let legacy_source = msg.clone();
         self.services
             .rollout_thread_trace
             .record_codex_turn_event(&turn_context.sub_id, &legacy_source);
@@ -2004,17 +2049,8 @@ impl Session {
             id: turn_context.sub_id.clone(),
             msg,
         };
-        let defer_v2_child_status = turn_context.multi_agent_version == MultiAgentVersion::V2
-            && matches!(
-                (&legacy_source, &turn_context.session_source),
-                (
-                    EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::Error(_),
-                    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                        agent_path: Some(_),
-                        ..
-                    })
-                )
-            );
+        let defer_v2_child_status =
+            is_v2_spawn_child && matches!(&legacy_source, EventMsg::Error(_));
         // Private reviewers have no app-server listener; publicly resumed Guardian threads do.
         if matches!(
             &turn_context.session_source,
@@ -2042,12 +2078,6 @@ impl Session {
             .await;
         } else {
             self.send_event_raw(event).await;
-        }
-        let deferred_agent_status = self
-            .maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
-            .await;
-        if defer_v2_child_status && let Some(status) = deferred_agent_status {
-            self.agent_status.send_replace(status);
         }
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
             .await;

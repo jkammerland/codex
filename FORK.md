@@ -28,8 +28,9 @@ not prompt for an npm update that would overwrite the fork.
    without returning control to the model.
 7. Unified exec provides a no-timeout `wait_process` that wakes on completion,
    queued input, or TTY output while retaining explicit bounded polling.
-8. Completed unified-exec waits drain through the terminal output-close event,
-   preserving final output that arrives after process exit.
+8. Completed unified-exec waits use a bounded post-exit output grace period, so
+   a descendant-held pipe cannot orphan the wait while immediately available
+   final output is still retained.
 9. Code mode surfaces recoverable metadata for live unified-exec sessions even
    when JavaScript emits only a projection of the nested tool result.
 10. Multi-agent v2 mail is persisted before delivery, preserves FIFO ordering,
@@ -51,10 +52,12 @@ not prompt for an npm update that would overwrite the fork.
     uncommitted reservations in FIFO order, an uncertain persistence result is
     quarantined without replay, and resume reconstructs the item at that claim
     rather than at admission. Preexisting mail from `.mcp.13` remains recoverable
-    up to the established aggregate turn bound.
-18. Durable-state resume scans have explicit record-count and byte limits, MCP
-    event streams stop concurrently within one shared timeout window, and a late
-    interrupted event cannot erase an already persisted terminal failure.
+    without applying current-format truncation, with a hard 10K-token item cap.
+18. Durable-state resume scans have explicit logical-state, physical-record, and
+    record-byte limits; claims preserve FIFO ordering and only an earlier matching
+    turn start can make a legacy claim model-visible. MCP event streams stop
+    concurrently within one shared timeout window, and a late interrupted event
+    cannot erase an already persisted terminal failure.
 
 The terminal-status marker is intentionally model-invisible. Current builds can
 recover both the dedicated marker and the overloaded `.mcp.11` metadata form.
@@ -92,10 +95,18 @@ From `codex-rs`:
 
 ```bash
 just fmt
+just test -p codex-history
+just test -p codex-rollout
+just test -p codex-thread-store
+just test -p codex-external-agent-migration
+just test -p codex-app-server-protocol
+just test -p codex-memories-write
+just test -p codex-core
 just test -p codex-mcp
 just test -p codex-cli
 just test -p codex-tui
-just fix -p codex-mcp -p codex-cli -p codex-tui
+just fix -p codex-core -p codex-history -p codex-rollout -p codex-thread-store
+just fix -p codex-external-agent-migration -p codex-mcp -p codex-cli -p codex-tui
 ```
 
 The focused `codex-core` MCP tests should also pass after transport changes:

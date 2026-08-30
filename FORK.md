@@ -5,9 +5,9 @@ maintained separately from upstream releases.
 
 ## Identity
 
-- Branch: `release/jkammerland.mcp.9`
+- Branch: `release/jkammerland.mcp.10`
 - Upstream base: `60fc6995608e8188c0c9f8407d6cd98676efa247` (`origin/main`)
-- User-visible suffix: `+jkammerland.mcp.9`
+- User-visible suffix: `+jkammerland.mcp.10`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal
@@ -32,6 +32,24 @@ not prompt for an npm update that would overwrite the fork.
    preserving final output that arrives after process exit.
 9. Code mode surfaces recoverable metadata for live unified-exec sessions even
    when JavaScript emits only a projection of the nested tool result.
+10. Multi-agent v2 mail is persisted before delivery, preserves FIFO ordering,
+    and rejects same-ID retries whose payload or turn lineage changed.
+11. Spawn admission and residency remain reserved until failed unpublished
+    children have shut down and their durable state has been removed.
+12. Child terminal events and exact terminal status are persisted before parent
+    completion delivery; a deterministic outbox acknowledgement makes reload
+    replay idempotent.
+13. MCP event-stream subscription IDs remain leased until terminal forwarding
+    finishes, so a same-ID replacement cannot receive a stale terminal event.
+14. Resumed code-mode cells retain their originating turn environment without
+    leaking hook context into a newer active turn.
+15. Completion envelopes are bounded even when agent paths are unusually long.
+16. User and fleet installers verify the selected checkout, active target,
+    fork identity, and `codex agents` support before reporting activation.
+
+The terminal-status marker is intentionally model-invisible. Older binaries can
+skip it and continue reading the adjacent raw terminal event; after a downgrade,
+only the exact `Error` followed by `Interrupted` status reconstruction is lost.
 
 ## Validate
 
@@ -61,10 +79,11 @@ codex --version
 ```
 
 The installer builds `codex` and `codex-code-mode-host` in release mode, verifies
-the fork suffix, preserves the first upstream executables for that upstream
-version, stages and optionally strips the new executables, and atomically
-replaces each npm platform-native binary. The npm JavaScript launcher and other
-helper binaries remain untouched.
+the fork suffix and `codex agents` support, preserves the first upstream
+executables for that upstream version, stages and optionally strips the new
+executables, and atomically replaces the selected managed standalone or npm
+platform-native binary pair. The npm JavaScript launcher and other helper
+binaries remain untouched.
 
 ## Rebase onto a later upstream release
 

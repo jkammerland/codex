@@ -390,3 +390,32 @@ async fn connection_shutdown_aborts_a_forwarder_blocked_after_explicit_stop() {
         .expect("stop task should join");
     assert!(streams.tasks.lock().await.is_empty());
 }
+
+#[tokio::test(start_paused = true)]
+async fn stopping_many_blocked_streams_uses_one_shared_timeout_window() {
+    let streams = Arc::new(McpEventStreams::default());
+    let thread_id = ThreadId::new();
+    for subscription_id in ["blocked-a", "blocked-b", "blocked-c"] {
+        streams
+            .start_task(subscription_id.to_string(), thread_id, |_cancellation| {
+                tokio::spawn(std::future::pending())
+            })
+            .await
+            .expect("subscription should start");
+    }
+
+    let stop = tokio::spawn({
+        let streams = Arc::clone(&streams);
+        async move { streams.stop_thread(thread_id).await }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(super::MCP_EVENT_STREAM_STOP_WAIT_TIMEOUT).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        stop.is_finished(),
+        "all blocked streams should share one five-second stop window"
+    );
+    stop.await.expect("stop task should join");
+    streams.abort_for_connection_shutdown().await;
+}

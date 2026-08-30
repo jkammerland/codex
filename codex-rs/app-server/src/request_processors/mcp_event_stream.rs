@@ -14,6 +14,7 @@ use codex_mcp::McpEventStream;
 use codex_mcp::McpEventStreamEnd;
 use codex_mcp::McpEventStreamItem;
 use codex_protocol::ThreadId;
+use futures::future::join_all;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
@@ -325,7 +326,7 @@ impl McpEventStreams {
                 });
             }
         }
-        for mut completion in completions {
+        join_all(completions.into_iter().map(|mut completion| async move {
             if !*completion.borrow()
                 && tokio::time::timeout(MCP_EVENT_STREAM_STOP_WAIT_TIMEOUT, completion.changed())
                     .await
@@ -336,7 +337,8 @@ impl McpEventStreams {
                     "timed out waiting for an MCP event stream write to finish"
                 );
             }
-        }
+        }))
+        .await;
     }
 }
 

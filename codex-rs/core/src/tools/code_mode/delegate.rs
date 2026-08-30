@@ -496,16 +496,21 @@ impl CoreTurnHost {
         }
         self.exec
             .session
-            .inject_if_running(vec![ResponseItem::CustomToolCallOutput {
-                id: None,
-                call_id,
-                name: Some(PUBLIC_TOOL_NAME.to_string()),
-                output: FunctionCallOutputPayload::from_text(text),
-                internal_chat_message_metadata_passthrough: None,
-            }])
+            .inject_if_running_for_turn(
+                &self.exec.turn.sub_id,
+                vec![ResponseItem::CustomToolCallOutput {
+                    id: None,
+                    call_id,
+                    name: Some(PUBLIC_TOOL_NAME.to_string()),
+                    output: FunctionCallOutputPayload::from_text(text),
+                    internal_chat_message_metadata_passthrough: None,
+                }],
+            )
             .await
             .map_err(|_| {
-                format!("failed to inject exec notify message for cell {cell_id}: no active turn")
+                format!(
+                    "failed to inject exec notify message for cell {cell_id}: originating turn is not active"
+                )
             })
     }
 }

@@ -22,7 +22,7 @@ class FleetReleaseTest(unittest.TestCase):
         )
 
     def test_checked_in_manifest_is_valid(self) -> None:
-        self.assertEqual(self.release.marker, "+jkammerland.mcp.13")
+        self.assertEqual(self.release.marker, "+jkammerland.mcp.14")
         self.assertEqual(self.release.rusty_v8_version, "150.4.0")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
         self.assertEqual(
@@ -100,10 +100,10 @@ class FleetReleaseTest(unittest.TestCase):
     ) -> None:
         mac_script = fleet_release.activation_script(self.hosts[0], self.release)
         windows_script = fleet_release.activation_script(self.hosts[1], self.release)
-        self.assertIn(".jkammerland.mcp.13-previous", mac_script)
+        self.assertIn(".jkammerland.mcp.14-previous", mac_script)
         self.assertIn("mv -f", mac_script)
         self.assertIn("ReplaceFile", windows_script)
-        self.assertIn(".jkammerland.mcp.13-previous", windows_script)
+        self.assertIn(".jkammerland.mcp.14-previous", windows_script)
         self.assertIn("Build worktree is not clean at the manifest commit", mac_script)
         self.assertIn(
             "Build worktree is not clean at the manifest commit", windows_script

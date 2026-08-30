@@ -5,9 +5,9 @@ maintained separately from upstream releases.
 
 ## Identity
 
-- Branch: `release/jkammerland.mcp.13`
+- Branch: `release/jkammerland.mcp.14`
 - Upstream base: `60fc6995608e8188c0c9f8407d6cd98676efa247` (`origin/main`)
-- User-visible suffix: `+jkammerland.mcp.13`
+- User-visible suffix: `+jkammerland.mcp.14`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal
@@ -46,15 +46,25 @@ not prompt for an npm update that would overwrite the fork.
 15. Completion envelopes are bounded even when agent paths are unusually long.
 16. User and fleet installers verify the selected checkout, active target,
     fork identity, and `codex agents` support before reporting activation.
-17. Durable mail claims retain a bounded `.mcp.12` payload/response shadow so a
-    binary rollback can reconstruct the delivery; current builds de-duplicate
-    that shadow and expose the mail only after its claimed turn starts.
+17. Durable mail admission is pending-only. The exact bounded and stamped model
+    item is committed atomically at its delivery claim, interrupted turns requeue
+    uncommitted reservations in FIFO order, and resume reconstructs the item at
+    that claim rather than at admission.
+18. Durable-state resume scans have explicit record-count and byte limits, MCP
+    event streams stop concurrently within one shared timeout window, and a late
+    interrupted event cannot erase an already persisted terminal failure.
 
 The terminal-status marker is intentionally model-invisible. Current builds can
 recover both the dedicated marker and the overloaded `.mcp.11` metadata form.
 Older binaries can skip the dedicated marker and continue reading the adjacent
 raw terminal event; after a downgrade, only the exact `Error` followed by
 `Interrupted` status reconstruction is lost.
+
+The `.mcp.14` durable-mail encoding is intentionally fail-closed on downgrade.
+After `.mcp.14` has written new-format durable mail to a rollout, do not resume
+that rollout with `.mcp.13` or older: those binaries cannot prove whether a
+pending-only record was delivered. Roll back the executable pair only before
+new-format sessions are used, or upgrade back to `.mcp.14` before resuming them.
 
 ## Release layout
 

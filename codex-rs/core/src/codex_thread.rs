@@ -255,17 +255,7 @@ impl CodexThread {
     }
 
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
-        match op {
-            Op::InterAgentCommunicationWithAck {
-                communication,
-                start_options,
-                reply,
-            } => {
-                self.submit_inter_agent_communication_with_ack(communication, start_options, reply)
-                    .await
-            }
-            op => self.io.submit(op).await,
-        }
+        self.io.submit(op).await
     }
 
     /// Returns the session telemetry handle for thread-scoped production instrumentation.
@@ -343,58 +333,11 @@ impl CodexThread {
         op: Op,
         trace: Option<W3cTraceContext>,
     ) -> CodexResult<String> {
-        match op {
-            Op::InterAgentCommunicationWithAck {
-                communication,
-                start_options,
-                reply,
-            } => {
-                self.submit_inter_agent_communication_with_ack(communication, start_options, reply)
-                    .await
-            }
-            op => {
-                self.io
-                    .submit_with_trace(
-                        op, trace, /*parent_turn_id*/ None, /*root_turn_id*/ None,
-                    )
-                    .await
-            }
-        }
-    }
-
-    async fn submit_inter_agent_communication_with_ack(
-        &self,
-        communication: codex_protocol::protocol::InterAgentCommunication,
-        start_options: TurnStartOptions,
-        reply: oneshot::Sender<()>,
-    ) -> CodexResult<String> {
-        let sub_id = new_submission_id();
-        let _delivery_permit = self
-            .session
-            .agent_delivery_gate
-            .clone()
-            .acquire_owned()
+        self.io
+            .submit_with_trace(
+                op, trace, /*parent_turn_id*/ None, /*root_turn_id*/ None,
+            )
             .await
-            .map_err(|_| CodexErr::InternalAgentDied)?;
-        if !self.is_running() {
-            return Err(CodexErr::InternalAgentDied);
-        }
-        let trigger_turn = self
-            .session
-            .persist_and_enqueue_inter_agent_communication(&sub_id, communication, start_options)
-            .await
-            .map_err(|err| {
-                CodexErr::Fatal(format!(
-                    "failed to persist inter-agent communication: {err}"
-                ))
-            })?;
-        let _ = reply.send(());
-        if trigger_turn || self.session.has_outstanding_durable_sleep() {
-            self.session
-                .maybe_start_turn_for_pending_work_with_sub_id(sub_id.clone())
-                .await;
-        }
-        Ok(sub_id)
     }
 
     /// Submits turn input without requiring the caller to inspect thread state.

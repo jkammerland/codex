@@ -1316,6 +1316,41 @@ async fn public_acknowledged_mail_op_completes_after_durable_delivery() {
 }
 
 #[tokio::test]
+async fn public_acknowledged_mail_op_does_not_overtake_queued_shutdown() {
+    let harness = AgentControlHarness::new().await;
+    let (_, thread) = harness.start_thread().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "mail queued after shutdown".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let (reply, acknowledged) = tokio::sync::oneshot::channel();
+
+    thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should enqueue");
+    thread
+        .submit(Op::InterAgentCommunicationWithAck {
+            communication: communication.clone(),
+            start_options: Default::default(),
+            reply,
+        })
+        .await
+        .expect("mail may enqueue but must remain ordered after shutdown");
+    tokio::time::timeout(Duration::from_secs(5), thread.wait_until_terminated())
+        .await
+        .expect("queued shutdown must terminate the session loop");
+    assert!(acknowledged.await.is_err());
+    assert!(!history_contains_agent_message(
+        thread.session.clone_history().await.raw_items(),
+        &communication
+    ));
+}
+
+#[tokio::test]
 async fn acknowledged_mail_wins_when_delivery_precedes_shutdown() {
     let harness = AgentControlHarness::new().await;
     let (thread_id, thread) = harness.start_thread().await;
@@ -4268,6 +4303,91 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         &InterAgentCommunication::new(
             tester_path,
             AgentPath::root(),
+            Vec::new(),
+            expected_message,
+            /*trigger_turn*/ false,
+        )
+    ));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_completion_reports_persistent_parent_delivery_failure() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let mut child_config = harness.config.clone();
+    let _ = child_config.features.enable(Feature::MultiAgentV2);
+    let parent_path = AgentPath::root().join("worker_a").expect("parent path");
+    let child_path = parent_path.join("tester").expect("child path");
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            child_config,
+            text_input("tester task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 2,
+                agent_path: Some(child_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
+        .await
+        .expect("child thread should start");
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush before the injected failure");
+    parent_thread
+        .session
+        .live_thread()
+        .expect("parent should have durable persistence")
+        .shutdown()
+        .await
+        .expect("closing the parent writer should succeed");
+
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_turn = child_thread.session.new_default_turn().await;
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some("done".to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    let AgentStatus::Errored(error) = child_thread.agent_status().await else {
+        panic!("persistent parent delivery failure must publish an explicit terminal error");
+    };
+    assert!(error.contains("could not be durably delivered"));
+    assert!(error.contains("after 3 attempts"));
+    let expected_message = crate::session_prefix::format_inter_agent_completion_message(
+        parent_path.clone(),
+        child_path.clone(),
+        &AgentStatus::Completed(Some("done".to_string())),
+    )
+    .expect("completed status should render");
+    assert!(!history_contains_agent_message(
+        parent_thread.session.clone_history().await.raw_items(),
+        &InterAgentCommunication::new(
+            child_path,
+            parent_path,
             Vec::new(),
             expected_message,
             /*trigger_turn*/ false,

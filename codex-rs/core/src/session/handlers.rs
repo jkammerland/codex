@@ -804,6 +804,11 @@ pub(super) async fn submission_loop(
         .await;
         if should_exit {
             shutdown_received = true;
+            // Reject new work and release replies owned by submissions already queued after the
+            // terminal operation. Leaving those values buffered would keep their waiters alive
+            // even though no session loop can ever process them.
+            rx_sub.close();
+            while rx_sub.try_recv().is_ok() {}
             break;
         }
     }

@@ -173,6 +173,7 @@ fn write_subagent_lifecycle_hooks(
     stop_prompts: &[&str],
     subagent_stop_matcher: &str,
 ) -> Result<()> {
+    let hook_order_log_path = home.join("subagent_hook_order_log.jsonl");
     let session_start_script_path = home.join("session_start_hook.py");
     let session_start_log_path = home.join("session_start_hook_log.jsonl");
     let session_start_script = format!(
@@ -196,12 +197,16 @@ from pathlib import Path
 import sys
 
 log_path = Path(r"{start_log_path}")
+order_log_path = Path(r"{hook_order_log_path}")
 payload = json.load(sys.stdin)
 with log_path.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+with order_log_path.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(payload) + "\n")
 print(json.dumps({{"hookSpecificOutput": {{"hookEventName": "SubagentStart", "additionalContext": {SUBAGENT_START_CONTEXT:?}}}}}))
 "#,
         start_log_path = start_log_path.display(),
+        hook_order_log_path = hook_order_log_path.display(),
     );
 
     let user_prompt_submit_script_path = home.join("user_prompt_submit_hook.py");
@@ -212,11 +217,15 @@ from pathlib import Path
 import sys
 
 log_path = Path(r"{user_prompt_submit_log_path}")
+order_log_path = Path(r"{hook_order_log_path}")
 payload = json.load(sys.stdin)
 with log_path.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(payload) + "\n")
+with order_log_path.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
 "#,
         user_prompt_submit_log_path = user_prompt_submit_log_path.display(),
+        hook_order_log_path = hook_order_log_path.display(),
     );
 
     let subagent_stop_script_path = home.join("subagent_stop_hook.py");
@@ -710,6 +719,28 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
         Some(spawned_id.as_str())
     );
     assert_eq!(child_prompt_input["agent_type"].as_str(), Some("worker"));
+
+    let hook_order_inputs = wait_for_hook_log(
+        test.codex_home_path(),
+        "subagent_hook_order_log.jsonl",
+        /*expected_len*/ 3,
+    )
+    .await?;
+    let subagent_start_index = hook_order_inputs
+        .iter()
+        .position(|input| input["hook_event_name"].as_str() == Some("SubagentStart"))
+        .expect("SubagentStart hook order entry");
+    let child_prompt_index = hook_order_inputs
+        .iter()
+        .position(|input| {
+            input["hook_event_name"].as_str() == Some("UserPromptSubmit")
+                && input["prompt"].as_str() == Some(CHILD_PROMPT)
+        })
+        .expect("child UserPromptSubmit hook order entry");
+    assert!(
+        subagent_start_index < child_prompt_index,
+        "SubagentStart must run before the child UserPromptSubmit hook"
+    );
 
     let session_start_inputs = wait_for_hook_log(
         test.codex_home_path(),

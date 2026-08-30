@@ -160,7 +160,19 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
-    let input_already_recorded = if let Some(barrier) = sess.take_spawn_admission_barrier().await {
+    let spawn_admission_barrier = sess.take_spawn_admission_barrier().await;
+
+    // Record results from hooks that finished after the previous turn before this turn's user prompt.
+    drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
+
+    let input_already_recorded = if let Some(barrier) = spawn_admission_barrier {
+        if run_pending_session_start_hooks(&sess, &turn_context).await {
+            let _ = barrier.persisted.send(Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "spawned agent startup was blocked by a session start hook",
+            )));
+            return Ok(None);
+        }
         if run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart)
             .await
         {
@@ -196,9 +208,6 @@ pub(crate) async fn run_turn(
     } else {
         false
     };
-
-    // Record results from hooks that finished after the previous turn before this turn's user prompt.
-    drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
@@ -310,7 +319,7 @@ pub(crate) async fn run_turn(
         return Ok(None);
     };
 
-    if run_pending_session_start_hooks(&sess, &turn_context).await {
+    if !input_already_recorded && run_pending_session_start_hooks(&sess, &turn_context).await {
         return Ok(None);
     }
     let mut can_drain_pending_input = input.is_empty();

@@ -26,6 +26,7 @@ static PENDING_MAILBOX_MESSAGES: Gauge = Gauge::new("core.mailbox.pending");
 const MAX_MAILBOX_ITEMS_PER_TURN: usize = 64;
 pub(super) const MAX_MAILBOX_MODEL_TOKENS_PER_TURN: usize = 9_000;
 pub(super) const MAX_MAILBOX_MODEL_TOKENS_PER_ITEM: usize = 1_000;
+const MAX_LEGACY_MAILBOX_MODEL_TOKENS_PER_ITEM: usize = 10_000;
 const INTER_AGENT_MODEL_CONTENT_MAX_TOKENS: usize = 768;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,7 +39,7 @@ impl MailboxModelSizeLimit {
     fn max_tokens(self) -> usize {
         match self {
             Self::Current => MAX_MAILBOX_MODEL_TOKENS_PER_ITEM,
-            Self::LegacyRecovery => MAX_MAILBOX_MODEL_TOKENS_PER_TURN,
+            Self::LegacyRecovery => MAX_LEGACY_MAILBOX_MODEL_TOKENS_PER_ITEM,
         }
     }
 }
@@ -82,12 +83,17 @@ fn stamped_mailbox_model_communication(
     turn_id: &str,
 ) -> PreparedMailboxModelCommunication {
     let unstamped_communication = communication.clone();
-    communication.set_turn_id_if_missing(turn_id);
-    communication
+    let metadata = communication
         .internal_chat_message_metadata_passthrough
-        .get_or_insert_with(InternalChatMessageMetadataPassthrough::default)
-        .create_time
-        .get_or_insert_with(super::Session::response_item_create_time);
+        .get_or_insert_with(InternalChatMessageMetadataPassthrough::default);
+    if metadata.turn_id.as_deref() != Some(turn_id) {
+        metadata.turn_id = Some(turn_id.to_string());
+        metadata.create_time = Some(super::Session::response_item_create_time());
+    } else {
+        metadata
+            .create_time
+            .get_or_insert_with(super::Session::response_item_create_time);
+    }
     let model_tokens = usize::try_from(estimate_item_token_count(
         &communication.to_model_input_item(),
     ))
@@ -104,10 +110,33 @@ pub(super) fn prepare_mailbox_model_communication(
     turn_id: &str,
     size_limit: MailboxModelSizeLimit,
 ) -> io::Result<PreparedMailboxModelCommunication> {
-    let prepared =
-        stamped_mailbox_model_communication(mailbox_model_communication(communication), turn_id);
+    let model_communication = match size_limit {
+        MailboxModelSizeLimit::Current => mailbox_model_communication(communication),
+        MailboxModelSizeLimit::LegacyRecovery => communication.clone(),
+    };
+    prepare_stored_mailbox_model_communication(model_communication, turn_id, size_limit)
+}
+
+fn prepare_stored_mailbox_model_communication(
+    model_communication: InterAgentCommunication,
+    turn_id: &str,
+    size_limit: MailboxModelSizeLimit,
+) -> io::Result<PreparedMailboxModelCommunication> {
+    let prepared = stamped_mailbox_model_communication(model_communication, turn_id);
+    validate_stored_mailbox_model_communication(&prepared.communication, size_limit)?;
+    Ok(prepared)
+}
+
+pub(super) fn validate_stored_mailbox_model_communication(
+    communication: &InterAgentCommunication,
+    size_limit: MailboxModelSizeLimit,
+) -> io::Result<()> {
+    let model_tokens = usize::try_from(estimate_item_token_count(
+        &communication.to_model_input_item(),
+    ))
+    .unwrap_or(usize::MAX);
     let max_tokens = size_limit.max_tokens();
-    if prepared.model_tokens > max_tokens {
+    if model_tokens > max_tokens {
         let id = communication
             .id
             .as_ref()
@@ -116,12 +145,11 @@ pub(super) fn prepare_mailbox_model_communication(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "inter-agent communication {id} is too large for one model-context item ({} estimated tokens; maximum {max_tokens})",
-                prepared.model_tokens
+                "inter-agent communication {id} is too large for one model-context item ({model_tokens} estimated tokens; maximum {max_tokens})"
             ),
         ));
     }
-    Ok(prepared)
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -280,7 +308,10 @@ fn deliverable_mail_count(pending_mails: &VecDeque<PendingMailboxCommunication>)
         .take(MAX_MAILBOX_ITEMS_PER_TURN)
     {
         let next_model_tokens = model_tokens.saturating_add(mail.model_tokens);
-        if next_model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN {
+        let legacy_single_item = count == 0
+            && mail.size_limit == MailboxModelSizeLimit::LegacyRecovery
+            && next_model_tokens <= MAX_LEGACY_MAILBOX_MODEL_TOKENS_PER_ITEM;
+        if next_model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN && !legacy_single_item {
             break;
         }
         count += 1;
@@ -425,6 +456,7 @@ impl InputQueue {
     pub(super) async fn prepare_persisted_mailbox_communication(
         &self,
         communication: InterAgentCommunication,
+        prepared: PreparedMailboxModelCommunication,
         start_options: TurnStartOptions,
         fingerprint: String,
         intended_turn_id: String,
@@ -433,8 +465,6 @@ impl InputQueue {
         let Some(id) = communication.id.as_ref() else {
             return Ok(false);
         };
-        let prepared =
-            prepare_mailbox_model_communication(&communication, &intended_turn_id, size_limit)?;
         let mut mailbox = self.mailbox.lock().await;
         if let Some(pending) = mailbox
             .pending_mails
@@ -505,8 +535,12 @@ impl InputQueue {
         communication: InterAgentCommunication,
         start_options: TurnStartOptions,
     ) -> io::Result<()> {
+        let mut sized_communication = communication.clone();
+        sized_communication
+            .id
+            .get_or_insert_with(|| ResponseItemId::new("msg"));
         let prepared = prepare_mailbox_model_communication(
-            &communication,
+            &sized_communication,
             "00000000-0000-0000-0000-000000000000",
             MailboxModelSizeLimit::Current,
         )?;
@@ -576,13 +610,16 @@ impl InputQueue {
             .take_while(|mail| mail.persisted)
             .take(MAX_MAILBOX_ITEMS_PER_TURN)
         {
-            let prepared = prepare_mailbox_model_communication(
-                &mail.model_communication,
+            let prepared = prepare_stored_mailbox_model_communication(
+                mail.model_communication.clone(),
                 turn_id,
                 mail.size_limit,
             )?;
             let next_model_tokens = selected_model_tokens.saturating_add(prepared.model_tokens);
-            if next_model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN {
+            let legacy_single_item = selected_count == 0
+                && mail.size_limit == MailboxModelSizeLimit::LegacyRecovery
+                && next_model_tokens <= MAX_LEGACY_MAILBOX_MODEL_TOKENS_PER_ITEM;
+            if next_model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN && !legacy_single_item {
                 break;
             }
             if let (Some(communication_id), Some(fingerprint)) =
@@ -1481,6 +1518,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_recovery_delivers_one_item_when_stamping_crosses_the_turn_bound() {
+        let first_words_over_limit = (8_000..40_000)
+            .step_by(256)
+            .find(|words| {
+                let mut communication = InterAgentCommunication::new_encrypted(
+                    AgentPath::root(),
+                    AgentPath::try_from("/root/worker").expect("agent path"),
+                    Vec::new(),
+                    "x ".repeat(*words),
+                    /*trigger_turn*/ true,
+                );
+                communication.id = Some(ResponseItemId::with_suffix("msg", "legacy-boundary"));
+                stamped_mailbox_model_communication(communication, "legacy-turn").model_tokens
+                    > MAX_MAILBOX_MODEL_TOKENS_PER_TURN
+            })
+            .expect("fixture search should cross the normal turn limit");
+        let (communication, unstamped_tokens, stamped_tokens) =
+            (first_words_over_limit.saturating_sub(256)..=first_words_over_limit)
+                .find_map(|words| {
+                    let mut communication = InterAgentCommunication::new_encrypted(
+                        AgentPath::root(),
+                        AgentPath::try_from("/root/worker").expect("agent path"),
+                        Vec::new(),
+                        "x ".repeat(words),
+                        /*trigger_turn*/ true,
+                    );
+                    communication.id = Some(ResponseItemId::with_suffix("msg", "legacy-boundary"));
+                    let unstamped_tokens = usize::try_from(estimate_item_token_count(
+                        &communication.to_model_input_item(),
+                    ))
+                    .unwrap_or(usize::MAX);
+                    let stamped_tokens =
+                        stamped_mailbox_model_communication(communication.clone(), "legacy-turn")
+                            .model_tokens;
+                    (unstamped_tokens <= MAX_MAILBOX_MODEL_TOKENS_PER_TURN
+                        && stamped_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN
+                        && stamped_tokens <= MAX_LEGACY_MAILBOX_MODEL_TOKENS_PER_ITEM)
+                        .then_some((communication, unstamped_tokens, stamped_tokens))
+                })
+                .expect("fixture should cross the turn limit only after metadata stamping");
+        let input_queue = InputQueue::new();
+
+        assert!(
+            input_queue
+                .restore_claimed_mailbox_communication(
+                    communication,
+                    Default::default(),
+                    "legacy-fingerprint".to_string(),
+                    "legacy-turn".to_string(),
+                    MailboxModelSizeLimit::LegacyRecovery,
+                )
+                .await
+                .expect("legacy item remains below the recovery item limit")
+        );
+        let snapshot = input_queue
+            .pending_mailbox_claim_snapshot("replacement-turn")
+            .await
+            .expect("one legacy item above the normal turn limit must remain claimable");
+
+        assert!(unstamped_tokens <= MAX_MAILBOX_MODEL_TOKENS_PER_TURN);
+        assert!(stamped_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN);
+        assert_eq!(snapshot.selected_count, 1);
+        assert!(snapshot.durable_mail[0].model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN);
+    }
+
+    #[tokio::test]
+    async fn legacy_recovery_preserves_plaintext_beyond_the_current_truncation_limit() {
+        let mut communication = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            &"legacy plaintext ".repeat(1_500),
+            /*trigger_turn*/ true,
+        );
+        communication.id = Some(ResponseItemId::with_suffix("msg", "legacy-plaintext"));
+        let input_queue = InputQueue::new();
+
+        assert!(
+            input_queue
+                .restore_claimed_mailbox_communication(
+                    communication.clone(),
+                    Default::default(),
+                    "legacy-fingerprint".to_string(),
+                    "legacy-turn".to_string(),
+                    MailboxModelSizeLimit::LegacyRecovery,
+                )
+                .await
+                .expect("valid legacy plaintext should restore")
+        );
+        let snapshot = input_queue
+            .pending_mailbox_claim_snapshot("replacement-turn")
+            .await
+            .expect("restored legacy plaintext should remain claimable");
+
+        assert_eq!(
+            snapshot.durable_mail[0].model_communication.content,
+            communication.content
+        );
+    }
+
+    #[tokio::test]
     async fn mailbox_admission_estimates_the_bounded_agent_paths() {
         let input_queue = InputQueue::new();
         let long_path = AgentPath::try_from(format!("/root/{}", "worker".repeat(8_000)))
@@ -1525,6 +1662,12 @@ mod tests {
             input_queue
                 .prepare_persisted_mailbox_communication(
                     first.clone(),
+                    prepare_mailbox_model_communication(
+                        &first,
+                        "first-turn",
+                        MailboxModelSizeLimit::Current,
+                    )
+                    .expect("valid first model item"),
                     Default::default(),
                     "first-fingerprint".to_string(),
                     "first-turn".to_string(),
@@ -1555,6 +1698,12 @@ mod tests {
             input_queue
                 .prepare_persisted_mailbox_communication(
                     second.clone(),
+                    prepare_mailbox_model_communication(
+                        &second,
+                        "second-turn",
+                        MailboxModelSizeLimit::Current,
+                    )
+                    .expect("valid second model item"),
                     Default::default(),
                     "second-fingerprint".to_string(),
                     "second-turn".to_string(),
@@ -1598,6 +1747,12 @@ mod tests {
             input_queue
                 .prepare_persisted_mailbox_communication(
                     communication.clone(),
+                    prepare_mailbox_model_communication(
+                        &communication,
+                        "intended-turn",
+                        MailboxModelSizeLimit::Current,
+                    )
+                    .expect("valid model item"),
                     Default::default(),
                     "fingerprint".to_string(),
                     "intended-turn".to_string(),
@@ -1612,6 +1767,14 @@ mod tests {
             .pending_mailbox_claim_snapshot("first-turn")
             .await
             .expect("mail should fit first turn");
+        assert_eq!(
+            first_snapshot.durable_mail[0]
+                .model_communication
+                .internal_chat_message_metadata_passthrough
+                .as_ref()
+                .and_then(|metadata| metadata.turn_id.as_deref()),
+            Some("first-turn")
+        );
         assert_eq!(
             input_queue
                 .drain_claimed_mailbox_input_items(&first_snapshot, "first-turn")
@@ -1632,6 +1795,14 @@ mod tests {
             .pending_mailbox_claim_snapshot("second-turn")
             .await
             .expect("mail should fit second turn");
+        assert_eq!(
+            second_snapshot.durable_mail[0]
+                .model_communication
+                .internal_chat_message_metadata_passthrough
+                .as_ref()
+                .and_then(|metadata| metadata.turn_id.as_deref()),
+            Some("second-turn")
+        );
         assert_eq!(
             input_queue
                 .drain_claimed_mailbox_input_items(&second_snapshot, "second-turn")
@@ -1669,6 +1840,12 @@ mod tests {
             input_queue
                 .prepare_persisted_mailbox_communication(
                     communication.clone(),
+                    prepare_mailbox_model_communication(
+                        &communication,
+                        "commit-turn",
+                        MailboxModelSizeLimit::Current,
+                    )
+                    .expect("valid model item"),
                     Default::default(),
                     "fingerprint".to_string(),
                     "commit-turn".to_string(),
@@ -1734,6 +1911,12 @@ mod tests {
             input_queue
                 .prepare_persisted_mailbox_communication(
                     durable.clone(),
+                    prepare_mailbox_model_communication(
+                        &durable,
+                        "next-turn",
+                        MailboxModelSizeLimit::Current,
+                    )
+                    .expect("valid next model item"),
                     Default::default(),
                     "next-fingerprint".to_string(),
                     "next-turn".to_string(),

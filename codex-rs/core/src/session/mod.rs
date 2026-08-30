@@ -1386,11 +1386,12 @@ impl Session {
                         .await;
                 }
                 for pending in durable_mail_recovery.pending {
-                    let intended_turn_id = if pending.intended_turn_id.is_empty() {
-                        uuid::Uuid::new_v4().to_string()
-                    } else {
-                        pending.intended_turn_id
-                    };
+                    let intended_turn_id =
+                        if pending.already_claimed || pending.intended_turn_id.is_empty() {
+                            uuid::Uuid::new_v4().to_string()
+                        } else {
+                            pending.intended_turn_id
+                        };
                     let id = pending.communication.id.clone();
                     let restored = if pending.already_claimed {
                         self.input_queue
@@ -1403,15 +1404,25 @@ impl Session {
                             )
                             .await
                     } else {
-                        self.input_queue
-                            .prepare_persisted_mailbox_communication(
-                                pending.communication,
-                                pending.start_options,
-                                pending.fingerprint.clone(),
-                                intended_turn_id.clone(),
-                                pending.size_limit,
-                            )
-                            .await
+                        match input_queue::prepare_mailbox_model_communication(
+                            &pending.communication,
+                            &intended_turn_id,
+                            pending.size_limit,
+                        ) {
+                            Ok(prepared) => {
+                                self.input_queue
+                                    .prepare_persisted_mailbox_communication(
+                                        pending.communication,
+                                        prepared,
+                                        pending.start_options,
+                                        pending.fingerprint.clone(),
+                                        intended_turn_id.clone(),
+                                        pending.size_limit,
+                                    )
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        }
                     };
                     if restored.as_ref().is_ok_and(|restored| *restored)
                         && !pending.already_claimed
@@ -3545,6 +3556,14 @@ impl Session {
                 "cannot commit durable mailbox delivery without a live rollout writer",
             ));
         }
+        // Hold the live-history lock before crossing the durable commit point. Once the rollout
+        // flush succeeds, inserting the exact response below is synchronous, so cancellation
+        // cannot leave durable history ahead of the context observed by later live turns.
+        let mut durable_history = if durable_claim.is_some() {
+            Some(self.state.lock().await)
+        } else {
+            None
+        };
         if let Some(live_thread) = self.live_thread() {
             if let Some(id) = communication.id.as_ref()
                 && durable_claim.is_some()
@@ -3592,6 +3611,21 @@ impl Session {
                 self.flush_rollout().await?;
             }
         }
+        if let Some(state) = durable_history.as_mut() {
+            state.current_time_reminder.note_recorded_items(items);
+            state.record_items(
+                items.iter(),
+                turn_context.model_info().truncation_policy.into(),
+            );
+        } else {
+            let mut state = self.state.lock().await;
+            state.current_time_reminder.note_recorded_items(items);
+            state.record_items(
+                items.iter(),
+                turn_context.model_info().truncation_policy.into(),
+            );
+        }
+        drop(durable_history);
         if let Some(id) = communication.id.as_ref()
             && durable_claim.is_some()
             && !self
@@ -3602,14 +3636,6 @@ impl Session {
             return Err(std::io::Error::other(format!(
                 "durable mailbox delivery {id} lost its in-flight claim"
             )));
-        }
-        {
-            let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(items);
-            state.record_items(
-                items.iter(),
-                turn_context.model_info().truncation_policy.into(),
-            );
         }
         self.send_raw_response_items(turn_context, items).await;
         Ok(())

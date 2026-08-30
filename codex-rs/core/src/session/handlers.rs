@@ -136,11 +136,6 @@ impl Session {
         communication.id = Some(communication_id.clone());
         let mail_fingerprint = durable_mail_fingerprint(&communication, &start_options);
         let turn_context = self.new_default_turn().await;
-        let prepared = prepare_mailbox_model_communication(
-            &communication,
-            &turn_context.sub_id,
-            MailboxModelSizeLimit::Current,
-        )?;
         self.try_ensure_rollout_materialized(PersistContext::Standard)
             .await?;
         let recorded_fingerprint = self
@@ -199,23 +194,21 @@ impl Session {
                         ),
                     ));
                 }
-                None => {
-                    self.persist_durable_inter_agent_communication(
-                        &turn_context,
-                        &prepared.unstamped_communication,
-                        &mail_fingerprint,
-                        &start_options,
-                    )
-                    .await?
-                }
+                None => {}
             },
         }
+        let prepared = prepare_mailbox_model_communication(
+            &communication,
+            &turn_context.sub_id,
+            MailboxModelSizeLimit::Current,
+        )?;
         if !self
             .input_queue
             .prepare_persisted_mailbox_communication(
-                communication,
-                start_options,
-                mail_fingerprint,
+                communication.clone(),
+                prepared.clone(),
+                start_options.clone(),
+                mail_fingerprint.clone(),
                 turn_context.sub_id.clone(),
                 MailboxModelSizeLimit::Current,
             )
@@ -228,6 +221,13 @@ impl Session {
                 ),
             ));
         }
+        self.persist_durable_inter_agent_communication(
+            &turn_context,
+            &prepared.communication,
+            &mail_fingerprint,
+            &start_options,
+        )
+        .await?;
         self.flush_rollout().await?;
         let accepted = self
             .input_queue

@@ -1826,6 +1826,42 @@ async fn ambiguous_delivery_flush_failure_is_quarantined_without_replay() {
         )
         .await
         .expect_err("the injected flush failure must fail acknowledgement");
+    let substituted = InterAgentCommunication {
+        content: "substituted after ambiguous append".to_string(),
+        ..communication.clone()
+    };
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            substituted,
+            AgentCommunicationContext::new(AgentCommunicationKind::Result, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect_err("an ambiguous append must retain the original fingerprint");
+    let stored_after_substitution = thread_store
+        .load_history(codex_thread_store::LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load stored history after rejected substitution");
+    assert_eq!(
+        stored_after_substitution
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                RolloutItem::DurableInterAgentCommunication {
+                    communication: stored,
+                    ..
+                } if stored.id == communication.id
+            ))
+            .count(),
+        1,
+        "a changed-payload retry must not append a second admission"
+    );
     for _ in 0..2 {
         harness
             .control
@@ -2085,6 +2121,24 @@ async fn inflight_mail_recovered_into_a_different_turn_commits_only_the_delivery
         .claim_and_drain_mailbox_input_items(&interrupted_turn_id)
         .await
         .expect("the first claim should persist");
+    let rollout_path = thread
+        .rollout_path()
+        .expect("thread should have a rollout path");
+    let (initial_rollout_items, _, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path)
+            .await
+            .expect("read rollout before reload");
+    assert_eq!(parse_errors, 0);
+    let persisted_communication = initial_rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::DurableInterAgentCommunication {
+                communication: persisted,
+                ..
+            } if persisted.id == communication.id => Some(persisted.clone()),
+            _ => None,
+        })
+        .expect("durable admission should preserve the exact stamped communication");
     harness.manager.remove_thread(&thread_id).await;
     drop(thread);
     harness
@@ -2107,7 +2161,7 @@ async fn inflight_mail_recovered_into_a_different_turn_commits_only_the_delivery
             .expect("a different turn should reclaim the mail")
             .0,
         vec![crate::session::TurnInput::InterAgentCommunication(
-            communication.clone()
+            persisted_communication
         )]
     );
     let replacement_turn = reloaded

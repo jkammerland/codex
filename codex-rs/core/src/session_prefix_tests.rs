@@ -18,3 +18,15 @@ fn error_completion_message_stays_below_manual_review_threshold() {
     assert!(approx_token_count(&message) < COMPLETION_MESSAGE_MAX_TOKENS);
     assert!(message.contains(ERROR_NEXT_ACTION));
 }
+
+#[test]
+fn successful_completion_message_stays_below_manual_review_threshold() {
+    let message = format_inter_agent_completion_message(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        &AgentStatus::Completed(Some("finished work ".repeat(1_000))),
+    )
+    .expect("completed status should produce a completion message");
+
+    assert!(approx_token_count(&message) < COMPLETION_MESSAGE_MAX_TOKENS);
+}

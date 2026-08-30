@@ -798,7 +798,7 @@ pub(crate) async fn inject_tool_additional_contexts(
     }
 
     let _ = sess
-        .inject_if_running_for_turn(&turn_context.sub_id, developer_messages)
+        .record_if_running_for_turn(turn_context, developer_messages)
         .await;
 }
 

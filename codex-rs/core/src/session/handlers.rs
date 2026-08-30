@@ -44,6 +44,8 @@ use codex_protocol::protocol::WarningEvent;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_thread_store::PersistContext;
+use sha1::Digest;
+use sha1::Sha1;
 
 use crate::context_manager::is_user_turn_boundary;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -126,35 +128,69 @@ impl Session {
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| codex_protocol::ResponseItemId::new("msg"));
         communication.id = Some(communication_id.clone());
+        let mail_fingerprint = durable_mail_fingerprint(&communication, &start_options);
         let turn_context = self.new_default_turn().await;
         self.try_ensure_rollout_materialized(PersistContext::Standard)
             .await?;
-        let already_recorded = self
-            .has_recorded_inter_agent_communication(&communication)
-            .await;
-        if already_recorded {
-            if !self
-                .input_queue
-                .recorded_mail_requires_delivery(&communication_id)
+        match self
+            .input_queue
+            .recorded_durable_mail_fingerprint(&communication_id)
+            .await
+        {
+            Some(recorded_fingerprint) if recorded_fingerprint != mail_fingerprint => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "inter-agent communication {communication_id} was retried with a different payload or turn-start options"
+                    ),
+                ));
+            }
+            Some(_) => {}
+            None => match self
+                .recorded_inter_agent_communication_matches(&communication)
                 .await
             {
-                return Ok(false);
-            }
-        } else {
-            self.record_inter_agent_communication(&turn_context, communication.clone())
-                .await?;
-            self.input_queue
-                .mark_mail_persistence_pending(communication_id)
-                .await;
+                Some(false) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "inter-agent communication {communication_id} reused an existing response-item ID"
+                        ),
+                    ));
+                }
+                Some(true) => {}
+                None => {
+                    self.record_inter_agent_communication(
+                        &turn_context,
+                        communication.clone(),
+                        Some(mail_fingerprint.clone()),
+                    )
+                    .await?
+                }
+            },
         }
-        self.flush_rollout().await?;
         let trigger_turn = communication.trigger_turn;
         if !self
             .input_queue
-            .enqueue_persisted_mailbox_communication(communication, start_options)
+            .prepare_persisted_mailbox_communication(communication, start_options, mail_fingerprint)
             .await
         {
-            return Ok(false);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "inter-agent communication {communication_id} conflicts with pending delivery"
+                ),
+            ));
+        }
+        self.flush_rollout().await?;
+        let accepted = self
+            .input_queue
+            .mark_mailbox_communication_persisted(&communication_id)
+            .await;
+        if !accepted {
+            return Err(std::io::Error::other(format!(
+                "inter-agent communication {communication_id} lost pending delivery state"
+            )));
         }
         crate::agent_communication::emit_agent_communication_receive(sub_id);
         Ok(trigger_turn)
@@ -175,6 +211,22 @@ impl Session {
             trigger_turn
         })
     }
+}
+
+fn durable_mail_fingerprint(
+    communication: &InterAgentCommunication,
+    start_options: &codex_protocol::turn_input::TurnStartOptions,
+) -> String {
+    let value = serde_json::json!({
+        "communication": communication,
+        "turn_trigger": start_options.turn_trigger,
+        "final_output_json_schema": start_options.final_output_json_schema,
+        "service_tier": start_options.service_tier,
+        "parent_turn_id": start_options.parent_turn_id,
+        "root_turn_id": start_options.root_turn_id,
+        "cyber_access_program": start_options.cyber_access_program,
+    });
+    format!("{:x}", Sha1::digest(value.to_string().as_bytes()))
 }
 
 pub async fn run_user_shell_command(

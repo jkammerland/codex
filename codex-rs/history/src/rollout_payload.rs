@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use super::AgentStatus;
 use super::CodexHarnessMetadata;
 use super::CompactedItem;
 use super::EventMsg;
@@ -35,6 +36,9 @@ pub(super) enum RolloutItemWire<'a> {
     InterAgentCommunicationMetadata {
         payload: InterAgentCommunicationMetadataPayload,
     },
+    TerminalAgentStatus {
+        payload: TerminalAgentStatusPayload,
+    },
     Compacted {
         payload: Cow<'a, CompactedItem>,
     },
@@ -68,13 +72,23 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
             RolloutItem::InterAgentCommunication(payload) => Self::InterAgentCommunication {
                 payload: Cow::Borrowed(payload),
             },
-            RolloutItem::InterAgentCommunicationMetadata { trigger_turn } => {
-                Self::InterAgentCommunicationMetadata {
-                    payload: InterAgentCommunicationMetadataPayload {
-                        trigger_turn: *trigger_turn,
-                    },
-                }
-            }
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn,
+                mail_fingerprint,
+                delivery_id,
+            } => Self::InterAgentCommunicationMetadata {
+                payload: InterAgentCommunicationMetadataPayload {
+                    trigger_turn: *trigger_turn,
+                    mail_fingerprint: mail_fingerprint.clone(),
+                    delivery_id: delivery_id.clone(),
+                },
+            },
+            RolloutItem::TerminalAgentStatus { turn_id, status } => Self::TerminalAgentStatus {
+                payload: TerminalAgentStatusPayload {
+                    turn_id: turn_id.clone(),
+                    status: status.clone(),
+                },
+            },
             RolloutItem::Compacted(payload) => Self::Compacted {
                 payload: Cow::Borrowed(payload),
             },
@@ -113,8 +127,14 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
             RolloutItemWire::InterAgentCommunicationMetadata { payload } => {
                 Self::InterAgentCommunicationMetadata {
                     trigger_turn: payload.trigger_turn,
+                    mail_fingerprint: payload.mail_fingerprint,
+                    delivery_id: payload.delivery_id,
                 }
             }
+            RolloutItemWire::TerminalAgentStatus { payload } => Self::TerminalAgentStatus {
+                turn_id: payload.turn_id,
+                status: payload.status,
+            },
             RolloutItemWire::Compacted { payload } => Self::Compacted(payload.into_owned()),
             RolloutItemWire::TurnContext { payload } => Self::TurnContext(payload.into_owned()),
             RolloutItemWire::WorldState { payload } => Self::WorldState(payload.into_owned()),
@@ -130,6 +150,16 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub(super) struct InterAgentCommunicationMetadataPayload {
     trigger_turn: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mail_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_id: Option<codex_protocol::ResponseItemId>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub(super) struct TerminalAgentStatusPayload {
+    turn_id: String,
+    status: AgentStatus,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

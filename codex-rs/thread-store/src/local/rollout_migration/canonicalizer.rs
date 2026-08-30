@@ -291,6 +291,7 @@ impl LegacyRolloutCanonicalizer {
                 self.write_item(writer, &timestamp, item).await?;
             }
             item @ (RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TerminalAgentStatus { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)

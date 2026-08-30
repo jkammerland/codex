@@ -11,7 +11,7 @@ use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -86,12 +86,14 @@ pub(crate) struct InputQueue {
 #[derive(Default)]
 struct MailboxState {
     pending_mails: VecDeque<PendingMailboxCommunication>,
-    pending_persisted_mail: HashSet<ResponseItemId>,
+    recorded_durable_mail: HashMap<ResponseItemId, String>,
 }
 
 struct PendingMailboxCommunication {
     communication: InterAgentCommunication,
     start_options: TurnStartOptions,
+    fingerprint: Option<String>,
+    persisted: bool,
     _diagnostics_guard: GaugeGuard,
 }
 
@@ -104,37 +106,74 @@ impl InputQueue {
         }
     }
 
-    pub(crate) async fn mark_mail_persistence_pending(&self, id: ResponseItemId) {
-        self.mailbox.lock().await.pending_persisted_mail.insert(id);
-    }
-
-    pub(crate) async fn recorded_mail_requires_delivery(&self, id: &ResponseItemId) -> bool {
+    pub(crate) async fn restore_recorded_durable_mail(
+        &self,
+        id: ResponseItemId,
+        fingerprint: String,
+    ) {
         self.mailbox
             .lock()
             .await
-            .pending_persisted_mail
-            .contains(id)
+            .recorded_durable_mail
+            .insert(id, fingerprint);
     }
 
-    pub(crate) async fn enqueue_persisted_mailbox_communication(
+    pub(crate) async fn recorded_durable_mail_fingerprint(
+        &self,
+        id: &ResponseItemId,
+    ) -> Option<String> {
+        self.mailbox
+            .lock()
+            .await
+            .recorded_durable_mail
+            .get(id)
+            .cloned()
+    }
+
+    pub(crate) async fn prepare_persisted_mailbox_communication(
         &self,
         communication: InterAgentCommunication,
         start_options: TurnStartOptions,
+        fingerprint: String,
     ) -> bool {
-        let Some(id) = communication.id.clone() else {
+        let Some(id) = communication.id.as_ref() else {
             return false;
         };
         let mut mailbox = self.mailbox.lock().await;
-        if !mailbox.pending_persisted_mail.remove(&id) {
-            return false;
+        if let Some(pending) = mailbox
+            .pending_mails
+            .iter()
+            .find(|pending| pending.communication.id.as_ref() == Some(id))
+        {
+            return pending.fingerprint.as_deref() == Some(fingerprint.as_str());
         }
         mailbox
             .pending_mails
             .push_back(PendingMailboxCommunication {
                 communication,
                 start_options,
+                fingerprint: Some(fingerprint),
+                persisted: false,
                 _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
             });
+        true
+    }
+
+    pub(crate) async fn mark_mailbox_communication_persisted(&self, id: &ResponseItemId) -> bool {
+        let mut mailbox = self.mailbox.lock().await;
+        let Some(pending) = mailbox
+            .pending_mails
+            .iter_mut()
+            .find(|pending| pending.communication.id.as_ref() == Some(id))
+        else {
+            return false;
+        };
+        pending.persisted = true;
+        if let Some(fingerprint) = pending.fingerprint.clone() {
+            mailbox
+                .recorded_durable_mail
+                .insert(id.clone(), fingerprint);
+        }
         drop(mailbox);
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
         true
@@ -155,7 +194,7 @@ impl InputQueue {
         };
         let pending_activity = if has_pending_steer {
             Some(InputQueueActivity::Steer)
-        } else if self.has_pending_mailbox_items().await {
+        } else if self.has_deliverable_mailbox_items().await {
             Some(InputQueueActivity::Mailbox)
         } else {
             None
@@ -175,6 +214,8 @@ impl InputQueue {
             .push_back(PendingMailboxCommunication {
                 communication,
                 start_options,
+                fingerprint: None,
+                persisted: true,
                 _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
             });
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
@@ -184,23 +225,38 @@ impl InputQueue {
         !self.mailbox.lock().await.pending_mails.is_empty()
     }
 
+    async fn has_deliverable_mailbox_items(&self) -> bool {
+        self.mailbox
+            .lock()
+            .await
+            .pending_mails
+            .front()
+            .is_some_and(|mail| mail.persisted)
+    }
+
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
         self.mailbox
             .lock()
             .await
             .pending_mails
             .iter()
+            .take_while(|mail| mail.persisted)
             .any(|mail| mail.communication.trigger_turn)
     }
 
     pub(crate) async fn drain_mailbox_input_items(&self) -> (Vec<TurnInput>, TurnStartOptions) {
-        let pending_mails = self
-            .mailbox
-            .lock()
-            .await
-            .pending_mails
-            .drain(..)
-            .collect::<Vec<_>>();
+        let pending_mails = {
+            let mut mailbox = self.mailbox.lock().await;
+            let deliverable_count = mailbox
+                .pending_mails
+                .iter()
+                .take_while(|mail| mail.persisted)
+                .count();
+            mailbox
+                .pending_mails
+                .drain(..deliverable_count)
+                .collect::<Vec<_>>()
+        };
         // A later follow-up supersedes the earlier choice, including an omitted choice.
         let mut start_options = pending_mails
             .iter()
@@ -412,7 +468,7 @@ impl InputQueue {
         if has_turn_pending_input {
             return true;
         }
-        self.has_pending_mailbox_items().await
+        self.has_deliverable_mailbox_items().await
     }
 }
 

@@ -337,8 +337,13 @@ impl CodexThread {
     }
 
     async fn submit_ordered(&self, op: Op, trace: Option<W3cTraceContext>) -> CodexResult<String> {
-        let delivery_permit = if matches!(&op, Op::InterAgentCommunicationWithAck { .. }) {
-            let permit = self
+        if let Op::InterAgentCommunicationWithAck {
+            communication,
+            start_options,
+            reply,
+        } = op
+        {
+            let delivery_permit = self
                 .session
                 .agent_delivery_gate
                 .clone()
@@ -348,18 +353,33 @@ impl CodexThread {
             if !self.is_running() {
                 return Err(CodexErr::InternalAgentDied);
             }
-            Some(permit)
-        } else {
-            None
-        };
-        let result = self
-            .io
+            let (durable_reply, durable_acknowledged) = tokio::sync::oneshot::channel();
+            let result = self
+                .io
+                .submit_with_trace(
+                    Op::InterAgentCommunicationWithAck {
+                        communication,
+                        start_options,
+                        reply: durable_reply,
+                    },
+                    trace,
+                    /*parent_turn_id*/ None,
+                    /*root_turn_id*/ None,
+                )
+                .await?;
+            tokio::spawn(async move {
+                if durable_acknowledged.await.is_ok() {
+                    let _ = reply.send(());
+                }
+                drop(delivery_permit);
+            });
+            return Ok(result);
+        }
+        self.io
             .submit_with_trace(
                 op, trace, /*parent_turn_id*/ None, /*root_turn_id*/ None,
             )
-            .await;
-        drop(delivery_permit);
-        result
+            .await
     }
 
     /// Submits turn input without requiring the caller to inspect thread state.

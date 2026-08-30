@@ -1104,6 +1104,11 @@ impl ThreadManager {
         if let InitialHistory::Resumed(resumed) = &initial_history
             && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
             && !session_source.is_non_root_agent()
+            && self
+                .state
+                .get_thread(resumed.conversation_id)
+                .await
+                .is_err()
         {
             agent_control
                 .restore_v2_agent_metadata(&config, resumed.conversation_id)

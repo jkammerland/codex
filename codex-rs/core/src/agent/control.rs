@@ -278,9 +278,11 @@ impl AgentControl {
     ) -> CodexResult<bool> {
         let state = self.upgrade()?;
         let Some(store) = state.agent_graph_store() else {
-            // Ephemeral and non-local configurations rely on the in-memory
-            // spawn admission barrier instead of a durable graph edge.
-            return Ok(true);
+            return Ok(self
+                .state
+                .agent_metadata_for_thread(child_thread_id)
+                .and_then(|metadata| metadata.agent_path)
+                .is_some_and(|path| self.state.agent_id_for_path(&path) == Some(child_thread_id)));
         };
         let children = store
             .list_thread_spawn_children(

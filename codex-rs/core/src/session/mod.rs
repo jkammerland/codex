@@ -115,7 +115,6 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::HistoryPosition;
@@ -132,7 +131,6 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
-use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnContextNetworkItem;
 use codex_protocol::protocol::TurnEnvironmentSelection;
@@ -260,9 +258,10 @@ use self::turn_context::TurnContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum AgentStatusUpdate {
     Apply,
+    Override(AgentStatus),
     Defer,
 }
 
@@ -1372,17 +1371,37 @@ impl Session {
             InitialHistory::Resumed(resumed_history) => {
                 let turn_context = self.new_default_turn().await;
                 let rollout_items = resumed_history.history;
-                let restored_agent_status =
-                    rollout_items.iter().rev().find_map(|item| match item {
-                        RolloutItem::EventMsg(event) => agent_status_from_event(event),
-                        _ => None,
-                    });
+                for pair in rollout_items.windows(2) {
+                    let [
+                        RolloutItem::InterAgentCommunicationMetadata {
+                            mail_fingerprint: Some(fingerprint),
+                            ..
+                        },
+                        RolloutItem::ResponseItem(response_item),
+                    ] = pair
+                    else {
+                        continue;
+                    };
+                    if let Some(id) = response_item.id().cloned() {
+                        self.input_queue
+                            .restore_recorded_durable_mail(id, fingerprint.clone())
+                            .await;
+                    }
+                }
                 let restore_terminal_v2_child = self.multi_agent_version()
                     == Some(MultiAgentVersion::V2)
                     && matches!(
                         &turn_context.session_source,
                         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
                     );
+                let restored_agent_status = if restore_terminal_v2_child {
+                    parent_completion::terminal_status_from_rollout(&rollout_items)
+                } else {
+                    rollout_items.iter().rev().find_map(|item| match item {
+                        RolloutItem::EventMsg(event) => agent_status_from_event(event),
+                        _ => None,
+                    })
+                };
                 if let Some(status) = restored_agent_status
                     && (matches!(status, AgentStatus::Interrupted)
                         || (restore_terminal_v2_child && crate::agent::status::is_final(&status)))
@@ -1392,6 +1411,10 @@ impl Session {
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
+                if restore_terminal_v2_child {
+                    self.resume_pending_parent_completion(&turn_context, &rollout_items)
+                        .await;
+                }
 
                 // If resuming, warn when the last recorded model differs from the current one.
                 let curr: &str = turn_context.model_info().slug.as_str();
@@ -1994,7 +2017,7 @@ impl Session {
     }
 
     /// Persist the event to rollout and send it to clients.
-    pub(crate) async fn send_event(&self, turn_context: &TurnContext, mut msg: EventMsg) {
+    pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
         if let EventMsg::Error(error) = &msg
             && error.affects_turn_status()
         {
@@ -2011,41 +2034,14 @@ impl Session {
                     ..
                 })
             );
-        let parent_completion = if is_v2_spawn_child
-            && matches!(&msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
-        {
-            self.maybe_notify_parent_of_terminal_turn(turn_context, &msg)
-                .await
+        let is_v2_child_terminal = is_v2_spawn_child
+            && matches!(&msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_));
+        let v2_child_terminal_status = if is_v2_child_terminal {
+            let terminal_error = turn_context.terminal_error.lock().await.take();
+            parent_completion::terminal_status_from_event(&msg, terminal_error.as_ref())
         } else {
             None
         };
-        if let Some(parent_completion) = parent_completion
-            && let AgentStatus::Errored(error) = parent_completion.status
-        {
-            let error = ErrorEvent {
-                message: error,
-                codex_error_info: None,
-                misalignment: None,
-            };
-            match &mut msg {
-                EventMsg::TurnComplete(event) => event.error = Some(error),
-                EventMsg::TurnAborted(event) => {
-                    msg = EventMsg::TurnComplete(TurnCompleteEvent {
-                        turn_id: event
-                            .turn_id
-                            .clone()
-                            .unwrap_or_else(|| turn_context.sub_id.clone()),
-                        last_agent_message: None,
-                        error: Some(error),
-                        started_at: event.started_at,
-                        completed_at: event.completed_at,
-                        duration_ms: event.duration_ms,
-                        time_to_first_token_ms: None,
-                    });
-                }
-                _ => {}
-            }
-        }
         let legacy_source = msg.clone();
         self.services
             .rollout_thread_trace
@@ -2077,7 +2073,49 @@ impl Session {
                 .analytics_events_client
                 .track_guardian_session_event(self.thread_id, &event);
         }
-        if defer_v2_child_status {
+        if is_v2_child_terminal {
+            // Keep the durable child event ahead of its parent outbox delivery, but do not make
+            // the terminal status observable to `wait_agent` until that delivery is handled.
+            // Otherwise a waiter can observe the child as terminal and return before the
+            // corresponding completion mail reaches the parent.
+            self.services.mcp_runtime.observe_event(&event.msg);
+            let mut rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
+            if let Some(status) = v2_child_terminal_status.clone() {
+                let turn_id = parent_completion::terminal_event_turn_id(&event.msg)
+                    .unwrap_or(&turn_context.sub_id)
+                    .to_string();
+                rollout_items.push(RolloutItem::TerminalAgentStatus { turn_id, status });
+            }
+            let persistence_succeeded =
+                self.try_persist_rollout_items(&rollout_items).await.is_ok();
+            self.services
+                .rollout_thread_trace
+                .record_protocol_event(&event.msg);
+            if persistence_succeeded {
+                match self.flush_rollout().await {
+                    Ok(()) => {
+                        if let Some(status) = v2_child_terminal_status.clone() {
+                            self.maybe_notify_parent_of_terminal_turn(
+                                turn_context,
+                                &legacy_source,
+                                status,
+                            )
+                            .await;
+                        }
+                    }
+                    Err(error) => warn!(
+                        child_thread_id = %self.thread_id,
+                        %error,
+                        "terminal child event is not durable; parent delivery remains pending"
+                    ),
+                }
+            }
+            let status_update = v2_child_terminal_status
+                .map(AgentStatusUpdate::Override)
+                .unwrap_or(AgentStatusUpdate::Apply);
+            self.deliver_event_raw_with_status_update(event, status_update)
+                .await;
+        } else if defer_v2_child_status {
             self.send_event_raw_with_persistence(
                 event,
                 /*persist*/ true,
@@ -2085,7 +2123,12 @@ impl Session {
             )
             .await;
         } else {
-            self.send_event_raw(event).await;
+            self.send_event_raw_with_persistence(
+                event,
+                /*persist*/ true,
+                AgentStatusUpdate::Apply,
+            )
+            .await;
         }
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
             .await;
@@ -2160,12 +2203,9 @@ impl Session {
     }
 
     pub(crate) async fn send_event_raw(&self, event: Event) {
-        self.send_event_raw_with_persistence(
-            event,
-            /*persist*/ true,
-            AgentStatusUpdate::Apply,
-        )
-        .await;
+        let _ = self
+            .send_event_raw_with_persistence(event, /*persist*/ true, AgentStatusUpdate::Apply)
+            .await;
     }
 
     /// Delivers an event without creating a local rollout for a thread that has not materialized.
@@ -2178,7 +2218,8 @@ impl Session {
                 true
             }
         };
-        self.send_event_raw_with_persistence(event, persist, AgentStatusUpdate::Apply)
+        let _ = self
+            .send_event_raw_with_persistence(event, persist, AgentStatusUpdate::Apply)
             .await;
     }
 
@@ -2187,18 +2228,21 @@ impl Session {
         event: Event,
         persist: bool,
         agent_status_update: AgentStatusUpdate,
-    ) {
+    ) -> bool {
         self.services.mcp_runtime.observe_event(&event.msg);
         // Persist the event into rollout storage; the store applies its persistence policy.
-        if persist {
+        let persistence_succeeded = if persist {
             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
-            self.persist_rollout_items(&rollout_items).await;
-        }
+            self.try_persist_rollout_items(&rollout_items).await.is_ok()
+        } else {
+            true
+        };
         self.services
             .rollout_thread_trace
             .record_protocol_event(&event.msg);
         self.deliver_event_raw_with_status_update(event, agent_status_update)
             .await;
+        persistence_succeeded
     }
 
     async fn deliver_event_raw(&self, event: Event) {
@@ -2212,10 +2256,16 @@ impl Session {
         agent_status_update: AgentStatusUpdate,
     ) {
         // Record the last known agent status.
-        if agent_status_update == AgentStatusUpdate::Apply
-            && let Some(status) = agent_status_from_event(&event.msg)
-        {
-            self.agent_status.send_replace(status);
+        match agent_status_update {
+            AgentStatusUpdate::Apply => {
+                if let Some(status) = agent_status_from_event(&event.msg) {
+                    self.agent_status.send_replace(status);
+                }
+            }
+            AgentStatusUpdate::Override(status) => {
+                self.agent_status.send_replace(status);
+            }
+            AgentStatusUpdate::Defer => {}
         }
         if let Err(e) = self.tx_event.send(event).await {
             debug!("dropping event because channel is closed: {e}");
@@ -3387,6 +3437,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         communication: InterAgentCommunication,
+        mail_fingerprint: Option<String>,
     ) -> std::io::Result<()> {
         let response_item = communication.to_model_input_item();
         let (items, _) = self.prepare_conversation_items_for_history(
@@ -3400,6 +3451,8 @@ impl Session {
                 .append_items(&[
                     RolloutItem::InterAgentCommunicationMetadata {
                         trigger_turn: communication.trigger_turn,
+                        mail_fingerprint,
+                        delivery_id: None,
                     },
                     RolloutItem::ResponseItem(response_item.into()),
                 ])
@@ -3431,6 +3484,44 @@ impl Session {
             .clone_history()
             .raw_items()
             .any(|item| item.id() == Some(communication_id))
+    }
+
+    pub(crate) async fn recorded_inter_agent_communication_matches(
+        &self,
+        communication: &InterAgentCommunication,
+    ) -> Option<bool> {
+        let communication_id = communication.id.as_ref()?;
+        let expected = communication.to_model_input_item();
+        self.state
+            .lock()
+            .await
+            .clone_history()
+            .raw_items()
+            .find(|item| item.id() == Some(communication_id))
+            .map(|recorded| match (recorded, &expected) {
+                (
+                    ResponseItem::AgentMessage {
+                        id: recorded_id,
+                        author: recorded_author,
+                        recipient: recorded_recipient,
+                        content: recorded_content,
+                        ..
+                    },
+                    ResponseItem::AgentMessage {
+                        id: expected_id,
+                        author: expected_author,
+                        recipient: expected_recipient,
+                        content: expected_content,
+                        ..
+                    },
+                ) => {
+                    recorded_id == expected_id
+                        && recorded_author == expected_author
+                        && recorded_recipient == expected_recipient
+                        && recorded_content == expected_content
+                }
+                _ => false,
+            })
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -3872,11 +3963,19 @@ impl Session {
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
-        if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
-        {
+        if let Err(e) = self.try_persist_rollout_items(items).await {
             error!("failed to record rollout items: {e:#}");
         }
+    }
+
+    async fn try_persist_rollout_items(&self, items: &[RolloutItem]) -> std::io::Result<()> {
+        if let Some(live_thread) = self.live_thread() {
+            live_thread
+                .append_items(items)
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn clone_history(&self) -> ContextManager {

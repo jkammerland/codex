@@ -97,7 +97,14 @@ pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize
                     fork_turn_positions.push(idx);
                 }
             }
-            RolloutItem::InterAgentCommunicationMetadata { trigger_turn } => {
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn,
+                delivery_id,
+                ..
+            } => {
+                if delivery_id.is_some() {
+                    continue;
+                }
                 rollback_turn_positions.push(idx);
                 if *trigger_turn {
                     fork_turn_positions.push(idx);

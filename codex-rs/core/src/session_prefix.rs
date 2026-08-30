@@ -38,7 +38,11 @@ pub(crate) fn format_inter_agent_completion_message(
         AgentStatus::NotFound => "Agent was not found.".to_string(),
         AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => return None,
     };
-    Some(InterAgentCompletionMessage::new(task_name, sender, payload).render())
+    let message = InterAgentCompletionMessage::new(task_name, sender, payload).render();
+    Some(truncate_text(
+        &message,
+        TruncationPolicy::Tokens(COMPLETION_PAYLOAD_MAX_TOKENS),
+    ))
 }
 
 #[cfg(test)]

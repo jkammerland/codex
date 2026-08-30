@@ -399,6 +399,7 @@ impl ThreadHistoryBuilder {
             RolloutItem::ResponseItem(item) => self.handle_response_item(&item.item),
             RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TerminalAgentStatus { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)

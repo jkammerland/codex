@@ -1371,6 +1371,7 @@ impl Session {
                     | RolloutItem::ResponseItem(_)
                     | RolloutItem::InterAgentCommunication(_)
                     | RolloutItem::InterAgentCommunicationMetadata { .. }
+                    | RolloutItem::TerminalAgentStatus { .. }
                     | RolloutItem::TurnContext(_)
                     | RolloutItem::WorldState(_)
                     | RolloutItem::RealtimeItem(_)

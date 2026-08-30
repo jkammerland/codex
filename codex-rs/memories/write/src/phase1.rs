@@ -415,6 +415,7 @@ mod job {
                 }
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TerminalAgentStatus { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::RealtimeItem(_)
@@ -824,7 +825,11 @@ mod tests {
         let response_item = communication.to_model_input_item();
 
         let serialized = job::serialize_filtered_rollout_response_items(&[
-            RolloutItem::InterAgentCommunicationMetadata { trigger_turn: true },
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: true,
+                mail_fingerprint: None,
+                delivery_id: None,
+            },
             RolloutItem::ResponseItem(response_item.clone().into()),
         ])
         .expect("serialize");

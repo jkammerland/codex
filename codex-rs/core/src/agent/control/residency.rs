@@ -130,6 +130,38 @@ impl AgentControl {
             active: true,
         }
     }
+
+    pub(super) fn schedule_v2_residency_rebalance(
+        &self,
+        manager: Arc<ThreadManagerState>,
+        capacity: usize,
+        protected_thread_id: ThreadId,
+    ) {
+        let residency = Arc::clone(&self.v2_residency);
+        tokio::spawn(async move {
+            let cancellation_token = CancellationToken::new();
+            while residency.resident_and_pending_count() > capacity {
+                match residency
+                    .try_unload_one_resident(
+                        &manager,
+                        Some(protected_thread_id),
+                        &cancellation_token,
+                    )
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(50)).await,
+                    Err(error) => {
+                        warn!(
+                            %error,
+                            "terminal-delivery residency rebalance remains pending"
+                        );
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        });
+    }
 }
 
 impl V2Residency {
@@ -265,6 +297,14 @@ impl V2Residency {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .residents
             .len()
+    }
+
+    fn resident_and_pending_count(&self) -> usize {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.residents.len().saturating_add(state.pending_slots)
     }
 
     fn pop_lru_candidate(&self, protected_thread_id: Option<ThreadId>) -> Option<ThreadId> {

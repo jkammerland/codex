@@ -17,7 +17,6 @@ use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::intersect_effective_permission_profiles;
 use codex_protocol::protocol::EnvironmentConfigState;
-use codex_protocol::protocol::TurnAbortReason;
 use codex_utils_path_uri::PathUri;
 use std::time::Duration;
 
@@ -142,6 +141,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         RolloutItem::RealtimeItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
         | RolloutItem::SecurityRiskScore(_) => false,
         // Full-history forks preserve the cached prompt prefix and can keep diffing
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
@@ -259,6 +259,13 @@ impl AgentControl {
                 }
             };
             for pending_thread_id in pending_children {
+                if state.get_thread(pending_thread_id).await.is_ok() {
+                    warn!(
+                        %pending_thread_id,
+                        "skipping pending-spawn recovery owned by a live admission"
+                    );
+                    continue;
+                }
                 match state.delete_stored_thread(pending_thread_id).await {
                     Ok(()) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {
                         if let Err(err) = agent_graph_store
@@ -666,6 +673,9 @@ impl AgentControl {
                 None,
             )
         };
+        let residency_capacity = config
+            .effective_agent_max_threads(MultiAgentVersion::V2)
+            .unwrap_or(usize::MAX);
         // Reserving a slot can evict an idle nested parent. Keep its authority captured above.
         let residency_slot = match admission {
             V2LoadAdmission::Normal => {
@@ -705,6 +715,13 @@ impl AgentControl {
                 }
                 self.state.clear_evicted_environments(thread_id);
                 residency_slot.commit(reloaded_thread.thread_id);
+                if admission == V2LoadAdmission::TerminalDelivery {
+                    self.schedule_v2_residency_rebalance(
+                        Arc::clone(&state),
+                        residency_capacity,
+                        reloaded_thread.thread_id,
+                    );
+                }
                 state.notify_thread_created(reloaded_thread.thread_id);
                 Ok(())
             }
@@ -836,11 +853,10 @@ impl AgentControl {
             None
         };
         let reserved_thread_id = provisional_edge.as_ref().map(|edge| edge.child_thread_id);
-        let requires_spawn_admission_barrier = multi_agent_version == MultiAgentVersion::V2
-            && matches!(
-                &notification_source,
-                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
-            );
+        let requires_spawn_admission_barrier = matches!(
+            &notification_source,
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
+        );
 
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread_result = match (session_source, options.fork_mode.as_ref(), inheritance) {
@@ -1194,67 +1210,92 @@ impl AgentControl {
         let thread_id = thread.session.thread_id;
         match await_unpublished_spawn_shutdown(thread.shutdown_and_wait()).await? {
             UnpublishedSpawnShutdown::Complete => {
-                cleanup_unpublished_spawn_state(state, thread, provisional_edge).await
+                match cleanup_unpublished_spawn_state(state, thread, provisional_edge).await {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        self.defer_unpublished_spawn_cleanup(
+                            state,
+                            reservation,
+                            thread,
+                            provisional_edge,
+                            UnpublishedSpawnShutdown::Complete,
+                        )
+                        .await;
+                        Err(format!(
+                            "durable cleanup failed after unpublished spawned agent shutdown: {error}; cleanup continues in the background"
+                        ))
+                    }
+                }
             }
             UnpublishedSpawnShutdown::TimedOut => {
-                // Transfer the exact count and canonical-path reservation to
-                // the janitor. A retry cannot reuse either while the old
-                // runtime or durable state still exists.
-                let registry_slot = reservation.defer_release();
-                let residency_slot = self.retain_unpublished_v2_residency_slot(thread.as_ref());
-                let state = Arc::clone(state);
-                let thread = Arc::clone(thread);
-                let provisional_edge = provisional_edge.cloned();
-                let _ = state.remove_thread_if_matches(&thread_id, &thread).await;
-                tokio::spawn(async move {
-                    loop {
-                        thread
-                            .session
-                            .abort_all_tasks(TurnAbortReason::Replaced)
-                            .await;
-                        if tokio::time::timeout(
-                            SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT,
-                            thread.wait_until_terminated(),
-                        )
-                        .await
-                        .is_ok()
-                        {
-                            break;
-                        }
-                        warn!(
-                            %thread_id,
-                            "unpublished spawn janitor is still waiting for bounded session shutdown"
-                        );
-                        tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
-                    }
-                    loop {
-                        match cleanup_unpublished_spawn_state(
-                            &state,
-                            &thread,
-                            provisional_edge.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(()) => break,
-                            Err(err) => {
-                                warn!(
-                                    %thread_id,
-                                    %err,
-                                    "unpublished spawn janitor is retaining admission while durable cleanup retries"
-                                );
-                                tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
-                            }
-                        }
-                    }
-                    drop(residency_slot);
-                    drop(registry_slot);
-                });
+                self.defer_unpublished_spawn_cleanup(
+                    state,
+                    reservation,
+                    thread,
+                    provisional_edge,
+                    UnpublishedSpawnShutdown::TimedOut,
+                )
+                .await;
                 Err(format!(
-                    "timed out shutting down unpublished spawned agent after {}s; cleanup continues in the background",
+                    "timed out shutting down unpublished spawned agent {thread_id} after {}s; cleanup continues in the background",
                     SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT.as_secs()
                 ))
             }
         }
+    }
+
+    async fn defer_unpublished_spawn_cleanup(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        reservation: &mut crate::agent::registry::SpawnReservation,
+        thread: &Arc<CodexThread>,
+        provisional_edge: Option<&ProvisionalSpawnEdge>,
+        shutdown_state: UnpublishedSpawnShutdown,
+    ) {
+        let thread_id = thread.session.thread_id;
+        let registry_slot = reservation.defer_release();
+        let residency_slot = self.retain_unpublished_v2_residency_slot(thread.as_ref());
+        let state = Arc::clone(state);
+        let thread = Arc::clone(thread);
+        let provisional_edge = provisional_edge.cloned();
+        let _ = state.remove_thread_if_matches(&thread_id, &thread).await;
+        tokio::spawn(async move {
+            if shutdown_state == UnpublishedSpawnShutdown::TimedOut {
+                loop {
+                    match tokio::time::timeout(
+                        SPAWN_ROLLBACK_SHUTDOWN_TIMEOUT,
+                        thread.shutdown_and_wait(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => break,
+                        shutdown => warn!(
+                            %thread_id,
+                            ?shutdown,
+                            "unpublished spawn janitor is retrying bounded session shutdown"
+                        ),
+                    }
+                    tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
+                }
+            }
+            loop {
+                match cleanup_unpublished_spawn_state(&state, &thread, provisional_edge.as_ref())
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(err) => {
+                        warn!(
+                            %thread_id,
+                            %err,
+                            "unpublished spawn janitor is retaining admission while durable cleanup retries"
+                        );
+                        tokio::time::sleep(SPAWN_ROLLBACK_RETRY_DELAY).await;
+                    }
+                }
+            }
+            drop(residency_slot);
+            drop(registry_slot);
+        });
     }
 
     async fn spawn_forked_thread(
@@ -1486,7 +1527,8 @@ impl AgentControl {
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TerminalAgentStatus { .. } => true,
                 RolloutItem::SecurityRiskScore(_) => false,
             }
         });

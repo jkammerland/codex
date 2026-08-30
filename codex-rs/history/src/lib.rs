@@ -6,6 +6,7 @@ use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
@@ -13,6 +14,7 @@ use codex_protocol::mcp::McpResourceOriginCheckpoint;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -99,6 +101,16 @@ pub enum RolloutItem {
     InterAgentCommunication(InterAgentCommunication),
     InterAgentCommunicationMetadata {
         trigger_turn: bool,
+        /// Stable identity for the exact durable mail payload and turn-start options.
+        mail_fingerprint: Option<String>,
+        /// Deterministic message ID after a spawned child's terminal outbox entry is handled.
+        /// This acknowledgement is never model-visible.
+        delivery_id: Option<ResponseItemId>,
+    },
+    /// Model-invisible terminal status recorded alongside the raw terminal event.
+    TerminalAgentStatus {
+        turn_id: String,
+        status: AgentStatus,
     },
     Compacted(CompactedItem),
     TurnContext(TurnContextItem),
@@ -417,6 +429,7 @@ fn multi_agent_version_from_items(
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TerminalAgentStatus { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)

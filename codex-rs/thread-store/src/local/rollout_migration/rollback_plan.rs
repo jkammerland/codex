@@ -196,6 +196,11 @@ impl RollbackPlanner {
                 let boundary = self.start_boundary(index);
                 self.pending_delivery_boundary = Some(boundary);
             }
+            RolloutItem::TerminalAgentStatus { .. } => {
+                self.record_boundaries[index] = index
+                    .checked_sub(1)
+                    .and_then(|previous| self.record_boundaries[previous]);
+            }
             RolloutItem::Compacted(item) => {
                 let owner = self
                     .active_turn_id

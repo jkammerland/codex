@@ -23,6 +23,8 @@ use codex_protocol::security_risk::SecurityRiskScore;
 use core_test_support::responses::strip_metadata_from_items;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use sha1::Digest;
+use sha1::Sha1;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -96,36 +98,6 @@ async fn durable_claim_is_the_single_model_visible_mail_record() {
         .reconstruct_history_from_rollout(
             &turn_context,
             &[
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id: communication.id.clone().expect("message id"),
-                    communication: Some(communication.clone()),
-                    delivered_response: None,
-                    fingerprint: "fingerprint".to_string(),
-                    turn_id: "turn-claimed".to_string(),
-                },
-                RolloutItem::DurableInterAgentCommunication {
-                    communication: communication.clone(),
-                    start_options: Default::default(),
-                    fingerprint: "fingerprint".to_string(),
-                    turn_id: "turn-claimed".to_string(),
-                    compatibility_shadow: false,
-                },
-                RolloutItem::ResponseItem(communication.to_model_input_item().into()),
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id: communication.id.clone().expect("message id"),
-                    communication: Some(communication.clone()),
-                    delivered_response: None,
-                    fingerprint: "fingerprint".to_string(),
-                    turn_id: "turn-claimed".to_string(),
-                },
-                RolloutItem::DurableInterAgentCommunication {
-                    communication: communication.clone(),
-                    start_options: Default::default(),
-                    fingerprint: "fingerprint".to_string(),
-                    turn_id: "turn-claimed".to_string(),
-                    compatibility_shadow: false,
-                },
-                RolloutItem::ResponseItem(communication.to_model_input_item().into()),
                 RolloutItem::EventMsg(EventMsg::TurnStarted(
                     codex_protocol::protocol::TurnStartedEvent {
                         turn_id: "turn-claimed".to_string(),
@@ -135,6 +107,36 @@ async fn durable_claim_is_the_single_model_visible_mail_record() {
                         collaboration_mode_kind: Default::default(),
                     },
                 )),
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id: communication.id.clone().expect("message id"),
+                    communication: Some(communication.clone()),
+                    delivered_response: None,
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-claimed".to_string(),
+                },
+                RolloutItem::DurableInterAgentCommunication {
+                    communication: communication.clone(),
+                    start_options: Default::default(),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-claimed".to_string(),
+                    compatibility_shadow: false,
+                },
+                RolloutItem::ResponseItem(communication.to_model_input_item().into()),
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id: communication.id.clone().expect("message id"),
+                    communication: Some(communication.clone()),
+                    delivered_response: None,
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-claimed".to_string(),
+                },
+                RolloutItem::DurableInterAgentCommunication {
+                    communication: communication.clone(),
+                    start_options: Default::default(),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-claimed".to_string(),
+                    compatibility_shadow: false,
+                },
+                RolloutItem::ResponseItem(communication.to_model_input_item().into()),
             ],
         )
         .await;
@@ -150,7 +152,7 @@ async fn durable_claim_is_the_single_model_visible_mail_record() {
 }
 
 #[tokio::test]
-async fn durable_claim_without_started_turn_stays_out_of_model_history() {
+async fn durable_claim_with_only_a_later_turn_start_stays_out_of_model_history() {
     let (session, turn_context) = make_session_and_context().await;
     let mut communication = InterAgentCommunication::new(
         AgentPath::root(),
@@ -180,6 +182,15 @@ async fn durable_claim_without_started_turn_stays_out_of_model_history() {
                     compatibility_shadow: false,
                 },
                 RolloutItem::ResponseItem(communication.to_model_input_item().into()),
+                RolloutItem::EventMsg(EventMsg::TurnStarted(
+                    codex_protocol::protocol::TurnStartedEvent {
+                        turn_id: "turn-not-started".to_string(),
+                        trace_id: None,
+                        started_at: None,
+                        model_context_window: None,
+                        collaboration_mode_kind: Default::default(),
+                    },
+                )),
             ],
         )
         .await;
@@ -380,6 +391,7 @@ async fn record_initial_history_reconstructs_typed_inter_agent_message() {
 #[tokio::test]
 async fn record_initial_history_restores_large_mcp13_mail_without_discarding_it() {
     let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
     let mut communication = InterAgentCommunication::new_encrypted(
         AgentPath::root().join("worker").expect("worker path"),
         AgentPath::root(),
@@ -389,20 +401,45 @@ async fn record_initial_history_restores_large_mcp13_mail_without_discarding_it(
     );
     let communication_id = ResponseItemId::with_suffix("msg", "legacy-large-resume");
     communication.id = Some(communication_id.clone());
+    let start_options = codex_protocol::turn_input::TurnStartOptions::default();
+    let fingerprint_value = serde_json::json!({
+        "communication": communication,
+        "turn_trigger": start_options.turn_trigger,
+        "final_output_json_schema": start_options.final_output_json_schema,
+        "service_tier": start_options.service_tier,
+        "parent_turn_id": start_options.parent_turn_id,
+        "root_turn_id": start_options.root_turn_id,
+        "cyber_access_program": start_options.cyber_access_program,
+    });
+    let fingerprint = format!(
+        "{:x}",
+        Sha1::digest(fingerprint_value.to_string().as_bytes())
+    );
 
     session
         .record_initial_history(InitialHistory::Resumed(ResumedHistory {
             conversation_id: ThreadId::default(),
             history: Arc::new(vec![RolloutItem::DurableInterAgentCommunication {
                 communication: communication.clone(),
-                start_options: Default::default(),
-                fingerprint: "legacy-fingerprint".to_string(),
+                start_options: start_options.clone(),
+                fingerprint,
                 turn_id: "legacy-turn".to_string(),
                 compatibility_shadow: false,
             }]),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
         .await;
+
+    assert!(
+        session
+            .persist_and_enqueue_inter_agent_communication(
+                "legacy-retry",
+                communication.clone(),
+                start_options,
+            )
+            .await
+            .expect("an exact retry of valid restored legacy mail should be acknowledged")
+    );
 
     assert_eq!(
         session
@@ -422,6 +459,51 @@ async fn record_initial_history_restores_large_mcp13_mail_without_discarding_it(
             .0,
         vec![TurnInput::InterAgentCommunication(communication)]
     );
+}
+
+#[tokio::test]
+async fn record_initial_history_replaces_an_unstarted_claim_turn_id() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root().join("worker").expect("worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "recover interrupted claim".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let communication_id = ResponseItemId::with_suffix("msg", "replace-claim-turn");
+    communication.id = Some(communication_id.clone());
+    let historical_turn_id = "historical-claim-turn";
+
+    session
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::default(),
+            history: Arc::new(vec![
+                RolloutItem::DurableInterAgentCommunication {
+                    communication: communication.clone(),
+                    start_options: Default::default(),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: historical_turn_id.to_string(),
+                    compatibility_shadow: true,
+                },
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
+                    communication: Some(communication),
+                    delivered_response: None,
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: historical_turn_id.to_string(),
+                },
+            ]),
+            rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
+        }))
+        .await;
+
+    let recovered_turn_id = session
+        .input_queue
+        .pending_mailbox_turn_id()
+        .await
+        .expect("unstarted claim should recover as pending");
+    assert_ne!(recovered_turn_id, historical_turn_id);
 }
 
 #[tokio::test]

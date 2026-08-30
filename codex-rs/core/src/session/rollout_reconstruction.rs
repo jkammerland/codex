@@ -1,6 +1,8 @@
 use super::*;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
+use crate::session::input_queue::MailboxModelSizeLimit;
+use crate::session::input_queue::validate_stored_mailbox_model_communication;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::protocol::SessionContextWindow;
 use uuid::Uuid;
@@ -116,29 +118,28 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> RolloutReconstruction {
-        let started_turn_ids = rollout_items
-            .iter()
-            .filter_map(|item| match item {
-                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.as_str()),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let legacy_claim_model_item_ids = rollout_items
-            .iter()
-            .filter_map(|item| match item {
+        let mut started_turn_ids = HashSet::new();
+        let mut legacy_claim_model_item_ids = HashMap::new();
+        for item in rollout_items {
+            match item {
+                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                    started_turn_ids.insert(event.turn_id.as_str());
+                }
                 RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication_id,
                     communication: Some(_),
                     delivered_response: None,
                     turn_id,
                     ..
-                } => Some((
-                    communication_id.clone(),
-                    started_turn_ids.contains(turn_id.as_str()),
-                )),
-                _ => None,
-            })
-            .collect::<HashMap<_, _>>();
+                } => {
+                    legacy_claim_model_item_ids.insert(
+                        communication_id.clone(),
+                        started_turn_ids.contains(turn_id.as_str()),
+                    );
+                }
+                _ => {}
+            }
+        }
         let compatibility_shadow_ids = rollout_items
             .windows(2)
             .filter_map(|pair| match pair {
@@ -331,11 +332,16 @@ impl Session {
                         is_user_turn_boundary(&response_item.item);
                 }
                 RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
                     communication: Some(communication),
                     delivered_response: None,
                     turn_id,
                     ..
-                } if started_turn_ids.contains(turn_id.as_str()) => {
+                } if legacy_claim_model_item_ids
+                    .get(communication_id)
+                    .copied()
+                    .unwrap_or(false) =>
+                {
                     let active_segment =
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
                     active_segment
@@ -395,8 +401,7 @@ impl Session {
         .unwrap_or(u64::MAX);
 
         let mut history = ContextManager::new();
-        let mut recorded_legacy_claim_model_item_ids = HashSet::new();
-        let mut recorded_durable_claim_model_item_ids = HashSet::new();
+        let mut recorded_claim_model_item_ids = HashSet::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
         if let Some(base_replacement_history) = base_replacement_history {
             history.replace_annotated(base_replacement_history.to_vec());
@@ -410,7 +415,7 @@ impl Session {
                     let record = response_item.id().is_none_or(|id| {
                         !compatibility_shadow_ids.contains(id)
                             && legacy_claim_model_item_ids.get(id).is_none_or(|started| {
-                                *started && recorded_legacy_claim_model_item_ids.insert(id.clone())
+                                *started && recorded_claim_model_item_ids.insert(id.clone())
                             })
                     });
                     if record {
@@ -431,7 +436,7 @@ impl Session {
                     communication_id,
                     delivered_response: Some(response_item),
                     ..
-                } if recorded_durable_claim_model_item_ids.insert(communication_id.clone()) => {
+                } if recorded_claim_model_item_ids.insert(communication_id.clone()) => {
                     history.record_annotated_items(
                         std::slice::from_ref(response_item),
                         turn_context.model_info().truncation_policy.into(),
@@ -443,18 +448,33 @@ impl Session {
                     delivered_response: None,
                     turn_id,
                     ..
-                } if started_turn_ids.contains(turn_id.as_str())
-                    && recorded_legacy_claim_model_item_ids.insert(communication_id.clone()) =>
+                } if legacy_claim_model_item_ids
+                    .get(communication_id)
+                    .copied()
+                    .unwrap_or(false)
+                    && recorded_claim_model_item_ids.insert(communication_id.clone()) =>
                 {
                     let mut communication = communication.clone();
                     communication
                         .id
                         .get_or_insert_with(|| communication_id.clone());
-                    let response_item = communication.to_model_input_item();
-                    history.record_items(
-                        std::iter::once(&response_item),
-                        turn_context.model_info().truncation_policy.into(),
-                    );
+                    match validate_stored_mailbox_model_communication(
+                        &communication,
+                        MailboxModelSizeLimit::LegacyRecovery,
+                    ) {
+                        Ok(()) => {
+                            let response_item = communication.to_model_input_item();
+                            history.record_items(
+                                std::iter::once(&response_item),
+                                turn_context.model_info().truncation_policy.into(),
+                            );
+                        }
+                        Err(error) => warn!(
+                            %communication_id,
+                            %error,
+                            "skipping oversized legacy durable mailbox history item"
+                        ),
+                    }
                 }
                 RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::TerminalAgentStatus { .. }

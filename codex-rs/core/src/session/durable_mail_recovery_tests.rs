@@ -166,6 +166,32 @@ fn mcp13_claim_with_turn_start_retains_legacy_consumption_semantics() {
     assert_eq!(
         recover_durable_mail(&[
             payload(&communication),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "claimed-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            mcp13_claim(&communication),
+        ]),
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "fingerprint".to_string(),
+                claimed_turn_id: "claimed-turn".to_string(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn later_turn_start_does_not_retroactively_consume_mcp13_claim() {
+    let communication = mail("mcp13-future-turn");
+
+    assert_eq!(
+        recover_durable_mail(&[
             mcp13_claim(&communication),
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "claimed-turn".to_string(),
@@ -176,12 +202,15 @@ fn mcp13_claim_with_turn_start_retains_legacy_consumption_semantics() {
             })),
         ]),
         DurableMailRecovery {
-            pending: Vec::new(),
-            consumed: vec![ConsumedDurableMail {
-                id,
+            pending: vec![PendingDurableMail {
+                communication,
+                start_options: TurnStartOptions::default(),
                 fingerprint: "fingerprint".to_string(),
-                claimed_turn_id: "claimed-turn".to_string(),
+                intended_turn_id: "claimed-turn".to_string(),
+                already_claimed: true,
+                size_limit: MailboxModelSizeLimit::LegacyRecovery,
             }],
+            consumed: Vec::new(),
         }
     );
 }
@@ -268,5 +297,22 @@ fn compacted_consumed_receipt_restores_retry_identity_without_model_mail() {
                 claimed_turn_id: String::new(),
             }],
         }
+    );
+}
+
+#[test]
+fn claim_only_recovery_preserves_fifo_order() {
+    let first = mail("claim-first");
+    let second = mail("claim-second");
+
+    let recovered = recover_durable_mail(&[mcp13_claim(&first), mcp13_claim(&second)]);
+
+    assert_eq!(
+        recovered
+            .pending
+            .iter()
+            .map(|pending| pending.communication.id.clone())
+            .collect::<Vec<_>>(),
+        vec![first.id, second.id]
     );
 }

@@ -41,19 +41,15 @@ struct DurablePayload {
 }
 
 struct DurableClaim {
+    communication_id: ResponseItemId,
+    fingerprint: String,
     turn_id: String,
     communication: Option<InterAgentCommunication>,
     delivered: bool,
+    turn_started: bool,
 }
 
 pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery {
-    let started_turn_ids = items
-        .iter()
-        .filter_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.clone()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
     let legacy_consumed_ids = items
         .iter()
         .filter_map(|item| match item {
@@ -64,26 +60,35 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
             _ => None,
         })
         .collect::<HashSet<_>>();
-    let claims = items
-        .iter()
-        .filter_map(|item| match item {
+    let mut claims = Vec::new();
+    let mut claim_indices = HashMap::new();
+    let mut started_turn_ids = HashSet::new();
+    for item in items {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                started_turn_ids.insert(event.turn_id.clone());
+            }
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
                 communication,
                 delivered_response,
                 fingerprint,
                 turn_id,
-            } => Some((
-                (communication_id.clone(), fingerprint.clone()),
-                DurableClaim {
+            } => {
+                let index = claims.len();
+                claims.push(DurableClaim {
+                    communication_id: communication_id.clone(),
+                    fingerprint: fingerprint.clone(),
                     turn_id: turn_id.clone(),
                     communication: communication.clone(),
                     delivered: delivered_response.is_some(),
-                },
-            )),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
+                    turn_started: started_turn_ids.contains(turn_id),
+                });
+                claim_indices.insert((communication_id.clone(), fingerprint.clone()), index);
+            }
+            _ => {}
+        }
+    }
 
     let mut payloads = Vec::new();
     for item in items {
@@ -134,9 +139,10 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
         if !recovered_ids.insert(id.clone()) {
             continue;
         }
-        let claim = claims.get(&(id.clone(), payload.fingerprint.clone()));
-        let delivered =
-            claim.is_some_and(|claim| claim.delivered || started_turn_ids.contains(&claim.turn_id));
+        let claim = claim_indices
+            .get(&(id.clone(), payload.fingerprint.clone()))
+            .and_then(|index| claims.get(*index));
+        let delivered = claim.is_some_and(|claim| claim.delivered || claim.turn_started);
         if legacy_consumed_ids.contains(&id) || delivered {
             recovery.consumed.push(ConsumedDurableMail {
                 id,
@@ -209,17 +215,28 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
     // A `.mcp.13` claim carries enough payload to recover even when the older payload was
     // compacted. Claims from earlier releases omitted that field; without a payload they retain
     // the legacy consumed fallback because replaying an unknown body would be unsafe.
-    for ((id, fingerprint), claim) in claims {
+    for (index, claim) in claims.into_iter().enumerate() {
+        let DurableClaim {
+            communication_id: id,
+            fingerprint,
+            turn_id,
+            communication,
+            delivered,
+            turn_started,
+        } = claim;
+        if claim_indices.get(&(id.clone(), fingerprint.clone())) != Some(&index) {
+            continue;
+        }
         if recovered_ids.insert(id.clone()) {
-            if let Some(communication) = claim.communication
-                && !claim.delivered
-                && !started_turn_ids.contains(&claim.turn_id)
+            if let Some(communication) = communication
+                && !delivered
+                && !turn_started
             {
                 recovery.pending.push(PendingDurableMail {
                     communication,
                     start_options: TurnStartOptions::default(),
                     fingerprint,
-                    intended_turn_id: claim.turn_id,
+                    intended_turn_id: turn_id,
                     already_claimed: true,
                     size_limit: MailboxModelSizeLimit::LegacyRecovery,
                 });
@@ -227,7 +244,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 recovery.consumed.push(ConsumedDurableMail {
                     id,
                     fingerprint,
-                    claimed_turn_id: claim.turn_id,
+                    claimed_turn_id: turn_id,
                 });
             }
         }

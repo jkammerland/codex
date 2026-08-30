@@ -127,14 +127,15 @@ impl Session {
             .iter()
             .filter_map(|item| match item {
                 RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication: Some(communication),
+                    communication_id,
+                    communication: Some(_),
                     delivered_response: None,
                     turn_id,
                     ..
-                } => communication
-                    .id
-                    .clone()
-                    .map(|id| (id, started_turn_ids.contains(turn_id.as_str()))),
+                } => Some((
+                    communication_id.clone(),
+                    started_turn_ids.contains(turn_id.as_str()),
+                )),
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
@@ -329,6 +330,20 @@ impl Session {
                     active_segment.counts_as_user_turn |=
                         is_user_turn_boundary(&response_item.item);
                 }
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication: Some(communication),
+                    delivered_response: None,
+                    turn_id,
+                    ..
+                } if started_turn_ids.contains(turn_id.as_str()) => {
+                    let active_segment =
+                        active_segment.get_or_insert_with(ActiveReplaySegment::default);
+                    active_segment
+                        .turn_id
+                        .get_or_insert_with(|| turn_id.clone());
+                    active_segment.counts_as_user_turn |=
+                        is_user_turn_boundary(&communication.to_model_input_item());
+                }
                 RolloutItem::InterAgentCommunication(_) => {
                     let active_segment =
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
@@ -381,6 +396,7 @@ impl Session {
 
         let mut history = ContextManager::new();
         let mut recorded_legacy_claim_model_item_ids = HashSet::new();
+        let mut recorded_durable_claim_model_item_ids = HashSet::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
         if let Some(base_replacement_history) = base_replacement_history {
             history.replace_annotated(base_replacement_history.to_vec());
@@ -412,11 +428,31 @@ impl Session {
                     );
                 }
                 RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
                     delivered_response: Some(response_item),
                     ..
-                } => {
+                } if recorded_durable_claim_model_item_ids.insert(communication_id.clone()) => {
                     history.record_annotated_items(
                         std::slice::from_ref(response_item),
+                        turn_context.model_info().truncation_policy.into(),
+                    );
+                }
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
+                    communication: Some(communication),
+                    delivered_response: None,
+                    turn_id,
+                    ..
+                } if started_turn_ids.contains(turn_id.as_str())
+                    && recorded_legacy_claim_model_item_ids.insert(communication_id.clone()) =>
+                {
+                    let mut communication = communication.clone();
+                    communication
+                        .id
+                        .get_or_insert_with(|| communication_id.clone());
+                    let response_item = communication.to_model_input_item();
+                    history.record_items(
+                        std::iter::once(&response_item),
                         turn_context.model_info().truncation_policy.into(),
                     );
                 }
@@ -426,6 +462,10 @@ impl Session {
                 | RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication: None | Some(_),
                     delivered_response: None,
+                    ..
+                }
+                | RolloutItem::DurableInterAgentCommunicationClaimed {
+                    delivered_response: Some(_),
                     ..
                 } => {}
                 RolloutItem::Compacted(compacted) => {

@@ -7,6 +7,8 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::turn_input::TurnStartOptions;
 
+use super::input_queue::MailboxModelSizeLimit;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PendingDurableMail {
     pub(super) communication: InterAgentCommunication,
@@ -14,6 +16,7 @@ pub(super) struct PendingDurableMail {
     pub(super) fingerprint: String,
     pub(super) intended_turn_id: String,
     pub(super) already_claimed: bool,
+    pub(super) size_limit: MailboxModelSizeLimit,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +37,7 @@ struct DurablePayload {
     start_options: TurnStartOptions,
     fingerprint: String,
     intended_turn_id: String,
+    size_limit: MailboxModelSizeLimit,
 }
 
 struct DurableClaim {
@@ -89,12 +93,17 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 start_options,
                 fingerprint,
                 turn_id,
-                ..
+                compatibility_shadow,
             } => payloads.push(DurablePayload {
                 communication: communication.clone(),
                 start_options: start_options.clone(),
                 fingerprint: fingerprint.clone(),
                 intended_turn_id: turn_id.clone(),
+                size_limit: if *compatibility_shadow {
+                    MailboxModelSizeLimit::Current
+                } else {
+                    MailboxModelSizeLimit::LegacyRecovery
+                },
             }),
             RolloutItem::InterAgentCommunicationMetadata {
                 mail_fingerprint: Some(fingerprint),
@@ -110,6 +119,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                     .as_ref()
                     .and_then(|metadata| metadata.turn_id.clone())
                     .unwrap_or_default(),
+                size_limit: MailboxModelSizeLimit::LegacyRecovery,
             }),
             _ => {}
         }
@@ -144,6 +154,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                     .map(|claim| claim.turn_id.clone())
                     .unwrap_or(payload.intended_turn_id),
                 already_claimed: claim.is_some(),
+                size_limit: payload.size_limit,
             });
         }
     }
@@ -210,6 +221,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                     fingerprint,
                     intended_turn_id: claim.turn_id,
                     already_claimed: true,
+                    size_limit: MailboxModelSizeLimit::LegacyRecovery,
                 });
             } else {
                 recovery.consumed.push(ConsumedDurableMail {

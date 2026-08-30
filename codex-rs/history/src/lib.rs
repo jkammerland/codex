@@ -163,6 +163,7 @@ pub enum RolloutItem {
 #[derive(Debug, Default)]
 pub struct RolloutModelResponseProjection {
     compatibility_shadow_id: Option<ResponseItemId>,
+    delivered_communication_ids: std::collections::HashSet<ResponseItemId>,
 }
 
 impl RolloutModelResponseProjection {
@@ -187,9 +188,15 @@ impl RolloutModelResponseProjection {
             }
             RolloutItem::ResponseItem(response) => Some(response),
             RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
                 delivered_response: Some(response),
                 ..
-            } => Some(response),
+            } if self
+                .delivered_communication_ids
+                .insert(communication_id.clone()) =>
+            {
+                Some(response)
+            }
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }

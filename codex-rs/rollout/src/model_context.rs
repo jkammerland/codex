@@ -78,6 +78,7 @@ pub struct ModelContextScan {
     older_durable_items_newest_first: Vec<RolloutItem>,
     older_candidate_response: Option<RolloutItem>,
     older_latest_turn_started: Option<RolloutItem>,
+    older_claim_turn_ids_awaiting_start: HashSet<String>,
     retained_started_turn_ids: HashSet<String>,
     retained_durable_state_bytes: usize,
     scanned_items: usize,
@@ -168,19 +169,38 @@ impl ModelContextScan {
 
     fn observe_older_durable_item(&mut self, item: RolloutItem) {
         match item {
-            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
-                self.older_latest_turn_started = Some(item);
+            RolloutItem::EventMsg(EventMsg::TurnStarted(ref started)) => {
+                if self
+                    .older_claim_turn_ids_awaiting_start
+                    .remove(&started.turn_id)
+                {
+                    if self
+                        .retained_started_turn_ids
+                        .insert(started.turn_id.clone())
+                    {
+                        self.retain_older_durable_item(item);
+                    }
+                    self.older_latest_turn_started = None;
+                } else {
+                    self.older_latest_turn_started = Some(item);
+                }
                 self.older_candidate_response = None;
             }
             RolloutItem::DurableInterAgentCommunicationClaimed { ref turn_id, .. } => {
+                let mut retained_start = false;
                 if let Some(RolloutItem::EventMsg(EventMsg::TurnStarted(started))) =
                     self.older_latest_turn_started.as_ref()
                     && started.turn_id == *turn_id
                     && self.retained_started_turn_ids.insert(turn_id.clone())
                 {
+                    retained_start = true;
                     self.retain_older_durable_item(RolloutItem::EventMsg(EventMsg::TurnStarted(
                         started.clone(),
                     )));
+                }
+                if !retained_start && !self.retained_started_turn_ids.contains(turn_id) {
+                    self.older_claim_turn_ids_awaiting_start
+                        .insert(turn_id.clone());
                 }
                 self.retain_older_durable_item(item);
                 self.older_candidate_response = None;
@@ -524,13 +544,17 @@ fn compact_durable_agent_state(
 
     for ((id, fingerprint), claim) in claims {
         if claim.from_older_history && represented_ids.insert(id.clone()) {
-            compacted.push(RolloutItem::DurableInterAgentCommunicationClaimed {
-                communication_id: id,
-                communication: None,
-                delivered_response: None,
-                fingerprint,
-                turn_id: claim.turn_id,
-            });
+            if claim.delivered || started_turn_ids.contains(&claim.turn_id) {
+                compacted.push(consumed_mail_marker(id, fingerprint));
+            } else {
+                compacted.push(RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id: id,
+                    communication: claim.communication,
+                    delivered_response: None,
+                    fingerprint,
+                    turn_id: claim.turn_id,
+                });
+            }
         }
     }
     compacted

@@ -48,8 +48,10 @@ not prompt for an npm update that would overwrite the fork.
     fork identity, and `codex agents` support before reporting activation.
 17. Durable mail admission is pending-only. The exact bounded and stamped model
     item is committed atomically at its delivery claim, interrupted turns requeue
-    uncommitted reservations in FIFO order, and resume reconstructs the item at
-    that claim rather than at admission.
+    uncommitted reservations in FIFO order, an uncertain persistence result is
+    quarantined without replay, and resume reconstructs the item at that claim
+    rather than at admission. Preexisting mail from `.mcp.13` remains recoverable
+    up to the established aggregate turn bound.
 18. Durable-state resume scans have explicit record-count and byte limits, MCP
     event streams stop concurrently within one shared timeout window, and a late
     interrupted event cannot erase an already persisted terminal failure.
@@ -68,16 +70,21 @@ new-format sessions are used, or upgrade back to `.mcp.14` before resuming them.
 
 ## Release layout
 
-Each fleet release uses two commits because a commit cannot contain its own Git
-object ID:
+Each fleet release uses two commits and one immutable local source ref because a
+commit cannot contain its own Git object ID:
 
 1. The reviewed source commit contains the versioned code and installer marker.
-2. Its direct manifest descendant pins that source commit in `fleet/release.json`.
+2. `fleet/jkammerland.mcp.14-source` points exactly at that source commit and is
+   the ref exported in deployment bundles.
+3. A direct manifest descendant pins both the source commit and source ref in
+   `fleet/release.json`; `release/jkammerland.mcp.14` points at this manifest
+   commit.
 
 Run fleet preparation and installation from the manifest commit. The controller
-checks out and builds the pinned source commit; the source commit is not expected
-to contain the descendant manifest pin. Both hashes belong in release-review
-evidence, and neither commit is pushed automatically.
+fetches the dedicated source ref, verifies that its tip equals the pinned source
+commit, and builds that commit. The source commit is not expected to contain the
+descendant manifest pin. Both hashes and the source ref belong in release-review
+evidence, and nothing is pushed automatically.
 
 ## Validate
 

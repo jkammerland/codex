@@ -188,6 +188,53 @@ async fn durable_claim_without_started_turn_stays_out_of_model_history() {
 }
 
 #[tokio::test]
+async fn started_legacy_claim_without_a_response_shadow_reconstructs_mail() {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root().join("worker").expect("worker path"),
+        Vec::new(),
+        "claim-only durable mail".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let communication_id = ResponseItemId::with_suffix("msg", "claim-only");
+    communication.id = Some(communication_id.clone());
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                RolloutItem::EventMsg(EventMsg::TurnStarted(
+                    codex_protocol::protocol::TurnStartedEvent {
+                        turn_id: "legacy-turn".to_string(),
+                        trace_id: None,
+                        started_at: None,
+                        model_context_window: None,
+                        collaboration_mode_kind: Default::default(),
+                    },
+                )),
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
+                    communication: Some(communication.clone()),
+                    delivered_response: None,
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "legacy-turn".to_string(),
+                },
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction
+            .history
+            .into_iter()
+            .map(ResponseItemEnvelope::into_item)
+            .collect::<Vec<_>>(),
+        vec![communication.to_model_input_item()]
+    );
+}
+
+#[tokio::test]
 async fn durable_delivery_reconstructs_at_its_exact_model_insertion_point() {
     let (session, turn_context) = make_session_and_context().await;
     let before_mail = user_message("context recorded before mail");
@@ -327,6 +374,53 @@ async fn record_initial_history_reconstructs_typed_inter_agent_message() {
     assert_eq!(
         raw_history_items(&session.state.lock().await.clone_history()),
         vec![communication.to_model_input_item()]
+    );
+}
+
+#[tokio::test]
+async fn record_initial_history_restores_large_mcp13_mail_without_discarding_it() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let mut communication = InterAgentCommunication::new_encrypted(
+        AgentPath::root().join("worker").expect("worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "x ".repeat(5_000),
+        /*trigger_turn*/ true,
+    );
+    let communication_id = ResponseItemId::with_suffix("msg", "legacy-large-resume");
+    communication.id = Some(communication_id.clone());
+
+    session
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::default(),
+            history: Arc::new(vec![RolloutItem::DurableInterAgentCommunication {
+                communication: communication.clone(),
+                start_options: Default::default(),
+                fingerprint: "legacy-fingerprint".to_string(),
+                turn_id: "legacy-turn".to_string(),
+                compatibility_shadow: false,
+            }]),
+            rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
+        }))
+        .await;
+
+    assert_eq!(
+        session
+            .input_queue
+            .durable_mail_retry_status(&communication_id)
+            .await,
+        crate::session::input_queue::DurableMailRetryStatus::Pending {
+            trigger_turn: true,
+            persisted: true,
+        }
+    );
+    assert_eq!(
+        session
+            .claim_and_drain_mailbox_input_items("legacy-turn")
+            .await
+            .expect("legacy mail should remain claimable")
+            .0,
+        vec![TurnInput::InterAgentCommunication(communication)]
     );
 }
 

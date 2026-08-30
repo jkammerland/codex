@@ -11,6 +11,7 @@ use super::ConsumedDurableMail;
 use super::DurableMailRecovery;
 use super::PendingDurableMail;
 use super::recover_durable_mail;
+use crate::session::input_queue::MailboxModelSizeLimit;
 
 fn mail(id: &str) -> InterAgentCommunication {
     let mut communication = InterAgentCommunication::new(
@@ -30,7 +31,7 @@ fn payload(communication: &InterAgentCommunication) -> RolloutItem {
         start_options: TurnStartOptions::default(),
         fingerprint: "fingerprint".to_string(),
         turn_id: "intended-turn".to_string(),
-        compatibility_shadow: false,
+        compatibility_shadow: true,
     }
 }
 
@@ -77,6 +78,7 @@ fn current_unclaimed_payload_is_recovered_as_pending() {
                 fingerprint: "fingerprint".to_string(),
                 intended_turn_id: "intended-turn".to_string(),
                 already_claimed: false,
+                size_limit: MailboxModelSizeLimit::Current,
             }],
             consumed: Vec::new(),
         }
@@ -96,6 +98,7 @@ fn claim_without_turn_start_is_recovered_for_the_same_turn() {
                 fingerprint: "fingerprint".to_string(),
                 intended_turn_id: "claimed-turn".to_string(),
                 already_claimed: true,
+                size_limit: MailboxModelSizeLimit::Current,
             }],
             consumed: Vec::new(),
         }
@@ -130,6 +133,7 @@ fn pending_only_payload_with_turn_start_but_without_delivery_is_recovered_as_pen
                 fingerprint: "fingerprint".to_string(),
                 intended_turn_id: "intended-turn".to_string(),
                 already_claimed: false,
+                size_limit: MailboxModelSizeLimit::Current,
             }],
             consumed: Vec::new(),
         }
@@ -204,6 +208,7 @@ fn mcp11_overloaded_metadata_retains_pending_mail() {
                 fingerprint: "legacy-fingerprint".to_string(),
                 intended_turn_id: String::new(),
                 already_claimed: false,
+                size_limit: MailboxModelSizeLimit::LegacyRecovery,
             }],
             consumed: Vec::new(),
         }

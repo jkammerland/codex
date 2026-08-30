@@ -69,6 +69,13 @@ fn model_response_projection_moves_durable_delivery_from_shadow_to_claim() {
         )),
         RolloutItem::DurableInterAgentCommunicationClaimed {
             communication_id: communication.id.clone().expect("communication id"),
+            communication: Some(communication.clone()),
+            delivered_response: Some(delivered.clone()),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication.id.clone().expect("communication id"),
             communication: Some(communication),
             delivered_response: Some(delivered.clone()),
             fingerprint: "fingerprint".to_string(),

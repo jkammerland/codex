@@ -1774,7 +1774,7 @@ async fn oversized_durable_mail_is_rejected_before_persistence_or_acknowledgemen
 }
 
 #[tokio::test]
-async fn acknowledged_mail_retries_after_admission_and_delivery_flush_failures_are_idempotent() {
+async fn ambiguous_delivery_flush_failure_is_quarantined_without_replay() {
     let (home, config) = test_config().await;
     let thread_store = Arc::new(InMemoryThreadStore::default());
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
@@ -1876,7 +1876,7 @@ async fn acknowledged_mail_retries_after_admission_and_delivery_flush_failures_a
         .session
         .record_inter_agent_communication(&turn_context, communication.clone())
         .await
-        .expect("delivery should retry its persistence barrier without appending twice");
+        .expect_err("an ambiguous delivery flush must not be retried automatically");
     assert_eq!(
         thread
             .session
@@ -1885,8 +1885,15 @@ async fn acknowledged_mail_retries_after_admission_and_delivery_flush_failures_a
             .raw_items()
             .filter(|item| item.id() == communication.id.as_ref())
             .count(),
-        1
+        0,
+        "the uncertain delivery must not enter live model history"
     );
+    let replay_error = thread
+        .session
+        .record_inter_agent_communication(&turn_context, communication.clone())
+        .await
+        .expect_err("the same turn must not replay an indeterminate delivery");
+    assert!(replay_error.to_string().contains("refusing to replay"));
     let stored = thread_store
         .load_history(codex_thread_store::LoadThreadHistoryParams {
             thread_id,
@@ -1917,11 +1924,20 @@ async fn acknowledged_mail_retries_after_admission_and_delivery_flush_failures_a
             Default::default(),
         )
         .await
-        .expect("same-ID retry after mailbox delivery should be acknowledged");
+        .expect("same-ID retry should acknowledge the quarantined in-flight delivery");
     assert_eq!(
         thread.session.drain_mailbox_input_items().await.0,
         Vec::new(),
-        "a consumed durable mail must not be queued for a second model turn"
+        "an ambiguous durable delivery must not be queued for a second model turn"
+    );
+    assert_eq!(
+        thread
+            .session
+            .input_queue
+            .release_inflight_mail_for_turn(&turn_id)
+            .await,
+        0,
+        "turn cleanup must leave an indeterminate commit quarantined"
     );
 }
 
@@ -1959,8 +1975,9 @@ async fn consumed_durable_mail_remains_idempotent_after_reload() {
     let fingerprint = thread
         .session
         .input_queue
-        .pending_mailbox_claim_snapshot()
+        .pending_mailbox_claim_snapshot(&turn_id)
         .await
+        .expect("mail should fit the reserved turn")
         .durable_mail
         .into_iter()
         .next()

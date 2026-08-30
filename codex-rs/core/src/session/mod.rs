@@ -1399,6 +1399,7 @@ impl Session {
                                 pending.start_options,
                                 pending.fingerprint.clone(),
                                 intended_turn_id.clone(),
+                                pending.size_limit,
                             )
                             .await
                     } else {
@@ -1408,6 +1409,7 @@ impl Session {
                                 pending.start_options,
                                 pending.fingerprint.clone(),
                                 intended_turn_id.clone(),
+                                pending.size_limit,
                             )
                             .await
                     };
@@ -1419,21 +1421,12 @@ impl Session {
                             .input_queue
                             .mark_mailbox_communication_persisted(id)
                             .await;
-                    } else if !restored.as_ref().is_ok_and(|restored| *restored)
-                        && let Some(id) = id
-                    {
+                    } else if !restored.as_ref().is_ok_and(|restored| *restored) {
                         warn!(
-                            communication_id = %id,
+                            communication_id = ?id,
                             error = ?restored.err(),
                             "failed to restore durable mailbox payload"
                         );
-                        self.input_queue
-                            .restore_recorded_durable_mail(
-                                id,
-                                pending.fingerprint,
-                                Some(intended_turn_id),
-                            )
-                            .await;
                     }
                 }
                 let restore_terminal_v2_child = self.multi_agent_version()
@@ -3519,7 +3512,27 @@ impl Session {
         turn_context: &TurnContext,
         communication: InterAgentCommunication,
     ) -> std::io::Result<()> {
-        let model_communication = input_queue::mailbox_model_communication(&communication);
+        let durable_claim = if let Some(id) = communication.id.as_ref() {
+            match self
+                .input_queue
+                .inflight_mail_commit(id, &turn_context.sub_id)
+                .await
+            {
+                Some(input_queue::InflightMailCommit::Reserved(claim)) => Some(*claim),
+                Some(input_queue::InflightMailCommit::Indeterminate) => {
+                    return Err(std::io::Error::other(format!(
+                        "durable mailbox delivery {id} has an indeterminate persistence result; refusing to replay it"
+                    )));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let model_communication = durable_claim.as_ref().map_or_else(
+            || input_queue::mailbox_model_communication(&communication),
+            |claim| claim.model_communication.clone(),
+        );
         let response_item = model_communication.to_model_input_item();
         let (items, _) = self.prepare_conversation_items_for_history(
             turn_context,
@@ -3527,19 +3540,23 @@ impl Session {
         );
         let items = items.as_ref();
         let response_item = items[0].clone();
-        let durable_claim = if let Some(id) = communication.id.as_ref() {
-            self.input_queue
-                .inflight_mail_for_turn(id, &turn_context.sub_id)
-                .await
-        } else {
-            None
-        };
         if durable_claim.is_some() && self.live_thread().is_none() {
             return Err(std::io::Error::other(
                 "cannot commit durable mailbox delivery without a live rollout writer",
             ));
         }
         if let Some(live_thread) = self.live_thread() {
+            if let Some(id) = communication.id.as_ref()
+                && durable_claim.is_some()
+                && !self
+                    .input_queue
+                    .mark_inflight_mail_commit_started(id, &turn_context.sub_id)
+                    .await
+            {
+                return Err(std::io::Error::other(format!(
+                    "durable mailbox delivery {id} lost its in-flight claim before persistence"
+                )));
+            }
             let metadata = durable_claim.as_ref().map_or_else(
                 || RolloutItem::InterAgentCommunicationMetadata {
                     trigger_turn: communication.trigger_turn,
@@ -3571,14 +3588,8 @@ impl Session {
                 .append_items(&items)
                 .await
                 .map_err(std::io::Error::other)?;
-            if durable_claim.is_some()
-                && let Err(first_error) = self.flush_rollout().await
-            {
-                self.flush_rollout().await.map_err(|retry_error| {
-                        std::io::Error::other(format!(
-                            "failed to flush durable mailbox delivery twice: {first_error}; retry: {retry_error}"
-                        ))
-                    })?;
+            if durable_claim.is_some() {
+                self.flush_rollout().await?;
             }
         }
         if let Some(id) = communication.id.as_ref()
@@ -3607,17 +3618,16 @@ impl Session {
     pub(crate) async fn persist_durable_inter_agent_communication(
         &self,
         turn_context: &TurnContext,
-        communication: &InterAgentCommunication,
+        model_communication: &InterAgentCommunication,
         fingerprint: &str,
         start_options: &codex_protocol::turn_input::TurnStartOptions,
     ) -> std::io::Result<()> {
         let live_thread = self.live_thread().ok_or_else(|| {
             std::io::Error::other("cannot persist durable mailbox without a live rollout writer")
         })?;
-        let model_communication = input_queue::mailbox_model_communication(communication);
         live_thread
             .append_items(&[RolloutItem::DurableInterAgentCommunication {
-                communication: model_communication,
+                communication: model_communication.clone(),
                 start_options: start_options.clone(),
                 fingerprint: fingerprint.to_string(),
                 turn_id: turn_context.sub_id.clone(),
@@ -3631,7 +3641,10 @@ impl Session {
         &self,
         turn_id: &str,
     ) -> std::io::Result<(Vec<TurnInput>, codex_protocol::turn_input::TurnStartOptions)> {
-        let snapshot = self.input_queue.pending_mailbox_claim_snapshot().await;
+        let snapshot = self
+            .input_queue
+            .pending_mailbox_claim_snapshot(turn_id)
+            .await?;
         self.input_queue
             .drain_claimed_mailbox_input_items(&snapshot, turn_id)
             .await

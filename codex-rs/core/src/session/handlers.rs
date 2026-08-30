@@ -11,8 +11,8 @@ use tracing::debug_span;
 use tracing::info_span;
 
 use crate::session::input_queue::DurableMailRetryStatus;
-use crate::session::input_queue::MAX_MAILBOX_MODEL_TOKENS_PER_ITEM;
-use crate::session::input_queue::mailbox_model_token_estimate;
+use crate::session::input_queue::MailboxModelSizeLimit;
+use crate::session::input_queue::prepare_mailbox_model_communication;
 use crate::session::session::Session;
 use crate::session::thread_settings;
 use crate::session::turn_input;
@@ -134,17 +134,13 @@ impl Session {
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| codex_protocol::ResponseItemId::new("msg"));
         communication.id = Some(communication_id.clone());
-        let model_tokens = mailbox_model_token_estimate(&communication);
-        if model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_ITEM {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "inter-agent communication {communication_id} is too large for one model-context item ({model_tokens} estimated tokens; maximum {MAX_MAILBOX_MODEL_TOKENS_PER_ITEM})"
-                ),
-            ));
-        }
         let mail_fingerprint = durable_mail_fingerprint(&communication, &start_options);
         let turn_context = self.new_default_turn().await;
+        let prepared = prepare_mailbox_model_communication(
+            &communication,
+            &turn_context.sub_id,
+            MailboxModelSizeLimit::Current,
+        )?;
         self.try_ensure_rollout_materialized(PersistContext::Standard)
             .await?;
         let recorded_fingerprint = self
@@ -206,7 +202,7 @@ impl Session {
                 None => {
                     self.persist_durable_inter_agent_communication(
                         &turn_context,
-                        &communication,
+                        &prepared.unstamped_communication,
                         &mail_fingerprint,
                         &start_options,
                     )
@@ -221,6 +217,7 @@ impl Session {
                 start_options,
                 mail_fingerprint,
                 turn_context.sub_id.clone(),
+                MailboxModelSizeLimit::Current,
             )
             .await?
         {

@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use chrono::DateTime;
@@ -498,6 +499,7 @@ pub struct InMemoryThreadStore {
     state: tokio::sync::Mutex<InMemoryThreadStoreState>,
     omit_metadata_update_result: AtomicBool,
     fail_next_flush: AtomicBool,
+    fail_delete_attempts: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -543,6 +545,11 @@ impl InMemoryThreadStore {
     /// Causes the next flush call to fail after prior appends remain recorded.
     pub fn fail_next_flush_for_testing(&self) {
         self.fail_next_flush.store(true, Ordering::Release);
+    }
+
+    /// Causes the next `attempts` delete calls to fail without changing stored state.
+    pub fn fail_deletes_for_testing(&self, attempts: usize) {
+        self.fail_delete_attempts.store(attempts, Ordering::Release);
     }
 
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
@@ -831,6 +838,17 @@ impl InMemoryThreadStore {
     async fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreResult<()> {
         let mut state = self.state.lock().await;
         state.calls.delete_thread += 1;
+        if self
+            .fail_delete_attempts
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |attempts| {
+                attempts.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ThreadStoreError::Internal {
+                message: "injected delete failure".to_string(),
+            });
+        }
         let existed = state.histories.remove(&params.thread_id).is_some();
         state.created_threads.remove(&params.thread_id);
         state.names.remove(&params.thread_id);

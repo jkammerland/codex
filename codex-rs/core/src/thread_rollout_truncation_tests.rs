@@ -451,10 +451,16 @@ fn fork_turn_positions_use_canonical_agent_messages_and_delivery_metadata() {
         response_item(user_msg("user task")),
         RolloutItem::InterAgentCommunicationMetadata {
             trigger_turn: false,
+            mail_fingerprint: None,
+            delivery_id: None,
         },
         response_item(queued.to_model_input_item()),
         response_item(assistant_msg("first answer")),
-        RolloutItem::InterAgentCommunicationMetadata { trigger_turn: true },
+        RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: true,
+            mail_fingerprint: None,
+            delivery_id: None,
+        },
         response_item(triggered.to_model_input_item()),
         response_item(assistant_msg("second answer")),
         response_item(user_msg("next user task")),

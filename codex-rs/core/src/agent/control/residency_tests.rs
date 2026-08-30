@@ -18,6 +18,8 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -421,6 +423,66 @@ async fn residency_does_not_evict_parent_before_nonterminal_child_reports_comple
         Ok(_) => panic!("terminal child did not unblock parent eviction"),
     }
     drop(replacement_slot);
+}
+
+#[tokio::test]
+async fn terminal_delivery_overcommit_is_rebalanced_after_child_becomes_terminal() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+    let state = control.upgrade().expect("thread manager should be live");
+
+    let child_slot = control
+        .reserve_v2_residency_slot(
+            &state,
+            &config,
+            /*protected_thread_id*/ None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("child resident slot");
+    let child = spawn_v2_subagent(&control, &state, config.clone(), root.thread_id, "child").await;
+    child_slot.commit(child.thread_id);
+
+    let parent_slot = control.reserve_v2_terminal_delivery_slot();
+    let reloaded_parent =
+        spawn_v2_subagent(&control, &state, config, root.thread_id, "reloaded-parent").await;
+    parent_slot.commit(reloaded_parent.thread_id);
+    control.schedule_v2_residency_rebalance(
+        Arc::clone(&state),
+        /*capacity*/ 1,
+        reloaded_parent.thread_id,
+    );
+    assert_eq!(control.v2_residency.resident_and_pending_count(), 2);
+
+    mark_thread_completed(child.thread.as_ref()).await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if manager.get_thread(child.thread_id).await.is_err()
+                && control.v2_residency.resident_and_pending_count() == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal child should release the temporary residency overcommit");
+    assert!(manager.get_thread(reloaded_parent.thread_id).await.is_ok());
 }
 
 async fn spawn_v2_subagent(

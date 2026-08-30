@@ -2369,7 +2369,11 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     expected_item.set_turn_id_if_missing(&turn_context.sub_id);
 
     session
-        .record_inter_agent_communication(&turn_context, communication)
+        .record_inter_agent_communication(
+            &turn_context,
+            communication,
+            /*mail_fingerprint*/ None,
+        )
         .await
         .expect("record communication");
 
@@ -2403,6 +2407,7 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
                 RolloutItem::ResponseItem(_)
                     | RolloutItem::InterAgentCommunication(_)
                     | RolloutItem::InterAgentCommunicationMetadata { .. }
+                    | RolloutItem::TerminalAgentStatus { .. }
             )
         })
         .cloned()
@@ -2410,6 +2415,8 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     let expected_persisted_items = vec![
         RolloutItem::InterAgentCommunicationMetadata {
             trigger_turn: false,
+            mail_fingerprint: None,
+            delivery_id: None,
         },
         RolloutItem::ResponseItem(expected_item.clone().into()),
     ];
@@ -2447,7 +2454,11 @@ async fn record_inter_agent_communication_preserves_item_id_in_rollout_and_resum
     );
 
     session
-        .record_inter_agent_communication(&turn_context, communication)
+        .record_inter_agent_communication(
+            &turn_context,
+            communication,
+            /*mail_fingerprint*/ None,
+        )
         .await
         .expect("record communication");
 
@@ -3441,6 +3452,7 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
@@ -3519,6 +3531,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         RolloutItem::SessionMeta(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TerminalAgentStatus { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)

@@ -30,3 +30,20 @@ fn successful_completion_message_stays_below_manual_review_threshold() {
 
     assert!(approx_token_count(&message) < COMPLETION_MESSAGE_MAX_TOKENS);
 }
+
+#[test]
+fn completion_envelope_with_long_agent_paths_is_bounded() {
+    let long_name = "a".repeat(50_000);
+    let task_name = AgentPath::try_from(format!("/root/{long_name}").as_str())
+        .expect("long task path should be valid");
+    let sender = AgentPath::try_from(format!("/root/{long_name}/worker").as_str())
+        .expect("long sender path should be valid");
+    let message = format_inter_agent_completion_message(
+        task_name,
+        sender,
+        &AgentStatus::Completed(Some("done".to_string())),
+    )
+    .expect("completed status should produce a completion message");
+
+    assert!(approx_token_count(&message) < COMPLETION_MESSAGE_MAX_TOKENS);
+}

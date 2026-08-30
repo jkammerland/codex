@@ -61,6 +61,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::turn_input::CyberAccessProgram;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
@@ -255,6 +256,7 @@ async fn persisted_originator(thread: &CodexThread) -> String {
             RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TerminalAgentStatus { .. }
             | RolloutItem::EventMsg(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
@@ -657,6 +659,107 @@ async fn failed_initial_submission_does_not_publish_spawned_agent() {
 }
 
 #[tokio::test]
+async fn failed_spawn_cleanup_retains_path_and_capacity_until_janitor_succeeds() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let thread_store = Arc::new(InMemoryThreadStore::default());
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store.clone(),
+        /*agent_graph_store*/ None,
+        uuid::Uuid::new_v4().to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let control = manager.agent_control();
+    let harness = AgentControlHarness {
+        _home: home,
+        config,
+        state_db: None,
+        manager,
+        control,
+    };
+    let (parent_thread_id, parent) = harness.start_thread().await;
+    let child_source = || {
+        thread_spawn_source(
+            parent_thread_id,
+            &parent.session_source,
+            next_thread_spawn_depth(&parent.session_source),
+            /*agent_role*/ None,
+            Some("worker".to_string()),
+        )
+        .expect("child source")
+    };
+    thread_store.fail_deletes_for_testing(2);
+
+    harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("unpublished child"),
+            Some(child_source()),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                remove_thread_before_initial_submission: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("injected initial submission and cleanup should fail");
+    harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("too-early retry"),
+            Some(child_source()),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("janitor must retain the original path and capacity while cleanup is pending");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if thread_store.calls().await.delete_thread >= 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("janitor should retry durable deletion");
+    let spawned = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("accepted retry"),
+            Some(child_source()),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("successful janitor cleanup should release the path and capacity");
+    assert_eq!(spawned.metadata.agent_path, child_source().get_agent_path());
+}
+
+#[tokio::test]
 async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
     let (home, mut config) = test_config().await;
     config
@@ -923,82 +1026,73 @@ async fn cancelled_initial_submission_shuts_down_and_releases_spawned_agent() {
 }
 
 #[tokio::test]
-async fn ephemeral_v2_spawn_still_installs_an_admission_barrier() {
-    let (home, mut config) = test_config().await;
+async fn ephemeral_v2_blocked_prompt_is_not_published_without_graph_store() {
+    let home = TempDir::new().expect("create temp dir");
+    let hooks = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 -c 'import json; print(json.dumps({\"decision\": \"block\", \"reason\": \"blocked ephemeral child\"}))'"
+                }]
+            }]
+        }
+    });
+    std::fs::write(home.path().join("hooks.json"), hooks.to_string())
+        .expect("write blocking hook fixture");
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .expect("load hook test config");
+    config
+        .features
+        .enable(Feature::CodexHooks)
+        .expect("enable hooks");
     config
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow multi-agent v2");
     config.multi_agent_v2.max_concurrent_threads_per_session = 2;
     config.ephemeral = true;
+    config.bypass_hook_trust = true;
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let (parent_thread_id, parent) = harness.start_thread().await;
-    let cancellation = tokio_util::sync::CancellationToken::new();
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let spawn = tokio::spawn({
-        let control = harness.control.clone();
-        let config = harness.config.clone();
-        let cancellation = cancellation.clone();
-        let started = Arc::clone(&started);
-        let release = Arc::clone(&release);
-        async move {
-            control
-                .spawn_agent_with_metadata(
-                    config,
-                    text_input("ephemeral child task"),
-                    Some(
-                        thread_spawn_source(
-                            parent_thread_id,
-                            &parent.session_source,
-                            next_thread_spawn_depth(&parent.session_source),
-                            /*agent_role*/ None,
-                            Some("worker".to_string()),
-                        )
-                        .expect("child source"),
-                    ),
-                    SpawnAgentOptions {
-                        parent_thread_id: Some(parent_thread_id),
-                        cancellation_token: cancellation,
-                        initial_submission_barrier: Some(
-                            crate::agent::control::InitialSubmissionBarrier { started, release },
-                        ),
-                        ..Default::default()
-                    },
+    let worker_path = AgentPath::root().join("worker").expect("worker path");
+    let error = timeout(
+        Duration::from_secs(5),
+        harness.control.spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("ephemeral child task"),
+            Some(
+                thread_spawn_source(
+                    parent_thread_id,
+                    &parent.session_source,
+                    next_thread_spawn_depth(&parent.session_source),
+                    /*agent_role*/ None,
+                    Some("worker".to_string()),
                 )
-                .await
-        }
-    });
-
-    started.notified().await;
-    let child_thread_id = harness
-        .manager
-        .list_thread_ids()
-        .await
-        .into_iter()
-        .find(|thread_id| *thread_id != parent_thread_id)
-        .expect("ephemeral child should be constructed");
-    let child = harness
-        .manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("ephemeral child should be loaded");
+                .expect("child source"),
+            ),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("blocked ephemeral admission must not hang")
+    .expect_err("blocked ephemeral prompt must fail admission");
     assert!(
-        child.session.take_spawn_admission_barrier().await.is_some(),
-        "V2 hook and task durability admission must not depend on a graph store"
+        error
+            .to_string()
+            .contains("blocked by a UserPromptSubmit hook")
     );
-
-    cancellation.cancel();
-    release.notify_one();
-    let error = spawn
-        .await
-        .expect("spawn task should join")
-        .expect_err("cancelled ephemeral admission should fail");
-    assert!(matches!(error.details(), CodexErrorDetails::Interrupted));
     assert_eq!(
         harness.manager.list_thread_ids().await,
         vec![parent_thread_id]
     );
+    assert_eq!(harness.control.state.agent_id_for_path(&worker_path), None);
 }
 
 #[tokio::test]
@@ -1011,6 +1105,7 @@ async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
     config.multi_agent_v2.max_concurrent_threads_per_session = 2;
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let (parent_thread_id, parent) = harness.start_thread().await;
+    let mut thread_created = harness.manager.subscribe_thread_created();
     harness
         .control
         .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
@@ -1085,6 +1180,28 @@ async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
         ),
         (vec![child_thread_id], Vec::<ThreadId>::new()),
     );
+    harness
+        .control
+        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
+        .await;
+    assert!(
+        harness.manager.get_thread(child_thread_id).await.is_ok(),
+        "root restoration must not clean up a pending spawn owned by live admission"
+    );
+    assert!(
+        state_db
+            .get_thread(child_thread_id)
+            .await
+            .expect("pending child metadata query")
+            .is_some(),
+        "live pending child metadata must survive concurrent root restoration"
+    );
+    assert!(
+        timeout(Duration::from_millis(100), thread_created.recv())
+            .await
+            .is_err(),
+        "a pending spawn must not publish thread-created before edge commit"
+    );
 
     release.notify_one();
     let spawned = spawn
@@ -1092,6 +1209,13 @@ async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
         .expect("spawn task should join")
         .expect("spawn should commit after durable initialization");
     assert_eq!(spawned.thread_id, child_thread_id);
+    assert_eq!(
+        timeout(Duration::from_secs(5), thread_created.recv())
+            .await
+            .expect("committed spawn should publish thread-created")
+            .expect("thread-created channel should remain open"),
+        child_thread_id
+    );
     assert_eq!(
         (
             state_db
@@ -1116,7 +1240,7 @@ async fn spawned_child_waits_for_open_edge_after_initial_task_is_durable() {
 }
 
 #[tokio::test]
-async fn blocked_spawn_prompt_is_not_admitted_or_persisted() {
+async fn blocked_v1_spawn_prompt_is_not_admitted_or_persisted() {
     let home = TempDir::new().expect("create temp dir");
     let hooks = serde_json::json!({
         "hooks": {
@@ -1141,8 +1265,8 @@ async fn blocked_spawn_prompt_is_not_admitted_or_persisted() {
         .expect("enable hooks");
     config
         .features
-        .enable(Feature::MultiAgentV2)
-        .expect("enable multi-agent v2");
+        .disable(Feature::MultiAgentV2)
+        .expect("select multi-agent v1");
     config.bypass_hook_trust = true;
     config.multi_agent_v2.max_concurrent_threads_per_session = 2;
     let harness = AgentControlHarness::new_with_config(home, config).await;
@@ -1482,6 +1606,182 @@ async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
 }
 
 #[tokio::test]
+async fn acknowledged_mail_flush_retry_preserves_fifo() {
+    let (home, config) = test_config().await;
+    let thread_store = Arc::new(InMemoryThreadStore::default());
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store.clone(),
+        /*agent_graph_store*/ None,
+        uuid::Uuid::new_v4().to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let control = manager.agent_control();
+    let harness = AgentControlHarness {
+        _home: home,
+        config,
+        state_db: None,
+        manager,
+        control,
+    };
+    let (thread_id, thread) = harness.start_thread().await;
+    let communication = |suffix: &str, content: &str| {
+        let mut communication = InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            Vec::new(),
+            content.to_string(),
+            /*trigger_turn*/ false,
+        );
+        communication.id = Some(codex_protocol::ResponseItemId::with_suffix("msg", suffix));
+        communication
+    };
+    let first = communication("fifo-first", "first");
+    let second = communication("fifo-second", "second");
+    thread_store.fail_next_flush_for_testing();
+
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            first.clone(),
+            AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect_err("first flush should fail");
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            second.clone(),
+            AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect("second flush should succeed without overtaking");
+    assert_eq!(
+        thread
+            .session
+            .input_queue
+            .drain_mailbox_input_items()
+            .await
+            .0,
+        Vec::new()
+    );
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            first.clone(),
+            AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
+            Default::default(),
+        )
+        .await
+        .expect("first retry should release the ordered prefix");
+
+    assert_eq!(
+        thread
+            .session
+            .input_queue
+            .drain_mailbox_input_items()
+            .await
+            .0,
+        vec![
+            crate::session::TurnInput::InterAgentCommunication(first),
+            crate::session::TurnInput::InterAgentCommunication(second),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn acknowledged_mail_rejects_same_id_payload_or_lineage_substitution() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let mut original = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "original".to_string(),
+        /*trigger_turn*/ false,
+    );
+    original.id = Some(codex_protocol::ResponseItemId::with_suffix(
+        "msg",
+        "substitution",
+    ));
+    let start_options = TurnStartOptions {
+        parent_turn_id: Some("parent-one".to_string()),
+        ..Default::default()
+    };
+    harness
+        .control
+        .send_inter_agent_communication(
+            thread_id,
+            original.clone(),
+            AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
+            start_options.clone(),
+        )
+        .await
+        .expect("original mail should persist");
+
+    for (communication, start_options) in [
+        (
+            InterAgentCommunication {
+                content: "substituted".to_string(),
+                ..original.clone()
+            },
+            start_options.clone(),
+        ),
+        (
+            original.clone(),
+            TurnStartOptions {
+                parent_turn_id: Some("parent-two".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            original.clone(),
+            TurnStartOptions {
+                parent_turn_id: start_options.parent_turn_id.clone(),
+                cyber_access_program: Some(CyberAccessProgram::DaybreakBlue),
+                ..Default::default()
+            },
+        ),
+    ] {
+        harness
+            .control
+            .send_inter_agent_communication(
+                thread_id,
+                communication,
+                AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
+                start_options,
+            )
+            .await
+            .expect_err("same-ID substitution must fail closed");
+    }
+
+    assert_eq!(
+        thread
+            .session
+            .input_queue
+            .drain_mailbox_input_items()
+            .await
+            .0,
+        vec![crate::session::TurnInput::InterAgentCommunication(original)]
+    );
+}
+
+#[tokio::test]
 async fn public_acknowledged_mail_op_does_not_overtake_queued_shutdown() {
     let harness = AgentControlHarness::new().await;
     let (_, thread) = harness.start_thread().await;
@@ -1737,6 +2037,291 @@ async fn reloaded_v2_child_restores_persisted_terminal_status() {
     assert_eq!(
         reloaded_child.agent_status().await,
         AgentStatus::Completed(Some("persisted result".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn reloaded_v2_child_uses_raw_terminal_abort_instead_of_preceding_error() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let root = harness
+        .manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    let child =
+        spawn_v2_reload_test_child(&harness.control, config.clone(), &root.thread, "worker").await;
+    let child_thread = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_turn = child_thread.session.new_default_turn().await;
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::Error(ErrorEvent {
+                message: "transient terminal precursor".to_string(),
+                codex_error_info: None,
+                misalignment: None,
+            }),
+        )
+        .await;
+    let abort = TurnAbortedEvent {
+        turn_id: Some(child_turn.sub_id.clone()),
+        reason: TurnAbortReason::Replaced,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+    };
+    child_thread
+        .session
+        .send_event(child_turn.as_ref(), EventMsg::TurnAborted(abort.clone()))
+        .await;
+    *child_thread.session.active_turn.lock().await = None;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("terminal child rollout should flush");
+    let rollout_path = child_thread
+        .rollout_path()
+        .expect("child rollout should be materialized");
+    let (rollout_items, _, parse_errors) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read child rollout");
+    assert_eq!(parse_errors, 0);
+    let recorded_abort = rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::TurnAborted(recorded)) => Some(recorded),
+            _ => None,
+        })
+        .expect("raw turn-aborted event should be preserved");
+    assert_eq!(
+        serde_json::to_value(recorded_abort).expect("serialize recorded abort"),
+        serde_json::to_value(&abort).expect("serialize expected abort")
+    );
+
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("terminal child should shut down");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&child.thread_id)
+            .await
+            .is_some()
+    );
+    harness.control.forget_v2_residency(child.thread_id);
+    harness
+        .control
+        .ensure_v2_agent_loaded(config, child.thread_id, /*parent*/ None)
+        .await
+        .expect("aborted child should reload");
+    let reloaded_child = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("reloaded child should exist");
+    assert_eq!(
+        reloaded_child.agent_status().await,
+        AgentStatus::Errored("Replaced".to_string())
+    );
+}
+
+#[tokio::test]
+async fn reloaded_v2_child_uses_preceding_error_for_interrupted_terminal_abort() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let root = harness
+        .manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    let child =
+        spawn_v2_reload_test_child(&harness.control, config.clone(), &root.thread, "worker").await;
+    let child_thread = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_turn = child_thread.session.new_default_turn().await;
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::Error(ErrorEvent {
+                message: "worker failed".to_string(),
+                codex_error_info: None,
+                misalignment: None,
+            }),
+        )
+        .await;
+    let abort = TurnAbortedEvent {
+        turn_id: Some(child_turn.sub_id.clone()),
+        reason: TurnAbortReason::Interrupted,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+    };
+    child_thread
+        .session
+        .send_event(child_turn.as_ref(), EventMsg::TurnAborted(abort.clone()))
+        .await;
+    *child_thread.session.active_turn.lock().await = None;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("terminal child rollout should flush");
+    let rollout_path = child_thread
+        .rollout_path()
+        .expect("child rollout should be materialized");
+    let (rollout_items, _, parse_errors) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read child rollout");
+    assert_eq!(parse_errors, 0);
+    let recorded_abort = rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::TurnAborted(recorded)) => Some(recorded),
+            _ => None,
+        })
+        .expect("raw turn-aborted event should be preserved");
+    assert_eq!(
+        serde_json::to_value(recorded_abort).expect("serialize recorded abort"),
+        serde_json::to_value(&abort).expect("serialize expected abort")
+    );
+
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("terminal child should shut down");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&child.thread_id)
+            .await
+            .is_some()
+    );
+    harness.control.forget_v2_residency(child.thread_id);
+    harness
+        .control
+        .ensure_v2_agent_loaded(config, child.thread_id, /*parent*/ None)
+        .await
+        .expect("errored child should reload");
+    let reloaded_child = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("reloaded child should exist");
+    assert_eq!(
+        reloaded_child.agent_status().await,
+        AgentStatus::Errored("worker failed".to_string())
+    );
+}
+
+#[tokio::test]
+async fn reloaded_v2_child_replays_only_unacknowledged_terminal_outbox() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let root = harness
+        .manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    let child =
+        spawn_v2_reload_test_child(&harness.control, config.clone(), &root.thread, "worker").await;
+    let child_thread = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_turn = child_thread.session.new_default_turn().await;
+    let terminal_event = EventMsg::TurnComplete(TurnCompleteEvent {
+        turn_id: child_turn.sub_id.clone(),
+        last_agent_message: Some("persisted before crash".to_string()),
+        error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+        time_to_first_token_ms: None,
+    });
+    child_thread
+        .session
+        .live_thread()
+        .expect("child should have a durable writer")
+        .append_items(&[RolloutItem::EventMsg(terminal_event)])
+        .await
+        .expect("terminal outbox entry should append");
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("terminal outbox entry should flush");
+    *child_thread.session.active_turn.lock().await = None;
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("child should shut down");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&child.thread_id)
+            .await
+            .is_some()
+    );
+    harness.control.forget_v2_residency(child.thread_id);
+
+    harness
+        .control
+        .ensure_v2_agent_loaded(config.clone(), child.thread_id, /*parent*/ None)
+        .await
+        .expect("child should reload and drain its outbox");
+    let (items, _) = root
+        .thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(items.len(), 1);
+    let crate::session::TurnInput::InterAgentCommunication(communication) = &items[0] else {
+        panic!("expected terminal parent communication");
+    };
+    assert!(communication.content.contains("persisted before crash"));
+
+    harness.control.forget_v2_residency(child.thread_id);
+    let reloaded = harness
+        .manager
+        .remove_thread(&child.thread_id)
+        .await
+        .expect("reloaded child should exist");
+    reloaded
+        .shutdown_and_wait()
+        .await
+        .expect("reloaded child should shut down");
+    harness
+        .control
+        .ensure_v2_agent_loaded(config, child.thread_id, /*parent*/ None)
+        .await
+        .expect("acknowledged child should reload without replay");
+    assert_eq!(
+        root.thread
+            .session
+            .input_queue
+            .drain_mailbox_input_items()
+            .await
+            .0,
+        Vec::new()
     );
 }
 
@@ -4210,7 +4795,7 @@ async fn spawn_child_completion_notifies_parent_history() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_completion_reports_dead_direct_parent() {
+async fn multi_agent_v2_completion_preserves_terminal_status_when_parent_is_dead() {
     let harness = AgentControlHarness::new().await;
     let mut config = harness.config.clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
@@ -4283,11 +4868,10 @@ async fn multi_agent_v2_completion_reports_dead_direct_parent() {
 
     sleep(Duration::from_millis(100)).await;
 
-    let AgentStatus::Errored(error) = tester_thread.agent_status().await else {
-        panic!("a dead parent must produce an explicit terminal delivery failure");
-    };
-    assert!(error.contains("could not be durably delivered"));
-    assert!(error.contains(&worker_thread_id.to_string()));
+    assert_eq!(
+        tester_thread.agent_status().await,
+        AgentStatus::Completed(Some("done".to_string()))
+    );
 
     assert!(
         !harness
@@ -4555,6 +5139,36 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
             expected_communication
         )]
     );
+    let rollout_path = tester_thread
+        .rollout_path()
+        .expect("tester should have a durable rollout");
+    let (rollout_items, _, parse_errors) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read tester rollout");
+    assert_eq!(parse_errors, 0);
+    let terminal_position = rollout_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::TurnComplete(event))
+                    if event.turn_id == tester_turn.sub_id
+            )
+        })
+        .expect("terminal event should be durable");
+    let acknowledgement_position = rollout_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                RolloutItem::InterAgentCommunicationMetadata {
+                    delivery_id: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("delivery acknowledgement should be durable");
+    assert!(terminal_position < acknowledgement_position);
 
     let root_history = root_thread.session.clone_history().await;
     assert!(!history_contains_assistant_inter_agent_communication(
@@ -4570,7 +5184,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_completion_reports_persistent_parent_delivery_failure() {
+async fn multi_agent_v2_completion_keeps_outbox_pending_after_parent_persistence_failure() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     let mut child_config = harness.config.clone();
@@ -4631,11 +5245,10 @@ async fn multi_agent_v2_completion_reports_persistent_parent_delivery_failure() 
         )
         .await;
 
-    let AgentStatus::Errored(error) = child_thread.agent_status().await else {
-        panic!("persistent parent delivery failure must publish an explicit terminal error");
-    };
-    assert!(error.contains("could not be durably delivered"));
-    assert!(error.contains("after 3 attempts"));
+    assert_eq!(
+        child_thread.agent_status().await,
+        AgentStatus::Completed(Some("done".to_string()))
+    );
     child_thread
         .session
         .flush_rollout()
@@ -4653,7 +5266,16 @@ async fn multi_agent_v2_completion_reports_persistent_parent_delivery_failure() 
             item,
             RolloutItem::EventMsg(EventMsg::TurnComplete(event))
                 if event.turn_id == child_turn.sub_id
-                    && event.error.as_ref().is_some_and(|event| event.message == error)
+                    && event.error.is_none()
+        )
+    }));
+    assert!(!rollout_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::InterAgentCommunicationMetadata {
+                delivery_id: Some(_),
+                ..
+            }
         )
     }));
     let expected_message = crate::session_prefix::format_inter_agent_completion_message(

@@ -1017,7 +1017,11 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
         thread_id,
         SessionSource::Cli,
         vec![
-            RolloutItem::InterAgentCommunicationMetadata { trigger_turn: true },
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: true,
+                mail_fingerprint: None,
+                delivery_id: None,
+            },
             rollout_response_item(delivery.to_model_input_item()),
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,

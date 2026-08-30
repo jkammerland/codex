@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use super::mcp_processor::McpRequestProcessor;
 use crate::error_code::OVERLOADED_ERROR_CODE;
@@ -41,7 +42,7 @@ struct McpEventStreamTask {
 impl McpEventStreamTask {
     fn is_finished(&self) -> bool {
         match &self.state {
-            McpEventStreamTaskState::Running(task) => task.is_finished(),
+            McpEventStreamTaskState::Running { task, .. } => task.is_finished(),
             McpEventStreamTaskState::Stopping { .. } => false,
         }
     }
@@ -49,7 +50,10 @@ impl McpEventStreamTask {
 
 #[derive(Debug)]
 enum McpEventStreamTaskState {
-    Running(JoinHandle<()>),
+    Running {
+        task: JoinHandle<()>,
+        cancellation: CancellationToken,
+    },
     Stopping {
         completed: watch::Receiver<bool>,
         lease: Arc<()>,
@@ -77,11 +81,17 @@ impl McpEventStreams {
             .map_err(|error| invalid_request(format!("invalid thread id: {error}")))?;
         let subscription_id = params.subscription_id.clone();
         let (ready_tx, ready_rx) = oneshot::channel();
-        self.start_task(subscription_id, thread_id, || {
+        self.start_task(subscription_id, thread_id, |cancellation| {
             tokio::spawn(async move {
                 let mut auth_changes =
                     McpEventStreamAuthChanges::new(Arc::clone(&processor.auth_manager));
                 let opened = tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        let _ = ready_tx.send(Err(internal_error(
+                            "MCP event stream stopped during startup",
+                        )));
+                        return;
+                    }
                     () = auth_changes.changed() => Err(internal_error(
                         "MCP event subscription authentication changed during startup",
                     )),
@@ -120,6 +130,7 @@ impl McpEventStreams {
                             thread,
                             stream,
                             auth_changes,
+                            cancellation,
                             ready: Some(ready_tx),
                         })
                         .await;
@@ -138,7 +149,7 @@ impl McpEventStreams {
         &self,
         subscription_id: String,
         thread_id: ThreadId,
-        spawn_task: impl FnOnce() -> JoinHandle<()>,
+        spawn_task: impl FnOnce(CancellationToken) -> JoinHandle<()>,
     ) -> Result<(), JSONRPCErrorError> {
         let mut spawn_task = Some(spawn_task);
         loop {
@@ -151,7 +162,7 @@ impl McpEventStreams {
                 tasks.retain(|_, task| !task.is_finished());
                 if let Some(task) = tasks.get(&subscription_id) {
                     match &task.state {
-                        McpEventStreamTaskState::Running(_) => {
+                        McpEventStreamTaskState::Running { .. } => {
                             return Err(invalid_request(format!(
                                 "MCP event subscription '{subscription_id}' already exists"
                             )));
@@ -175,12 +186,13 @@ impl McpEventStreams {
                             "MCP event subscription task was already started",
                         ));
                     };
-                    let task = spawn_task();
+                    let cancellation = CancellationToken::new();
+                    let task = spawn_task(cancellation.clone());
                     tasks.insert(
                         subscription_id.clone(),
                         McpEventStreamTask {
                             thread_id,
-                            state: McpEventStreamTaskState::Running(task),
+                            state: McpEventStreamTaskState::Running { task, cancellation },
                         },
                     );
                     None
@@ -251,10 +263,10 @@ impl McpEventStreams {
                         lease: Arc::clone(&lease),
                     },
                 );
-                let McpEventStreamTaskState::Running(task) = previous else {
+                let McpEventStreamTaskState::Running { task, cancellation } = previous else {
                     continue;
                 };
-                task.abort();
+                cancellation.cancel();
                 completions.push(completed_rx);
 
                 let tasks = Arc::clone(&self.tasks);
@@ -265,7 +277,7 @@ impl McpEventStreams {
                         tasks
                             .get(&subscription_id)
                             .is_some_and(|task| match &task.state {
-                                McpEventStreamTaskState::Running(_) => false,
+                                McpEventStreamTaskState::Running { .. } => false,
                                 McpEventStreamTaskState::Stopping {
                                     lease: current_lease,
                                     ..
@@ -298,6 +310,7 @@ struct McpEventForwarder<'a> {
     thread: Arc<CodexThread>,
     stream: McpEventStream,
     auth_changes: McpEventStreamAuthChanges,
+    cancellation: CancellationToken,
     ready: Option<oneshot::Sender<Result<(), JSONRPCErrorError>>>,
 }
 
@@ -309,6 +322,7 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
         thread,
         mut stream,
         mut auth_changes,
+        cancellation,
         mut ready,
     } = forwarder;
     let send = |notification| {
@@ -323,6 +337,7 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
     let termination_reason = loop {
         let notification = tokio::select! {
             biased;
+            _ = cancellation.cancelled() => return,
             () = auth_changes.changed() => break "authenticationChanged",
             () = thread.wait_until_terminated() => break "threadTerminated",
             result = stream.recv_item() => match result {
@@ -372,6 +387,9 @@ async fn forward_events(forwarder: McpEventForwarder<'_>) {
             "MCP event stream ended before becoming active: {termination_reason}"
         ))));
     } else {
+        if cancellation.is_cancelled() {
+            return;
+        }
         send(McpServerEventNotification {
             method: "notifications/events/terminated".to_string(),
             params: serde_json::json!({ "reason": termination_reason }),

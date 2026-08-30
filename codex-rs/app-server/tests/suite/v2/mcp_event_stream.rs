@@ -485,13 +485,11 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
         }
     );
 
-    let _: McpServerEventStreamStopResponse = app_server
-        .request(|request_id| ClientRequest::McpServerEventStreamStop {
-            request_id,
-            params: McpServerEventStreamStopParams {
-                subscription_id: "subscription-1".to_string(),
-            },
-        })
+    let stop_request_id = app_server
+        .send_raw_request(
+            "mcpServer/event/stream/stop",
+            Some(json!({ "subscriptionId": "subscription-1" })),
+        )
         .await?;
     timeout(Duration::from_secs(5), async {
         loop {
@@ -505,6 +503,11 @@ async fn mcp_event_stream_waits_for_activation_forwards_events_and_cancels() -> 
     let restarted_request_id = app_server
         .send_raw_request("mcpServer/event/stream/start", Some(start_params.clone()))
         .await?;
+    let _: McpServerEventStreamStopResponse = timeout(
+        Duration::from_secs(5),
+        app_server.read_response(stop_request_id),
+    )
+    .await??;
     let (restarted_path, _) = timeout(Duration::from_secs(5), stream_started_rx.recv())
         .await?
         .context("same-ID subscription did not restart after a live stop")?;

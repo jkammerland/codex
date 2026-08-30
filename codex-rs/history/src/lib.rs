@@ -128,13 +128,20 @@ pub enum RolloutItem {
         start_options: codex_protocol::turn_input::TurnStartOptions,
         fingerprint: String,
         turn_id: String,
+        /// Whether this record is pending-only rather than a legacy delivery boundary.
+        /// Any adjacent matching response item is a compatibility shadow, not a delivery.
+        compatibility_shadow: bool,
     },
-    /// Durable proof that a turn owns one exact mailbox delivery occurrence.
+    /// Durable proof that a turn committed one exact mailbox delivery occurrence.
     DurableInterAgentCommunicationClaimed {
         communication_id: ResponseItemId,
         /// Bounded model-visible communication stored atomically with the claim.
         /// Older fork rollouts omit this field and recover it from the payload record.
         communication: Option<InterAgentCommunication>,
+        /// Exact stamped model item at the real delivery position.
+        ///
+        /// Older fork rollouts omit this field and use their historical claim semantics.
+        delivered_response: Option<ResponseItemEnvelope>,
         fingerprint: String,
         turn_id: String,
     },
@@ -145,6 +152,58 @@ pub enum RolloutItem {
     EventMsg(EventMsg),
     /// Sparse, model-invisible facts used to reconstruct realtime presentation.
     RealtimeItem(RealtimeItem),
+}
+
+/// Projects the model-visible response items from a persisted rollout stream.
+///
+/// New durable mailbox delivery atomically stores the exact delivered response on the claim
+/// record. Transitional rollouts may also contain an adjacent compatibility shadow. Consumers
+/// that rebuild a model transcript must suppress such a shadow and expose the claimed response at
+/// its actual delivery position.
+#[derive(Debug, Default)]
+pub struct RolloutModelResponseProjection {
+    compatibility_shadow_id: Option<ResponseItemId>,
+}
+
+impl RolloutModelResponseProjection {
+    /// Applies one rollout item in persistence order and returns its model-visible response, if any.
+    pub fn project<'a>(&mut self, item: &'a RolloutItem) -> Option<&'a ResponseItemEnvelope> {
+        let compatibility_shadow_id = self.compatibility_shadow_id.take();
+        match item {
+            RolloutItem::DurableInterAgentCommunication {
+                communication,
+                compatibility_shadow: true,
+                ..
+            } => {
+                self.compatibility_shadow_id = communication.id.clone();
+                None
+            }
+            RolloutItem::ResponseItem(response)
+                if compatibility_shadow_id
+                    .as_ref()
+                    .is_some_and(|shadow_id| Some(shadow_id) == response.id()) =>
+            {
+                None
+            }
+            RolloutItem::ResponseItem(response) => Some(response),
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                delivered_response: Some(response),
+                ..
+            } => Some(response),
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TerminalAgentStatus { .. }
+            | RolloutItem::DurableInterAgentCommunication { .. }
+            | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::EventMsg(_)
+            | RolloutItem::RealtimeItem(_) => None,
+        }
+    }
 }
 
 impl Serialize for RolloutItem {

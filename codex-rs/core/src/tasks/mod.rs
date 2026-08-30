@@ -585,6 +585,9 @@ impl Session {
         if let Some(turn_context) = turn_context.as_deref() {
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
                 .await;
+            self.input_queue
+                .release_inflight_mail_for_turn(&turn_context.sub_id)
+                .await;
         }
         if let Some(active_turn) = active_turn_to_clear {
             // Let interrupted tasks observe cancellation before dropping pending approvals, or an
@@ -630,6 +633,9 @@ impl Session {
         }
         if let Some(turn_context) = turn_context.as_deref() {
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
+                .await;
+            self.input_queue
+                .release_inflight_mail_for_turn(&turn_context.sub_id)
                 .await;
         }
         // Let interrupted tasks observe cancellation before dropping pending approvals, or an
@@ -696,13 +702,19 @@ impl Session {
                 ts.token_usage_at_turn_start.clone(),
             )
         };
-        run_hooks_and_record_inputs(
+        if let Err(error) = run_hooks_and_record_inputs(
             self,
             &turn_context,
             &pending_input,
             PersistContext::Standard,
         )
-        .await;
+        .await
+        {
+            warn!(%error, "failed to persist pending input while finishing a turn");
+        }
+        self.input_queue
+            .release_inflight_mail_for_turn(&turn_context.sub_id)
+            .await;
         // Emit token usage metrics.
         {
             // TODO(jif): drop this

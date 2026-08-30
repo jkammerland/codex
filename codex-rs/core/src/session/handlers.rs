@@ -10,7 +10,8 @@ use tracing::Instrument;
 use tracing::debug_span;
 use tracing::info_span;
 
-use crate::session::input_queue::MAX_MAILBOX_MODEL_TOKENS_PER_TURN;
+use crate::session::input_queue::DurableMailRetryStatus;
+use crate::session::input_queue::MAX_MAILBOX_MODEL_TOKENS_PER_ITEM;
 use crate::session::input_queue::mailbox_model_token_estimate;
 use crate::session::session::Session;
 use crate::session::thread_settings;
@@ -134,11 +135,11 @@ impl Session {
             .unwrap_or_else(|| codex_protocol::ResponseItemId::new("msg"));
         communication.id = Some(communication_id.clone());
         let model_tokens = mailbox_model_token_estimate(&communication);
-        if model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_TURN {
+        if model_tokens > MAX_MAILBOX_MODEL_TOKENS_PER_ITEM {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "inter-agent communication {communication_id} is too large for model context ({model_tokens} estimated tokens; maximum {MAX_MAILBOX_MODEL_TOKENS_PER_TURN})"
+                    "inter-agent communication {communication_id} is too large for one model-context item ({model_tokens} estimated tokens; maximum {MAX_MAILBOX_MODEL_TOKENS_PER_ITEM})"
                 ),
             ));
         }
@@ -163,15 +164,25 @@ impl Session {
                     ),
                 ));
             }
-            Some(_)
-                if self
-                    .input_queue
-                    .durable_mail_was_consumed(&communication_id)
-                    .await =>
+            Some(_) => match self
+                .input_queue
+                .durable_mail_retry_status(&communication_id)
+                .await
             {
-                return Ok(false);
-            }
-            Some(_) => {}
+                DurableMailRetryStatus::Delivered | DurableMailRetryStatus::InFlight => {
+                    return Ok(false);
+                }
+                DurableMailRetryStatus::Pending {
+                    trigger_turn,
+                    persisted: true,
+                } => {
+                    return Ok(trigger_turn);
+                }
+                DurableMailRetryStatus::Pending {
+                    persisted: false, ..
+                }
+                | DurableMailRetryStatus::Missing => {}
+            },
             None => match self
                 .recorded_inter_agent_communication_matches(&communication)
                 .await

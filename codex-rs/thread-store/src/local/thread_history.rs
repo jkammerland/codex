@@ -329,8 +329,16 @@ INSERT INTO thread_turns (
 ON CONFLICT(thread_id, turn_id) DO UPDATE SET
     rollout_end_ordinal = excluded.rollout_end_ordinal,
     rollout_end_byte_offset = excluded.rollout_end_byte_offset,
-    status = excluded.status,
-    error_json = excluded.error_json,
+    status = CASE
+        WHEN thread_turns.status = 'failed' AND excluded.status = 'interrupted'
+        THEN thread_turns.status
+        ELSE excluded.status
+    END,
+    error_json = CASE
+        WHEN thread_turns.status = 'failed' AND excluded.status = 'interrupted'
+        THEN thread_turns.error_json
+        ELSE excluded.error_json
+    END,
     started_at = COALESCE(excluded.started_at, thread_turns.started_at),
     completed_at = COALESCE(excluded.completed_at, thread_turns.completed_at),
     duration_ms = COALESCE(excluded.duration_ms, thread_turns.duration_ms)
@@ -342,6 +350,10 @@ OR (
     excluded.status = 'failed'
     AND excluded.error_json IS NOT NULL
     AND thread_turns.status IN ('completed', 'interrupted')
+)
+OR (
+    thread_turns.status = 'failed'
+    AND excluded.status = 'interrupted'
 )
             "#,
         )

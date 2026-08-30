@@ -3527,26 +3527,70 @@ impl Session {
         );
         let items = items.as_ref();
         let response_item = items[0].clone();
-        let claimed_durable_mail = if let Some(id) = communication.id.as_ref() {
-            self.input_queue.durable_mail_was_consumed(id).await
+        let durable_claim = if let Some(id) = communication.id.as_ref() {
+            self.input_queue
+                .inflight_mail_for_turn(id, &turn_context.sub_id)
+                .await
         } else {
-            false
+            None
         };
-        if !claimed_durable_mail && let Some(live_thread) = self.live_thread() {
-            let metadata = RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: communication.trigger_turn,
-                mail_fingerprint: None,
-                delivery_id: None,
-                terminal_turn_id: None,
-                terminal_status: None,
-                mail_communication: None,
-                mail_start_options: None,
-                consumed_mail_id: None,
+        if durable_claim.is_some() && self.live_thread().is_none() {
+            return Err(std::io::Error::other(
+                "cannot commit durable mailbox delivery without a live rollout writer",
+            ));
+        }
+        if let Some(live_thread) = self.live_thread() {
+            let metadata = durable_claim.as_ref().map_or_else(
+                || RolloutItem::InterAgentCommunicationMetadata {
+                    trigger_turn: communication.trigger_turn,
+                    mail_fingerprint: None,
+                    delivery_id: None,
+                    terminal_turn_id: None,
+                    terminal_status: None,
+                    mail_communication: None,
+                    mail_start_options: None,
+                    consumed_mail_id: None,
+                },
+                |claim| RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id: claim.communication_id.clone(),
+                    communication: Some(model_communication.clone()),
+                    delivered_response: Some(response_item.clone().into()),
+                    fingerprint: claim.fingerprint.clone(),
+                    turn_id: turn_context.sub_id.clone(),
+                },
+            );
+            let items = if durable_claim.is_some() {
+                vec![metadata]
+            } else {
+                vec![
+                    metadata,
+                    RolloutItem::ResponseItem(response_item.clone().into()),
+                ]
             };
             live_thread
-                .append_items(&[metadata, RolloutItem::ResponseItem(response_item.into())])
+                .append_items(&items)
                 .await
                 .map_err(std::io::Error::other)?;
+            if durable_claim.is_some()
+                && let Err(first_error) = self.flush_rollout().await
+            {
+                self.flush_rollout().await.map_err(|retry_error| {
+                        std::io::Error::other(format!(
+                            "failed to flush durable mailbox delivery twice: {first_error}; retry: {retry_error}"
+                        ))
+                    })?;
+            }
+        }
+        if let Some(id) = communication.id.as_ref()
+            && durable_claim.is_some()
+            && !self
+                .input_queue
+                .mark_inflight_mail_delivered(id, &turn_context.sub_id)
+                .await
+        {
+            return Err(std::io::Error::other(format!(
+                "durable mailbox delivery {id} lost its in-flight claim"
+            )));
         }
         {
             let mut state = self.state.lock().await;
@@ -3570,12 +3614,14 @@ impl Session {
         let live_thread = self.live_thread().ok_or_else(|| {
             std::io::Error::other("cannot persist durable mailbox without a live rollout writer")
         })?;
+        let model_communication = input_queue::mailbox_model_communication(communication);
         live_thread
             .append_items(&[RolloutItem::DurableInterAgentCommunication {
-                communication: communication.clone(),
+                communication: model_communication,
                 start_options: start_options.clone(),
                 fingerprint: fingerprint.to_string(),
                 turn_id: turn_context.sub_id.clone(),
+                compatibility_shadow: true,
             }])
             .await
             .map_err(std::io::Error::other)
@@ -3586,42 +3632,6 @@ impl Session {
         turn_id: &str,
     ) -> std::io::Result<(Vec<TurnInput>, codex_protocol::turn_input::TurnStartOptions)> {
         let snapshot = self.input_queue.pending_mailbox_claim_snapshot().await;
-        let items = snapshot
-            .durable_mail
-            .iter()
-            .filter(|claim| claim.persisted_turn_id.as_deref() != Some(turn_id))
-            .flat_map(|claim| {
-                let communication = claim.model_communication.clone();
-                [
-                    RolloutItem::DurableInterAgentCommunicationClaimed {
-                        communication_id: claim.communication_id.clone(),
-                        communication: Some(communication.clone()),
-                        fingerprint: claim.fingerprint.clone(),
-                        turn_id: turn_id.to_string(),
-                    },
-                    // Keep the previous release able to reconstruct this delivery after a binary
-                    // rollback. Current reconstruction recognizes and de-duplicates this bounded
-                    // payload/response shadow in favor of the atomic claim above.
-                    RolloutItem::DurableInterAgentCommunication {
-                        communication: communication.clone(),
-                        start_options: claim.start_options.clone(),
-                        fingerprint: claim.fingerprint.clone(),
-                        turn_id: turn_id.to_string(),
-                    },
-                    RolloutItem::ResponseItem(communication.to_model_input_item().into()),
-                ]
-            })
-            .collect::<Vec<_>>();
-        if !items.is_empty() {
-            let live_thread = self.live_thread().ok_or_else(|| {
-                std::io::Error::other("cannot claim durable mailbox without a live rollout writer")
-            })?;
-            live_thread
-                .append_items(&items)
-                .await
-                .map_err(std::io::Error::other)?;
-            self.flush_rollout().await?;
-        }
         self.input_queue
             .drain_claimed_mailbox_input_items(&snapshot, turn_id)
             .await

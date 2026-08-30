@@ -501,6 +501,7 @@ fn durable_claim_shadow_counts_once_only_after_its_turn_starts() {
         RolloutItem::DurableInterAgentCommunicationClaimed {
             communication_id: communication.id.clone().expect("communication id"),
             communication: Some(communication.clone()),
+            delivered_response: None,
             fingerprint: "fingerprint".to_string(),
             turn_id: "claimed-turn".to_string(),
         },
@@ -509,11 +510,13 @@ fn durable_claim_shadow_counts_once_only_after_its_turn_starts() {
             start_options: Default::default(),
             fingerprint: "fingerprint".to_string(),
             turn_id: "claimed-turn".to_string(),
+            compatibility_shadow: false,
         },
         response_item(communication.to_model_input_item()),
         RolloutItem::DurableInterAgentCommunicationClaimed {
             communication_id: communication.id.clone().expect("communication id"),
             communication: Some(communication.clone()),
+            delivered_response: None,
             fingerprint: "fingerprint".to_string(),
             turn_id: "claimed-turn".to_string(),
         },
@@ -522,6 +525,7 @@ fn durable_claim_shadow_counts_once_only_after_its_turn_starts() {
             start_options: Default::default(),
             fingerprint: "fingerprint".to_string(),
             turn_id: "claimed-turn".to_string(),
+            compatibility_shadow: false,
         },
         response_item(communication.to_model_input_item()),
     ];
@@ -547,6 +551,97 @@ fn durable_claim_shadow_counts_once_only_after_its_turn_starts() {
         &InitialHistory::Forked(rollout.clone())
     ));
     assert_eq!(fork_turn_positions_in_rollout(&rollout), vec![0]);
+}
+
+#[test]
+fn mcp12_claim_with_agent_message_delivery_remains_a_fork_boundary() {
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "durable result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(ResponseItemId::with_suffix("msg", "mcp12-delivery"));
+    let rollout = vec![
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication.id.clone().expect("communication id"),
+            communication: None,
+            delivered_response: None,
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "claimed-turn".to_string(),
+        },
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "claimed-turn".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+        RolloutItem::DurableInterAgentCommunication {
+            communication: communication.clone(),
+            start_options: Default::default(),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "claimed-turn".to_string(),
+            compatibility_shadow: false,
+        },
+        response_item(communication.to_model_input_item()),
+    ];
+
+    assert_eq!(fork_turn_positions_in_rollout(&rollout), vec![2]);
+    let truncated = truncate_rollout_to_last_n_fork_turns(rollout, 1);
+    assert_eq!(truncated.len(), 2);
+    assert!(matches!(
+        truncated.first(),
+        Some(RolloutItem::DurableInterAgentCommunication { .. })
+    ));
+}
+
+#[test]
+fn current_durable_delivery_uses_the_claim_as_its_only_fork_boundary() {
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "durable result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(ResponseItemId::with_suffix("msg", "current-delivery"));
+    let delivered_response =
+        codex_history::ResponseItemEnvelope::new(communication.to_model_input_item());
+    let rollout = vec![
+        RolloutItem::DurableInterAgentCommunication {
+            communication: communication.clone(),
+            start_options: Default::default(),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "claimed-turn".to_string(),
+            compatibility_shadow: true,
+        },
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "claimed-turn".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication.id.clone().expect("communication id"),
+            communication: Some(communication),
+            delivered_response: Some(delivered_response),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "claimed-turn".to_string(),
+        },
+    ];
+
+    assert_eq!(fork_turn_positions_in_rollout(&rollout), vec![2]);
+    let truncated = truncate_rollout_to_last_n_fork_turns(rollout, 1);
+    assert!(matches!(
+        truncated.as_slice(),
+        [RolloutItem::DurableInterAgentCommunicationClaimed {
+            delivered_response: Some(_),
+            ..
+        }]
+    ));
 }
 
 #[test]

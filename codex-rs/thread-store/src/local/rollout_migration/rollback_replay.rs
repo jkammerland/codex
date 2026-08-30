@@ -7,6 +7,7 @@
 
 use codex_protocol::protocol::EventMsg;
 use codex_rollout::RolloutItem;
+use codex_rollout::RolloutModelResponseProjection;
 
 use super::rollback;
 
@@ -38,16 +39,22 @@ pub(super) struct ModelReplayPlan {
 
 pub(super) struct ModelReplayPlanner {
     records: Vec<ReplayRecord>,
+    model_response_projection: RolloutModelResponseProjection,
 }
 
 impl ModelReplayPlanner {
     pub(super) fn new() -> Self {
         Self {
             records: Vec::new(),
+            model_response_projection: RolloutModelResponseProjection::default(),
         }
     }
 
     pub(super) fn observe(&mut self, record_index: usize, item: &RolloutItem) {
+        let projected_response_counts_as_boundary = self
+            .model_response_projection
+            .project(item)
+            .is_some_and(|response| rollback::counts_as_boundary(&response.item));
         let record = match item {
             RolloutItem::Compacted(compacted) => ReplayRecord::Compacted {
                 record_index,
@@ -67,16 +74,22 @@ impl ModelReplayPlanner {
             }
             RolloutItem::TurnContext(context) => ReplayRecord::TurnContext(context.turn_id.clone()),
             RolloutItem::EventMsg(EventMsg::UserMessage(_))
-            | RolloutItem::InterAgentCommunication(_)
-            | RolloutItem::DurableInterAgentCommunication { .. } => ReplayRecord::UserBoundary,
-            RolloutItem::ResponseItem(response) if rollback::counts_as_boundary(&response.item) => {
-                ReplayRecord::UserBoundary
-            }
+            | RolloutItem::InterAgentCommunication(_) => ReplayRecord::UserBoundary,
+            RolloutItem::ResponseItem(_)
+            | RolloutItem::DurableInterAgentCommunicationClaimed {
+                delivered_response: Some(_),
+                ..
+            } if projected_response_counts_as_boundary => ReplayRecord::UserBoundary,
+            RolloutItem::DurableInterAgentCommunication {
+                compatibility_shadow: false,
+                ..
+            } => ReplayRecord::UserBoundary,
             RolloutItem::SessionMeta(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TerminalAgentStatus { .. }
+            | RolloutItem::DurableInterAgentCommunication { .. }
             | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)

@@ -61,6 +61,7 @@ use codex_protocol::protocol::WebSearchEndEvent;
 use codex_protocol::review_format::REVIEW_FALLBACK_MESSAGE;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
+use codex_rollout::RolloutModelResponseProjection;
 use std::collections::HashMap;
 use tracing::warn;
 use uuid::Uuid;
@@ -240,6 +241,7 @@ pub struct ThreadHistoryBuilder {
     current_rollout_index: usize,
     next_rollout_index: usize,
     active_change_set: Option<ThreadHistoryChangeSet>,
+    model_response_projection: RolloutModelResponseProjection,
 }
 
 impl Default for ThreadHistoryBuilder {
@@ -257,6 +259,7 @@ impl ThreadHistoryBuilder {
             current_rollout_index: 0,
             next_rollout_index: 0,
             active_change_set: None,
+            model_response_projection: RolloutModelResponseProjection::default(),
         }
     }
 
@@ -393,14 +396,18 @@ impl ThreadHistoryBuilder {
     pub fn handle_rollout_item(&mut self, item: &RolloutItem) {
         self.current_rollout_index = self.next_rollout_index;
         self.next_rollout_index += 1;
+        if let Some(response) = self.model_response_projection.project(item) {
+            self.handle_response_item(&response.item);
+            return;
+        }
         match item {
             RolloutItem::EventMsg(event) => self.handle_event(event),
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
-            RolloutItem::ResponseItem(item) => self.handle_response_item(&item.item),
             RolloutItem::TerminalAgentStatus { turn_id, status } => {
                 self.handle_terminal_agent_status(turn_id, status)
             }
-            RolloutItem::InterAgentCommunication(_)
+            RolloutItem::ResponseItem(_)
+            | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::DurableInterAgentCommunication { .. }
             | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
@@ -1214,7 +1221,10 @@ impl ThreadHistoryBuilder {
 
     fn handle_turn_aborted(&mut self, payload: &TurnAbortedEvent) {
         let apply_abort = |turn: &mut PendingTurn| {
-            turn.status = TurnStatus::Interrupted;
+            if turn.status != TurnStatus::Failed {
+                turn.status = TurnStatus::Interrupted;
+                turn.error = None;
+            }
             turn.completed_at = payload.completed_at;
             turn.duration_ms = payload.duration_ms;
             ThreadHistoryTurnChange::from_pending_turn(turn)
@@ -1228,7 +1238,10 @@ impl ThreadHistoryBuilder {
             }
 
             if let Some(turn) = self.turns.iter_mut().find(|turn| turn.id == turn_id) {
-                turn.status = TurnStatus::Interrupted;
+                if turn.status != TurnStatus::Failed {
+                    turn.status = TurnStatus::Interrupted;
+                    turn.error = None;
+                }
                 turn.completed_at = payload.completed_at;
                 turn.duration_ms = payload.duration_ms;
                 let changed_turn = ThreadHistoryTurnChange::from_turn(turn);
@@ -4027,6 +4040,52 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_event_does_not_overwrite_an_earlier_terminal_error_marker() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: Some(10),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::TerminalAgentStatus {
+                turn_id: "turn-a".into(),
+                status: AgentStatus::Errored("delivery failed".into()),
+            },
+            RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id: Some("turn-a".into()),
+                started_at: Some(10),
+                reason: TurnAbortReason::Interrupted,
+                completed_at: Some(20),
+                duration_ms: Some(10_000),
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(
+            (
+                turns[0].status.clone(),
+                turns[0].error.clone(),
+                turns[0].completed_at,
+                turns[0].duration_ms,
+            ),
+            (
+                TurnStatus::Failed,
+                Some(V2TurnError {
+                    misalignment: None,
+                    message: "delivery failed".into(),
+                    codex_error_info: None,
+                    additional_details: None,
+                }),
+                Some(20),
+                Some(10_000),
+            )
+        );
+    }
+
+    #[test]
     fn preserves_compaction_only_turn() {
         let items = vec![
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
@@ -4534,6 +4593,74 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn rebuilds_durable_response_at_claim_instead_of_compatibility_shadow() {
+        let response_id = codex_protocol::ResponseItemId::with_suffix("msg", "durable-hook");
+        let mut hook_prompt =
+            build_hook_prompt_message(&[CoreHookPromptFragment::from_single_hook(
+                "Retry with tests.",
+                "hook-run-1",
+            )])
+            .expect("hook prompt message");
+        hook_prompt.set_id(Some(response_id.clone()));
+        let mut communication = codex_protocol::protocol::InterAgentCommunication::new(
+            codex_protocol::AgentPath::root(),
+            codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+            Vec::new(),
+            "durable result".to_string(),
+            /*trigger_turn*/ true,
+        );
+        communication.id = Some(response_id.clone());
+        let response_envelope = codex_rollout::ResponseItemEnvelope::new(hook_prompt);
+        let items = vec![
+            RolloutItem::DurableInterAgentCommunication {
+                communication: communication.clone(),
+                start_options: codex_protocol::turn_input::TurnStartOptions::default(),
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "turn-a".to_string(),
+                compatibility_shadow: true,
+            },
+            RolloutItem::ResponseItem(response_envelope.clone()),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: response_id,
+                communication: Some(communication),
+                delivered_response: Some(response_envelope),
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "turn-a".to_string(),
+            },
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                started_at: None,
+                last_agent_message: None,
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, "turn-a");
+        assert!(matches!(
+            turns[0].items.as_slice(),
+            [ThreadItem::HookPrompt { fragments, .. }]
+                if fragments.as_slice()
+                    == [crate::protocol::v2::HookPromptFragment {
+                        text: "Retry with tests.".into(),
+                        hook_run_id: "hook-run-1".into(),
+                    }]
+        ));
     }
 
     #[test]

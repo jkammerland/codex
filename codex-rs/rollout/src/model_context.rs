@@ -17,7 +17,16 @@ pub enum ModelContextScanProgress {
     Continue,
     /// The scan has collected a safe bounded suffix.
     Complete,
+    /// The durable-state scan exceeded its hard scan or retained-state bound.
+    LimitExceeded,
 }
+
+/// Maximum number of rollout records inspected while reconstructing durable V2 agent state.
+pub const MAX_PRESERVED_DURABLE_SCAN_ITEMS: usize = 262_144;
+/// Maximum number of durable-state records retained beyond the bounded model-context suffix.
+pub const MAX_PRESERVED_DURABLE_STATE_ITEMS: usize = 16_384;
+/// Maximum serialized bytes retained for durable state beyond the model-context suffix.
+pub const MAX_PRESERVED_DURABLE_STATE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Selects whether a reverse scan may stop at the newest context checkpoint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -25,7 +34,8 @@ pub enum ModelContextScanMode {
     /// Stop once the latest model context and turn settings are reconstructable.
     #[default]
     Bounded,
-    /// Scan to the rollout head so durable agent mailbox state cannot be omitted.
+    /// Scan toward the rollout head, subject to explicit safety bounds, so durable agent mailbox
+    /// state cannot be silently omitted.
     PreserveDurableAgentState,
 }
 
@@ -59,9 +69,18 @@ pub enum ModelContextScanMode {
 /// - rollback markers;
 ///
 /// When one appears, the scanner continues to the beginning and returns the complete replay.
+/// Durable-state scans additionally fail closed after [`MAX_PRESERVED_DURABLE_SCAN_ITEMS`]
+/// inspected records, [`MAX_PRESERVED_DURABLE_STATE_ITEMS`] retained records, or
+/// [`MAX_PRESERVED_DURABLE_STATE_BYTES`] serialized retained bytes.
 #[derive(Debug, Default)]
 pub struct ModelContextScan {
     items_newest_first: Vec<RolloutItem>,
+    older_durable_items_newest_first: Vec<RolloutItem>,
+    older_candidate_response: Option<RolloutItem>,
+    older_latest_turn_started: Option<RolloutItem>,
+    retained_started_turn_ids: HashSet<String>,
+    retained_durable_state_bytes: usize,
+    scanned_items: usize,
     saw_compaction: bool,
     saw_completed_turn_context: bool,
     must_scan_to_start: bool,
@@ -87,6 +106,25 @@ impl ModelContextScan {
 
     /// Adds the next newest-to-oldest rollout item and reports whether the reader can stop.
     pub fn push(&mut self, item: RolloutItem) -> ModelContextScanProgress {
+        if self.mode == ModelContextScanMode::PreserveDurableAgentState
+            && self.scanned_items >= MAX_PRESERVED_DURABLE_SCAN_ITEMS
+        {
+            return ModelContextScanProgress::LimitExceeded;
+        }
+        self.scanned_items = self.scanned_items.saturating_add(1);
+        if self.mode == ModelContextScanMode::PreserveDurableAgentState
+            && self.bounded_suffix_len.is_some()
+        {
+            self.observe_older_durable_item(item);
+            return if self.older_durable_items_newest_first.len()
+                > MAX_PRESERVED_DURABLE_STATE_ITEMS
+                || self.retained_durable_state_bytes > MAX_PRESERVED_DURABLE_STATE_BYTES
+            {
+                ModelContextScanProgress::LimitExceeded
+            } else {
+                ModelContextScanProgress::Continue
+            };
+        }
         let progress = self.observe(&item);
         self.items_newest_first.push(item);
         if self.mode == ModelContextScanMode::PreserveDurableAgentState
@@ -103,12 +141,11 @@ impl ModelContextScan {
     /// Call this after the reader reaches the beginning of its source or after [`Self::push`]
     /// returns [`ModelContextScanProgress::Complete`].
     pub fn finish(mut self, session_meta: SessionMetaLine) -> Vec<RolloutItem> {
-        if let Some(bounded_suffix_len) = self.bounded_suffix_len {
-            let mut older_items = self.items_newest_first.split_off(bounded_suffix_len);
-            older_items.reverse();
+        if self.bounded_suffix_len.is_some() {
+            self.older_durable_items_newest_first.reverse();
             self.items_newest_first.reverse();
             let durable_state = compact_durable_agent_state(
-                older_items.as_slice(),
+                self.older_durable_items_newest_first.as_slice(),
                 self.items_newest_first.as_slice(),
             );
             let mut items =
@@ -127,6 +164,59 @@ impl ModelContextScan {
                 .insert(0, RolloutItem::SessionMeta(session_meta));
         }
         self.items_newest_first
+    }
+
+    fn observe_older_durable_item(&mut self, item: RolloutItem) {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
+                self.older_latest_turn_started = Some(item);
+                self.older_candidate_response = None;
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed { ref turn_id, .. } => {
+                if let Some(RolloutItem::EventMsg(EventMsg::TurnStarted(started))) =
+                    self.older_latest_turn_started.as_ref()
+                    && started.turn_id == *turn_id
+                    && self.retained_started_turn_ids.insert(turn_id.clone())
+                {
+                    self.retain_older_durable_item(RolloutItem::EventMsg(EventMsg::TurnStarted(
+                        started.clone(),
+                    )));
+                }
+                self.retain_older_durable_item(item);
+                self.older_candidate_response = None;
+            }
+            RolloutItem::DurableInterAgentCommunication { .. } => {
+                self.retain_older_durable_item(item);
+                self.older_candidate_response = None;
+            }
+            RolloutItem::InterAgentCommunicationMetadata {
+                mail_fingerprint: Some(_),
+                ..
+            } => {
+                if let Some(response) = self.older_candidate_response.take() {
+                    self.retain_older_durable_item(response);
+                }
+                self.retain_older_durable_item(item);
+            }
+            RolloutItem::ResponseItem(response)
+                if response.id().is_some() && response_item_is_durable_mail(&response.item) =>
+            {
+                self.older_candidate_response = Some(RolloutItem::ResponseItem(response));
+            }
+            _ => {
+                self.older_candidate_response = None;
+            }
+        }
+    }
+
+    fn retain_older_durable_item(&mut self, item: RolloutItem) {
+        let serialized_bytes = serde_json::to_vec(&item)
+            .map(|serialized| serialized.len())
+            .unwrap_or(MAX_PRESERVED_DURABLE_STATE_BYTES.saturating_add(1));
+        self.retained_durable_state_bytes = self
+            .retained_durable_state_bytes
+            .saturating_add(serialized_bytes);
+        self.older_durable_items_newest_first.push(item);
     }
 
     fn observe(&mut self, item: &RolloutItem) -> ModelContextScanProgress {
@@ -200,6 +290,17 @@ impl ModelContextScan {
             }
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication: Some(_),
+                delivered_response: None,
+                turn_id,
+                ..
+            } => {
+                self.active_segment
+                    .turn_id
+                    .get_or_insert_with(|| turn_id.clone());
+                self.active_segment.has_user_turn = true;
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                delivered_response: Some(_),
                 turn_id,
                 ..
             } => {
@@ -218,6 +319,7 @@ impl ModelContextScan {
             | RolloutItem::DurableInterAgentCommunication { .. }
             | RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication: None,
+                delivered_response: None,
                 ..
             }
             | RolloutItem::RealtimeItem(_)
@@ -254,6 +356,7 @@ struct DurablePayload {
     start_options: TurnStartOptions,
     fingerprint: String,
     turn_id: String,
+    compatibility_shadow: bool,
 }
 
 #[derive(Clone)]
@@ -261,6 +364,7 @@ struct DurableClaim {
     communication: Option<InterAgentCommunication>,
     turn_id: String,
     from_older_history: bool,
+    delivered: bool,
 }
 
 fn compact_durable_agent_state(
@@ -294,6 +398,7 @@ fn compact_durable_agent_state(
         if let RolloutItem::DurableInterAgentCommunicationClaimed {
             communication_id,
             communication,
+            delivered_response,
             fingerprint,
             turn_id,
         } = item
@@ -304,6 +409,7 @@ fn compact_durable_agent_state(
                     communication: communication.clone(),
                     turn_id: turn_id.clone(),
                     from_older_history,
+                    delivered: delivered_response.is_some(),
                 },
             );
         }
@@ -317,11 +423,13 @@ fn compact_durable_agent_state(
                 start_options,
                 fingerprint,
                 turn_id,
+                compatibility_shadow,
             } => payloads.push(DurablePayload {
                 communication: communication.clone(),
                 start_options: start_options.clone(),
                 fingerprint: fingerprint.clone(),
                 turn_id: turn_id.clone(),
+                compatibility_shadow: *compatibility_shadow,
             }),
             RolloutItem::InterAgentCommunicationMetadata {
                 mail_fingerprint: Some(fingerprint),
@@ -337,6 +445,7 @@ fn compact_durable_agent_state(
                     .as_ref()
                     .and_then(|metadata| metadata.turn_id.clone())
                     .unwrap_or_default(),
+                compatibility_shadow: false,
             }),
             _ => {}
         }
@@ -353,7 +462,8 @@ fn compact_durable_agent_state(
         }
         let claim = claims.get(&(id.clone(), payload.fingerprint.clone()));
         let consumed = legacy_consumed_ids.contains(&id)
-            || claim.is_some_and(|claim| started_turn_ids.contains(&claim.turn_id));
+            || claim
+                .is_some_and(|claim| claim.delivered || started_turn_ids.contains(&claim.turn_id));
         if consumed {
             compacted.push(consumed_mail_marker(id, payload.fingerprint));
         } else {
@@ -362,6 +472,7 @@ fn compact_durable_agent_state(
                 start_options: payload.start_options,
                 fingerprint: payload.fingerprint.clone(),
                 turn_id: payload.turn_id,
+                compatibility_shadow: payload.compatibility_shadow,
             });
             if let Some(claim) = claim
                 && claim.from_older_history
@@ -369,6 +480,7 @@ fn compact_durable_agent_state(
                 compacted.push(RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication_id: id,
                     communication: claim.communication.clone(),
+                    delivered_response: None,
                     fingerprint: payload.fingerprint,
                     turn_id: claim.turn_id.clone(),
                 });
@@ -415,6 +527,7 @@ fn compact_durable_agent_state(
             compacted.push(RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id: id,
                 communication: None,
+                delivered_response: None,
                 fingerprint,
                 turn_id: claim.turn_id,
             });
@@ -457,3 +570,17 @@ fn response_item_counts_as_user_turn(response_item: &ResponseItemEnvelope) -> bo
         _ => false,
     }
 }
+
+fn response_item_is_durable_mail(response_item: &ResponseItem) -> bool {
+    match response_item {
+        ResponseItem::AgentMessage { .. } => true,
+        ResponseItem::Message { content, .. } => {
+            InterAgentCommunication::is_message_content(content)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+#[path = "model_context_tests.rs"]
+mod tests;

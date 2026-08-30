@@ -24,6 +24,8 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TokenCountEvent;
+use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
@@ -2006,6 +2008,63 @@ async fn terminal_agent_error_corrects_a_completed_paginated_turn() {
             .expect("serialize error"),
             Some(10),
             Some(20),
+        )
+    );
+}
+
+#[tokio::test]
+async fn terminal_agent_error_before_abort_preserves_error_and_adds_terminal_timing() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                RolloutItem::TerminalAgentStatus {
+                    turn_id: "turn-1".to_string(),
+                    status: AgentStatus::Errored("parent delivery failed".to_string()),
+                },
+                RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                    turn_id: Some("turn-1".to_string()),
+                    reason: TurnAbortReason::Interrupted,
+                    started_at: Some(10),
+                    completed_at: Some(20),
+                    duration_ms: Some(10_000),
+                })),
+            ],
+        })
+        .await
+        .expect("append marker-first terminal status");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let row = sqlx::query_as::<_, (String, String, Option<i64>, Option<i64>, Option<i64>)>(
+        "SELECT status, error_json, started_at, completed_at, duration_ms FROM thread_turns WHERE thread_id = ? AND turn_id = 'turn-1'",
+    )
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read marker-first terminal turn");
+    assert_eq!(
+        row,
+        (
+            "failed".to_string(),
+            serde_json::to_string(&codex_app_server_protocol::TurnError {
+                misalignment: None,
+                message: "parent delivery failed".to_string(),
+                codex_error_info: None,
+                additional_details: None,
+            })
+            .expect("serialize error"),
+            Some(10),
+            Some(20),
+            Some(10_000),
         )
     );
 }

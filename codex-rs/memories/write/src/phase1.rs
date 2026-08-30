@@ -17,6 +17,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout::INTERACTIVE_SESSION_SOURCES;
 use codex_rollout::RolloutItem;
+use codex_rollout::RolloutModelResponseProjection;
 use codex_rollout::should_persist_response_item_for_memories;
 use codex_secrets::redact_secrets;
 use futures::StreamExt;
@@ -406,24 +407,31 @@ mod job {
     pub(super) fn serialize_filtered_rollout_response_items(
         items: &[RolloutItem],
     ) -> codex_protocol::error::Result<String> {
+        let mut model_response_projection = RolloutModelResponseProjection::default();
         let filtered = items
             .iter()
-            .filter_map(|item| match item {
-                RolloutItem::ResponseItem(item) => sanitize_response_item_for_memories(&item.item),
-                RolloutItem::InterAgentCommunication(communication) => {
-                    Some(communication.to_model_input_item())
+            .filter_map(|item| {
+                if let Some(response) = model_response_projection.project(item) {
+                    return sanitize_response_item_for_memories(&response.item);
                 }
-                RolloutItem::SessionMeta(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. }
-                | RolloutItem::TerminalAgentStatus { .. }
-                | RolloutItem::DurableInterAgentCommunication { .. }
-                | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
-                | RolloutItem::Compacted(_)
-                | RolloutItem::TurnContext(_)
-                | RolloutItem::RealtimeItem(_)
-                | RolloutItem::WorldState(_)
-                | RolloutItem::SecurityRiskScore(_)
-                | RolloutItem::EventMsg(_) => None,
+
+                match item {
+                    RolloutItem::InterAgentCommunication(communication) => {
+                        Some(communication.to_model_input_item())
+                    }
+                    RolloutItem::SessionMeta(_)
+                    | RolloutItem::ResponseItem(_)
+                    | RolloutItem::InterAgentCommunicationMetadata { .. }
+                    | RolloutItem::TerminalAgentStatus { .. }
+                    | RolloutItem::DurableInterAgentCommunication { .. }
+                    | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
+                    | RolloutItem::Compacted(_)
+                    | RolloutItem::TurnContext(_)
+                    | RolloutItem::RealtimeItem(_)
+                    | RolloutItem::WorldState(_)
+                    | RolloutItem::SecurityRiskScore(_)
+                    | RolloutItem::EventMsg(_) => None,
+                }
             })
             .collect::<Vec<_>>();
         let serialized = serde_json::to_string(&filtered).map_err(|err| {
@@ -838,6 +846,42 @@ mod tests {
                 consumed_mail_id: None,
             },
             RolloutItem::ResponseItem(response_item.clone().into()),
+        ])
+        .expect("serialize");
+        let parsed: Vec<ResponseItem> = serde_json::from_str(&serialized).expect("parse");
+
+        assert_eq!(parsed, vec![response_item]);
+    }
+
+    #[test]
+    fn serializes_durable_mail_once_at_its_claimed_delivery() {
+        let mut communication = InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::root().join("worker").expect("agent path"),
+            Vec::new(),
+            "durable result".to_string(),
+            /*trigger_turn*/ true,
+        );
+        communication.id = Some(ResponseItemId::with_suffix("msg", "durable-delivery"));
+        let response_item = communication.to_model_input_item();
+        let response_envelope = codex_rollout::ResponseItemEnvelope::new(response_item.clone());
+
+        let serialized = job::serialize_filtered_rollout_response_items(&[
+            RolloutItem::DurableInterAgentCommunication {
+                communication: communication.clone(),
+                start_options: codex_protocol::turn_input::TurnStartOptions::default(),
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "turn-1".to_string(),
+                compatibility_shadow: true,
+            },
+            RolloutItem::ResponseItem(response_envelope.clone()),
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: communication.id.clone().expect("communication id"),
+                communication: Some(communication),
+                delivered_response: Some(response_envelope),
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
         ])
         .expect("serialize");
         let parsed: Vec<ResponseItem> = serde_json::from_str(&serialized).expect("parse");

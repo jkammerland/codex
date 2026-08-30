@@ -99,6 +99,7 @@ async fn durable_claim_is_the_single_model_visible_mail_record() {
                 RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication_id: communication.id.clone().expect("message id"),
                     communication: Some(communication.clone()),
+                    delivered_response: None,
                     fingerprint: "fingerprint".to_string(),
                     turn_id: "turn-claimed".to_string(),
                 },
@@ -107,11 +108,13 @@ async fn durable_claim_is_the_single_model_visible_mail_record() {
                     start_options: Default::default(),
                     fingerprint: "fingerprint".to_string(),
                     turn_id: "turn-claimed".to_string(),
+                    compatibility_shadow: false,
                 },
                 RolloutItem::ResponseItem(communication.to_model_input_item().into()),
                 RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication_id: communication.id.clone().expect("message id"),
                     communication: Some(communication.clone()),
+                    delivered_response: None,
                     fingerprint: "fingerprint".to_string(),
                     turn_id: "turn-claimed".to_string(),
                 },
@@ -120,6 +123,7 @@ async fn durable_claim_is_the_single_model_visible_mail_record() {
                     start_options: Default::default(),
                     fingerprint: "fingerprint".to_string(),
                     turn_id: "turn-claimed".to_string(),
+                    compatibility_shadow: false,
                 },
                 RolloutItem::ResponseItem(communication.to_model_input_item().into()),
                 RolloutItem::EventMsg(EventMsg::TurnStarted(
@@ -164,6 +168,7 @@ async fn durable_claim_without_started_turn_stays_out_of_model_history() {
                 RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication_id: communication.id.clone().expect("message id"),
                     communication: Some(communication.clone()),
+                    delivered_response: None,
                     fingerprint: "fingerprint".to_string(),
                     turn_id: "turn-not-started".to_string(),
                 },
@@ -172,6 +177,7 @@ async fn durable_claim_without_started_turn_stays_out_of_model_history() {
                     start_options: Default::default(),
                     fingerprint: "fingerprint".to_string(),
                     turn_id: "turn-not-started".to_string(),
+                    compatibility_shadow: false,
                 },
                 RolloutItem::ResponseItem(communication.to_model_input_item().into()),
             ],
@@ -179,6 +185,77 @@ async fn durable_claim_without_started_turn_stays_out_of_model_history() {
         .await;
 
     assert_eq!(reconstruction.history, Vec::new());
+}
+
+#[tokio::test]
+async fn durable_delivery_reconstructs_at_its_exact_model_insertion_point() {
+    let (session, turn_context) = make_session_and_context().await;
+    let before_mail = user_message("context recorded before mail");
+    let after_mail = assistant_message("sampled after mail");
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root().join("worker").expect("worker path"),
+        Vec::new(),
+        "durable mail".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(ResponseItemId::with_suffix("msg", "ordered"));
+    let mail_item = communication.to_model_input_item();
+    let mut mail_turn_context = turn_context.to_turn_context_item();
+    mail_turn_context.turn_id = Some("turn-ordered".to_string());
+    mail_turn_context.model = "mail-turn-model".to_string();
+    mail_turn_context.comp_hash = Some("mail-turn-comp-hash".to_string());
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                RolloutItem::DurableInterAgentCommunication {
+                    communication: communication.clone(),
+                    start_options: Default::default(),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-ordered".to_string(),
+                    compatibility_shadow: true,
+                },
+                RolloutItem::EventMsg(EventMsg::TurnStarted(
+                    codex_protocol::protocol::TurnStartedEvent {
+                        turn_id: "turn-ordered".to_string(),
+                        trace_id: None,
+                        started_at: None,
+                        model_context_window: None,
+                        collaboration_mode_kind: Default::default(),
+                    },
+                )),
+                RolloutItem::TurnContext(mail_turn_context),
+                RolloutItem::ResponseItem(before_mail.clone().into()),
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id: communication.id.clone().expect("message id"),
+                    communication: Some(communication.clone()),
+                    delivered_response: Some(mail_item.clone().into()),
+                    fingerprint: "fingerprint".to_string(),
+                    turn_id: "turn-ordered".to_string(),
+                },
+                RolloutItem::ResponseItem(after_mail.clone().into()),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction
+            .history
+            .iter()
+            .map(|response| response.item.clone())
+            .collect::<Vec<_>>(),
+        vec![before_mail, mail_item, after_mail]
+    );
+    assert_eq!(
+        reconstruction.previous_turn_settings,
+        Some(PreviousTurnSettings {
+            model: "mail-turn-model".to_string(),
+            comp_hash: Some("mail-turn-comp-hash".to_string()),
+            realtime_active: Some(turn_context.realtime_active),
+        })
+    );
 }
 
 fn completed_user_turn_rollout(

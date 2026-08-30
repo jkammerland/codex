@@ -174,7 +174,7 @@ pub(crate) async fn run_turn(
             return Ok(None);
         }
         if run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart)
-            .await
+            .await?
         {
             let _ = barrier.persisted.send(Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -225,8 +225,13 @@ pub(crate) async fn run_turn(
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
             if !input_already_recorded {
-                run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
-                    .await;
+                let _ = run_hooks_and_record_inputs(
+                    &sess,
+                    &turn_context,
+                    &input,
+                    PersistContext::Standard,
+                )
+                .await;
             }
             return Err(err);
         }
@@ -249,7 +254,7 @@ pub(crate) async fn run_turn(
             Ok(requirements) => requirements,
             Err(err) => {
                 if !input_already_recorded {
-                    run_hooks_and_record_inputs(
+                    let _ = run_hooks_and_record_inputs(
                         &sess,
                         &turn_context,
                         &input,
@@ -273,8 +278,13 @@ pub(crate) async fn run_turn(
         Ok(step_context) => step_context,
         Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
             if !input_already_recorded {
-                run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
-                    .await;
+                let _ = run_hooks_and_record_inputs(
+                    &sess,
+                    &turn_context,
+                    &input,
+                    PersistContext::Standard,
+                )
+                .await;
             }
             return Err(err);
         }
@@ -326,7 +336,7 @@ pub(crate) async fn run_turn(
     let blocked_input = if input_already_recorded {
         false
     } else {
-        run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart).await
+        run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart).await?
     };
     if blocked_input {
         return Ok(None);
@@ -381,7 +391,7 @@ pub(crate) async fn run_turn(
             &pending_input,
             PersistContext::Standard,
         )
-        .await
+        .await?
         {
             break;
         }
@@ -692,7 +702,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
     turn_context: &Arc<TurnContext>,
     input: &[TurnInput],
     persist_context: PersistContext,
-) -> bool {
+) -> std::io::Result<bool> {
     let mut blocked_input = false;
     let mut accepted_user_input = false;
     for input_item in input {
@@ -711,10 +721,10 @@ pub(crate) async fn run_hooks_and_record_inputs(
                 hook_outcome.additional_contexts,
                 persist_context,
             )
-            .await;
+            .await?;
         }
     }
-    blocked_input && !accepted_user_input
+    Ok(blocked_input && !accepted_user_input)
 }
 
 fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {

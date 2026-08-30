@@ -1774,7 +1774,7 @@ async fn oversized_durable_mail_is_rejected_before_persistence_or_acknowledgemen
 }
 
 #[tokio::test]
-async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
+async fn acknowledged_mail_retries_after_admission_and_delivery_flush_failures_are_idempotent() {
     let (home, config) = test_config().await;
     let thread_store = Arc::new(InMemoryThreadStore::default());
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
@@ -1845,13 +1845,6 @@ async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
         .pending_mailbox_turn_id()
         .await
         .expect("persisted mail should retain its intended turn");
-    thread_store.fail_next_flush_for_testing();
-    thread
-        .session
-        .claim_and_drain_mailbox_input_items(&turn_id)
-        .await
-        .expect_err("claim flush failure must not release durable mail to a turn");
-    assert!(thread.session.input_queue.has_pending_mailbox_items().await);
     let (items, _) = thread
         .session
         .claim_and_drain_mailbox_input_items(&turn_id)
@@ -1874,16 +1867,57 @@ async fn acknowledged_mail_retry_after_flush_failure_is_idempotent() {
         0,
         "durable receipt and claim must remain model-invisible until the turn records the batch"
     );
+    thread_store.fail_next_flush_for_testing();
+    let turn_context = thread
+        .session
+        .new_turn_with_default_settings(turn_id.clone(), Default::default())
+        .await;
+    thread
+        .session
+        .record_inter_agent_communication(&turn_context, communication.clone())
+        .await
+        .expect("delivery should retry its persistence barrier without appending twice");
+    assert_eq!(
+        thread
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .filter(|item| item.id() == communication.id.as_ref())
+            .count(),
+        1
+    );
+    let stored = thread_store
+        .load_history(codex_thread_store::LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load stored history");
+    assert_eq!(
+        stored
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
+                    ..
+                } if Some(communication_id) == communication.id.as_ref()
+            ))
+            .count(),
+        1
+    );
     harness
         .control
         .send_inter_agent_communication(
             thread_id,
-            communication,
+            communication.clone(),
             AgentCommunicationContext::new(AgentCommunicationKind::Result, ThreadId::new()),
             Default::default(),
         )
         .await
-        .expect("same-ID retry after mailbox consumption should be acknowledged");
+        .expect("same-ID retry after mailbox delivery should be acknowledged");
     assert_eq!(
         thread.session.drain_mailbox_input_items().await.0,
         Vec::new(),
@@ -1922,6 +1956,16 @@ async fn consumed_durable_mail_remains_idempotent_after_reload() {
         .pending_mailbox_turn_id()
         .await
         .expect("mail should reserve a turn");
+    let fingerprint = thread
+        .session
+        .input_queue
+        .pending_mailbox_claim_snapshot()
+        .await
+        .durable_mail
+        .into_iter()
+        .next()
+        .expect("mail should have a durable claim")
+        .fingerprint;
     assert_eq!(
         thread
             .session
@@ -1937,21 +1981,28 @@ async fn consumed_durable_mail_remains_idempotent_after_reload() {
         .session
         .live_thread()
         .expect("thread should have a durable writer")
-        .append_items(&[RolloutItem::EventMsg(EventMsg::TurnStarted(
-            TurnStartedEvent {
-                turn_id,
+        .append_items(&[
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.clone(),
                 trace_id: None,
                 started_at: None,
                 model_context_window: None,
                 collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: communication.id.clone().expect("communication id"),
+                communication: None,
+                delivered_response: Some(communication.to_model_input_item().into()),
+                fingerprint,
+                turn_id,
             },
-        ))])
+        ])
         .await
-        .expect("turn ownership should append");
+        .expect("model delivery should append");
     thread
         .flush_rollout()
         .await
-        .expect("turn ownership should flush");
+        .expect("model delivery should flush");
     harness.manager.remove_thread(&thread_id).await;
     drop(thread);
     harness
@@ -1982,7 +2033,7 @@ async fn consumed_durable_mail_remains_idempotent_after_reload() {
 }
 
 #[tokio::test]
-async fn claimed_mail_recovered_into_a_different_turn_rewrites_the_claim() {
+async fn inflight_mail_recovered_into_a_different_turn_commits_only_the_delivery() {
     let harness = AgentControlHarness::new().await;
     let (thread_id, thread) = harness.start_thread().await;
     let mut communication = InterAgentCommunication::new(
@@ -2042,6 +2093,15 @@ async fn claimed_mail_recovered_into_a_different_turn_rewrites_the_claim() {
             communication.clone()
         )]
     );
+    let replacement_turn = reloaded
+        .session
+        .new_turn_with_default_settings(replacement_turn_id.to_string(), Default::default())
+        .await;
+    reloaded
+        .session
+        .record_inter_agent_communication(&replacement_turn, communication.clone())
+        .await
+        .expect("replacement turn should commit the delivery");
     reloaded
         .flush_rollout()
         .await
@@ -2067,10 +2127,7 @@ async fn claimed_mail_recovered_into_a_different_turn_rewrites_the_claim() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        claim_turn_ids,
-        vec![interrupted_turn_id, replacement_turn_id.to_string()]
-    );
+    assert_eq!(claim_turn_ids, vec![replacement_turn_id.to_string()]);
 }
 
 #[tokio::test]
@@ -2132,40 +2189,6 @@ async fn pending_durable_mail_is_recovered_after_reload() {
     .await
     .expect("recovered trigger mail should schedule itself");
     assert_eq!(started_turn_id, intended_turn_id);
-    reloaded.flush_rollout().await.expect("flush recovery turn");
-    let (rollout_items, _, parse_errors) = RolloutRecorder::load_rollout_items(
-        &reloaded
-            .rollout_path()
-            .expect("reloaded thread should have rollout path"),
-    )
-    .await
-    .expect("read recovered rollout");
-    assert_eq!(parse_errors, 0);
-    let claim_position = rollout_items
-        .iter()
-        .position(|item| {
-            matches!(
-                item,
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    turn_id,
-                    ..
-                } if communication_id == communication.id.as_ref().expect("communication id")
-                    && turn_id == &intended_turn_id
-            )
-        })
-        .expect("recovered mail claim should be durable");
-    let turn_position = rollout_items
-        .iter()
-        .position(|item| {
-            matches!(
-                item,
-                RolloutItem::EventMsg(EventMsg::TurnStarted(event))
-                    if event.turn_id == intended_turn_id
-            )
-        })
-        .expect("recovered turn start should be durable");
-    assert!(claim_position < turn_position);
 }
 
 #[tokio::test]

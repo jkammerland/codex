@@ -1024,11 +1024,13 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
                 start_options: Default::default(),
                 fingerprint: "sha256:delivery".to_string(),
                 turn_id: "delivery-turn".to_string(),
+                compatibility_shadow: false,
             },
             rollout_response_item(delivery.to_model_input_item()),
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id: delivery_id.clone(),
                 communication: None,
+                delivered_response: None,
                 fingerprint: "sha256:delivery".to_string(),
                 turn_id: "delivery-turn".to_string(),
             },
@@ -1066,6 +1068,85 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
                 && turn_id == "delivery-turn"
         )
     }));
+}
+
+#[tokio::test]
+async fn migration_rolls_back_current_durable_delivery_without_replaying_pending_payload() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let mut delivery = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root().join("worker").expect("worker path"),
+        Vec::new(),
+        "remove current delivery".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let delivery_id = codex_protocol::ResponseItemId::with_suffix("msg", "current-delivery");
+    delivery.id = Some(delivery_id.clone());
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            RolloutItem::DurableInterAgentCommunication {
+                communication: delivery.clone(),
+                start_options: Default::default(),
+                fingerprint: "sha256:current-delivery".to_string(),
+                turn_id: "delivery-turn".to_string(),
+                compatibility_shadow: true,
+            },
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "delivery-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: delivery_id.clone(),
+                communication: Some(delivery.clone()),
+                delivered_response: Some(delivery.to_model_input_item().into()),
+                fingerprint: "sha256:current-delivery".to_string(),
+                turn_id: "delivery-turn".to_string(),
+            },
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            user_message("replacement question"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate rolled-back current delivery");
+
+    let migrated = read_rollout(&path);
+    assert!(migrated.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::DurableInterAgentCommunication {
+            communication,
+            compatibility_shadow: true,
+            ..
+        } if communication.id.as_ref() == Some(&delivery_id)
+    )));
+    assert!(!migrated.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            delivered_response: Some(_),
+            ..
+        } if communication_id == &delivery_id
+    )));
+    assert!(migrated.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::InterAgentCommunicationMetadata {
+            consumed_mail_id: Some(communication_id),
+            mail_fingerprint: Some(fingerprint),
+            ..
+        } if communication_id == &delivery_id && fingerprint == "sha256:current-delivery"
+    )));
 }
 
 #[tokio::test]

@@ -38,6 +38,8 @@ struct DurablePayload {
 
 struct DurableClaim {
     turn_id: String,
+    communication: Option<InterAgentCommunication>,
+    delivered: bool,
 }
 
 pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery {
@@ -63,13 +65,16 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
         .filter_map(|item| match item {
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
+                communication,
+                delivered_response,
                 fingerprint,
                 turn_id,
-                ..
             } => Some((
                 (communication_id.clone(), fingerprint.clone()),
                 DurableClaim {
                     turn_id: turn_id.clone(),
+                    communication: communication.clone(),
+                    delivered: delivered_response.is_some(),
                 },
             )),
             _ => None,
@@ -84,6 +89,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 start_options,
                 fingerprint,
                 turn_id,
+                ..
             } => payloads.push(DurablePayload {
                 communication: communication.clone(),
                 start_options: start_options.clone(),
@@ -119,9 +125,9 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
             continue;
         }
         let claim = claims.get(&(id.clone(), payload.fingerprint.clone()));
-        if legacy_consumed_ids.contains(&id)
-            || claim.is_some_and(|claim| started_turn_ids.contains(&claim.turn_id))
-        {
+        let delivered =
+            claim.is_some_and(|claim| claim.delivered || started_turn_ids.contains(&claim.turn_id));
+        if legacy_consumed_ids.contains(&id) || delivered {
             recovery.consumed.push(ConsumedDurableMail {
                 id,
                 fingerprint: payload.fingerprint,
@@ -189,15 +195,29 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
         }
     }
 
-    // A current-format claim is sufficient retry evidence even if its payload was compacted or
-    // truncated by an older build.
+    // A `.mcp.13` claim carries enough payload to recover even when the older payload was
+    // compacted. Claims from earlier releases omitted that field; without a payload they retain
+    // the legacy consumed fallback because replaying an unknown body would be unsafe.
     for ((id, fingerprint), claim) in claims {
         if recovered_ids.insert(id.clone()) {
-            recovery.consumed.push(ConsumedDurableMail {
-                id,
-                fingerprint,
-                claimed_turn_id: claim.turn_id,
-            });
+            if let Some(communication) = claim.communication
+                && !claim.delivered
+                && !started_turn_ids.contains(&claim.turn_id)
+            {
+                recovery.pending.push(PendingDurableMail {
+                    communication,
+                    start_options: TurnStartOptions::default(),
+                    fingerprint,
+                    intended_turn_id: claim.turn_id,
+                    already_claimed: true,
+                });
+            } else {
+                recovery.consumed.push(ConsumedDurableMail {
+                    id,
+                    fingerprint,
+                    claimed_turn_id: claim.turn_id,
+                });
+            }
         }
     }
     recovery

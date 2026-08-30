@@ -642,7 +642,7 @@ pub(crate) async fn record_pending_input(
     pending_input: TurnInput,
     additional_contexts: Vec<String>,
     persist_context: PersistContext,
-) {
+) -> std::io::Result<()> {
     match pending_input {
         TurnInput::UserInput { content, client_id } => {
             sess.record_user_prompt_and_emit_turn_item(
@@ -683,15 +683,14 @@ pub(crate) async fn record_pending_input(
             if !sess
                 .has_recorded_inter_agent_communication(&communication)
                 .await
-                && let Err(err) = sess
-                    .record_inter_agent_communication(turn_context, communication)
-                    .await
             {
-                tracing::error!("failed to record inter-agent communication: {err}");
+                sess.record_inter_agent_communication(turn_context, communication)
+                    .await?;
             }
         }
     }
     record_additional_contexts(sess, turn_context, additional_contexts).await;
+    Ok(())
 }
 
 /// Processes finished async hook results at a safe turn boundary.

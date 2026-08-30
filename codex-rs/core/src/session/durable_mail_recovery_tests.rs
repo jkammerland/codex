@@ -30,13 +30,35 @@ fn payload(communication: &InterAgentCommunication) -> RolloutItem {
         start_options: TurnStartOptions::default(),
         fingerprint: "fingerprint".to_string(),
         turn_id: "intended-turn".to_string(),
+        compatibility_shadow: false,
     }
 }
 
 fn claim(communication: &InterAgentCommunication) -> RolloutItem {
     RolloutItem::DurableInterAgentCommunicationClaimed {
         communication_id: communication.id.clone().expect("message id"),
+        communication: None,
+        delivered_response: None,
+        fingerprint: "fingerprint".to_string(),
+        turn_id: "claimed-turn".to_string(),
+    }
+}
+
+fn mcp13_claim(communication: &InterAgentCommunication) -> RolloutItem {
+    RolloutItem::DurableInterAgentCommunicationClaimed {
+        communication_id: communication.id.clone().expect("message id"),
         communication: Some(communication.clone()),
+        delivered_response: None,
+        fingerprint: "fingerprint".to_string(),
+        turn_id: "claimed-turn".to_string(),
+    }
+}
+
+fn committed_delivery(communication: &InterAgentCommunication) -> RolloutItem {
+    RolloutItem::DurableInterAgentCommunicationClaimed {
+        communication_id: communication.id.clone().expect("message id"),
+        communication: None,
+        delivered_response: Some(communication.to_model_input_item().into()),
         fingerprint: "fingerprint".to_string(),
         turn_id: "claimed-turn".to_string(),
     }
@@ -81,14 +103,66 @@ fn claim_without_turn_start_is_recovered_for_the_same_turn() {
 }
 
 #[test]
-fn claim_with_turn_start_is_recovered_as_consumed() {
+fn pending_only_payload_with_turn_start_but_without_delivery_is_recovered_as_pending() {
     let communication = mail("started");
+
+    assert_eq!(
+        recover_durable_mail(&[
+            RolloutItem::DurableInterAgentCommunication {
+                communication: communication.clone(),
+                start_options: TurnStartOptions::default(),
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "intended-turn".to_string(),
+                compatibility_shadow: true,
+            },
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "unrelated-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+        ]),
+        DurableMailRecovery {
+            pending: vec![PendingDurableMail {
+                communication,
+                start_options: TurnStartOptions::default(),
+                fingerprint: "fingerprint".to_string(),
+                intended_turn_id: "intended-turn".to_string(),
+                already_claimed: false,
+            }],
+            consumed: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn current_delivery_is_consumed_only_after_its_exact_model_item_is_persisted() {
+    let communication = mail("delivered");
+    let id = communication.id.clone().expect("message id");
+
+    assert_eq!(
+        recover_durable_mail(&[payload(&communication), committed_delivery(&communication),]),
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "fingerprint".to_string(),
+                claimed_turn_id: "claimed-turn".to_string(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn mcp13_claim_with_turn_start_retains_legacy_consumption_semantics() {
+    let communication = mail("mcp13");
     let id = communication.id.clone().expect("message id");
 
     assert_eq!(
         recover_durable_mail(&[
             payload(&communication),
-            claim(&communication),
+            mcp13_claim(&communication),
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "claimed-turn".to_string(),
                 trace_id: None,

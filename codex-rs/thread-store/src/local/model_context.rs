@@ -156,6 +156,17 @@ fn scan_model_context_from_lineage_blocking(
             match scan.push(line.item) {
                 ModelContextScanProgress::Continue => {}
                 ModelContextScanProgress::Complete => break 'segments,
+                ModelContextScanProgress::LimitExceeded => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "durable model-context scan exceeded its safety limits ({} scanned records, {} retained state records, or {} retained state bytes)",
+                            codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS,
+                            codex_rollout::MAX_PRESERVED_DURABLE_STATE_ITEMS,
+                            codex_rollout::MAX_PRESERVED_DURABLE_STATE_BYTES,
+                        ),
+                    ));
+                }
             }
         }
     }

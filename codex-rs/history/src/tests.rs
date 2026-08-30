@@ -35,6 +35,86 @@ fn response_item_envelope_accessors_preserve_item() {
 }
 
 #[test]
+fn model_response_projection_moves_durable_delivery_from_shadow_to_claim() {
+    let mut communication = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "durable result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(ResponseItemId::with_suffix("msg", "durable-delivery"));
+    let shadow = ResponseItemEnvelope::new(communication.to_model_input_item());
+    let delivered = shadow.clone();
+    let before = ResponseItemEnvelope::new(response_message("user"));
+    let after = ResponseItemEnvelope::new(response_message("assistant"));
+    let items = [
+        RolloutItem::ResponseItem(before.clone()),
+        RolloutItem::DurableInterAgentCommunication {
+            communication: communication.clone(),
+            start_options: codex_protocol::turn_input::TurnStartOptions::default(),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "turn-1".to_string(),
+            compatibility_shadow: true,
+        },
+        RolloutItem::ResponseItem(shadow),
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: "turn-1".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            },
+        )),
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication.id.clone().expect("communication id"),
+            communication: Some(communication),
+            delivered_response: Some(delivered.clone()),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+        RolloutItem::ResponseItem(after.clone()),
+    ];
+    let mut projection = RolloutModelResponseProjection::default();
+    let projected = items
+        .iter()
+        .filter_map(|item| projection.project(item).cloned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(projected, vec![before, delivered, after]);
+}
+
+#[test]
+fn model_response_projection_only_suppresses_an_adjacent_identified_shadow() {
+    let communication = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "unidentified result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let response = ResponseItemEnvelope::new(response_message("user"));
+    let items = [
+        RolloutItem::DurableInterAgentCommunication {
+            communication,
+            start_options: codex_protocol::turn_input::TurnStartOptions::default(),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "turn-1".to_string(),
+            compatibility_shadow: true,
+        },
+        RolloutItem::ResponseItem(response.clone()),
+    ];
+    let mut projection = RolloutModelResponseProjection::default();
+    let projected = items
+        .iter()
+        .filter_map(|item| projection.project(item).cloned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(projected, vec![response]);
+}
+
+#[test]
 /// Keeps legacy response-item rollout lines readable and byte-shape compatible.
 fn response_item_rollout_line_preserves_shape() -> Result<()> {
     let legacy_line = json!({
@@ -303,6 +383,74 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
         panic!("expected legacy compacted item");
     };
     assert_eq!(legacy.replacement_history, vec![response_item]);
+    Ok(())
+}
+
+#[test]
+fn durable_delivery_extensions_remain_readable_by_mcp12_shapes() -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum LegacyRolloutItem {
+        DurableInterAgentCommunication { payload: Box<LegacyDurablePayload> },
+        DurableInterAgentCommunicationClaimed { payload: Box<LegacyClaimPayload> },
+    }
+
+    #[derive(Deserialize)]
+    struct LegacyDurablePayload {
+        communication: InterAgentCommunication,
+        fingerprint: String,
+        turn_id: String,
+    }
+
+    #[derive(Deserialize)]
+    struct LegacyClaimPayload {
+        communication_id: ResponseItemId,
+        fingerprint: String,
+        turn_id: String,
+    }
+
+    let mut communication = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "bounded mail".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let id = ResponseItemId::with_suffix("msg", "compatibility");
+    communication.id = Some(id.clone());
+    let fingerprint = "fingerprint".to_string();
+
+    let durable = serde_json::to_value(RolloutItem::DurableInterAgentCommunication {
+        communication: communication.clone(),
+        start_options: Default::default(),
+        fingerprint: fingerprint.clone(),
+        turn_id: "intended-turn".to_string(),
+        compatibility_shadow: true,
+    })?;
+    let LegacyRolloutItem::DurableInterAgentCommunication { payload } =
+        serde_json::from_value(durable)?
+    else {
+        panic!("expected legacy durable payload");
+    };
+    assert_eq!(payload.communication, communication);
+    assert_eq!(payload.fingerprint, fingerprint);
+    assert_eq!(payload.turn_id, "intended-turn");
+
+    let claim = serde_json::to_value(RolloutItem::DurableInterAgentCommunicationClaimed {
+        communication_id: id.clone(),
+        communication: None,
+        delivered_response: Some(communication.to_model_input_item().into()),
+        fingerprint: fingerprint.clone(),
+        turn_id: "delivery-turn".to_string(),
+    })?;
+    let LegacyRolloutItem::DurableInterAgentCommunicationClaimed { payload } =
+        serde_json::from_value(claim)?
+    else {
+        panic!("expected legacy durable claim");
+    };
+    assert_eq!(payload.communication_id, id);
+    assert_eq!(payload.fingerprint, fingerprint);
+    assert_eq!(payload.turn_id, "delivery-turn");
     Ok(())
 }
 

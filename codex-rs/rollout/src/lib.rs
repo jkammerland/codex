@@ -31,6 +31,7 @@ pub use codex_history::ResponseItemEnvelope;
 pub use codex_history::ResumedHistory;
 pub use codex_history::RolloutItem;
 pub use codex_history::RolloutLine;
+pub use codex_history::RolloutModelResponseProjection;
 pub(crate) use codex_protocol::protocol;
 
 /// Decodes a persisted rollout record without Serde's flattened-envelope buffering.
@@ -119,6 +120,9 @@ pub use maintenance::try_acquire_rollout_maintenance_lock;
 pub use metadata::builder_from_items;
 pub use metadata::forked_from_ordinal_exclusive;
 pub use metadata::rollout_id_from_path;
+pub use model_context::MAX_PRESERVED_DURABLE_SCAN_ITEMS;
+pub use model_context::MAX_PRESERVED_DURABLE_STATE_BYTES;
+pub use model_context::MAX_PRESERVED_DURABLE_STATE_ITEMS;
 pub use model_context::ModelContextScan;
 pub use model_context::ModelContextScanMode;
 pub use model_context::ModelContextScanProgress;

@@ -15,6 +15,7 @@ use codex_protocol::protocol::UserMessageEvent;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use codex_rollout::RolloutModelResponseProjection;
 
 use super::migration_error;
 use super::rollback;
@@ -69,6 +70,25 @@ impl RollbackPlan {
             return Ok(Some(line));
         }
         if boundary.is_some_and(|boundary| !self.boundary_alive[boundary]) {
+            if let RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
+                delivered_response: Some(_),
+                fingerprint,
+                ..
+            } = line.item
+            {
+                line.item = RolloutItem::InterAgentCommunicationMetadata {
+                    trigger_turn: false,
+                    mail_fingerprint: Some(fingerprint),
+                    delivery_id: None,
+                    terminal_turn_id: None,
+                    terminal_status: None,
+                    mail_communication: None,
+                    mail_start_options: None,
+                    consumed_mail_id: Some(communication_id),
+                };
+                return Ok(Some(line));
+            }
             return Ok(None);
         }
         Ok(Some(line))
@@ -88,6 +108,7 @@ pub(super) struct RollbackPlanner {
     turn_boundaries: HashMap<String, usize>,
     compactions: Vec<CompactionFrame>,
     model_replay: ModelReplayPlanner,
+    model_response_projection: RolloutModelResponseProjection,
 }
 
 impl RollbackPlanner {
@@ -104,12 +125,15 @@ impl RollbackPlanner {
             turn_boundaries: HashMap::new(),
             compactions: Vec::new(),
             model_replay: ModelReplayPlanner::new(),
+            model_response_projection: RolloutModelResponseProjection::default(),
         }
     }
 
     pub(super) fn observe(&mut self, line: &RolloutLine) -> ThreadStoreResult<()> {
         let index = self.record_boundaries.len();
         self.model_replay.observe(index, &line.item);
+        let response_is_model_visible =
+            self.model_response_projection.project(&line.item).is_some();
         self.record_boundaries
             .push(self.boundary_stack.last().copied());
         let paired_user_boundary = match (&self.pending_user_response, &line.item) {
@@ -134,7 +158,9 @@ impl RollbackPlanner {
         match &line.item {
             RolloutItem::SessionMeta(_) => self.record_boundaries[index] = None,
             RolloutItem::ResponseItem(response) => {
-                if let Some(boundary) = paired_delivery_boundary {
+                if !response_is_model_visible {
+                    self.record_boundaries[index] = None;
+                } else if let Some(boundary) = paired_delivery_boundary {
                     self.record_boundaries[index] = Some(boundary);
                 } else if rollback::counts_as_boundary(&response.item) {
                     let boundary = self.start_boundary(index);
@@ -204,12 +230,24 @@ impl RollbackPlanner {
                 let boundary = self.start_boundary(index);
                 self.pending_delivery_boundary = Some(boundary);
             }
-            RolloutItem::DurableInterAgentCommunication { .. } => {
+            RolloutItem::DurableInterAgentCommunication {
+                compatibility_shadow: false,
+                ..
+            } => {
                 let boundary = self.start_boundary(index);
                 self.pending_delivery_boundary = Some(boundary);
             }
+            RolloutItem::DurableInterAgentCommunication { .. } => {
+                self.record_boundaries[index] = None;
+            }
             RolloutItem::TerminalAgentStatus { turn_id, .. } => {
                 self.assign_targeted_record(index, Some(turn_id));
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                delivered_response: Some(_),
+                ..
+            } => {
+                self.start_boundary(index);
             }
             RolloutItem::DurableInterAgentCommunicationClaimed { .. } => {
                 // A durable claim prevents automatic replay even if its model-visible turn is

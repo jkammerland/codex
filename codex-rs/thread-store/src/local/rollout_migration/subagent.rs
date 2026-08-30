@@ -46,10 +46,24 @@ pub(super) async fn select_bounded_context(
             let Ok(Some(line)) = line_parser::parse_legacy_rollout_value(value) else {
                 continue;
             };
-            if scan.push(line.item) == ModelContextScanProgress::Complete {
-                let mut items = scan.finish(session_meta);
-                items.retain(|item| !matches!(item, RolloutItem::SessionMeta(_)));
-                return Ok(Some(items));
+            match scan.push(line.item) {
+                ModelContextScanProgress::Continue => {}
+                ModelContextScanProgress::Complete => {
+                    let mut items = scan.finish(session_meta);
+                    items.retain(|item| !matches!(item, RolloutItem::SessionMeta(_)));
+                    return Ok(Some(items));
+                }
+                ModelContextScanProgress::LimitExceeded => {
+                    return Err(migration_error(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "durable model-context scan exceeded its safety limits ({} scanned records, {} retained state records, or {} retained state bytes)",
+                            codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS,
+                            codex_rollout::MAX_PRESERVED_DURABLE_STATE_ITEMS,
+                            codex_rollout::MAX_PRESERVED_DURABLE_STATE_BYTES,
+                        ),
+                    )));
+                }
             }
         }
 

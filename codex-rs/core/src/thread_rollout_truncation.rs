@@ -31,23 +31,30 @@ pub(crate) fn initial_history_has_prior_user_turns(conversation_history: &Initia
         .filter_map(|item| match item {
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication: Some(communication),
+                delivered_response: None,
                 ..
             } => communication.id.as_ref(),
             _ => None,
         })
         .collect::<HashSet<_>>();
+    let compatibility_shadow_ids = compatibility_shadow_ids(items);
     items.iter().any(|item| match item {
         RolloutItem::ResponseItem(item) => {
-            item.id()
-                .is_none_or(|id| !durable_claim_model_item_ids.contains(id))
-                && is_user_turn_boundary(item)
+            item.id().is_none_or(|id| {
+                !durable_claim_model_item_ids.contains(id) && !compatibility_shadow_ids.contains(id)
+            }) && is_user_turn_boundary(item)
         }
         RolloutItem::InterAgentCommunication(_) => true,
         RolloutItem::DurableInterAgentCommunicationClaimed {
             communication: Some(_),
+            delivered_response: None,
             turn_id,
             ..
         } => started_turn_ids.contains(turn_id.as_str()),
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            delivered_response: Some(_),
+            ..
+        } => true,
         _ => false,
     })
 }
@@ -114,36 +121,55 @@ fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
         .filter_map(|item| match item {
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication: Some(communication),
+                delivered_response: None,
                 ..
             } => communication.id.as_ref(),
             _ => None,
         })
         .collect::<HashSet<_>>();
+    let compatibility_shadow_ids = compatibility_shadow_ids(items);
     let mut seen_durable_claim_model_item_ids = HashSet::new();
     for (idx, item) in items.iter().enumerate() {
         match item {
             RolloutItem::ResponseItem(item) => {
-                if item
-                    .id()
-                    .is_some_and(|id| durable_claim_model_item_ids.contains(id))
-                {
+                if item.id().is_some_and(|id| {
+                    durable_claim_model_item_ids.contains(id)
+                        || compatibility_shadow_ids.contains(id)
+                }) {
                     continue;
                 }
-                let has_delivery_metadata = matches!(&item.item, ResponseItem::AgentMessage { .. })
-                    && idx.checked_sub(1).is_some_and(|previous_idx| {
-                        matches!(
-                            items.get(previous_idx),
-                            Some(
-                                RolloutItem::InterAgentCommunicationMetadata { .. }
-                                    | RolloutItem::DurableInterAgentCommunication { .. }
+                let durable_delivery = idx.checked_sub(1).and_then(|previous_idx| {
+                    let RolloutItem::DurableInterAgentCommunication {
+                        communication,
+                        compatibility_shadow: false,
+                        ..
+                    } = items.get(previous_idx)?
+                    else {
+                        return None;
+                    };
+                    (communication.id.as_ref() == item.id())
+                        .then_some((previous_idx, communication))
+                });
+                let has_legacy_delivery_metadata =
+                    matches!(&item.item, ResponseItem::AgentMessage { .. })
+                        && idx.checked_sub(1).is_some_and(|previous_idx| {
+                            matches!(
+                                items.get(previous_idx),
+                                Some(RolloutItem::InterAgentCommunicationMetadata { .. })
                             )
-                        )
-                    });
-                if is_user_turn_boundary(item) && !has_delivery_metadata {
-                    rollback_turn_positions.push(idx);
+                        });
+                if durable_delivery.is_some()
+                    || (is_user_turn_boundary(item) && !has_legacy_delivery_metadata)
+                {
+                    rollback_turn_positions
+                        .push(durable_delivery.map_or(idx, |(delivery_idx, _)| delivery_idx));
                 }
-                if is_real_user_message_boundary(item) || is_trigger_turn_boundary(item) {
-                    fork_turn_positions.push(idx);
+                if is_real_user_message_boundary(item)
+                    || is_trigger_turn_boundary(item)
+                    || durable_delivery.is_some_and(|(_, communication)| communication.trigger_turn)
+                {
+                    fork_turn_positions
+                        .push(durable_delivery.map_or(idx, |(delivery_idx, _)| delivery_idx));
                 }
             }
             RolloutItem::InterAgentCommunication(communication) => {
@@ -167,6 +193,7 @@ fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
             }
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication: Some(communication),
+                delivered_response: None,
                 turn_id,
                 ..
             } => {
@@ -185,10 +212,25 @@ fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
                     fork_turn_positions.push(idx);
                 }
             }
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication,
+                delivered_response: Some(response_item),
+                ..
+            } => {
+                rollback_turn_positions.push(idx);
+                if communication
+                    .as_ref()
+                    .is_some_and(|communication| communication.trigger_turn)
+                    || is_trigger_turn_boundary(&response_item.item)
+                {
+                    fork_turn_positions.push(idx);
+                }
+            }
             RolloutItem::TerminalAgentStatus { .. }
             | RolloutItem::DurableInterAgentCommunication { .. }
             | RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication: None,
+                delivered_response: None,
                 ..
             } => {}
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
@@ -381,6 +423,23 @@ fn is_trigger_turn_boundary(item: &ResponseItem) -> bool {
     role == "assistant"
         && InterAgentCommunication::from_message_content(content)
             .is_some_and(|communication| communication.trigger_turn)
+}
+
+fn compatibility_shadow_ids(items: &[RolloutItem]) -> HashSet<&codex_protocol::ResponseItemId> {
+    items
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [
+                RolloutItem::DurableInterAgentCommunication {
+                    communication,
+                    compatibility_shadow: true,
+                    ..
+                },
+                RolloutItem::ResponseItem(response_item),
+            ] if communication.id.as_ref() == response_item.id() => response_item.id(),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]

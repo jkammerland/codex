@@ -102,6 +102,66 @@ fn requires_a_strict_nonempty_model_prefix() {
     assert!(plan_append(&source, &with_tool_call).is_none());
 }
 
+#[test]
+fn durable_delivery_compares_and_appends_at_the_claim_position() {
+    let history = rollout(&[(MessageRole::User, "first request")]);
+    let mut source = history.clone();
+    let mut communication = codex_protocol::protocol::InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "durable result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(codex_protocol::ResponseItemId::with_suffix(
+        "msg",
+        "durable-delivery",
+    ));
+    let delivered_response =
+        codex_rollout::ResponseItemEnvelope::new(communication.to_model_input_item());
+    source.extend([
+        RolloutItem::DurableInterAgentCommunication {
+            communication: communication.clone(),
+            start_options: codex_protocol::turn_input::TurnStartOptions::default(),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "turn-2".to_string(),
+            compatibility_shadow: true,
+        },
+        RolloutItem::ResponseItem(delivered_response.clone()),
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: "turn-2".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            },
+        )),
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication.id.clone().expect("communication id"),
+            communication: Some(communication),
+            delivered_response: Some(delivered_response),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "turn-2".to_string(),
+        },
+    ]);
+
+    let suffix = plan_append(&source, &history).expect("durable delivery should append");
+
+    assert!(matches!(
+        suffix.first(),
+        Some(RolloutItem::EventMsg(EventMsg::TurnStarted(event))) if event.turn_id == "turn-2"
+    ));
+    assert!(matches!(
+        suffix.last(),
+        Some(RolloutItem::DurableInterAgentCommunicationClaimed {
+            delivered_response: Some(_),
+            ..
+        })
+    ));
+    assert!(model_transcripts_match(&source, &source));
+}
+
 fn rollout(messages: &[(MessageRole, &str)]) -> Vec<RolloutItem> {
     rollout_items_from_messages(
         messages

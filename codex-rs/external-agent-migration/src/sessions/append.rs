@@ -8,6 +8,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutItem;
+use codex_rollout::RolloutModelResponseProjection;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
@@ -188,9 +189,10 @@ fn plan_append(
         .filter(|item| !is_import_marker(item))
         .cloned()
         .collect::<Vec<_>>();
+    let mut model_response_projection = RolloutModelResponseProjection::default();
     suffix
         .iter()
-        .any(|item| matches!(item, RolloutItem::ResponseItem(_)))
+        .any(|item| model_response_projection.project(item).is_some())
         .then_some(suffix)
 }
 
@@ -215,7 +217,15 @@ fn model_transcripts_match(source_items: &[RolloutItem], history_items: &[Rollou
 fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem<'_>>> {
     let mut model_items = Vec::new();
     let mut append_start_index = None;
+    let mut model_response_projection = RolloutModelResponseProjection::default();
     for (index, item) in items.iter().enumerate() {
+        if let Some(response_item) = model_response_projection.project(item) {
+            model_items.push(SourceModelItem {
+                response_item: &response_item.item,
+                append_start_index: append_start_index.take().unwrap_or(index),
+            });
+            continue;
+        }
         match item {
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -223,12 +233,7 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem<'_>>>
             | RolloutItem::DurableInterAgentCommunication { .. }
             | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
             | RolloutItem::RealtimeItem(_) => {}
-            RolloutItem::ResponseItem(response_item) => {
-                model_items.push(SourceModelItem {
-                    response_item: &response_item.item,
-                    append_start_index: append_start_index.take().unwrap_or(index),
-                });
-            }
+            RolloutItem::ResponseItem(_) => {}
             RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
                 append_start_index = Some(index);
             }
@@ -256,7 +261,12 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem<'_>>>
 
 fn history_model_items(items: &[RolloutItem]) -> Option<Vec<&ResponseItem>> {
     let mut model_items = Vec::new();
+    let mut model_response_projection = RolloutModelResponseProjection::default();
     for item in items {
+        if let Some(response_item) = model_response_projection.project(item) {
+            model_items.push(&response_item.item);
+            continue;
+        }
         match item {
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -265,7 +275,7 @@ fn history_model_items(items: &[RolloutItem]) -> Option<Vec<&ResponseItem>> {
             | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_) => {}
-            RolloutItem::ResponseItem(response_item) => model_items.push(&response_item.item),
+            RolloutItem::ResponseItem(_) => {}
             RolloutItem::EventMsg(
                 EventMsg::ContextCompacted(_) | EventMsg::ThreadRolledBack(_),
             )

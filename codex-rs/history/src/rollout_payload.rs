@@ -110,23 +110,32 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
                 start_options,
                 fingerprint,
                 turn_id,
+                compatibility_shadow,
             } => Self::DurableInterAgentCommunication {
                 payload: DurableInterAgentCommunicationPayload {
                     communication: communication.clone(),
                     start_options: start_options.clone(),
                     fingerprint: fingerprint.clone(),
                     turn_id: turn_id.clone(),
+                    compatibility_shadow: *compatibility_shadow,
                 },
             },
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
                 communication,
+                delivered_response,
                 fingerprint,
                 turn_id,
             } => Self::DurableInterAgentCommunicationClaimed {
                 payload: DurableInterAgentCommunicationClaimedPayload {
                     communication_id: communication_id.clone(),
                     communication: communication.clone(),
+                    delivered_response: delivered_response
+                        .as_ref()
+                        .map(|response| response.item.clone()),
+                    delivered_response_metadata: delivered_response
+                        .as_ref()
+                        .and_then(|response| response.metadata.clone()),
                     fingerprint: fingerprint.clone(),
                     turn_id: turn_id.clone(),
                 },
@@ -188,12 +197,19 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
                     start_options: payload.start_options,
                     fingerprint: payload.fingerprint,
                     turn_id: payload.turn_id,
+                    compatibility_shadow: payload.compatibility_shadow,
                 }
             }
             RolloutItemWire::DurableInterAgentCommunicationClaimed { payload } => {
                 Self::DurableInterAgentCommunicationClaimed {
                     communication_id: payload.communication_id,
                     communication: payload.communication,
+                    delivered_response: payload.delivered_response.map(|item| {
+                        ResponseItemEnvelope {
+                            item,
+                            metadata: payload.delivered_response_metadata,
+                        }
+                    }),
                     fingerprint: payload.fingerprint,
                     turn_id: payload.turn_id,
                 }
@@ -241,6 +257,8 @@ pub(super) struct DurableInterAgentCommunicationPayload {
     start_options: codex_protocol::turn_input::TurnStartOptions,
     fingerprint: String,
     turn_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    compatibility_shadow: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -248,6 +266,10 @@ pub(super) struct DurableInterAgentCommunicationClaimedPayload {
     communication_id: codex_protocol::ResponseItemId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     communication: Option<InterAgentCommunication>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivered_response: Option<ResponseItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivered_response_metadata: Option<CodexHarnessMetadata>,
     fingerprint: String,
     turn_id: String,
 }

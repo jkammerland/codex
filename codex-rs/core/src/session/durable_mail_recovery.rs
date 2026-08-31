@@ -37,6 +37,7 @@ struct DurablePayload {
     communication: InterAgentCommunication,
     start_options: TurnStartOptions,
     intended_turn_id: String,
+    turn_started: bool,
     size_limit: MailboxModelSizeLimit,
 }
 
@@ -54,23 +55,43 @@ struct DurableState {
 }
 
 struct RecoveryEntry {
-    index: usize,
+    order_index: usize,
+    latest_index: usize,
+    delivery_index: Option<usize>,
     id: ResponseItemId,
     fingerprint: String,
     payload: Option<DurablePayload>,
     claim: Option<DurableClaim>,
-    legacy_consumed: bool,
 }
 
 impl RecoveryEntry {
     fn delivered(&self) -> bool {
-        self.legacy_consumed || self.claim.as_ref().is_some_and(|claim| claim.delivered)
+        self.delivery_index.is_some()
+    }
+}
+
+fn insert_recovery_entry(
+    entries_by_id: &mut HashMap<ResponseItemId, RecoveryEntry>,
+    entry: RecoveryEntry,
+) {
+    let replace = match entries_by_id.get(&entry.id) {
+        Some(current) => match (current.delivery_index, entry.delivery_index) {
+            (Some(current_index), Some(entry_index)) => entry_index < current_index,
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (None, None) => entry.latest_index > current.latest_index,
+        },
+        None => true,
+    };
+    if replace {
+        entries_by_id.insert(entry.id.clone(), entry);
     }
 }
 
 pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery {
     let mut future_turn_starts = HashSet::new();
     let mut claim_delivered = HashMap::new();
+    let mut payload_turn_started = HashMap::new();
     for (index, item) in items.iter().enumerate().rev() {
         match item {
             RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
@@ -85,6 +106,9 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                     index,
                     delivered_response.is_some() || future_turn_starts.contains(turn_id),
                 );
+            }
+            RolloutItem::DurableInterAgentCommunication { turn_id, .. } => {
+                payload_turn_started.insert(index, future_turn_starts.contains(turn_id));
             }
             _ => {}
         }
@@ -110,6 +134,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                         communication: communication.clone(),
                         start_options: start_options.clone(),
                         intended_turn_id: turn_id.clone(),
+                        turn_started: payload_turn_started.get(&index).copied().unwrap_or(false),
                         size_limit: if *compatibility_shadow {
                             MailboxModelSizeLimit::Current
                         } else {
@@ -133,10 +158,10 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 let state = states
                     .entry((communication_id.clone(), fingerprint.clone()))
                     .or_default();
-                if !state
+                if state
                     .claim
                     .as_ref()
-                    .is_some_and(|current| current.delivered && !claim.delivered)
+                    .is_none_or(|current| !current.delivered)
                 {
                     state.claim = Some(claim);
                 }
@@ -163,10 +188,13 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                         .as_ref()
                         .and_then(|metadata| metadata.turn_id.clone())
                         .unwrap_or_default(),
+                    turn_started: false,
                     size_limit: MailboxModelSizeLimit::LegacyRecovery,
                 });
                 if let Some(consumed_id) = consumed_mail_id {
-                    legacy_consumed.insert(consumed_id.clone(), (index, fingerprint.clone()));
+                    legacy_consumed
+                        .entry(consumed_id.clone())
+                        .or_insert_with(|| (index, fingerprint.clone()));
                 }
             }
             RolloutItem::InterAgentCommunicationMetadata {
@@ -174,7 +202,9 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 consumed_mail_id: Some(id),
                 ..
             } => {
-                legacy_consumed.insert(id.clone(), (index, fingerprint.clone()));
+                legacy_consumed
+                    .entry(id.clone())
+                    .or_insert_with(|| (index, fingerprint.clone()));
             }
             _ => {}
         }
@@ -194,13 +224,15 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
             continue;
         };
         if let Some(id) = response_item.id().cloned() {
-            legacy_consumed.insert(id, (index + 1, fingerprint.clone()));
+            legacy_consumed
+                .entry(id)
+                .or_insert_with(|| (index + 1, fingerprint.clone()));
         }
     }
 
     let mut entries_by_id = HashMap::<ResponseItemId, RecoveryEntry>::new();
     for ((id, fingerprint), state) in states {
-        let state_index = state
+        let latest_index = state
             .payload
             .as_ref()
             .map(|payload| payload.index)
@@ -211,43 +243,49 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
         let matching_legacy_consumed = legacy_consumed
             .get(&id)
             .filter(|(_, consumed_fingerprint)| consumed_fingerprint == &fingerprint);
-        let index =
-            matching_legacy_consumed.map_or(state_index, |(index, _)| state_index.max(*index));
+        let latest_index =
+            matching_legacy_consumed.map_or(latest_index, |(index, _)| latest_index.max(*index));
+        let order_index = state
+            .payload
+            .as_ref()
+            .map(|payload| payload.index)
+            .or_else(|| state.claim.as_ref().map(|claim| claim.index))
+            .or_else(|| matching_legacy_consumed.map(|(index, _)| *index))
+            .unwrap_or_default();
+        let delivery_index = state
+            .claim
+            .as_ref()
+            .filter(|claim| claim.delivered)
+            .map(|claim| claim.index)
+            .into_iter()
+            .chain(matching_legacy_consumed.map(|(index, _)| *index))
+            .min();
         let entry = RecoveryEntry {
-            index,
-            legacy_consumed: matching_legacy_consumed.is_some(),
+            order_index,
+            latest_index,
+            delivery_index,
             id: id.clone(),
             fingerprint,
             payload: state.payload,
             claim: state.claim,
         };
-        match entries_by_id.get(&id) {
-            Some(current) if current.delivered() && !entry.delivered() => {}
-            Some(current) if current.delivered() == entry.delivered() && current.index > index => {}
-            _ => {
-                entries_by_id.insert(id, entry);
-            }
-        }
+        insert_recovery_entry(&mut entries_by_id, entry);
     }
     for (id, (index, fingerprint)) in legacy_consumed {
         let entry = RecoveryEntry {
-            index,
+            order_index: index,
+            latest_index: index,
+            delivery_index: Some(index),
             id: id.clone(),
             fingerprint,
             payload: None,
             claim: None,
-            legacy_consumed: true,
         };
-        match entries_by_id.get(&id) {
-            Some(current) if current.delivered() && current.index > index => {}
-            _ => {
-                entries_by_id.insert(id, entry);
-            }
-        }
+        insert_recovery_entry(&mut entries_by_id, entry);
     }
 
     let mut entries = entries_by_id.into_values().collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.index);
+    entries.sort_by_key(|entry| entry.order_index);
     let mut recovery = DurableMailRecovery::default();
     for entry in entries {
         let claimed_turn_id = entry
@@ -269,6 +307,11 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
             });
             continue;
         }
+        let already_claimed = entry.claim.is_some()
+            || entry
+                .payload
+                .as_ref()
+                .is_some_and(|payload| payload.turn_started);
         let claim_communication = entry
             .claim
             .as_ref()
@@ -306,7 +349,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
             start_options,
             fingerprint: entry.fingerprint,
             intended_turn_id: claimed_turn_id,
-            already_claimed: entry.claim.is_some(),
+            already_claimed,
             size_limit,
         });
     }

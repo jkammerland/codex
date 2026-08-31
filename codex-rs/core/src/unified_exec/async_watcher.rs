@@ -118,6 +118,19 @@ pub(crate) fn start_streaming_output(
                 }, if process_exited => {
                     if let Some(output_task_abort_handle) = output_task_abort_handle.as_ref() {
                         output_task_abort_handle.abort();
+                        // Abort only requests cancellation. Wait until the producer guard proves
+                        // it can no longer enqueue output, then drain every chunk that raced with
+                        // the cutoff. Register the notification before checking the atomic so a
+                        // fast abort cannot be missed.
+                        while !output_closed.load(Ordering::Acquire) {
+                            let output_task_closed = output_closed_notify.notified();
+                            tokio::pin!(output_task_closed);
+                            output_task_closed.as_mut().enable();
+                            if output_closed.load(Ordering::Acquire) {
+                                break;
+                            }
+                            output_task_closed.await;
+                        }
                     }
                     break;
                 },
@@ -136,22 +149,20 @@ pub(crate) fn start_streaming_output(
             }
         }
 
-        if output_closed.load(Ordering::Acquire) {
-            // Output producers publish all chunks before setting output_closed
-            // with Release ordering, so the Acquire above makes this a final
-            // safe drain.
-            loop {
-                let chunk = match receiver.try_recv() {
-                    Ok(chunk) => chunk,
-                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
-                    Err(
-                        tokio::sync::broadcast::error::TryRecvError::Empty
-                        | tokio::sync::broadcast::error::TryRecvError::Closed,
-                    ) => break,
-                };
+        // Natural producer close and the cutoff path both establish that no new chunk can arrive.
+        // Drain regardless of whether the process supplied a producer task; an already-queued
+        // direct event must not be discarded merely because the timer branch won a biased select.
+        loop {
+            let chunk = match receiver.try_recv() {
+                Ok(chunk) => chunk,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(
+                    tokio::sync::broadcast::error::TryRecvError::Empty
+                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                ) => break,
+            };
 
-                output.push(chunk).await;
-            }
+            output.push(chunk).await;
         }
 
         output.finish().await;

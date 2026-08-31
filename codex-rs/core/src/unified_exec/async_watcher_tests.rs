@@ -10,6 +10,10 @@ use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use crate::unified_exec::process::NoopSpawnLifecycle;
 use crate::unified_exec::process::UnifiedExecProcess;
+#[cfg(unix)]
+use codex_exec_server::Environment;
+#[cfg(unix)]
+use codex_exec_server::ExecParams;
 use codex_protocol::items::CommandExecutionStatus;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::Event;
@@ -17,6 +21,8 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecOutputStream;
 use codex_sandboxing::SandboxType;
+#[cfg(unix)]
+use codex_utils_path_uri::PathUri;
 
 use pretty_assertions::assert_eq;
 use tokio::time::Duration;
@@ -206,6 +212,110 @@ async fn streaming_output_bounds_a_permanently_inherited_descriptor() -> anyhow:
     };
     assert_eq!(item.status, CommandExecutionStatus::Completed);
     drop(stdout_tx);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_output_drains_a_chunk_queued_at_the_exit_cutoff() -> anyhow::Result<()> {
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        ..
+    } = streaming_output_harness().await?;
+    let output_drained = process.output_drained_notify();
+    let drained = output_drained.notified();
+    tokio::pin!(drained);
+
+    tokio::time::pause();
+    exit_tx.send(0).expect("send exit");
+    process.cancellation_token().cancelled().await;
+    tokio::time::advance(Duration::from_millis(1)).await;
+    process.publish_output_for_test(b"QUEUED-AT-CUTOFF".to_vec());
+    tokio::time::advance(super::super::process_manager::POST_EXIT_CLOSE_WAIT_CAP).await;
+    (&mut drained).await;
+    tokio::time::resume();
+
+    assert_eq!(
+        transcript.lock().await.to_bytes_with_omission_marker(),
+        b"QUEUED-AT-CUTOFF"
+    );
+    drop(stdout_tx);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_server_root_exit_bounds_an_inherited_output_descriptor() -> anyhow::Result<()> {
+    let environment = Environment::create_for_tests(/*exec_server_url*/ None)?;
+    let backend = environment.get_exec_backend();
+    let started = backend
+        .start(ExecParams {
+            process_id: "inherited-descriptor-proof".to_string().into(),
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 1 & exit 0".to_string(),
+            ],
+            cwd: PathUri::from_host_native_path(std::env::current_dir()?)?,
+            shell_snapshot: None,
+            env_policy: /*env_policy*/ None,
+            env: Default::default(),
+            tty: false,
+            pipe_stdin: false,
+            arg0: None,
+            sandbox: None,
+            enforce_managed_network: false,
+            managed_network: None,
+            network_proxy: None,
+        })
+        .await?;
+    let process = Arc::new(UnifiedExecProcess::from_exec_server_started(started).await?);
+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let context = UnifiedExecContext::new(
+        session,
+        crate::session::step_context::StepContext::for_test(turn),
+        tokio_util::sync::CancellationToken::new(),
+        "exec-server-descriptor-test".to_string(),
+    );
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    start_streaming_output(&process, &context, Arc::clone(&transcript));
+    #[allow(deprecated)]
+    let cwd = context.step_context.turn.cwd.clone().into();
+    let started_at = Instant::now();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        Arc::clone(&context.session),
+        Arc::clone(&context.step_context.turn),
+        context.call_id,
+        vec!["exec-server-descriptor-proof".to_string()],
+        cwd,
+        /*process_id*/ 125,
+        /*plugin_attribution*/ None,
+        transcript,
+        started_at,
+        /*network_denial_monitor*/ None,
+        /*plugin_metrics_sidecar*/ None,
+    );
+
+    let event = tokio::time::timeout(Duration::from_millis(750), rx_event.recv())
+        .await
+        .expect("root exit should not wait for the inherited descriptor")
+        .expect("command end event");
+    let EventMsg::ItemCompleted(completed) = event.msg else {
+        panic!("expected ItemCompleted");
+    };
+    let TurnItem::CommandExecution(item) = completed.item else {
+        panic!("expected CommandExecution");
+    };
+    assert_eq!(item.status, CommandExecutionStatus::Completed);
+    assert!(
+        started_at.elapsed() < Duration::from_millis(750),
+        "completion should use the bounded post-exit grace"
+    );
 
     Ok(())
 }

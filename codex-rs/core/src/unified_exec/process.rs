@@ -174,6 +174,11 @@ impl UnifiedExecProcess {
         self.output_tx.subscribe()
     }
 
+    #[cfg(test)]
+    pub(super) fn publish_output_for_test(&self, chunk: Vec<u8>) {
+        let _ = self.output_tx.send(chunk);
+    }
+
     pub(super) fn cancellation_token(&self) -> CancellationToken {
         self.output.cancellation_token.clone()
     }
@@ -440,11 +445,12 @@ impl UnifiedExecProcess {
         } = output_handles;
         let process = started.process;
         let mut events = process.subscribe_events();
+        let output_task_guard = OutputTaskGuard {
+            output_closed: Arc::clone(&output_closed),
+            output_closed_notify: Arc::clone(&output_closed_notify),
+        };
         tokio::spawn(async move {
-            let _output_task_guard = OutputTaskGuard {
-                output_closed: Arc::clone(&output_closed),
-                output_closed_notify: Arc::clone(&output_closed_notify),
-            };
+            let _output_task_guard = output_task_guard;
             let mut last_seq: u64 = 0;
             loop {
                 let event = match events.recv().await {
@@ -531,6 +537,9 @@ impl UnifiedExecProcess {
                         } else {
                             state
                         });
+                        if exited {
+                            cancellation_token.cancel();
+                        }
                     }
                     if closed {
                         output_closed.store(true, Ordering::Release);
@@ -569,6 +578,10 @@ impl UnifiedExecProcess {
                         let mut state = state_tx.borrow().clone();
                         state.sandbox_denied |= sandbox_denied.unwrap_or(false);
                         let _ = state_tx.send_replace(state.exited(Some(exit_code)));
+                        // Root exit starts the bounded late-output grace. `Closed` can be delayed
+                        // forever when a descendant inherits stdout/stderr, so it cannot be the
+                        // only completion signal for the client-side watcher.
+                        cancellation_token.cancel();
                     }
                     ExecProcessEvent::Closed { seq } => {
                         if seq <= last_seq {
@@ -604,11 +617,12 @@ impl UnifiedExecProcess {
             output_closed_notify,
             ..
         } = output_handles;
+        let output_task_guard = OutputTaskGuard {
+            output_closed: Arc::clone(&output_closed),
+            output_closed_notify: Arc::clone(&output_closed_notify),
+        };
         tokio::spawn(async move {
-            let _output_task_guard = OutputTaskGuard {
-                output_closed: Arc::clone(&output_closed),
-                output_closed_notify: Arc::clone(&output_closed_notify),
-            };
+            let _output_task_guard = output_task_guard;
             loop {
                 match receiver.recv().await {
                     Ok(chunk) => {

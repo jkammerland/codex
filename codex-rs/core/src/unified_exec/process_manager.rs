@@ -432,6 +432,18 @@ fn terminate_process_on_network_denial(
 }
 
 impl UnifiedExecProcessManager {
+    pub(crate) async fn retain_live_process_ids(&self, process_ids: Vec<i32>) -> Vec<i32> {
+        let store = self.process_store.lock().await;
+        process_ids
+            .into_iter()
+            .filter(|process_id| {
+                store.processes.get(process_id).is_some_and(|entry| {
+                    !entry.process.has_exited() && entry.process.failure_message().is_none()
+                })
+            })
+            .collect()
+    }
+
     pub(crate) async fn allocate_process_id(&self) -> i32 {
         loop {
             let mut store = self.process_store.lock().await;
@@ -1468,17 +1480,21 @@ impl UnifiedExecProcessManager {
                 &mut post_exit_deadline,
             )
             .await;
+            let output_notified = output_notify.notified();
+            let output_closed_notified = output_closed_notify.notified();
+            tokio::pin!(output_notified);
+            tokio::pin!(output_closed_notified);
+            // Both producers use `notify_waiters`, which does not retain a
+            // permit. Register before inspecting the buffer and close flag.
+            output_notified.as_mut().enable();
+            output_closed_notified.as_mut().enable();
             let drained_output: HeadTailBuffer<MAX_BYTES>;
             let has_drained_output: bool;
-            let mut wait_for_output = None;
             {
                 let mut guard = output_buffer.lock().await;
                 drained_output = std::mem::take(&mut *guard);
                 has_drained_output =
                     drained_output.retained_bytes() > 0 || drained_output.omitted_bytes() > 0;
-                if !has_drained_output {
-                    wait_for_output = Some(output_notify.notified());
-                }
             }
 
             if !has_drained_output {
@@ -1500,27 +1516,21 @@ impl UnifiedExecProcessManager {
                     if close_wait_remaining == Duration::ZERO {
                         break;
                     }
-                    let notified = wait_for_output.unwrap_or_else(|| output_notify.notified());
-                    let closed = output_closed_notify.notified();
-                    tokio::pin!(notified);
-                    tokio::pin!(closed);
                     tokio::select! {
-                        _ = &mut notified => {}
-                        _ = &mut closed => {}
-                        _ = tokio::time::sleep(close_wait_remaining) => break,
+                        _ = &mut output_notified => {}
+                        _ = &mut output_closed_notified => {}
+                        _ = tokio::time::sleep(close_wait_remaining) => {}
                         _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
                     }
                     continue;
                 }
 
-                let notified = wait_for_output.unwrap_or_else(|| output_notify.notified());
-                tokio::pin!(notified);
                 let exit_notified = cancellation_token.cancelled();
                 tokio::pin!(exit_notified);
                 tokio::select! {
-                    _ = &mut notified => {}
+                    _ = &mut output_notified => {}
                     _ = &mut exit_notified => exit_signal_received = true,
-                    _ = tokio::time::sleep(remaining) => break,
+                    _ = tokio::time::sleep(remaining) => {}
                     _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
                 }
                 continue;

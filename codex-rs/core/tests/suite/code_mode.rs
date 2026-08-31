@@ -2633,6 +2633,111 @@ text("finished after quiet deadlines");
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_wait_retires_observer_before_input_wake_observation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        let _ = config.features.enable(Feature::CodeMode);
+    });
+    let test = builder.build(&server).await?;
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-input-wake-exec"),
+            ev_custom_tool_call(
+                "call-input-wake-exec",
+                "exec",
+                "yield_control(); await new Promise(() => {});",
+            ),
+            ev_completed("resp-input-wake-exec"),
+        ]),
+    )
+    .await;
+    let initial_completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-input-wake-waiting", "waiting"),
+            ev_completed("resp-input-wake-waiting"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn("start an indefinitely quiet cell").await?;
+    let initial_items =
+        custom_tool_output_items(&initial_completion.single_request(), "call-input-wake-exec");
+    let cell_id = extract_running_cell_id(text_item(&initial_items, /*index*/ 0));
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-input-wake-wait"),
+            responses::ev_function_call(
+                "call-input-wake-wait",
+                "wait",
+                &serde_json::to_string(&serde_json::json!({
+                    "cell_id": cell_id,
+                    "yield_time_ms": 60_000,
+                }))?,
+            ),
+            ev_completed("resp-input-wake-wait"),
+        ]),
+    )
+    .await;
+    let completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-input-wake-done", "input received"),
+            ev_completed("resp-input-wake-done"),
+        ]),
+    )
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait for the quiet cell".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RawResponseItem(raw) => match &raw.item {
+            ResponseItem::FunctionCall { call_id, .. } if call_id == "call-input-wake-wait" => {
+                Some(())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "new direction".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let output = completion
+        .single_request()
+        .function_call_output_text("call-input-wake-wait")
+        .expect("input should release the code-mode wait");
+    assert!(
+        output.contains("Script running with cell ID"),
+        "unexpected input-wake output: {output}"
+    );
+    assert!(
+        !output.contains("already has an active observer"),
+        "replacement observation raced the canceled wait: {output}"
+    );
+    Ok(())
+}
+
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_yield_and_termination_are_not_starved_by_runtime_output() -> Result<()> {

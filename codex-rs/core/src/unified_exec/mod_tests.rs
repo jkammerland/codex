@@ -309,6 +309,45 @@ async fn wait_process_rejects_unknown_session() {
     ));
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn live_process_filter_excludes_completed_unconsumed_sessions() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let started = exec_command_with_tty(
+        &session,
+        &turn,
+        "sleep 0.2",
+        /*yield_time_ms*/ 10,
+        /*workdir*/ None,
+        /*tty*/ false,
+    )
+    .await?;
+    let process_id = started.process_id.expect("command should remain running");
+
+    assert_eq!(
+        session
+            .services
+            .unified_exec_manager
+            .retain_live_process_ids(vec![process_id])
+            .await,
+        vec![process_id]
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        session
+            .services
+            .unified_exec_manager
+            .retain_live_process_ids(vec![process_id])
+            .await,
+        Vec::<i32>::new()
+    );
+
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let completed = wait_process_for_test(&session, process_id, &mut activity_rx).await?;
+    assert_eq!(completed.wait_reason, Some(ProcessWaitReason::Completed));
+    Ok(())
+}
+
 #[derive(Debug)]
 struct TestSpawnLifecycle {
     inherited_fds: Vec<i32>,

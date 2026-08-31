@@ -31,7 +31,8 @@ not prompt for an npm update that would overwrite the fork.
 8. Completed unified-exec waits use a bounded post-exit output grace period, so
    a descendant-held pipe cannot orphan the wait. The output reader is released
    after that grace period while immediately available and slightly late final
-   output is still retained.
+   output is still retained. Remote root-exit events start the same grace period
+   without waiting for descendants to close inherited descriptors.
 9. Code mode surfaces recoverable metadata for live unified-exec sessions even
    when JavaScript emits only a projection of the nested tool result.
 10. Multi-agent v2 mail is persisted before delivery, preserves FIFO ordering,
@@ -64,8 +65,10 @@ not prompt for an npm update that would overwrite the fork.
     are suppressed and duplicate communication IDs are projected once. MCP event
     streams stop concurrently within one shared timeout window, and a late
     interrupted event cannot erase an already persisted terminal failure.
-19. macOS fleet activation fails closed when its canonical source is dirty or
-    binary-pair, staged-binary, or rollback-pair verification fails.
+19. Fleet staging writes a commit-, version-, and SHA-256-bound receipt for the
+    executable pair. macOS and Windows activation fail closed before mutation
+    when source cleanliness, the receipt, staged binaries, active binaries, or
+    rollback-pair verification fails.
 
 The terminal-status marker is intentionally model-invisible. Current builds can
 recover both the dedicated marker and the overloaded `.mcp.11` metadata form.
@@ -126,19 +129,20 @@ just test -p codex-core --lib mcp
 For the event-liveness hardening in this release, the focused and crate-wide
 validation completed as follows before the final lint and formatting pass:
 
-- `codex-history`: 21 passed.
-- `codex-rollout`: 135 passed; one preexisting compressed-rollout search test
+- `codex-history`: 23 passed.
+- `codex-rollout`: 136 passed; one preexisting compressed-rollout search test
   could not create its fixture because of local filesystem permissions. All 11
   scanner tests passed.
-- `codex-thread-store`: 244 passed.
-- `codex-external-agent-migration`: 169 passed.
+- `codex-thread-store`: 246 passed.
+- `codex-external-agent-migration`: 170 passed.
 - `codex-app-server-protocol`: 300 passed.
 - `codex-memories-write`: 44 passed.
-- `codex-core`: 3,981 passed, 11 failed, and 9 skipped. Every new durable-mail,
+- `codex-core`: 3,988 passed, 12 failed, and 9 skipped. Every new durable-mail,
   unbounded-MCP, and unified-exec regression passed. The failures reproduce as
-  unrelated local baseline issues: two existing 30-second async timeouts, eight
-  CLI stream tests whose fixture binary is unavailable, and one missing plugin
-  environment variable.
+  unrelated local baseline issues: two existing async-hook/remote-compaction
+  timeouts, eight CLI stream tests whose fixture binary is unavailable, one
+  missing plugin environment variable, and one shell-snapshot timeout that
+  passed on retry when rerun in isolation.
 - Fleet controller tests: 10 passed and the Windows-only test was skipped on
   Linux.
 

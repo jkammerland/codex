@@ -74,9 +74,7 @@ impl LiveExecSessionRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.remove(session_id);
-        state
-            .observation_order
-            .push_back(session_id);
+        state.observation_order.push_back(session_id);
         state
             .sessions_by_cell
             .entry(cell_id.clone())

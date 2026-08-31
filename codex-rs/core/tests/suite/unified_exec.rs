@@ -2458,9 +2458,9 @@ async fn wait_process_blocks_without_model_polling_and_wakes_for_input() -> Resu
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "new direction".to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: "new direction".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("steer input should interrupt wait_process");
     wait_for_event(&test.codex, |event| {

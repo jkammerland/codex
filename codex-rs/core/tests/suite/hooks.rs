@@ -1731,22 +1731,26 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let responses = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                ev_assistant_message("msg-1", "first turn completed"),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-2", "idle async context observed"),
-                ev_completed("resp-2"),
-            ]),
-        ],
-    )
-    .await;
+    let mut response_sequence = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "first turn completed"),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("msg-2", "idle async context observed"),
+            ev_completed("resp-2"),
+        ]),
+    ];
+    if !automatic_continuation {
+        response_sequence.push(sse(vec![
+            ev_response_created("resp-3"),
+            ev_assistant_message("msg-3", "current async context observed"),
+            ev_completed("resp-3"),
+        ]));
+    }
+    let responses = mount_sse_sequence(&server, response_sequence).await;
 
     let test = test_codex()
         .with_pre_build_hook(|home| {
@@ -1835,7 +1839,7 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
     .context("timed out waiting for the next turn to complete")??;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), if automatic_continuation { 2 } else { 3 });
     let second_turn_id = requests[1].body_json()["client_metadata"]["turn_id"]
         .as_str()
         .context("second model request should include its turn ID")?
@@ -1868,6 +1872,14 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
         context_index < prompt_index,
         "buffered async hook context should precede the next user prompt"
     );
+    if !automatic_continuation {
+        assert!(
+            requests[2]
+                .message_input_texts("developer")
+                .contains(&format!("async context for {next_prompt}")),
+            "the next prompt's own async hook should continue in its active turn"
+        );
+    }
 
     Ok(())
 }

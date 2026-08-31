@@ -137,9 +137,7 @@ class FleetReleaseTest(unittest.TestCase):
         values["cliSha256"] = "cli-hash"
         values["codeModeHostExecutable"] = "false"
         mode_drifted = fleet_release.Status(host, values)
-        self.assertEqual(
-            mode_drifted.drift(self.release), ("codeModeHostExecutable",)
-        )
+        self.assertEqual(mode_drifted.drift(self.release), ("codeModeHostExecutable",))
 
     def test_activation_scripts_preserve_rollback_and_use_atomic_replacement(
         self,
@@ -154,6 +152,8 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn("Assert-CleanGit $build", windows_script)
         self.assertIn("agents --help", mac_script)
         self.assertIn("agents --help", windows_script)
+        self.assertIn('"$target_host" --help', mac_script)
+        self.assertIn("& $targetHost --help", windows_script)
         self.assertIn(
             "Build receipt does not match the reviewed binary pair", mac_script
         )
@@ -272,10 +272,11 @@ class FleetReleaseTest(unittest.TestCase):
             self.assertFalse(Path(f"{target_cli}.test.release-previous").exists())
             self.assertFalse(Path(f"{target_host}.test.release-previous").exists())
 
+            fail_agents = root / "fail-agents"
             source_cli.write_text(
                 "#!/bin/sh\n"
                 "if [ \"$1\" = --version ]; then echo 'codex-cli expected'; exit 0; fi\n"
-                'if [ "$1" = agents ] && [ "$2" = --help ]; then exit 0; fi\n'
+                f'if [ "$1" = agents ] && [ "$2" = --help ]; then [ ! -e "{fail_agents}" ]; exit $?; fi\n'
                 "exit 1\n"
             )
             source_cli.chmod(0o755)
@@ -291,8 +292,10 @@ class FleetReleaseTest(unittest.TestCase):
             self.assertEqual(target_cli.read_bytes(), source_cli.read_bytes())
             self.assertEqual(target_host.read_bytes(), source_host.read_bytes())
 
-            Path(f"{target_cli}.test.release-previous").unlink()
-            Path(f"{target_host}.test.release-previous").unlink()
+            backup_cli = Path(f"{target_cli}.test.release-previous")
+            backup_host = Path(f"{target_host}.test.release-previous")
+            self.assertEqual(backup_cli.read_bytes(), original_cli)
+            self.assertEqual(backup_host.read_bytes(), original_host)
             target_host.chmod(0o644)
             repair_mode = run(
                 ["sh", "-c", fleet_release.activation_script(host, release)],
@@ -302,6 +305,31 @@ class FleetReleaseTest(unittest.TestCase):
             )
 
             self.assertEqual(repair_mode.returncode, 0, repair_mode.stderr)
+            self.assertTrue(os.access(target_host, os.X_OK))
+            self.assertEqual(backup_cli.read_bytes(), original_cli)
+            self.assertEqual(backup_host.read_bytes(), original_host)
+
+            target_host.chmod(0o644)
+            fail_agents.write_text("fail post-repair validation\n")
+            failed_mode_repair = run(
+                ["sh", "-c", fleet_release.activation_script(host, release)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(failed_mode_repair.returncode, 0)
+            self.assertFalse(os.access(target_host, os.X_OK))
+            self.assertEqual(backup_cli.read_bytes(), original_cli)
+            self.assertEqual(backup_host.read_bytes(), original_host)
+            fail_agents.unlink()
+            repaired_after_failure = run(
+                ["sh", "-c", fleet_release.activation_script(host, release)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(repaired_after_failure.returncode, 0)
             self.assertTrue(os.access(target_host, os.X_OK))
 
             active_cli = target_cli.read_bytes()

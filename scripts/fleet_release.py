@@ -510,6 +510,8 @@ $version = & {quote_ps(host.build_binary("codex"))} --version
 if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
 & {quote_ps(host.build_binary("codex"))} agents --help *> $null
 if ($LASTEXITCODE -ne 0) {{ throw 'Built fork does not support codex agents' }}
+& {quote_ps(host.build_binary("codex-code-mode-host"))} --help *> $null
+if ($LASTEXITCODE -ne 0) {{ throw 'Built code-mode host is not executable' }}
 $receipt = {quote_ps(host.build_receipt())}
 $receiptPartial = "$receipt.partial-$PID-$([guid]::NewGuid().ToString('N'))"
 $receiptLines = @(
@@ -594,6 +596,7 @@ PATH="$toolchain_bin:$PATH" \\
 normalize_release_lock "$build"
 version=$(target/release/codex --version)
 target/release/codex agents --help >/dev/null
+target/release/codex-code-mode-host --help >/dev/null
 [ "$version" = {shlex.quote(release.cli_version)} ] || {{ echo "Unexpected fork version: $version" >&2; exit 1; }}
 cli_hash=$(shasum -a 256 target/release/codex | awk '{{print $1}}')
 host_hash=$(shasum -a 256 target/release/codex-code-mode-host | awk '{{print $1}}')
@@ -688,6 +691,8 @@ if ($needsActivation) {{
     if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
     & $targetCli agents --help *> $null
     if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
+    & $targetHost --help *> $null
+    if ($LASTEXITCODE -ne 0) {{ throw 'Activated code-mode host is not executable' }}
   }} catch {{
     $activationError = $_.Exception.Message
     $rollbackErrors = [System.Collections.Generic.List[string]]::new()
@@ -704,18 +709,21 @@ if ($needsActivation) {{
   if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
   & $targetCli agents --help *> $null
   if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
+  & $targetHost --help *> $null
+  if ($LASTEXITCODE -ne 0) {{ throw 'Activated code-mode host is not executable' }}
 }}
 Write-Output "activated-version=$version"
 """
     return f"""set -eu
 sha() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
+file_mode() {{ stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }}
 git_clean_at() {{ path=$1; expected=$2; commit=$(git -C "$path" rev-parse HEAD) || return 1; status=$(git -C "$path" status --porcelain) || return 1; [ "$commit" = "$expected" ] && [ -z "$status" ]; }}
 receipt_value() {{ awk -v key="$1" 'index($0, key "=") == 1 {{ count++; value=substr($0, length(key) + 2) }} END {{ if (count != 1) exit 1; print value }}' "$2"; }}
 canonical={shlex.quote(host.source_root)}; build={shlex.quote(host.build_root)}; source_cli={shlex.quote(source_cli)}; source_host={shlex.quote(source_host)}; receipt={shlex.quote(receipt)}
 target_cli={shlex.quote(host.cli_binary)}; target_host={shlex.quote(host.code_mode_host_binary)}
 backup_cli={shlex.quote(backup_cli)}; backup_host={shlex.quote(backup_host)}
 server={shlex.quote(host.server_root)}
-activated=0; old_cli_hash=; old_host_hash=; restore_cli=; restore_host=; stage_cli=; stage_host=
+activated=0; repaired_modes=0; old_cli_mode=; old_host_mode=; old_cli_hash=; old_host_hash=; restore_cli=; restore_host=; stage_cli=; stage_host=
 rollback_pair() {{
   [ "$activated" -eq 1 ] || return 0
   restore_cli=$(mktemp "$target_cli.rollback.XXXXXX"); restore_host=$(mktemp "$target_host.rollback.XXXXXX")
@@ -745,6 +753,10 @@ finish_activation() {{
     echo "Activation rollback incomplete; recovery copies: $backup_cli, $backup_host" >&2
     status=1
   fi
+  if [ "$repaired_modes" -eq 1 ]; then
+    chmod "$old_cli_mode" "$target_cli" || status=1
+    chmod "$old_host_mode" "$target_host" || status=1
+  fi
   [ -z "$restore_cli" ] || rm -f "$restore_cli"
   [ -z "$restore_host" ] || rm -f "$restore_host"
   [ -z "$stage_cli" ] || rm -f "$stage_cli"
@@ -768,7 +780,13 @@ receipt_cli_hash=$(receipt_value cliSha256 "$receipt") || {{ echo 'Invalid build
 receipt_host_hash=$(receipt_value hostSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
 [ "$receipt_format" = v1 ] && [ "$receipt_commit" = {release.fork_commit} ] && [ "$receipt_version" = {shlex.quote(release.cli_version)} ] && [ "$receipt_cli_hash" = "$source_cli_hash" ] && [ "$receipt_host_hash" = "$source_host_hash" ] || {{ echo 'Build receipt does not match the reviewed binary pair' >&2; exit 1; }}
 [ ! -e "$backup_cli" ] && [ ! -e "$backup_host" ] || {{ [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}; }}
-if [ ! -x "$target_cli" ] || [ ! -x "$target_host" ] || [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
+target_cli_hash=$(sha "$target_cli"); target_host_hash=$(sha "$target_host")
+if [ "$target_cli_hash" = "$source_cli_hash" ] && [ "$target_host_hash" = "$source_host_hash" ] && {{ [ ! -x "$target_cli" ] || [ ! -x "$target_host" ]; }}; then
+  old_cli_mode=$(file_mode "$target_cli"); old_host_mode=$(file_mode "$target_host")
+  repaired_modes=1
+  chmod 0755 "$target_cli" "$target_host"
+fi
+if [ "$target_cli_hash" != "$source_cli_hash" ] || [ "$target_host_hash" != "$source_host_hash" ]; then
   if [ -e "$backup_cli" ] || [ -e "$backup_host" ]; then
     [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}
     cmp -s "$target_cli" "$backup_cli" && cmp -s "$target_host" "$backup_host" || {{ echo 'Release rollback pair does not match the active binaries' >&2; exit 1; }}
@@ -802,7 +820,12 @@ if ! "$target_cli" agents --help >/dev/null; then
   echo 'Activated fork does not support codex agents' >&2
   exit 1
 fi
+if ! "$target_host" --help >/dev/null; then
+  echo 'Activated code-mode host is not executable' >&2
+  exit 1
+fi
 activated=0
+repaired_modes=0
 trap - EXIT HUP INT TERM
 printf 'activated-version=%s\\n' "$version"
 """

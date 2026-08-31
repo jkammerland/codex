@@ -37,6 +37,12 @@ struct PendingUserResponse {
     content: Vec<ContentItem>,
 }
 
+#[derive(Clone)]
+struct PendingLegacyDelivery {
+    communication_id: codex_protocol::ResponseItemId,
+    records: Vec<usize>,
+}
+
 /// Compact plan keyed by parsed source-record index.
 pub(super) struct RollbackPlan {
     record_boundaries: Vec<Option<usize>>,
@@ -115,7 +121,7 @@ pub(super) struct RollbackPlanner {
     model_response_projection: RolloutModelResponseProjection,
     legacy_claim_shadow: Option<(codex_protocol::ResponseItemId, String)>,
     legacy_response_shadow: Option<(codex_protocol::ResponseItemId, String)>,
-    pending_legacy_shadow_records: HashMap<String, Vec<usize>>,
+    pending_legacy_shadow_records: HashMap<String, Vec<PendingLegacyDelivery>>,
     claim_records: HashMap<(codex_protocol::ResponseItemId, String), Vec<usize>>,
 }
 
@@ -144,10 +150,8 @@ impl RollbackPlanner {
     pub(super) fn observe(&mut self, line: &RolloutLine) -> ThreadStoreResult<()> {
         let index = self.record_boundaries.len();
         self.model_replay.observe(index, &line.item);
-        let response_is_model_visible = !self
-            .model_response_projection
-            .project(&line.item)
-            .is_empty();
+        let projected_responses = self.model_response_projection.project(&line.item);
+        let response_is_model_visible = !projected_responses.is_empty();
         let legacy_claim_shadow = self.legacy_claim_shadow.take();
         let legacy_response_shadow = self.legacy_response_shadow.take();
         let legacy_claim_shadow_turn = match (&line.item, legacy_claim_shadow) {
@@ -177,10 +181,21 @@ impl RollbackPlanner {
         } = &line.item
         {
             self.legacy_claim_shadow = Some((communication_id.clone(), turn_id.clone()));
-            self.pending_legacy_shadow_records
+            let pending = self
+                .pending_legacy_shadow_records
                 .entry(turn_id.clone())
-                .or_default()
-                .push(index);
+                .or_default();
+            if let Some(delivery) = pending
+                .iter_mut()
+                .find(|delivery| delivery.communication_id == *communication_id)
+            {
+                delivery.records.push(index);
+            } else {
+                pending.push(PendingLegacyDelivery {
+                    communication_id: communication_id.clone(),
+                    records: vec![index],
+                });
+            }
             self.claim_records
                 .entry((communication_id.clone(), fingerprint.clone()))
                 .or_default()
@@ -225,11 +240,13 @@ impl RollbackPlanner {
             RolloutItem::ResponseItem(response) => {
                 if !response_is_model_visible {
                     self.record_boundaries[index] = None;
-                    if let Some(turn_id) = legacy_response_shadow_turn {
-                        self.pending_legacy_shadow_records
-                            .entry(turn_id)
-                            .or_default()
-                            .push(index);
+                    if let Some(turn_id) = legacy_response_shadow_turn
+                        && let Some(delivery) = self
+                            .pending_legacy_shadow_records
+                            .get_mut(&turn_id)
+                            .and_then(|deliveries| deliveries.last_mut())
+                    {
+                        delivery.records.push(index);
                     }
                 } else if let Some(boundary) = paired_delivery_boundary {
                     self.record_boundaries[index] = Some(boundary);
@@ -257,13 +274,28 @@ impl RollbackPlanner {
                 self.active_turn_id = Some(event.turn_id.clone());
                 self.pending_turn_records.clear();
                 if response_is_model_visible {
-                    let boundary = self.start_boundary(index);
-                    if let Some(records) = self.pending_legacy_shadow_records.remove(&event.turn_id)
+                    let mut first_boundary = None;
+                    let mut pending = self
+                        .pending_legacy_shadow_records
+                        .remove(&event.turn_id)
+                        .unwrap_or_default();
+                    for response in projected_responses
+                        .iter()
+                        .filter(|response| rollback::counts_as_boundary(&response.item))
                     {
-                        for record in records {
-                            self.record_boundaries[record] = Some(boundary);
+                        let boundary = self.start_boundary(index);
+                        first_boundary.get_or_insert(boundary);
+                        if let Some(response_id) = response.id()
+                            && let Some(delivery) = pending
+                                .iter_mut()
+                                .find(|delivery| delivery.communication_id == *response_id)
+                        {
+                            for record in delivery.records.drain(..) {
+                                self.record_boundaries[record] = Some(boundary);
+                            }
                         }
                     }
+                    self.record_boundaries[index] = first_boundary;
                 } else {
                     self.pending_turn_records.push(index);
                 }
@@ -320,11 +352,13 @@ impl RollbackPlanner {
             }
             RolloutItem::DurableInterAgentCommunication { .. } => {
                 self.record_boundaries[index] = None;
-                if let Some((_, turn_id)) = legacy_claim_shadow_turn {
-                    self.pending_legacy_shadow_records
-                        .entry(turn_id)
-                        .or_default()
-                        .push(index);
+                if let Some((_, turn_id)) = legacy_claim_shadow_turn
+                    && let Some(delivery) = self
+                        .pending_legacy_shadow_records
+                        .get_mut(&turn_id)
+                        .and_then(|deliveries| deliveries.last_mut())
+                {
+                    delivery.records.push(index);
                 }
             }
             RolloutItem::TerminalAgentStatus { turn_id, .. } => {

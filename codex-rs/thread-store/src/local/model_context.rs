@@ -139,9 +139,7 @@ fn scan_model_context_from_lineage_blocking(
         ModelContextScanMode::Bounded
     };
     let mut scan = ModelContextScan::new(mode);
-    let mut remaining_record_budget =
-        matches!(mode, ModelContextScanMode::PreserveDurableAgentState)
-            .then_some(codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS);
+    let mut remaining_record_budget = codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS;
     for segment in lineage.segments().iter().rev() {
         let file = codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
         let scanner = match segment.end.map(|end| end.end_byte_offset) {
@@ -151,9 +149,7 @@ fn scan_model_context_from_lineage_blocking(
         let mut scanner = scanner
             .with_max_record_bytes(MAX_MODEL_CONTEXT_ROLLOUT_LINE_BYTES)
             .with_oversized_records_rejected();
-        if let Some(remaining_record_budget) = remaining_record_budget {
-            scanner = scanner.with_max_records(remaining_record_budget);
-        }
+        scanner = scanner.with_max_records(remaining_record_budget);
         let mut scan_complete = false;
         while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
             let ScanOutcome::Parsed(line) = outcome else {
@@ -183,9 +179,8 @@ fn scan_model_context_from_lineage_blocking(
                 }
             }
         }
-        if let Some(remaining) = remaining_record_budget.as_mut() {
-            *remaining = remaining.saturating_sub(scanner.physical_records_scanned());
-        }
+        remaining_record_budget =
+            remaining_record_budget.saturating_sub(scanner.physical_records_scanned());
         if scan_complete {
             break;
         }

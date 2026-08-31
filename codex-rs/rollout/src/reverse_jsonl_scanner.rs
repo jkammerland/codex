@@ -14,6 +14,8 @@ pub enum ScanOutcome<T> {
     /// The record was not valid JSON for the requested type.
     #[allow(dead_code)]
     Rejected(serde_json::Error),
+    /// The record exceeded the configured byte limit and was discarded without parsing.
+    Oversized,
 }
 
 /// Read-only scanner for newline-delimited JSON records, starting from the end.
@@ -109,9 +111,9 @@ where
                         if self.reject_oversized_records {
                             return Err(self.oversized_record_error());
                         }
-                        return Ok(None);
+                        return Ok(Some(ScanOutcome::Oversized));
                     }
-                    return self.finish_record(/*at_eof*/ true);
+                    return self.finish_record();
                 }
 
                 let read_size = usize::try_from(self.next_chunk_end.min(READ_CHUNK_SIZE as u64))
@@ -143,9 +145,9 @@ where
                     if self.reject_oversized_records {
                         return Err(self.oversized_record_error());
                     }
-                    continue;
+                    return Ok(Some(ScanOutcome::Oversized));
                 }
-                if let Some(outcome) = self.finish_record(/*at_eof*/ false)? {
+                if let Some(outcome) = self.finish_record()? {
                     return Ok(Some(outcome));
                 }
             } else {
@@ -191,12 +193,12 @@ where
         Ok(())
     }
 
-    fn finish_record<T>(&mut self, at_eof: bool) -> io::Result<Option<ScanOutcome<T>>>
+    fn finish_record<T>(&mut self) -> io::Result<Option<ScanOutcome<T>>>
     where
         T: DeserializeOwned,
     {
         self.record_reversed.reverse();
-        if (self.at_scan_start || at_eof) && self.record_reversed.is_empty() {
+        if self.at_scan_start && self.record_reversed.is_empty() {
             self.at_scan_start = false;
             return Ok(None);
         }

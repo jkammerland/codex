@@ -222,7 +222,7 @@ async fn multi_agent_v2_physical_record_limit_spans_the_entire_lineage() {
 }
 
 #[tokio::test]
-async fn non_v2_model_context_scan_does_not_apply_the_durable_record_limit() {
+async fn non_v2_model_context_scan_bounds_rejected_physical_records() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1011);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -238,16 +238,15 @@ async fn non_v2_model_context_scan_does_not_apply_the_durable_record_limit() {
     writer.flush().expect("flush malformed suffix");
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
 
-    let context = store
+    let error = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
             include_archived: false,
         })
         .await
-        .expect("ordinary paginated history should retain its existing bounded-scan behavior");
+        .expect_err("ordinary paginated history must also bound malformed physical records");
 
-    assert_eq!(context.items.len(), 1);
-    assert!(matches!(context.items[0], RolloutItem::SessionMeta(_)));
+    assert!(error.to_string().contains("record limit"));
 }
 
 #[tokio::test]
@@ -287,7 +286,6 @@ async fn multi_agent_v2_scan_compacts_consumed_mail_behind_a_checkpoint() {
                 turn_id: "mail-turn".to_string(),
                 compatibility_shadow: false,
             },
-            turn_started("mail-turn"),
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id: communication_id.clone(),
                 communication: Some(communication),
@@ -295,6 +293,7 @@ async fn multi_agent_v2_scan_compacts_consumed_mail_behind_a_checkpoint() {
                 fingerprint: "fingerprint".to_string(),
                 turn_id: "mail-turn".to_string(),
             },
+            turn_started("mail-turn"),
             turn_complete("mail-turn"),
             turn_started("turn-1"),
             user_message("newer turn"),

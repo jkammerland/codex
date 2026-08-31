@@ -118,6 +118,7 @@ pub async fn append_existing_session(
     }
 
     let Ok(_checkpoint_permit) = checkpoint_permits.acquire().await else {
+        let _ = thread_store.discard_thread(thread_id).await;
         return false;
     };
     let target_matches_source = match thread_store
@@ -137,6 +138,7 @@ pub async fn append_existing_session(
         Ok(_) | Err(_) => false,
     };
     if !target_matches_source {
+        let _ = thread_store.discard_thread(thread_id).await;
         return false;
     }
 
@@ -144,7 +146,7 @@ pub async fn append_existing_session(
     let source_path = source_path.to_path_buf();
     let expected_source_content_sha256 = expected_source_content_sha256.to_string();
     let source_content_sha256 = source_content_sha256.to_string();
-    matches!(
+    let checkpointed = matches!(
         tokio::task::spawn_blocking(move || {
             checkpoint_existing_session_import(
                 &codex_home,
@@ -156,7 +158,11 @@ pub async fn append_existing_session(
         })
         .await,
         Ok(Ok(true))
-    )
+    );
+    if !checkpointed {
+        let _ = thread_store.discard_thread(thread_id).await;
+    }
+    checkpointed
 }
 
 struct SourceModelItem {
@@ -231,11 +237,14 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem>> {
             append_start_index.get_or_insert(index);
         }
         let projected = model_response_projection.project(item);
-        for response_item in projected {
-            model_items.push(SourceModelItem {
-                response_item: response_item.item.clone(),
-                append_start_index: append_start_index.take().unwrap_or(index),
-            });
+        if !projected.is_empty() {
+            let projected_append_start_index = append_start_index.take().unwrap_or(index);
+            for response_item in projected {
+                model_items.push(SourceModelItem {
+                    response_item: response_item.item.clone(),
+                    append_start_index: projected_append_start_index,
+                });
+            }
         }
         match item {
             RolloutItem::SessionMeta(_)

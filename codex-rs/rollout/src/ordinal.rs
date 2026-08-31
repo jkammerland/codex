@@ -69,7 +69,7 @@ pub(crate) fn ordinal_state_for_rollout(
     let record = loop {
         match scanner.scan_next::<RolloutLine>()? {
             Some(ScanOutcome::Parsed(record)) => break record,
-            Some(ScanOutcome::Rejected(_)) => continue,
+            Some(ScanOutcome::Rejected(_) | ScanOutcome::Oversized) => continue,
             None => {
                 return Err(io::Error::other(format!(
                     "rollout at {} contains no valid records",

@@ -69,7 +69,7 @@ not-json
 }
 
 #[test]
-fn skips_records_over_the_configured_limit() -> std::io::Result<()> {
+fn reports_and_skips_records_over_the_configured_limit() -> std::io::Result<()> {
     let oversized = record(&"x".repeat(128));
     let input = format!(
         "{}\n{}\n{}\n",
@@ -80,7 +80,14 @@ fn skips_records_over_the_configured_limit() -> std::io::Result<()> {
     let mut scanner = ReverseJsonlScanner::new(Cursor::new(input.into_bytes()))?
         .with_max_record_bytes(/*max_record_bytes*/ 32);
 
-    assert_records(&mut scanner, &["third", "first"])
+    assert_eq!(parsed(scanner.scan_next::<TestRecord>()?), record("third"));
+    assert!(matches!(
+        scanner.scan_next::<TestRecord>()?,
+        Some(ScanOutcome::Oversized)
+    ));
+    assert_eq!(parsed(scanner.scan_next::<TestRecord>()?), record("first"));
+    assert!(scanner.scan_next::<TestRecord>()?.is_none());
+    Ok(())
 }
 
 #[test]
@@ -166,6 +173,21 @@ fn physical_record_limit_counts_blank_and_malformed_records() -> std::io::Result
         .expect_err("the fourth physical record must exceed the limit");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("3 record limit"));
+    Ok(())
+}
+
+#[test]
+fn physical_record_limit_counts_a_blank_first_record() -> std::io::Result<()> {
+    let input = b"\n{\"value\":\"last\"}\n";
+    let mut scanner =
+        ReverseJsonlScanner::new(Cursor::new(input))?.with_max_records(/*max_records*/ 1);
+
+    assert_eq!(parsed(scanner.scan_next::<TestRecord>()?), record("last"));
+    let error = scanner
+        .scan_next::<TestRecord>()
+        .expect_err("the blank first record must exceed the physical record limit");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("1 record limit"));
     Ok(())
 }
 

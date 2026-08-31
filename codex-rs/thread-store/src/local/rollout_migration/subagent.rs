@@ -36,14 +36,13 @@ pub(super) async fn select_bounded_context(
         let mut scanner = ReverseJsonlScanner::new(file)
             .map_err(migration_error)?
             .with_max_record_bytes(super::MAX_ROLLOUT_LINE_BYTES)
-            .with_oversized_records_rejected()
             .with_max_records(codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS);
         let mut scan = ModelContextScan::new(ModelContextScanMode::PreserveDurableAgentState);
 
         while let Some(outcome) = scanner.scan_next::<Value>().map_err(migration_error)? {
             let value = match outcome {
                 ScanOutcome::Parsed(value) => value,
-                ScanOutcome::Rejected(_) => return Ok(None),
+                ScanOutcome::Rejected(_) | ScanOutcome::Oversized => return Ok(None),
             };
             let line = match line_parser::parse_legacy_rollout_value(value) {
                 Ok(Some(line)) => line,

@@ -78,7 +78,6 @@ pub struct ModelContextScan {
     older_durable_items_newest_first: Vec<RolloutItem>,
     older_candidate_response: Option<RolloutItem>,
     older_latest_turn_started: Option<RolloutItem>,
-    older_claim_turn_ids_awaiting_start: HashSet<String>,
     retained_started_turn_ids: HashSet<String>,
     retained_durable_state_bytes: usize,
     scanned_items: usize,
@@ -133,37 +132,8 @@ impl ModelContextScan {
             && self.has_context_cutoff()
         {
             self.bounded_suffix_len = Some(self.items_newest_first.len());
-            self.seed_older_turn_start_retention_from_bounded_suffix();
         }
         progress
-    }
-
-    fn seed_older_turn_start_retention_from_bounded_suffix(&mut self) {
-        let suffix_started_turn_ids = self
-            .items_newest_first
-            .iter()
-            .filter_map(|item| match item {
-                RolloutItem::EventMsg(EventMsg::TurnStarted(started)) => {
-                    Some(started.turn_id.clone())
-                }
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        self.older_claim_turn_ids_awaiting_start
-            .extend(
-                self.items_newest_first
-                    .iter()
-                    .filter_map(|item| match item {
-                        RolloutItem::DurableInterAgentCommunicationClaimed { turn_id, .. }
-                            if !suffix_started_turn_ids.contains(turn_id) =>
-                        {
-                            Some(turn_id.clone())
-                        }
-                        _ => None,
-                    }),
-            );
-        self.retained_started_turn_ids
-            .extend(suffix_started_turn_ids);
     }
 
     /// Returns the collected items in chronological order with canonical head metadata.
@@ -198,38 +168,19 @@ impl ModelContextScan {
 
     fn observe_older_durable_item(&mut self, item: RolloutItem) {
         match item {
-            RolloutItem::EventMsg(EventMsg::TurnStarted(ref started)) => {
-                if self
-                    .older_claim_turn_ids_awaiting_start
-                    .remove(&started.turn_id)
-                {
-                    if self
-                        .retained_started_turn_ids
-                        .insert(started.turn_id.clone())
-                    {
-                        self.retain_older_durable_item(item);
-                    }
-                    self.older_latest_turn_started = None;
-                } else {
-                    self.older_latest_turn_started = Some(item);
-                }
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
+                self.older_latest_turn_started = Some(item);
                 self.older_candidate_response = None;
             }
             RolloutItem::DurableInterAgentCommunicationClaimed { ref turn_id, .. } => {
-                let mut retained_start = false;
                 if let Some(RolloutItem::EventMsg(EventMsg::TurnStarted(started))) =
                     self.older_latest_turn_started.as_ref()
                     && started.turn_id == *turn_id
                     && self.retained_started_turn_ids.insert(turn_id.clone())
                 {
-                    retained_start = true;
                     self.retain_older_durable_item(RolloutItem::EventMsg(EventMsg::TurnStarted(
                         started.clone(),
                     )));
-                }
-                if !retained_start && !self.retained_started_turn_ids.contains(turn_id) {
-                    self.older_claim_turn_ids_awaiting_start
-                        .insert(turn_id.clone());
                 }
                 self.retain_older_durable_item(item);
                 self.older_candidate_response = None;
@@ -436,16 +387,28 @@ fn compact_durable_agent_state(
         .collect::<HashSet<_>>();
     let mut claims = Vec::new();
     let mut claim_indices = HashMap::new();
-    let mut started_turn_ids = HashSet::new();
-    for (from_older_history, item) in older_items
+    let chronological_items = older_items
         .iter()
         .map(|item| (true, item))
         .chain(bounded_suffix.iter().map(|item| (false, item)))
-    {
+        .collect::<Vec<_>>();
+    let mut future_turn_starts = HashSet::new();
+    let mut claims_with_later_turn_start = HashSet::new();
+    for (index, (_, item)) in chronological_items.iter().enumerate().rev() {
         match item {
             RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                started_turn_ids.insert(event.turn_id.clone());
+                future_turn_starts.insert(event.turn_id.as_str());
             }
+            RolloutItem::DurableInterAgentCommunicationClaimed { turn_id, .. }
+                if future_turn_starts.contains(turn_id.as_str()) =>
+            {
+                claims_with_later_turn_start.insert(index);
+            }
+            _ => {}
+        }
+    }
+    for (position, (from_older_history, item)) in chronological_items.into_iter().enumerate() {
+        match item {
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
                 communication,
@@ -461,11 +424,22 @@ fn compact_durable_agent_state(
                     turn_id: turn_id.clone(),
                     from_older_history,
                     delivered: delivered_response.is_some(),
-                    turn_started: started_turn_ids.contains(turn_id),
+                    turn_started: claims_with_later_turn_start.contains(&position),
                 });
                 claim_indices.insert((communication_id.clone(), fingerprint.clone()), index);
             }
-            _ => {}
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TerminalAgentStatus { .. }
+            | RolloutItem::DurableInterAgentCommunication { .. }
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::EventMsg(_)
+            | RolloutItem::RealtimeItem(_) => {}
         }
     }
 

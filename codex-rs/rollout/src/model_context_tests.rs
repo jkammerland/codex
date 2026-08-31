@@ -190,7 +190,7 @@ fn durable_scan_fails_closed_when_retained_state_exceeds_its_byte_bound() {
 }
 
 #[test]
-fn durable_scan_retains_a_turn_start_older_than_its_legacy_claim() {
+fn durable_scan_does_not_apply_a_prior_turn_start_to_a_later_legacy_claim() {
     let id = ResponseItemId::with_suffix("msg", "started-before-claim");
     let mut scan = ModelContextScan::new(ModelContextScanMode::PreserveDurableAgentState);
     scan.bounded_suffix_len = Some(0);
@@ -207,22 +207,22 @@ fn durable_scan_retains_a_turn_start_older_than_its_legacy_claim() {
     let items = finish(scan);
     assert!(items.iter().any(|item| matches!(
         item,
-        RolloutItem::InterAgentCommunicationMetadata {
-            consumed_mail_id: Some(consumed_id),
-            ..
-        } if consumed_id == &id
-    )));
-    assert!(!items.iter().any(|item| matches!(
-        item,
         RolloutItem::DurableInterAgentCommunicationClaimed {
             communication_id,
             ..
         } if communication_id == &id
     )));
+    assert!(!items.iter().any(|item| matches!(
+        item,
+        RolloutItem::InterAgentCommunicationMetadata {
+            consumed_mail_id: Some(consumed_id),
+            ..
+        } if consumed_id == &id
+    )));
 }
 
 #[test]
-fn durable_scan_does_not_apply_a_newer_turn_start_to_an_older_claim() {
+fn durable_scan_applies_a_later_turn_start_to_an_earlier_claim() {
     let id = ResponseItemId::with_suffix("msg", "future-start");
     let mut scan = ModelContextScan::new(ModelContextScanMode::PreserveDurableAgentState);
     scan.bounded_suffix_len = Some(0);
@@ -239,22 +239,22 @@ fn durable_scan_does_not_apply_a_newer_turn_start_to_an_older_claim() {
     let items = finish(scan);
     assert!(items.iter().any(|item| matches!(
         item,
-        RolloutItem::DurableInterAgentCommunicationClaimed {
-            communication_id,
-            ..
-        } if communication_id == &id
-    )));
-    assert!(!items.iter().any(|item| matches!(
-        item,
         RolloutItem::InterAgentCommunicationMetadata {
             consumed_mail_id: Some(consumed_id),
             ..
         } if consumed_id == &id
     )));
+    assert!(!items.iter().any(|item| matches!(
+        item,
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            ..
+        } if communication_id == &id
+    )));
 }
 
 #[test]
-fn production_cutoff_retains_start_older_than_claim_in_bounded_suffix() {
+fn production_cutoff_does_not_apply_a_prior_start_to_a_later_claim() {
     let id = ResponseItemId::with_suffix("msg", "cutoff-split");
     let mut scan = ModelContextScan::new(ModelContextScanMode::PreserveDurableAgentState);
 
@@ -282,7 +282,7 @@ fn production_cutoff_retains_start_older_than_claim_in_bounded_suffix() {
     );
 
     let items = finish(scan);
-    assert!(items.iter().any(|item| matches!(
+    assert!(!items.iter().any(|item| matches!(
         item,
         RolloutItem::EventMsg(EventMsg::TurnStarted(started))
             if started.turn_id == "legacy-turn"

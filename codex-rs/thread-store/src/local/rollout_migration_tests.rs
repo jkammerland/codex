@@ -1094,6 +1094,86 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
 }
 
 #[tokio::test]
+async fn migration_rolls_back_only_the_last_mail_in_a_legacy_claim_batch() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let deliveries = ["keep first delivery", "remove second delivery"].map(|content| {
+        let mut delivery = InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::root().join("worker").expect("worker path"),
+            Vec::new(),
+            content.to_string(),
+            /*trigger_turn*/ true,
+        );
+        delivery.id = Some(codex_protocol::ResponseItemId::with_suffix("msg", content));
+        delivery
+    });
+    let mut items = Vec::new();
+    for (index, delivery) in deliveries.iter().enumerate() {
+        items.extend([
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: delivery.id.clone().expect("delivery id"),
+                communication: Some(delivery.clone()),
+                delivered_response: None,
+                fingerprint: format!("sha256:delivery-{index}"),
+                turn_id: "delivery-turn".to_string(),
+            },
+            RolloutItem::DurableInterAgentCommunication {
+                communication: delivery.clone(),
+                start_options: Default::default(),
+                fingerprint: format!("sha256:delivery-{index}"),
+                turn_id: "delivery-turn".to_string(),
+                compatibility_shadow: false,
+            },
+            rollout_response_item(delivery.to_model_input_item()),
+        ]);
+    }
+    items.extend([
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "delivery-turn".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        })),
+        RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+            num_turns: 1,
+        })),
+    ]);
+    let path = write_rollout(home.path(), thread_id, SessionSource::Cli, items);
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate partially rolled-back mail batch");
+
+    let migrated = read_rollout(&path);
+    assert!(migrated.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::DurableInterAgentCommunication { communication, .. }
+            if communication.id == deliveries[0].id
+    )));
+    assert!(!migrated.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::DurableInterAgentCommunication { communication, .. }
+            if communication.id == deliveries[1].id
+    )));
+    assert!(migrated.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::EventMsg(EventMsg::TurnStarted(event))
+            if event.turn_id == "delivery-turn"
+    )));
+    assert!(migrated.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::InterAgentCommunicationMetadata {
+            consumed_mail_id: Some(communication_id),
+            ..
+        } if Some(communication_id) == deliveries[1].id.as_ref()
+    )));
+}
+
+#[tokio::test]
 async fn migration_rolls_back_current_durable_delivery_without_replaying_pending_payload() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
@@ -1687,6 +1767,59 @@ async fn malformed_subagent_tail_falls_back_to_full_tolerant_replay() {
             .await
             .turns
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn oversized_subagent_tail_falls_back_to_full_tolerant_replay() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::SubAgent(SubAgentSource::Other("test".to_string())),
+        vec![
+            RolloutItem::Compacted(CompactedItem {
+                message: "fallback checkpoint".to_string(),
+                replacement_history: Some(Vec::new()),
+                mcp_resource_origins: None,
+                window_number: Some(1),
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+            }),
+            user_message("child question"),
+            agent_message("child answer"),
+        ],
+    );
+    let oversized_output = "x".repeat(super::MAX_ROLLOUT_LINE_BYTES);
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open legacy subagent rollout"),
+        "{{\"timestamp\":\"{TIMESTAMP}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":\"{oversized_output}\"}}}}"
+    )
+    .expect("append oversized record");
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate oversized legacy subagent");
+
+    let lines = read_rollout(&path);
+    assert!(lines.iter().any(|line| {
+        matches!(
+            &line.item,
+            RolloutItem::Compacted(compacted) if compacted.message == "fallback checkpoint"
+        )
+    }));
+    assert!(
+        fs::metadata(&path)
+            .expect("read migrated rollout metadata")
+            .len()
+            < super::MAX_ROLLOUT_LINE_BYTES as u64
     );
 }
 

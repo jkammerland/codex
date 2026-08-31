@@ -11037,6 +11037,39 @@ async fn turn_scoped_injection_rejects_a_different_active_turn() {
         vec![TurnInput::ResponseItem(item.into())]
     );
 
+    let developer_message = |text: &str| ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let stale_context = developer_message("stale turn context");
+    let current_context = developer_message("current turn context");
+    assert_eq!(
+        session
+            .record_conversation_items_if_running_for_turn(
+                &originating_turn,
+                vec![stale_context.clone()],
+            )
+            .await,
+        Err(vec![stale_context])
+    );
+    assert_eq!(
+        session
+            .record_conversation_items_if_running_for_turn(&current_turn, vec![current_context],)
+            .await,
+        Ok(())
+    );
+    assert_eq!(
+        developer_input_texts(&raw_history_items(
+            &session.state.lock().await.clone_history()
+        )),
+        vec!["current turn context"]
+    );
+
     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 

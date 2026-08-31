@@ -283,7 +283,7 @@ impl CodeModeService {
     }
 }
 
-fn handle_runtime_response(
+async fn handle_runtime_response(
     exec: &ExecContext,
     model_info: &codex_protocol::openai_models::ModelInfo,
     response: RuntimeResponse,
@@ -297,7 +297,7 @@ fn handle_runtime_response(
         .code_mode_host_duration()
         .filter(|_| experimental_show_cell_overhead);
 
-    let live_exec_sessions = match &response {
+    let observed_live_exec_sessions = match &response {
         RuntimeResponse::Yielded { .. } => Vec::new(),
         RuntimeResponse::Terminated { cell_id, .. } | RuntimeResponse::Result { cell_id, .. } => {
             exec.session
@@ -306,6 +306,12 @@ fn handle_runtime_response(
                 .live_exec_sessions_for_cell(cell_id)
         }
     };
+    let live_exec_sessions = exec
+        .session
+        .services
+        .unified_exec_manager
+        .retain_live_process_ids(observed_live_exec_sessions)
+        .await;
 
     let (content_items, error_text) = match response {
         RuntimeResponse::Yielded { content_items, .. }

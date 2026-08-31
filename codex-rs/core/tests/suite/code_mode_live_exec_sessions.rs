@@ -6,6 +6,7 @@ use core_test_support::responses;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_target_windows;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
@@ -135,6 +136,7 @@ text(JSON.stringify(result));
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_surfaces_live_session_when_result_output_is_emitted() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX shell command fixture");
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -165,6 +167,7 @@ async fn code_mode_surfaces_live_session_when_result_output_is_emitted() -> Resu
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_preserves_live_session_in_complete_result() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX shell command fixture");
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -194,6 +197,7 @@ async fn code_mode_preserves_live_session_in_complete_result() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_nested_command_does_not_report_live_session() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX shell command fixture");
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -216,6 +220,7 @@ async fn completed_nested_command_does_not_report_live_session() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumed_session_is_not_reported_as_live() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX shell command fixture");
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -236,6 +241,28 @@ text(JSON.stringify(result));
         output.contains("completed"),
         "unexpected code cell output: {output}"
     );
+    assert_eq!(recoverable_session_ids(&output), Vec::<i32>::new());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_that_finishes_after_projection_is_not_reported_as_live() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX sleep command fixture");
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let test = start_code_mode_test(&server).await?;
+    let source = r#"
+const projected = await tools.exec_command({
+  cmd: "sleep 0.4; printf completed",
+  yield_time_ms: 250,
+});
+await tools.exec_command({ cmd: "sleep 0.5", yield_time_ms: 1_000 });
+text(projected.output);
+"#;
+    let completion = run_code_cell(&server, &test, 1, source).await?;
+    let output = code_cell_output(&completion.single_request(), "call-live-session-1");
+
     assert_eq!(recoverable_session_ids(&output), Vec::<i32>::new());
     Ok(())
 }

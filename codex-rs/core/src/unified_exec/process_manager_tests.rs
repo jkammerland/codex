@@ -362,7 +362,7 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
     let produce = async {
         for chunk in chunks {
             output_buffer.lock().await.push_chunk(chunk);
-            output_notify.notify_one();
+            output_notify.notify_waiters();
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
                     if output_buffer.lock().await.pending.retained_bytes() == 0 {

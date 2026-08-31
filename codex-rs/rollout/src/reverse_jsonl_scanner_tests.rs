@@ -151,6 +151,25 @@ fn skips_blank_lines_with_or_without_termination() -> std::io::Result<()> {
 }
 
 #[test]
+fn physical_record_limit_counts_blank_and_malformed_records() -> std::io::Result<()> {
+    let input = b"{\"value\":\"first\"}\nnot-json\n\n{\"value\":\"last\"}\n";
+    let mut scanner =
+        ReverseJsonlScanner::new(Cursor::new(input))?.with_max_records(/*max_records*/ 3);
+
+    assert_eq!(parsed(scanner.scan_next::<TestRecord>()?), record("last"));
+    let Some(ScanOutcome::Rejected(_)) = scanner.scan_next::<TestRecord>()? else {
+        panic!("expected rejected record");
+    };
+    assert_eq!(scanner.physical_records_scanned(), 3);
+    let error = scanner
+        .scan_next::<TestRecord>()
+        .expect_err("the fourth physical record must exceed the limit");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("3 record limit"));
+    Ok(())
+}
+
+#[test]
 fn scans_across_read_chunk_boundaries() -> std::io::Result<()> {
     let empty_record_len = serde_json::to_string(&record(""))?.len();
     for distance_from_eof in [

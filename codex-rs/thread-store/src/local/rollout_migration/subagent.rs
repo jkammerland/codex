@@ -35,16 +35,20 @@ pub(super) async fn select_bounded_context(
         let file = File::open(rollout_path).map_err(migration_error)?;
         let mut scanner = ReverseJsonlScanner::new(file)
             .map_err(migration_error)?
-            .with_max_record_bytes(super::MAX_ROLLOUT_LINE_BYTES);
+            .with_max_record_bytes(super::MAX_ROLLOUT_LINE_BYTES)
+            .with_oversized_records_rejected()
+            .with_max_records(codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS);
         let mut scan = ModelContextScan::new(ModelContextScanMode::PreserveDurableAgentState);
 
         while let Some(outcome) = scanner.scan_next::<Value>().map_err(migration_error)? {
             let value = match outcome {
                 ScanOutcome::Parsed(value) => value,
-                ScanOutcome::Rejected(_) => continue,
+                ScanOutcome::Rejected(_) => return Ok(None),
             };
-            let Ok(Some(line)) = line_parser::parse_legacy_rollout_value(value) else {
-                continue;
+            let line = match line_parser::parse_legacy_rollout_value(value) {
+                Ok(Some(line)) => line,
+                Ok(None) => continue,
+                Err(_) => return Ok(None),
             };
             match scan.push(line.item) {
                 ModelContextScanProgress::Continue => {}

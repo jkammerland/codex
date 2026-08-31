@@ -35,6 +35,8 @@ use uuid::Uuid;
 
 use super::*;
 use crate::ThreadStore;
+use crate::local::rollout_lineage::RolloutLineage;
+use crate::local::rollout_lineage::RolloutLineageSegment;
 use crate::local::test_support::test_config;
 use crate::local::test_support::write_session_file_with_history_mode;
 
@@ -143,20 +145,21 @@ async fn multi_agent_v2_scan_preserves_durable_mail_behind_a_checkpoint() {
 }
 
 #[tokio::test]
-async fn model_context_scan_bounds_rejected_physical_records() {
+async fn multi_agent_v2_model_context_scan_bounds_rejected_physical_records() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1010);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
     let path = write_paginated_rollout(home.path(), "2025-01-03T13-00-09", uuid, []);
     let file = OpenOptions::new()
         .append(true)
-        .open(path)
+        .open(&path)
         .expect("open rollout for malformed suffix");
     let mut writer = BufWriter::new(file);
     for _ in 0..=codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS {
         writeln!(writer, "not-json").expect("append rejected rollout record");
     }
     writer.flush().expect("flush malformed suffix");
+    set_multi_agent_version(path.as_path(), MultiAgentVersion::V2);
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
 
     let error = store
@@ -167,7 +170,84 @@ async fn model_context_scan_bounds_rejected_physical_records() {
         .await
         .expect_err("rejected physical records must not permit an unbounded reverse scan");
 
-    assert!(error.to_string().contains("physical record limit"));
+    assert!(error.to_string().contains("record limit"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_physical_record_limit_spans_the_entire_lineage() {
+    let home = TempDir::new().expect("temp dir");
+    let parent_uuid = Uuid::from_u128(/*v*/ 1012);
+    let child_uuid = Uuid::from_u128(/*v*/ 1013);
+    let parent_id = ThreadId::from_string(&parent_uuid.to_string()).expect("parent id");
+    let child_id = ThreadId::from_string(&child_uuid.to_string()).expect("child id");
+    let parent_path = write_paginated_rollout(home.path(), "2025-01-03T13-00-11", parent_uuid, []);
+    let child_path = write_paginated_rollout(home.path(), "2025-01-03T13-00-12", child_uuid, []);
+    let records_per_segment = codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS / 2;
+    for path in [&parent_path, &child_path] {
+        let file = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open rollout for malformed suffix");
+        let mut writer = BufWriter::new(file);
+        for _ in 0..records_per_segment {
+            writeln!(writer, "not-json").expect("append rejected rollout record");
+        }
+        writer.flush().expect("flush malformed suffix");
+    }
+    set_multi_agent_version(child_path.as_path(), MultiAgentVersion::V2);
+    let session_meta = codex_rollout::read_session_meta_line(child_path.as_path())
+        .await
+        .expect("read child session metadata");
+    let lineage = RolloutLineage {
+        segments: vec![
+            RolloutLineageSegment {
+                rollout_id: parent_id,
+                rollout_path: parent_path,
+                start_ordinal: 0,
+                end: None,
+            },
+            RolloutLineageSegment {
+                rollout_id: child_id,
+                rollout_path: child_path,
+                start_ordinal: 0,
+                end: None,
+            },
+        ],
+    };
+
+    let error = scan_model_context_from_lineage_blocking(&lineage, session_meta)
+        .expect_err("the physical record budget must not reset at lineage boundaries");
+
+    assert!(error.to_string().contains("record limit"));
+}
+
+#[tokio::test]
+async fn non_v2_model_context_scan_does_not_apply_the_durable_record_limit() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1011);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_paginated_rollout(home.path(), "2025-01-03T13-00-10", uuid, []);
+    let file = OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open rollout for malformed suffix");
+    let mut writer = BufWriter::new(file);
+    for _ in 0..=codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS {
+        writeln!(writer, "not-json").expect("append rejected rollout record");
+    }
+    writer.flush().expect("flush malformed suffix");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("ordinary paginated history should retain its existing bounded-scan behavior");
+
+    assert_eq!(context.items.len(), 1);
+    assert!(matches!(context.items[0], RolloutItem::SessionMeta(_)));
 }
 
 #[tokio::test]

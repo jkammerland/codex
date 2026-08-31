@@ -26,6 +26,9 @@ pub struct ReverseJsonlScanner<R> {
     max_record_bytes: Option<usize>,
     discarding_oversized_record: bool,
     reject_oversized_records: bool,
+    max_records: Option<usize>,
+    records_scanned: usize,
+    at_scan_start: bool,
 }
 
 impl<R> ReverseJsonlScanner<R>
@@ -58,6 +61,9 @@ where
             max_record_bytes: None,
             discarding_oversized_record: false,
             reject_oversized_records: false,
+            max_records: None,
+            records_scanned: 0,
+            at_scan_start: true,
         })
     }
 
@@ -73,6 +79,19 @@ where
         self
     }
 
+    /// Fails closed after scanning the configured number of physical JSONL records.
+    ///
+    /// Blank, malformed, and oversized records count toward this limit.
+    pub fn with_max_records(mut self, max_records: usize) -> Self {
+        self.max_records = Some(max_records);
+        self
+    }
+
+    /// Returns the number of physical JSONL records inspected by this scanner.
+    pub fn physical_records_scanned(&self) -> usize {
+        self.records_scanned
+    }
+
     /// Scans the next nonblank record.
     ///
     /// I/O failures are returned as [`Err`]. Invalid JSON records are returned as
@@ -86,12 +105,13 @@ where
                 if self.next_chunk_end == 0 {
                     if self.discarding_oversized_record {
                         self.discarding_oversized_record = false;
+                        self.note_physical_record()?;
                         if self.reject_oversized_records {
                             return Err(self.oversized_record_error());
                         }
                         return Ok(None);
                     }
-                    return Ok(self.finish_record());
+                    return self.finish_record(/*at_eof*/ true);
                 }
 
                 let read_size = usize::try_from(self.next_chunk_end.min(READ_CHUNK_SIZE as u64))
@@ -118,12 +138,14 @@ where
                 self.chunk_position = newline_position;
                 if self.discarding_oversized_record {
                     self.discarding_oversized_record = false;
+                    self.at_scan_start = false;
+                    self.note_physical_record()?;
                     if self.reject_oversized_records {
                         return Err(self.oversized_record_error());
                     }
                     continue;
                 }
-                if let Some(outcome) = self.finish_record() {
+                if let Some(outcome) = self.finish_record(/*at_eof*/ false)? {
                     return Ok(Some(outcome));
                 }
             } else {
@@ -152,11 +174,34 @@ where
         )
     }
 
-    fn finish_record<T>(&mut self) -> Option<ScanOutcome<T>>
+    fn note_physical_record(&mut self) -> io::Result<()> {
+        self.records_scanned = self.records_scanned.saturating_add(1);
+        if self
+            .max_records
+            .is_some_and(|max_records| self.records_scanned > max_records)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "reverse JSONL scan exceeds the configured {} record limit",
+                    self.max_records.unwrap_or_default()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish_record<T>(&mut self, at_eof: bool) -> io::Result<Option<ScanOutcome<T>>>
     where
         T: DeserializeOwned,
     {
         self.record_reversed.reverse();
+        if (self.at_scan_start || at_eof) && self.record_reversed.is_empty() {
+            self.at_scan_start = false;
+            return Ok(None);
+        }
+        self.at_scan_start = false;
+        self.note_physical_record()?;
         let outcome = if self.record_reversed.iter().all(u8::is_ascii_whitespace) {
             None
         } else {
@@ -166,7 +211,7 @@ where
             })
         };
         self.record_reversed.clear();
-        outcome
+        Ok(outcome)
     }
 }
 

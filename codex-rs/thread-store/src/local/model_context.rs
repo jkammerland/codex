@@ -139,8 +139,10 @@ fn scan_model_context_from_lineage_blocking(
         ModelContextScanMode::Bounded
     };
     let mut scan = ModelContextScan::new(mode);
-    let mut inspected_records = 0usize;
-    'segments: for segment in lineage.segments().iter().rev() {
+    let mut remaining_record_budget =
+        matches!(mode, ModelContextScanMode::PreserveDurableAgentState)
+            .then_some(codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS);
+    for segment in lineage.segments().iter().rev() {
         let file = codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
         let scanner = match segment.end.map(|end| end.end_byte_offset) {
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
@@ -149,14 +151,11 @@ fn scan_model_context_from_lineage_blocking(
         let mut scanner = scanner
             .with_max_record_bytes(MAX_MODEL_CONTEXT_ROLLOUT_LINE_BYTES)
             .with_oversized_records_rejected();
+        if let Some(remaining_record_budget) = remaining_record_budget {
+            scanner = scanner.with_max_records(remaining_record_budget);
+        }
+        let mut scan_complete = false;
         while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
-            inspected_records = inspected_records.saturating_add(1);
-            if inspected_records > codex_rollout::MAX_PRESERVED_DURABLE_SCAN_ITEMS {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "model-context scan exceeded its physical record limit",
-                ));
-            }
             let ScanOutcome::Parsed(line) = outcome else {
                 continue;
             };
@@ -167,7 +166,10 @@ fn scan_model_context_from_lineage_blocking(
             }
             match scan.push(line.item) {
                 ModelContextScanProgress::Continue => {}
-                ModelContextScanProgress::Complete => break 'segments,
+                ModelContextScanProgress::Complete => {
+                    scan_complete = true;
+                    break;
+                }
                 ModelContextScanProgress::LimitExceeded => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -180,6 +182,12 @@ fn scan_model_context_from_lineage_blocking(
                     ));
                 }
             }
+        }
+        if let Some(remaining) = remaining_record_budget.as_mut() {
+            *remaining = remaining.saturating_sub(scanner.physical_records_scanned());
+        }
+        if scan_complete {
+            break;
         }
     }
 

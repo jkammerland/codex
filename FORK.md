@@ -29,8 +29,9 @@ not prompt for an npm update that would overwrite the fork.
 7. Unified exec provides a no-timeout `wait_process` that wakes on completion,
    queued input, or TTY output while retaining explicit bounded polling.
 8. Completed unified-exec waits use a bounded post-exit output grace period, so
-   a descendant-held pipe cannot orphan the wait while immediately available
-   final output is still retained.
+   a descendant-held pipe cannot orphan the wait. The output reader is released
+   after that grace period while immediately available and slightly late final
+   output is still retained.
 9. Code mode surfaces recoverable metadata for live unified-exec sessions even
    when JavaScript emits only a projection of the nested tool result.
 10. Multi-agent v2 mail is persisted before delivery, preserves FIFO ordering,
@@ -48,16 +49,23 @@ not prompt for an npm update that would overwrite the fork.
 16. User and fleet installers verify the selected checkout, active target,
     fork identity, and `codex agents` support before reporting activation.
 17. Durable mail admission is pending-only. The exact bounded and stamped model
-    item is committed atomically at its delivery claim, interrupted turns requeue
-    uncommitted reservations in FIFO order, an uncertain persistence result is
-    quarantined without replay, and resume reconstructs the item at that claim
-    rather than at admission. Preexisting mail from `.mcp.13` remains recoverable
-    without applying current-format truncation, with a hard 10K-token item cap.
+    item is committed atomically at its delivery claim. Once persistence starts,
+    a cancellation shield completes the claim and state transition before a new
+    turn can read history. Interrupted turns requeue uncommitted reservations in
+    FIFO order, an uncertain persistence result is quarantined without replay,
+    and resume reconstructs the item at that claim rather than at admission.
+    Preexisting mail from `.mcp.13` remains recoverable without applying
+    current-format truncation, with a hard 10K-token item cap.
 18. Durable-state resume scans have explicit logical-state, physical-record, and
-    record-byte limits; claims preserve FIFO ordering and only an earlier matching
-    turn start can make a legacy claim model-visible. MCP event streams stop
-    concurrently within one shared timeout window, and a late interrupted event
-    cannot erase an already persisted terminal failure.
+    record-byte limits across the complete rollout lineage. Claims preserve
+    global FIFO order. A legacy `.mcp.13` claim becomes model-visible only when a
+    later matching turn start proves the historical claim-before-turn sequence;
+    an earlier turn start cannot complete a later claim. Compatibility shadows
+    are suppressed and duplicate communication IDs are projected once. MCP event
+    streams stop concurrently within one shared timeout window, and a late
+    interrupted event cannot erase an already persisted terminal failure.
+19. macOS fleet activation fails closed when its canonical source is dirty or
+    binary-pair, staged-binary, or rollback-pair verification fails.
 
 The terminal-status marker is intentionally model-invisible. Current builds can
 recover both the dedicated marker and the overloaded `.mcp.11` metadata form.
@@ -114,6 +122,29 @@ The focused `codex-core` MCP tests should also pass after transport changes:
 ```bash
 just test -p codex-core --lib mcp
 ```
+
+For the event-liveness hardening in this release, the focused and crate-wide
+validation completed as follows before the final lint and formatting pass:
+
+- `codex-history`: 21 passed.
+- `codex-rollout`: 135 passed; one preexisting compressed-rollout search test
+  could not create its fixture because of local filesystem permissions. All 11
+  scanner tests passed.
+- `codex-thread-store`: 244 passed.
+- `codex-external-agent-migration`: 169 passed.
+- `codex-app-server-protocol`: 300 passed.
+- `codex-memories-write`: 44 passed.
+- `codex-core`: 3,981 passed, 11 failed, and 9 skipped. Every new durable-mail,
+  unbounded-MCP, and unified-exec regression passed. The failures reproduce as
+  unrelated local baseline issues: two existing 30-second async timeouts, eight
+  CLI stream tests whose fixture binary is unavailable, and one missing plugin
+  environment variable.
+- Fleet controller tests: 10 passed and the Windows-only test was skipped on
+  Linux.
+
+The final scoped `just fix` pass covered every changed Rust crate, followed by
+`just fmt`. Per repository policy, tests were not rerun after that final lint and
+format pass.
 
 ## Install for this user
 

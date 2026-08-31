@@ -324,19 +324,36 @@ async fn concurrent_first_imports_across_app_servers_share_one_thread() -> Resul
         timeout(TIMEOUT, fixture.app_server.read_response(first_request)).await??;
     let _: ExternalAgentConfigImportResponse =
         timeout(TIMEOUT, second_app_server.read_response(second_request)).await??;
-    let _: ExternalAgentConfigImportCompletedNotification = timeout(
+    let first_completed: ExternalAgentConfigImportCompletedNotification = timeout(
         TIMEOUT,
         fixture
             .app_server
             .read_notification("externalAgentConfig/import/completed"),
     )
     .await??;
-    let _: ExternalAgentConfigImportCompletedNotification = timeout(
+    let second_completed: ExternalAgentConfigImportCompletedNotification = timeout(
         TIMEOUT,
         second_app_server.read_notification("externalAgentConfig/import/completed"),
     )
     .await??;
 
+    let session_results = [first_completed, second_completed]
+        .into_iter()
+        .flat_map(|completed| completed.item_type_results)
+        .filter(|result| result.item_type == ExternalAgentConfigMigrationItemType::Sessions)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        session_results
+            .iter()
+            .map(|result| result.successes.len())
+            .sum::<usize>(),
+        1
+    );
+    assert!(
+        session_results
+            .iter()
+            .all(|result| result.failures.is_empty())
+    );
     assert_eq!(fixture.thread_count().await?, 1);
     let ledger: Value = serde_json::from_slice(&std::fs::read(fixture.ledger_path())?)?;
     assert_eq!(

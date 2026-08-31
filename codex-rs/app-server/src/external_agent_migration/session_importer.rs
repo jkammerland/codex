@@ -16,6 +16,7 @@ use codex_external_agent_migration::sessions::ExistingSessionAppend;
 use codex_external_agent_migration::sessions::ExternalAgentSessionMigration;
 use codex_external_agent_migration::sessions::ImportedExternalAgentSession;
 use codex_external_agent_migration::sessions::ImportedSessionConnectorAttribution;
+use codex_external_agent_migration::sessions::InitialImportReservation;
 use codex_external_agent_migration::sessions::PendingSessionImport;
 use codex_external_agent_migration::sessions::SessionImportTarget;
 use codex_external_agent_migration::sessions::SessionMetadataMode;
@@ -52,6 +53,7 @@ struct CompletedSessionImport {
     cwd: PathBuf,
     import: CompletedExternalAgentSessionImport,
     connector_attribution: Option<ImportedSessionConnectorAttribution>,
+    initial_import_reservation: InitialImportReservation,
 }
 
 enum SessionImportOutcome {
@@ -241,11 +243,19 @@ impl ExternalAgentSessionImporter {
                 .connector_names
                 .extend(connector_names);
         }
-        let completed_imports = completed_imports
+        let (imports, initial_import_reservations): (
+            Vec<CompletedExternalAgentSessionImport>,
+            Vec<InitialImportReservation>,
+        ) = completed_imports
             .into_iter()
-            .map(|completed_import| completed_import.import)
-            .collect();
-        if let Err(err) = record_completed_session_imports(&self.codex_home, completed_imports) {
+            .map(|completed_import| {
+                (
+                    completed_import.import,
+                    completed_import.initial_import_reservation,
+                )
+            })
+            .unzip();
+        if let Err(err) = record_completed_session_imports(&self.codex_home, imports) {
             record_import_error(
                 &mut item_result,
                 "session_ledger_update",
@@ -254,6 +264,7 @@ impl ExternalAgentSessionImporter {
                 /*source*/ None,
             );
         }
+        drop(initial_import_reservations);
         item_result
     }
 
@@ -279,21 +290,33 @@ impl ExternalAgentSessionImporter {
             source_path,
             source_content_sha256,
             target,
+            initial_import_reservation,
             attributed_mcp_server_ids,
             session,
         } = pending_import;
         match target {
-            SessionImportTarget::New { thread_id } => self
-                .create_session_import(
+            SessionImportTarget::New { thread_id } => {
+                let Some(initial_import_reservation) = initial_import_reservation else {
+                    return Err(SessionImportFailure {
+                        source_path,
+                        message: "initial session import is missing its exclusive reservation"
+                            .to_string(),
+                        stage: "session_prepare",
+                        sub_error_type: "missing_initial_import_reservation".to_string(),
+                    });
+                };
+                self.create_session_import(
                     source_path,
                     source_content_sha256,
                     attributed_mcp_server_ids,
                     session,
                     thread_id,
+                    initial_import_reservation,
                 )
                 .await
                 .map(SessionImportOutcome::Created)
-                .map(Some),
+                .map(Some)
+            }
             SessionImportTarget::Existing {
                 thread_id,
                 expected_source_content_sha256,
@@ -331,6 +354,7 @@ impl ExternalAgentSessionImporter {
         attributed_mcp_server_ids: BTreeSet<String>,
         session: ImportedExternalAgentSession,
         imported_thread_id: ThreadId,
+        initial_import_reservation: InitialImportReservation,
     ) -> Result<CompletedSessionImport, SessionImportFailure> {
         let connector_attribution = source_path
             .file_stem()
@@ -361,6 +385,7 @@ impl ExternalAgentSessionImporter {
                 title,
             },
             connector_attribution,
+            initial_import_reservation,
         })
     }
 

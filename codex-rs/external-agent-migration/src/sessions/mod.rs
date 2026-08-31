@@ -25,6 +25,7 @@ pub use append::append_existing_session;
 use export::load_session_for_import_with_content_sha256;
 pub use ledger::CompletedExternalAgentSessionImport;
 pub use ledger::ImportedConnectorCandidate;
+pub use ledger::InitialImportReservation;
 pub use ledger::append_imported_session_connector_names;
 pub use ledger::has_current_session_been_imported;
 pub use ledger::read_imported_connector_candidates;
@@ -95,11 +96,12 @@ pub enum SessionImportTarget {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PendingSessionImport {
     pub source_path: PathBuf,
     pub source_content_sha256: String,
     pub target: SessionImportTarget,
+    pub initial_import_reservation: Option<InitialImportReservation>,
     pub attributed_mcp_server_ids: BTreeSet<String>,
     pub session: ImportedExternalAgentSession,
 }
@@ -130,7 +132,11 @@ pub fn prepare_validated_session_import_with_metadata_mode(
         &pending.source_content_sha256,
         ThreadId::new(),
     )? {
-        ledger::SessionImportSourceMapping::New { imported_thread_id } => {
+        ledger::SessionImportSourceMapping::New {
+            imported_thread_id,
+            reservation,
+        } => {
+            pending.initial_import_reservation = Some(reservation);
             SessionImportTarget::New {
                 thread_id: imported_thread_id,
             }
@@ -177,6 +183,7 @@ fn load_importable_session(
             target: SessionImportTarget::New {
                 thread_id: ThreadId::new(),
             },
+            initial_import_reservation: None,
             attributed_mcp_server_ids,
             session: imported_session,
         }))

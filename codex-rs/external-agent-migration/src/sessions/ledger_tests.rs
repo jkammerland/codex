@@ -420,28 +420,152 @@ fn concurrent_first_imports_share_one_reserved_thread() {
 
     let first = reserve_session_import(&codex_home, &source_path, &source_hash, first_candidate)
         .expect("first reservation");
+    let (first_thread_id, first_reservation) = match first {
+        super::SessionImportSourceMapping::New {
+            imported_thread_id,
+            reservation,
+        } => (imported_thread_id, reservation),
+        mapping => panic!("unexpected first mapping: {mapping:?}"),
+    };
     let second = reserve_session_import(&codex_home, &source_path, &source_hash, second_candidate)
         .expect("second reservation");
 
-    assert_eq!(
-        (first, second),
-        (
-            super::SessionImportSourceMapping::New {
-                imported_thread_id: first_candidate,
-            },
-            super::SessionImportSourceMapping::New {
-                imported_thread_id: first_candidate,
-            },
-        )
-    );
+    assert_eq!(first_thread_id, first_candidate);
+    assert!(!first_reservation.replaces_incomplete_thread());
+    assert!(matches!(
+        second,
+        super::SessionImportSourceMapping::Ambiguous
+    ));
     let ledger = super::load_import_ledger(&codex_home).expect("reserved ledger");
-    assert_eq!(ledger.records.len(), 1);
-    assert!(ledger.records[0].initial_import_pending);
+    assert!(ledger.records.is_empty());
+    assert_eq!(ledger.pending_initial_imports.len(), 1);
+    assert_eq!(
+        ledger.pending_initial_imports[0].imported_thread_id,
+        first_candidate
+    );
     assert!(
         !ledger
             .contains_current_source(&source_path)
             .expect("reservation is not completion")
     );
+
+    let predecessor_view: serde_json::Value =
+        serde_json::from_slice(&ledger_bytes(&codex_home)).expect("ledger JSON");
+    assert_eq!(predecessor_view["records"], serde_json::json!([]));
+
+    drop(first_reservation);
+    let recovered =
+        reserve_session_import(&codex_home, &source_path, &source_hash, second_candidate)
+            .expect("recover reservation");
+    match recovered {
+        super::SessionImportSourceMapping::New {
+            imported_thread_id,
+            reservation,
+        } => {
+            assert_eq!(imported_thread_id, first_candidate);
+            assert!(reservation.replaces_incomplete_thread());
+        }
+        mapping => panic!("unexpected recovered mapping: {mapping:?}"),
+    }
+}
+
+#[test]
+fn interrupted_first_import_recovers_latest_source_under_the_reserved_thread() {
+    let root = TempDir::new().expect("tempdir");
+    let codex_home = root.path().join("codex-home");
+    let source_path = root.path().join("session.jsonl");
+    std::fs::write(&source_path, "v1").expect("initial source");
+    let source_path = std::fs::canonicalize(source_path).expect("canonical source");
+    let first_hash = format!("{:x}", Sha256::digest("v1"));
+    let first_candidate = ThreadId::new();
+    let second_candidate = ThreadId::new();
+
+    let first = reserve_session_import(&codex_home, &source_path, &first_hash, first_candidate)
+        .expect("first reservation");
+    let first_reservation = match first {
+        super::SessionImportSourceMapping::New { reservation, .. } => reservation,
+        mapping => panic!("unexpected first mapping: {mapping:?}"),
+    };
+    std::fs::write(&source_path, "v2").expect("updated source");
+    let second_hash = format!("{:x}", Sha256::digest("v2"));
+    assert!(matches!(
+        reserve_session_import(&codex_home, &source_path, &second_hash, second_candidate)
+            .expect("contending reservation"),
+        super::SessionImportSourceMapping::Ambiguous
+    ));
+
+    drop(first_reservation);
+    let recovered =
+        reserve_session_import(&codex_home, &source_path, &second_hash, second_candidate)
+            .expect("recover updated source");
+    match recovered {
+        super::SessionImportSourceMapping::New {
+            imported_thread_id,
+            reservation,
+        } => {
+            assert_eq!(imported_thread_id, first_candidate);
+            assert!(reservation.replaces_incomplete_thread());
+        }
+        mapping => panic!("unexpected recovered mapping: {mapping:?}"),
+    }
+    let ledger = super::load_import_ledger(&codex_home).expect("recovered ledger");
+    assert_eq!(ledger.pending_initial_imports.len(), 1);
+    assert_eq!(
+        ledger.pending_initial_imports[0].content_sha256,
+        second_hash
+    );
+}
+
+#[test]
+fn predecessor_pending_record_is_normalized_without_looking_completed() {
+    let root = TempDir::new().expect("tempdir");
+    let codex_home = root.path().join("codex-home");
+    let source_path = root.path().join("session.jsonl");
+    std::fs::write(&source_path, "source").expect("source");
+    let source_path = std::fs::canonicalize(source_path).expect("canonical source");
+    let source_hash = format!("{:x}", Sha256::digest("source"));
+    let reserved_thread_id = ThreadId::new();
+    super::save_import_ledger_unlocked(
+        &codex_home,
+        &super::ImportedExternalAgentSessionLedger {
+            records: vec![super::ImportedExternalAgentSessionRecord {
+                source_path: source_path.clone(),
+                content_sha256: source_hash.clone(),
+                initial_import_pending: true,
+                pending_content_sha256: None,
+                pending_target_model_item_count: None,
+                imported_thread_id: reserved_thread_id,
+                imported_at: super::now_unix_seconds(),
+                source_modified_at: super::session_modified_at(&source_path).expect("source mtime"),
+                connector_names: Vec::new(),
+                title: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .expect("predecessor ledger");
+    assert!(
+        !super::load_import_ledger(&codex_home)
+            .expect("predecessor ledger read")
+            .contains_current_source(&source_path)
+            .expect("pending predecessor is not complete")
+    );
+
+    let mapping = reserve_session_import(&codex_home, &source_path, &source_hash, ThreadId::new())
+        .expect("recover predecessor reservation");
+    match mapping {
+        super::SessionImportSourceMapping::New {
+            imported_thread_id,
+            reservation,
+        } => {
+            assert_eq!(imported_thread_id, reserved_thread_id);
+            assert!(reservation.replaces_incomplete_thread());
+        }
+        mapping => panic!("unexpected predecessor mapping: {mapping:?}"),
+    }
+    let ledger = super::load_import_ledger(&codex_home).expect("normalized ledger");
+    assert!(ledger.records.is_empty());
+    assert_eq!(ledger.pending_initial_imports.len(), 1);
 }
 
 #[test]

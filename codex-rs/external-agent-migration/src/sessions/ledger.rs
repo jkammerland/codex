@@ -17,13 +17,24 @@ use std::path::PathBuf;
 
 const SESSION_IMPORT_LEDGER_FILE: &str = "external_agent_session_imports.json";
 const SESSION_IMPORT_LEDGER_LOCK_FILE: &str = "external_agent_session_imports.lock";
+const SESSION_INITIAL_IMPORT_LOCK_DIRECTORY: &str = "external_agent_session_import_locks";
 const SESSION_HASH_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ImportedExternalAgentSessionLedger {
     records: Vec<ImportedExternalAgentSessionRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_initial_imports: Vec<PendingInitialImportRecord>,
     #[serde(default)]
     detected_connector_records: Vec<DetectedExternalAgentSessionConnectorRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingInitialImportRecord {
+    source_path: PathBuf,
+    content_sha256: String,
+    imported_thread_id: ThreadId,
+    reserved_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,10 +72,11 @@ pub struct CompletedExternalAgentSessionImport {
     pub title: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum SessionImportSourceMapping {
     New {
         imported_thread_id: ThreadId,
+        reservation: InitialImportReservation,
     },
     Current,
     Unique {
@@ -72,6 +84,22 @@ pub(crate) enum SessionImportSourceMapping {
         imported_thread_id: ThreadId,
     },
     Ambiguous,
+}
+
+/// Holds the per-source lease for one initial external-session import.
+///
+/// Callers must retain this value until the imported thread is durably recorded in the ledger.
+#[derive(Debug)]
+pub struct InitialImportReservation {
+    _lock: File,
+    replaces_incomplete_thread: bool,
+}
+
+impl InitialImportReservation {
+    /// Returns whether a prior interrupted attempt may have left the reserved thread incomplete.
+    pub fn replaces_incomplete_thread(&self) -> bool {
+        self.replaces_incomplete_thread
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,35 +151,72 @@ pub(crate) fn reserve_session_import(
     source_content_sha256: &str,
     candidate_thread_id: ThreadId,
 ) -> io::Result<SessionImportSourceMapping> {
-    let Some((source_path, source_modified_at)) =
+    let Some((source_path, _source_modified_at)) =
         stable_source_version(source_path, source_content_sha256)?
     else {
         return Ok(SessionImportSourceMapping::Ambiguous);
     };
 
+    let Some(initial_import_lock) = try_initial_import_lock(codex_home, &source_path)? else {
+        return Ok(SessionImportSourceMapping::Ambiguous);
+    };
+
     with_import_ledger_write(codex_home, |ledger| {
+        let normalized_legacy_pending = normalize_legacy_pending_records(ledger);
         let mut matching_records = ledger
             .records
             .iter()
             .filter(|record| record.source_path == source_path);
         let Some(record) = matching_records.next() else {
-            ledger.records.push(ImportedExternalAgentSessionRecord {
-                source_path,
-                content_sha256: source_content_sha256.to_string(),
-                initial_import_pending: true,
-                pending_content_sha256: None,
-                pending_target_model_item_count: None,
-                imported_thread_id: candidate_thread_id,
-                imported_at: now_unix_seconds(),
-                source_modified_at,
-                connector_names: Vec::new(),
-                title: None,
-            });
+            let mut matching_pending = ledger
+                .pending_initial_imports
+                .iter_mut()
+                .filter(|record| record.source_path == source_path);
+            let (imported_thread_id, replaces_incomplete_thread, changed) =
+                match matching_pending.next() {
+                    Some(pending) if matching_pending.next().is_none() => {
+                        let changed = pending.content_sha256 != source_content_sha256;
+                        if changed {
+                            pending.content_sha256 = source_content_sha256.to_string();
+                            pending.reserved_at = now_unix_seconds();
+                        }
+                        (pending.imported_thread_id, true, changed)
+                    }
+                    Some(_) => {
+                        return Ok((
+                            SessionImportSourceMapping::Ambiguous,
+                            if normalized_legacy_pending {
+                                ImportLedgerMutation::Changed
+                            } else {
+                                ImportLedgerMutation::Unchanged
+                            },
+                        ));
+                    }
+                    None => {
+                        ledger
+                            .pending_initial_imports
+                            .push(PendingInitialImportRecord {
+                                source_path,
+                                content_sha256: source_content_sha256.to_string(),
+                                imported_thread_id: candidate_thread_id,
+                                reserved_at: now_unix_seconds(),
+                            });
+                        (candidate_thread_id, false, true)
+                    }
+                };
             return Ok((
                 SessionImportSourceMapping::New {
-                    imported_thread_id: candidate_thread_id,
+                    imported_thread_id,
+                    reservation: InitialImportReservation {
+                        _lock: initial_import_lock,
+                        replaces_incomplete_thread,
+                    },
                 },
-                ImportLedgerMutation::Changed,
+                if normalized_legacy_pending || changed {
+                    ImportLedgerMutation::Changed
+                } else {
+                    ImportLedgerMutation::Unchanged
+                },
             ));
         };
         if matching_records.next().is_some() {
@@ -160,11 +225,7 @@ pub(crate) fn reserve_session_import(
                 ImportLedgerMutation::Unchanged,
             ));
         }
-        let mapping = if record.initial_import_pending {
-            SessionImportSourceMapping::New {
-                imported_thread_id: record.imported_thread_id,
-            }
-        } else if record.content_sha256 == source_content_sha256 {
+        let mapping = if record.content_sha256 == source_content_sha256 {
             SessionImportSourceMapping::Current
         } else {
             SessionImportSourceMapping::Unique {
@@ -172,7 +233,14 @@ pub(crate) fn reserve_session_import(
                 imported_thread_id: record.imported_thread_id,
             }
         };
-        Ok((mapping, ImportLedgerMutation::Unchanged))
+        Ok((
+            mapping,
+            if normalized_legacy_pending {
+                ImportLedgerMutation::Changed
+            } else {
+                ImportLedgerMutation::Unchanged
+            },
+        ))
     })
 }
 
@@ -286,6 +354,7 @@ pub fn record_completed_session_imports(
         return Ok(());
     }
     with_import_ledger_write(codex_home, move |ledger| {
+        normalize_legacy_pending_records(ledger);
         let imported_at = now_unix_seconds();
         for import in imports {
             let source_modified_at =
@@ -293,26 +362,12 @@ pub fn record_completed_session_imports(
                     .ok()
                     .flatten()
                     .and_then(|(_, source_modified_at)| source_modified_at);
+            ledger.pending_initial_imports.retain(|pending| {
+                pending.source_path != import.source_path
+                    || pending.imported_thread_id != import.imported_thread_id
+            });
             if let Some(index) = ledger.records.iter().rposition(|record| {
                 record.source_path == import.source_path
-                    && record.initial_import_pending
-                    && record.imported_thread_id == import.imported_thread_id
-            }) {
-                let mut record = ledger.records.remove(index);
-                record.content_sha256 = import.source_content_sha256;
-                record.initial_import_pending = false;
-                record.pending_content_sha256 = None;
-                record.pending_target_model_item_count = None;
-                record.imported_at = imported_at;
-                record.source_modified_at = source_modified_at;
-                append_connector_names(&mut record.connector_names, import.connector_names);
-                record.title = import.title;
-                ledger.records.push(record);
-                continue;
-            }
-            if let Some(index) = ledger.records.iter().rposition(|record| {
-                record.source_path == import.source_path
-                    && !record.initial_import_pending
                     && record.content_sha256 == import.source_content_sha256
             }) {
                 let mut record = ledger.records.remove(index);
@@ -572,6 +627,33 @@ fn save_import_ledger_unlocked(
     codex_utils_path::write_atomically(&path, &raw)
 }
 
+fn normalize_legacy_pending_records(ledger: &mut ImportedExternalAgentSessionLedger) -> bool {
+    let mut changed = false;
+    let mut completed = Vec::with_capacity(ledger.records.len());
+    for record in ledger.records.drain(..) {
+        if record.initial_import_pending {
+            if !ledger.pending_initial_imports.iter().any(|pending| {
+                pending.source_path == record.source_path
+                    && pending.imported_thread_id == record.imported_thread_id
+            }) {
+                ledger
+                    .pending_initial_imports
+                    .push(PendingInitialImportRecord {
+                        source_path: record.source_path,
+                        content_sha256: record.content_sha256,
+                        imported_thread_id: record.imported_thread_id,
+                        reserved_at: record.imported_at,
+                    });
+            }
+            changed = true;
+        } else {
+            completed.push(record);
+        }
+    }
+    ledger.records = completed;
+    changed
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImportLedgerMutation {
     Changed,
@@ -611,6 +693,26 @@ fn open_import_ledger_lock(codex_home: &Path) -> io::Result<File> {
         .create(true)
         .truncate(false)
         .open(codex_home.join(SESSION_IMPORT_LEDGER_LOCK_FILE))
+}
+
+fn try_initial_import_lock(codex_home: &Path, source_path: &Path) -> io::Result<Option<File>> {
+    let lock_directory = codex_home.join(SESSION_INITIAL_IMPORT_LOCK_DIRECTORY);
+    fs::create_dir_all(&lock_directory)?;
+    let lock_name = format!(
+        "{:x}.lock",
+        Sha256::digest(source_path.as_os_str().as_encoded_bytes())
+    );
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_directory.join(lock_name))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(err)) => Err(err),
+    }
 }
 
 fn import_ledger_path(codex_home: &Path) -> PathBuf {

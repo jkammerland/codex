@@ -75,6 +75,10 @@ impl UnifiedExecProcessManager {
                 tokio::pin!(state_changed);
                 tokio::pin!(activity_changed);
                 tokio::pin!(output_notified);
+                // `notify_waiters` does not retain a permit. Enable the waiter
+                // before the buffer recheck so output arriving at this boundary
+                // cannot be lost for an otherwise quiet interactive process.
+                output_notified.as_mut().enable();
 
                 if process.has_exited() || process.failure_message().is_some() {
                     break ProcessWaitReason::Completed;

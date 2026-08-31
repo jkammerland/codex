@@ -260,7 +260,7 @@ fn plan_existing_session_append(
     source_items: &[RolloutItem],
     history_items: &[RolloutItem],
 ) -> Option<ExistingSessionAppendPlan> {
-    if model_transcripts_match(source_items, history_items) {
+    if model_transcripts_match_exact(source_items, history_items) {
         Some(ExistingSessionAppendPlan::AlreadyComplete)
     } else {
         plan_append(source_items, history_items).map(ExistingSessionAppendPlan::Append)
@@ -284,8 +284,12 @@ fn plan_existing_session_append_from_base(
         return None;
     }
     if append_base_model_item_count == source.len() {
-        return (history.len() == source.len())
-            .then_some(ExistingSessionAppendPlan::AlreadyComplete);
+        return (history.len() == source.len()
+            && history
+                .iter()
+                .zip(&source)
+                .all(|(history, source)| history == &source.response_item))
+        .then_some(ExistingSessionAppendPlan::AlreadyComplete);
     }
 
     let append_start_index = source.get(append_base_model_item_count)?.append_start_index;
@@ -319,14 +323,23 @@ fn matching_transaction_prefix_len(
     projected_counts.push(0usize);
     let mut projection = RolloutModelResponseProjection::default();
     let mut fingerprints = Vec::with_capacity(transaction.len());
-    for item in transaction {
+    let mut original_prefix_by_fingerprint_count = HashMap::new();
+    if expected_model_item_count == 0 {
+        original_prefix_by_fingerprint_count.insert(0usize, 0usize);
+    }
+    for (index, item) in transaction.iter().enumerate() {
         projected_counts.push(
             projected_counts
                 .last()
                 .copied()?
                 .saturating_add(projection.project(item).len()),
         );
-        fingerprints.push(rollout_item_fingerprint(item)?);
+        if let Some(fingerprint) = rollout_item_recovery_fingerprint(item)? {
+            fingerprints.push(fingerprint);
+        }
+        if projected_counts.last().copied() == Some(expected_model_item_count) {
+            original_prefix_by_fingerprint_count.insert(fingerprints.len(), index + 1);
+        }
     }
 
     let mut failure = vec![0usize; fingerprints.len()];
@@ -343,7 +356,9 @@ fn matching_transaction_prefix_len(
 
     let mut matched = 0usize;
     for item in history_items {
-        let fingerprint = rollout_item_fingerprint(item)?;
+        let Some(fingerprint) = rollout_item_recovery_fingerprint(item)? else {
+            continue;
+        };
         while matched > 0 && (matched == fingerprints.len() || fingerprint != fingerprints[matched])
         {
             matched = failure[matched - 1];
@@ -354,11 +369,8 @@ fn matching_transaction_prefix_len(
     }
 
     loop {
-        if projected_counts.get(matched).copied() == Some(expected_model_item_count) {
-            let history_suffix = &history_items[history_items.len().saturating_sub(matched)..];
-            if rollout_items_match(history_suffix, &transaction[..matched])? {
-                return Some(matched);
-            }
+        if let Some(original_prefix_len) = original_prefix_by_fingerprint_count.get(&matched) {
+            return Some(*original_prefix_len);
         }
         if matched == 0 {
             return None;
@@ -367,23 +379,16 @@ fn matching_transaction_prefix_len(
     }
 }
 
-fn rollout_item_fingerprint(item: &RolloutItem) -> Option<[u8; 32]> {
-    let serialized = serde_json::to_vec(item).ok()?;
-    Some(Sha256::digest(serialized).into())
-}
-
-fn rollout_items_match(left: &[RolloutItem], right: &[RolloutItem]) -> Option<bool> {
-    if left.len() != right.len() {
-        return Some(false);
+fn rollout_item_recovery_fingerprint(item: &RolloutItem) -> Option<Option<[u8; 32]>> {
+    if matches!(item, RolloutItem::EventMsg(EventMsg::TokenCount(_))) {
+        return Some(None);
     }
-    left.iter()
-        .zip(right)
-        .try_fold(true, |matches, (left, right)| {
-            if !matches {
-                return Some(false);
-            }
-            Some(serde_json::to_vec(left).ok()? == serde_json::to_vec(right).ok()?)
-        })
+    let mut normalized = item.clone();
+    if let RolloutItem::EventMsg(EventMsg::TurnComplete(completed)) = &mut normalized {
+        completed.completed_at = None;
+    }
+    let serialized = serde_json::to_vec(&normalized).ok()?;
+    Some(Some(Sha256::digest(serialized).into()))
 }
 
 /// Returns the nonempty source suffix that can be safely appended to `history_items`.
@@ -434,6 +439,23 @@ fn model_transcripts_match(source_items: &[RolloutItem], history_items: &[Rollou
             .iter()
             .zip(&source)
             .all(|(history, source)| model_items_match(history, &source.response_item))
+}
+
+fn model_transcripts_match_exact(
+    source_items: &[RolloutItem],
+    history_items: &[RolloutItem],
+) -> bool {
+    let Some(source) = source_model_items(source_items) else {
+        return false;
+    };
+    let Some(history) = history_model_items(history_items) else {
+        return false;
+    };
+    history.len() == source.len()
+        && history
+            .iter()
+            .zip(source)
+            .all(|(history, source)| history == &source.response_item)
 }
 
 fn model_items_match(history: &ResponseItem, source: &ResponseItem) -> bool {

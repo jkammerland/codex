@@ -132,7 +132,7 @@ fn interrupted_append_keeps_its_raw_tail_when_the_source_advances() {
 
     assert!(matches!(
         remainder.first(),
-        Some(RolloutItem::EventMsg(EventMsg::TokenCount(_)))
+        Some(RolloutItem::EventMsg(EventMsg::TurnComplete(_)))
     ));
     assert_eq!(
         model_messages(&remainder),
@@ -142,6 +142,46 @@ fn interrupted_append_keeps_its_raw_tail_when_the_source_advances() {
     assert!(matches!(
         plan_existing_session_append_from_base(
             &third_source,
+            &interrupted_history,
+            append_base_model_item_count,
+        ),
+        Some(ExistingSessionAppendPlan::AlreadyComplete)
+    ));
+}
+
+#[test]
+fn predecessor_partial_append_recovers_across_token_count_and_timestamp_changes() {
+    let history = rollout(&[(MessageRole::User, "first request")]);
+    let source = rollout(&[
+        (MessageRole::User, "first request"),
+        (MessageRole::Assistant, "late answer"),
+    ]);
+    let append_base_model_item_count = history_model_items(&history)
+        .expect("history model items")
+        .len();
+    let ExistingSessionAppendPlan::Append(transaction) =
+        plan_existing_session_append_from_base(&source, &history, append_base_model_item_count)
+            .expect("initial append")
+    else {
+        panic!("initial transaction must append");
+    };
+    let mut predecessor_transaction = transaction
+        .iter()
+        .filter(|item| !matches!(item, RolloutItem::EventMsg(EventMsg::TokenCount(_))))
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(RolloutItem::EventMsg(EventMsg::TurnComplete(completed))) =
+        predecessor_transaction.last_mut()
+    else {
+        panic!("transaction should end with turn completion");
+    };
+    completed.completed_at = None;
+    let mut interrupted_history = history;
+    interrupted_history.extend(predecessor_transaction);
+
+    assert!(matches!(
+        plan_existing_session_append_from_base(
+            &source,
             &interrupted_history,
             append_base_model_item_count,
         ),
@@ -171,6 +211,28 @@ fn pre_cap_oversized_history_can_receive_a_bounded_suffix() {
     assert_eq!(
         model_messages(&suffix),
         vec![(MessageRole::Assistant, "new bounded answer")]
+    );
+}
+
+#[test]
+fn an_edit_only_beyond_the_import_bound_is_not_checkpointed_as_complete() {
+    let common_prefix = "legacy oversized message".repeat(1_000);
+    let old_message = format!("{common_prefix}-old-tail");
+    let new_message = format!("{common_prefix}-new-tail");
+    let mut history = rollout(&[(MessageRole::User, &old_message)]);
+    for item in &mut history {
+        if let RolloutItem::ResponseItem(response) = item
+            && let ResponseItem::Message { content, .. } = &mut response.item
+            && let [ContentItem::InputText { text }] = content.as_mut_slice()
+        {
+            *text = old_message.clone();
+        }
+    }
+    let source = rollout(&[(MessageRole::User, &new_message)]);
+
+    assert!(
+        plan_existing_session_append(&source, &history).is_none(),
+        "a changed truncated tail must remain pending instead of checkpointing stale content"
     );
 }
 

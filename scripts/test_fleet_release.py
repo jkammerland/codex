@@ -113,6 +113,7 @@ class FleetReleaseTest(unittest.TestCase):
                     f"cliVersion={self.release.cli_version}",
                     "cliSha256=cli-hash",
                     "codeModeHostSha256=host-hash",
+                    "codeModeHostExecutable=true",
                     f"receiptForkCommit={self.release.fork_commit}",
                     f"receiptCliVersion={self.release.cli_version}",
                     "receiptCliSha256=cli-hash",
@@ -133,6 +134,12 @@ class FleetReleaseTest(unittest.TestCase):
         values["cliSha256"] = "different-cli-hash"
         hash_drifted = fleet_release.Status(host, values)
         self.assertEqual(hash_drifted.drift(self.release), ("cliSha256",))
+        values["cliSha256"] = "cli-hash"
+        values["codeModeHostExecutable"] = "false"
+        mode_drifted = fleet_release.Status(host, values)
+        self.assertEqual(
+            mode_drifted.drift(self.release), ("codeModeHostExecutable",)
+        )
 
     def test_activation_scripts_preserve_rollback_and_use_atomic_replacement(
         self,
@@ -283,6 +290,19 @@ class FleetReleaseTest(unittest.TestCase):
             self.assertEqual(retry.returncode, 0, retry.stderr)
             self.assertEqual(target_cli.read_bytes(), source_cli.read_bytes())
             self.assertEqual(target_host.read_bytes(), source_host.read_bytes())
+
+            Path(f"{target_cli}.test.release-previous").unlink()
+            Path(f"{target_host}.test.release-previous").unlink()
+            target_host.chmod(0o644)
+            repair_mode = run(
+                ["sh", "-c", fleet_release.activation_script(host, release)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(repair_mode.returncode, 0, repair_mode.stderr)
+            self.assertTrue(os.access(target_host, os.X_OK))
 
             active_cli = target_cli.read_bytes()
             active_host = target_host.read_bytes()

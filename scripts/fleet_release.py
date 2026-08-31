@@ -118,6 +118,7 @@ class Status:
             "sourceCommit": release.fork_commit,
             "receiptForkCommit": release.fork_commit,
             "receiptCliVersion": release.cli_version,
+            "codeModeHostExecutable": "true",
         }
         drift = [
             key for key, value in expected.items() if self.values.get(key) != value
@@ -317,6 +318,7 @@ if (Test-Path -LiteralPath $cli) {{
 Field 'cliVersion' $cliVersion
 Field 'cliSha256' (HashValue $cli)
 Field 'codeModeHostSha256' (HashValue $codeModeHost)
+Field 'codeModeHostExecutable' $(if (Test-Path -LiteralPath $codeModeHost -PathType Leaf) {{ 'true' }} else {{ 'false' }})
 Field 'receiptForkCommit' (ReceiptValue $receipt 'forkCommit')
 Field 'receiptCliVersion' (ReceiptValue $receipt 'cliVersion')
 Field 'receiptCliSha256' (ReceiptValue $receipt 'cliSha256')
@@ -330,6 +332,7 @@ Field 'sourceStatus' (GitValue $source @('status', '--porcelain'))
 field() {{ printf '%s=%s\\n' "$1" "$2"; }}
 git_value() {{ path=$1; shift; if [ -d "$path/.git" ]; then git -C "$path" "$@" 2>/dev/null; else printf missing; fi; }}
 hash_value() {{ if [ -f "$1" ]; then shasum -a 256 "$1" | awk '{{print $1}}'; else printf missing; fi; }}
+executable_value() {{ if [ -x "$1" ]; then printf true; else printf false; fi; }}
 receipt_value() {{ if [ ! -f "$2" ]; then printf missing; return; fi; value=$(awk -v key="$1" 'index($0, key "=") == 1 {{ count++; value=substr($0, length(key) + 2) }} END {{ if (count != 1) exit 1; print value }}' "$2") || {{ printf invalid; return; }}; printf '%s' "$value"; }}
 cli={shlex.quote(host.cli_binary)}
 code_mode_host={shlex.quote(host.code_mode_host_binary)}
@@ -342,6 +345,7 @@ source_status=$(git_value {shlex.quote(host.source_root)} status --porcelain) ||
 field cliVersion "$cli_version"
 field cliSha256 "$(hash_value "$cli")"
 field codeModeHostSha256 "$(hash_value "$code_mode_host")"
+field codeModeHostExecutable "$(executable_value "$code_mode_host")"
 field receiptForkCommit "$(receipt_value forkCommit "$receipt")"
 field receiptCliVersion "$(receipt_value cliVersion "$receipt")"
 field receiptCliSha256 "$(receipt_value cliSha256 "$receipt")"
@@ -358,6 +362,7 @@ def parse_status(output: str) -> dict[str, str]:
         "cliVersion",
         "cliSha256",
         "codeModeHostSha256",
+        "codeModeHostExecutable",
         "receiptForkCommit",
         "receiptCliVersion",
         "receiptCliSha256",
@@ -380,7 +385,7 @@ def host_status(host: Host) -> Status:
     if result.returncode:
         return Status(host, {}, error_message("status", result))
     values = parse_status(result.stdout)
-    if len(values) != 11:
+    if len(values) != 12:
         return Status(host, values, "status output was incomplete")
     return Status(host, values)
 
@@ -763,7 +768,7 @@ receipt_cli_hash=$(receipt_value cliSha256 "$receipt") || {{ echo 'Invalid build
 receipt_host_hash=$(receipt_value hostSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
 [ "$receipt_format" = v1 ] && [ "$receipt_commit" = {release.fork_commit} ] && [ "$receipt_version" = {shlex.quote(release.cli_version)} ] && [ "$receipt_cli_hash" = "$source_cli_hash" ] && [ "$receipt_host_hash" = "$source_host_hash" ] || {{ echo 'Build receipt does not match the reviewed binary pair' >&2; exit 1; }}
 [ ! -e "$backup_cli" ] && [ ! -e "$backup_host" ] || {{ [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}; }}
-if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
+if [ ! -x "$target_cli" ] || [ ! -x "$target_host" ] || [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
   if [ -e "$backup_cli" ] || [ -e "$backup_host" ]; then
     [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}
     cmp -s "$target_cli" "$backup_cli" && cmp -s "$target_host" "$backup_host" || {{ echo 'Release rollback pair does not match the active binaries' >&2; exit 1; }}

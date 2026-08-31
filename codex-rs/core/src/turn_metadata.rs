@@ -38,6 +38,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSource;
+use codex_protocol::protocol::TurnAbortReason;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 const MODEL_KEY: &str = "model";
@@ -49,6 +50,36 @@ pub(crate) struct McpTurnMetadataContext<'a> {
     pub(crate) model: &'a str,
     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
     pub(crate) node_repl_disabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolCancellationOrigin {
+    BudgetLimited,
+    ConnectionSuperseded,
+    ExplicitTurnInterrupt,
+    ReviewEnded,
+    SessionShutdown,
+}
+
+impl ToolCancellationOrigin {
+    pub(crate) fn from_turn_abort_reason(reason: &TurnAbortReason) -> Self {
+        match reason {
+            TurnAbortReason::Interrupted => Self::ExplicitTurnInterrupt,
+            TurnAbortReason::Replaced => Self::ConnectionSuperseded,
+            TurnAbortReason::ReviewEnded => Self::ReviewEnded,
+            TurnAbortReason::BudgetLimited => Self::BudgetLimited,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::BudgetLimited => "budget_limited",
+            Self::ConnectionSuperseded => "connection_superseded",
+            Self::ExplicitTurnInterrupt => "explicit_turn_interrupt",
+            Self::ReviewEnded => "review_ended",
+            Self::SessionShutdown => "session_shutdown",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -131,6 +162,7 @@ pub(crate) struct TurnMetadataState {
     responsesapi_client_metadata: RwLock<BTreeMap<String, String>>,
     root_turn_ambiguous: AtomicBool,
     user_input_requested_during_turn: AtomicBool,
+    tool_cancellation_origin: Mutex<Option<ToolCancellationOrigin>>,
     enrichment_task: Mutex<Option<JoinHandle<()>>>,
     git_enrichment_complete: watch::Sender<bool>,
 }
@@ -201,9 +233,24 @@ impl TurnMetadataState {
             responsesapi_client_metadata: RwLock::new(BTreeMap::new()),
             root_turn_ambiguous: AtomicBool::new(false),
             user_input_requested_during_turn: AtomicBool::new(false),
+            tool_cancellation_origin: Mutex::new(None),
             enrichment_task: Mutex::new(None),
             git_enrichment_complete: watch::channel(/*init*/ true).0,
         }
+    }
+
+    pub(crate) fn set_tool_cancellation_origin(&self, origin: ToolCancellationOrigin) {
+        *self
+            .tool_cancellation_origin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(origin);
+    }
+
+    pub(crate) fn tool_cancellation_origin(&self) -> Option<ToolCancellationOrigin> {
+        *self
+            .tool_cancellation_origin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn current_meta_value_for_mcp_request(

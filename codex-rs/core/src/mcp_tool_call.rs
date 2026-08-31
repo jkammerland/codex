@@ -556,7 +556,12 @@ async fn handle_approved_mcp_tool_call(
         biased;
         result = &mut call => result,
         _ = cancellation_token.cancelled() => {
-            Err("MCP tool call cancelled (origin=explicit_turn_interrupt)".to_string())
+            let origin = turn_context
+                .turn_metadata_state
+                .tool_cancellation_origin()
+                .map(crate::turn_metadata::ToolCancellationOrigin::as_str)
+                .unwrap_or("unspecified_cancellation");
+            Err(format!("MCP tool call cancelled (origin={origin})"))
         }
     };
     drop(call);

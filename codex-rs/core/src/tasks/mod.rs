@@ -35,6 +35,7 @@ use crate::session::turn_context::TurnContext;
 use crate::state::ActiveTurn;
 use crate::state::RunningTask;
 use crate::state::TaskKind;
+use crate::turn_metadata::ToolCancellationOrigin;
 use codex_analytics::TurnProfileFact;
 use codex_analytics::TurnTokenUsageFact;
 use codex_context_fragments::RenderedFragment;
@@ -586,6 +587,15 @@ impl Session {
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
+        let origin = ToolCancellationOrigin::from_turn_abort_reason(&reason);
+        self.abort_all_tasks_with_origin(reason, origin).await;
+    }
+
+    pub(crate) async fn abort_all_tasks_with_origin(
+        self: &Arc<Self>,
+        reason: TurnAbortReason,
+        origin: ToolCancellationOrigin,
+    ) {
         let mut aborted_turn = false;
         let mut active_turn_to_clear = None;
         let mut turn_context = None;
@@ -594,7 +604,7 @@ impl Session {
             aborted_turn = task.is_some();
             turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
             if let Some(task) = task {
-                self.handle_task_abort(task, reason.clone()).await;
+                self.handle_task_abort(task, reason.clone(), origin).await;
             }
             if aborted_turn {
                 active_turn_to_clear = Some(active_turn);
@@ -648,7 +658,12 @@ impl Session {
         let task = active_turn.task.take();
         let turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
         if let Some(task) = task {
-            self.handle_task_abort(task, reason.clone()).await;
+            self.handle_task_abort(
+                task,
+                reason.clone(),
+                ToolCancellationOrigin::from_turn_abort_reason(&reason),
+            )
+            .await;
         }
         if let Some(turn_context) = turn_context.as_deref() {
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
@@ -986,13 +1001,21 @@ impl Session {
             .await
     }
 
-    async fn handle_task_abort(self: &Arc<Self>, task: RunningTask, reason: TurnAbortReason) {
+    async fn handle_task_abort(
+        self: &Arc<Self>,
+        task: RunningTask,
+        reason: TurnAbortReason,
+        origin: ToolCancellationOrigin,
+    ) {
         let sub_id = task.turn_context.sub_id.clone();
         if task.cancellation_token.is_cancelled() {
             return;
         }
 
         trace!(task_kind = ?task.kind, sub_id, "aborting running task");
+        task.turn_context
+            .turn_metadata_state
+            .set_tool_cancellation_origin(origin);
         task.cancellation_token.cancel();
         if reason == TurnAbortReason::Interrupted
             && task

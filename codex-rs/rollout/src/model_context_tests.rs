@@ -4,6 +4,7 @@ use super::MAX_PRESERVED_DURABLE_STATE_ITEMS;
 use super::ModelContextScan;
 use super::ModelContextScanMode;
 use super::ModelContextScanProgress;
+use super::compact_durable_agent_state;
 use crate::CompactedItem;
 use crate::RolloutItem;
 use codex_protocol::AgentPath;
@@ -34,6 +35,15 @@ fn model_invisible_mail_metadata() -> RolloutItem {
 }
 
 fn legacy_claim(id: &ResponseItemId, turn_id: &str) -> RolloutItem {
+    durable_claim(id, "fingerprint", turn_id, /*delivered*/ false)
+}
+
+fn durable_claim(
+    id: &ResponseItemId,
+    fingerprint: &str,
+    turn_id: &str,
+    delivered: bool,
+) -> RolloutItem {
     let mut communication = InterAgentCommunication::new(
         AgentPath::root(),
         AgentPath::try_from("/root/worker").expect("agent path"),
@@ -44,11 +54,36 @@ fn legacy_claim(id: &ResponseItemId, turn_id: &str) -> RolloutItem {
     communication.id = Some(id.clone());
     RolloutItem::DurableInterAgentCommunicationClaimed {
         communication_id: id.clone(),
-        communication: Some(communication),
-        delivered_response: None,
-        fingerprint: "fingerprint".to_string(),
+        communication: Some(communication.clone()),
+        delivered_response: delivered.then(|| communication.to_model_input_item().into()),
+        fingerprint: fingerprint.to_string(),
         turn_id: turn_id.to_string(),
     }
+}
+
+fn durable_payload(id: &ResponseItemId, fingerprint: &str, content: &str) -> RolloutItem {
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        content.to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(id.clone());
+    RolloutItem::DurableInterAgentCommunication {
+        communication,
+        start_options: Default::default(),
+        fingerprint: fingerprint.to_string(),
+        turn_id: "mail-turn".to_string(),
+        compatibility_shadow: false,
+    }
+}
+
+fn assert_rollout_items_eq(actual: &[RolloutItem], expected: &[RolloutItem]) {
+    assert_eq!(
+        serde_json::to_value(actual).expect("serialize actual rollout items"),
+        serde_json::to_value(expected).expect("serialize expected rollout items")
+    );
 }
 
 fn turn_started(turn_id: &str) -> RolloutItem {
@@ -326,5 +361,101 @@ fn durable_scan_preserves_the_body_of_an_unstarted_legacy_claim() {
     assert_eq!(
         retained_communication.as_ref(),
         expected_communication.as_ref()
+    );
+}
+
+#[test]
+fn durable_compaction_keeps_a_delivered_claim_consumed_after_a_pending_duplicate() {
+    let id = ResponseItemId::with_suffix("msg", "delivered-before-pending");
+    let compacted = compact_durable_agent_state(
+        &[
+            durable_payload(&id, "fingerprint", "mail body"),
+            durable_claim(
+                &id,
+                "fingerprint",
+                "delivered-turn",
+                /*delivered*/ true,
+            ),
+        ],
+        &[durable_claim(
+            &id,
+            "fingerprint",
+            "pending-turn",
+            /*delivered*/ false,
+        )],
+    );
+
+    assert_rollout_items_eq(
+        &compacted,
+        &[RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: false,
+            mail_fingerprint: Some("fingerprint".to_string()),
+            delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: Some(id),
+        }],
+    );
+}
+
+#[test]
+fn durable_compaction_keeps_an_older_fingerprint_consumed_after_a_new_pending_payload() {
+    let id = ResponseItemId::with_suffix("msg", "delivered-old-fingerprint");
+    let compacted = compact_durable_agent_state(
+        &[
+            durable_payload(&id, "old-fingerprint", "old mail body"),
+            durable_claim(
+                &id,
+                "old-fingerprint",
+                "delivered-turn",
+                /*delivered*/ true,
+            ),
+            durable_payload(&id, "new-fingerprint", "new mail body"),
+            durable_claim(
+                &id,
+                "new-fingerprint",
+                "pending-turn",
+                /*delivered*/ false,
+            ),
+        ],
+        &[],
+    );
+
+    assert_rollout_items_eq(
+        &compacted,
+        &[RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: false,
+            mail_fingerprint: Some("old-fingerprint".to_string()),
+            delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: Some(id),
+        }],
+    );
+}
+
+#[test]
+fn durable_compaction_keeps_latest_pending_payload_in_original_fifo_position() {
+    let first_id = ResponseItemId::with_suffix("msg", "first");
+    let second_id = ResponseItemId::with_suffix("msg", "second");
+    let compacted = compact_durable_agent_state(
+        &[
+            durable_payload(&first_id, "first-old", "old first body"),
+            durable_payload(&second_id, "second", "second body"),
+            durable_payload(&first_id, "first-new", "new first body"),
+        ],
+        &[],
+    );
+
+    assert_rollout_items_eq(
+        &compacted,
+        &[
+            durable_payload(&first_id, "first-new", "new first body"),
+            durable_payload(&second_id, "second", "second body"),
+        ],
     );
 }

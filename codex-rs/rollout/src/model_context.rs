@@ -370,6 +370,12 @@ struct DurableClaim {
     turn_started: bool,
 }
 
+impl DurableClaim {
+    fn is_consumed(&self) -> bool {
+        self.delivered || self.turn_started
+    }
+}
+
 fn compact_durable_agent_state(
     older_items: &[RolloutItem],
     bounded_suffix: &[RolloutItem],
@@ -386,7 +392,7 @@ fn compact_durable_agent_state(
         })
         .collect::<HashSet<_>>();
     let mut claims = Vec::new();
-    let mut claim_indices = HashMap::new();
+    let mut claim_indices = HashMap::<(ResponseItemId, String), usize>::new();
     let chronological_items = older_items
         .iter()
         .map(|item| (true, item))
@@ -426,7 +432,16 @@ fn compact_durable_agent_state(
                     delivered: delivered_response.is_some(),
                     turn_started: claims_with_later_turn_start.contains(&position),
                 });
-                claim_indices.insert((communication_id.clone(), fingerprint.clone()), index);
+                let key = (communication_id.clone(), fingerprint.clone());
+                match claim_indices.get_mut(&key) {
+                    Some(selected_index) if !claims[*selected_index].is_consumed() => {
+                        *selected_index = index;
+                    }
+                    Some(_) => {}
+                    None => {
+                        claim_indices.insert(key, index);
+                    }
+                }
             }
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunication(_)
@@ -443,16 +458,17 @@ fn compact_durable_agent_state(
         }
     }
 
-    let mut payloads = Vec::new();
+    let mut payload_order = Vec::new();
+    let mut payloads = HashMap::new();
     for item in older_items {
-        match item {
+        let payload = match item {
             RolloutItem::DurableInterAgentCommunication {
                 communication,
                 start_options,
                 fingerprint,
                 turn_id,
                 compatibility_shadow,
-            } => payloads.push(DurablePayload {
+            } => Some(DurablePayload {
                 communication: communication.clone(),
                 start_options: start_options.clone(),
                 fingerprint: fingerprint.clone(),
@@ -464,7 +480,7 @@ fn compact_durable_agent_state(
                 mail_communication: Some(communication),
                 mail_start_options: Some(start_options),
                 ..
-            } => payloads.push(DurablePayload {
+            } => Some(DurablePayload {
                 communication: communication.clone(),
                 start_options: start_options.clone(),
                 fingerprint: fingerprint.clone(),
@@ -475,7 +491,27 @@ fn compact_durable_agent_state(
                     .unwrap_or_default(),
                 compatibility_shadow: false,
             }),
-            _ => {}
+            _ => None,
+        };
+        let Some(payload) = payload else {
+            continue;
+        };
+        let Some(id) = payload.communication.id.clone() else {
+            continue;
+        };
+        if !payloads.contains_key(&id) {
+            payload_order.push(id.clone());
+        }
+        payloads.insert(id, payload);
+    }
+
+    let selected_claim_indices = claim_indices.values().copied().collect::<HashSet<_>>();
+    let mut consumed_claim_fingerprints = HashMap::new();
+    for (index, claim) in claims.iter().enumerate() {
+        if selected_claim_indices.contains(&index) && claim.is_consumed() {
+            consumed_claim_fingerprints
+                .entry(claim.communication_id.clone())
+                .or_insert_with(|| claim.fingerprint.clone());
         }
     }
 
@@ -500,19 +536,17 @@ fn compact_durable_agent_state(
         .cloned()
         .collect::<Vec<_>>();
     let mut represented_ids = HashSet::new();
-    for payload in payloads {
-        let Some(id) = payload.communication.id.clone() else {
+    for id in payload_order {
+        let Some(payload) = payloads.remove(&id) else {
             continue;
         };
-        if !represented_ids.insert(id.clone()) {
-            continue;
-        }
         let claim = claim_indices
             .get(&(id.clone(), payload.fingerprint.clone()))
             .and_then(|index| claims.get(*index));
-        let consumed = legacy_consumed_ids.contains(&id)
-            || claim.is_some_and(|claim| claim.delivered || claim.turn_started);
-        if consumed {
+        represented_ids.insert(id.clone());
+        if let Some(fingerprint) = consumed_claim_fingerprints.get(&id) {
+            compacted.push(consumed_mail_marker(id, fingerprint.clone()));
+        } else if legacy_consumed_ids.contains(&id) {
             compacted.push(consumed_mail_marker(id, payload.fingerprint));
         } else {
             compacted.push(RolloutItem::DurableInterAgentCommunication {
@@ -580,13 +614,14 @@ fn compact_durable_agent_state(
             delivered,
             turn_started,
         } = claim;
-        if claim_indices.get(&(id.clone(), fingerprint.clone())) != Some(&index) {
+        if !selected_claim_indices.contains(&index) {
             continue;
         }
         if from_older_history && represented_ids.insert(id.clone()) {
-            if delivered || turn_started {
-                compacted.push(consumed_mail_marker(id, fingerprint));
+            if let Some(consumed_fingerprint) = consumed_claim_fingerprints.get(&id) {
+                compacted.push(consumed_mail_marker(id, consumed_fingerprint.clone()));
             } else {
+                debug_assert!(!delivered && !turn_started);
                 compacted.push(RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication_id: id,
                     communication,

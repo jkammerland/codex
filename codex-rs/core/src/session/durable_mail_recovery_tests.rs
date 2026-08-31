@@ -399,6 +399,121 @@ fn latest_exact_payload_wins_for_a_reused_id() {
 }
 
 #[test]
+fn later_duplicate_payload_keeps_its_first_admission_fifo_position() {
+    let first = mail("duplicate-first");
+    let second = mail("second");
+    let mut latest = first.clone();
+    latest.content = "latest first payload".to_string();
+    let mut latest_payload = payload(&latest);
+    let RolloutItem::DurableInterAgentCommunication { fingerprint, .. } = &mut latest_payload
+    else {
+        unreachable!("payload helper returns durable mail");
+    };
+    *fingerprint = "latest-fingerprint".to_string();
+
+    let recovered = recover_durable_mail(&[payload(&first), payload(&second), latest_payload]);
+
+    assert_eq!(
+        recovered
+            .pending
+            .iter()
+            .map(|pending| (&pending.communication, pending.fingerprint.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(&latest, "latest-fingerprint"), (&second, "fingerprint"),]
+    );
+}
+
+#[test]
+fn latest_cross_fingerprint_claim_keeps_the_original_fifo_position() {
+    let first = mail("cross-fingerprint-first");
+    let second = mail("cross-fingerprint-second");
+    let mut claimed = first.clone();
+    claimed.content = "latest claimed body".to_string();
+    let latest_claim = RolloutItem::DurableInterAgentCommunicationClaimed {
+        communication_id: first.id.clone().expect("message id"),
+        communication: Some(claimed.clone()),
+        delivered_response: None,
+        fingerprint: "latest-fingerprint".to_string(),
+        turn_id: "latest-turn".to_string(),
+    };
+
+    let recovered = recover_durable_mail(&[payload(&first), payload(&second), latest_claim]);
+
+    assert_eq!(
+        recovered
+            .pending
+            .iter()
+            .map(|pending| (&pending.communication, pending.fingerprint.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(&claimed, "latest-fingerprint"), (&second, "fingerprint"),]
+    );
+}
+
+#[test]
+fn bodyless_cross_fingerprint_claim_consumes_the_id_fail_closed() {
+    let communication = mail("bodyless-cross-fingerprint");
+    let id = communication.id.clone().expect("message id");
+    let bodyless_claim = RolloutItem::DurableInterAgentCommunicationClaimed {
+        communication_id: id.clone(),
+        communication: None,
+        delivered_response: None,
+        fingerprint: "unknown-fingerprint".to_string(),
+        turn_id: "unknown-turn".to_string(),
+    };
+
+    assert_eq!(
+        recover_durable_mail(&[payload(&communication), bodyless_claim]),
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "unknown-fingerprint".to_string(),
+                claimed_turn_id: "unknown-turn".to_string(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn mcp10_delivery_wins_over_a_later_conflicting_pending_payload() {
+    let delivered = mail("mcp10-conflict");
+    let id = delivered.id.clone().expect("message id");
+    let mut conflicting = delivered.clone();
+    conflicting.content = "later conflicting payload".to_string();
+    let mut conflicting_payload = payload(&conflicting);
+    let RolloutItem::DurableInterAgentCommunication { fingerprint, .. } = &mut conflicting_payload
+    else {
+        unreachable!("payload helper returns durable mail");
+    };
+    *fingerprint = "conflicting-fingerprint".to_string();
+
+    assert_eq!(
+        recover_durable_mail(&[
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: true,
+                mail_fingerprint: Some("delivered-fingerprint".to_string()),
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: None,
+            },
+            RolloutItem::ResponseItem(delivered.to_model_input_item().into()),
+            conflicting_payload,
+        ]),
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "delivered-fingerprint".to_string(),
+                claimed_turn_id: String::new(),
+            }],
+        }
+    );
+}
+
+#[test]
 fn an_older_delivered_occurrence_wins_over_a_conflicting_pending_reuse() {
     let delivered = mail("delivered-conflict");
     let id = delivered.id.clone().expect("message id");

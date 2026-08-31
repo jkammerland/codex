@@ -6,7 +6,6 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionMetaLine;
-use codex_protocol::turn_input::TurnStartOptions;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -350,227 +349,55 @@ impl ModelContextScan {
     }
 }
 
-#[derive(Clone)]
-struct DurablePayload {
-    communication: InterAgentCommunication,
-    start_options: TurnStartOptions,
-    fingerprint: String,
-    turn_id: String,
-    compatibility_shadow: bool,
-}
-
-#[derive(Clone)]
-struct DurableClaim {
-    communication_id: ResponseItemId,
-    fingerprint: String,
-    communication: Option<InterAgentCommunication>,
-    turn_id: String,
-    from_older_history: bool,
-    delivered: bool,
-    turn_started: bool,
-}
-
-impl DurableClaim {
-    fn is_consumed(&self) -> bool {
-        self.delivered || self.turn_started
-    }
-}
-
 fn compact_durable_agent_state(
     older_items: &[RolloutItem],
     bounded_suffix: &[RolloutItem],
 ) -> Vec<RolloutItem> {
-    let legacy_consumed_ids = older_items
-        .iter()
-        .chain(bounded_suffix)
-        .filter_map(|item| match item {
-            RolloutItem::InterAgentCommunicationMetadata {
-                consumed_mail_id: Some(id),
-                ..
-            } => Some(id.clone()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    let mut claims = Vec::new();
-    let mut claim_indices = HashMap::<(ResponseItemId, String), usize>::new();
-    let chronological_items = older_items
-        .iter()
-        .map(|item| (true, item))
-        .chain(bounded_suffix.iter().map(|item| (false, item)))
-        .collect::<Vec<_>>();
+    let chronological_items = older_items.iter().chain(bounded_suffix).collect::<Vec<_>>();
     let mut future_turn_starts = HashSet::new();
-    let mut claims_with_later_turn_start = HashSet::new();
-    for (index, (_, item)) in chronological_items.iter().enumerate().rev() {
+    let mut delivered_claim_positions = HashSet::new();
+    for (index, item) in chronological_items.iter().enumerate().rev() {
         match item {
             RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
                 future_turn_starts.insert(event.turn_id.as_str());
             }
-            RolloutItem::DurableInterAgentCommunicationClaimed { turn_id, .. }
-                if future_turn_starts.contains(turn_id.as_str()) =>
-            {
-                claims_with_later_turn_start.insert(index);
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                delivered_response,
+                turn_id,
+                ..
+            } if delivered_response.is_some() || future_turn_starts.contains(turn_id.as_str()) => {
+                delivered_claim_positions.insert(index);
             }
             _ => {}
         }
     }
-    for (position, (from_older_history, item)) in chronological_items.into_iter().enumerate() {
+
+    let mut consumed_fingerprints = HashMap::<ResponseItemId, (usize, String)>::new();
+    for (position, item) in chronological_items.iter().enumerate() {
         match item {
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
-                communication,
-                delivered_response,
                 fingerprint,
-                turn_id,
-            } => {
-                let index = claims.len();
-                claims.push(DurableClaim {
-                    communication_id: communication_id.clone(),
-                    fingerprint: fingerprint.clone(),
-                    communication: communication.clone(),
-                    turn_id: turn_id.clone(),
-                    from_older_history,
-                    delivered: delivered_response.is_some(),
-                    turn_started: claims_with_later_turn_start.contains(&position),
-                });
-                let key = (communication_id.clone(), fingerprint.clone());
-                match claim_indices.get_mut(&key) {
-                    Some(selected_index) if !claims[*selected_index].is_consumed() => {
-                        *selected_index = index;
-                    }
-                    Some(_) => {}
-                    None => {
-                        claim_indices.insert(key, index);
-                    }
-                }
+                ..
+            } if delivered_claim_positions.contains(&position) => {
+                consumed_fingerprints
+                    .entry(communication_id.clone())
+                    .or_insert_with(|| (position, fingerprint.clone()));
             }
-            RolloutItem::SessionMeta(_)
-            | RolloutItem::InterAgentCommunication(_)
-            | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::TerminalAgentStatus { .. }
-            | RolloutItem::DurableInterAgentCommunication { .. }
-            | RolloutItem::Compacted(_)
-            | RolloutItem::TurnContext(_)
-            | RolloutItem::WorldState(_)
-            | RolloutItem::SecurityRiskScore(_)
-            | RolloutItem::ResponseItem(_)
-            | RolloutItem::EventMsg(_)
-            | RolloutItem::RealtimeItem(_) => {}
-        }
-    }
-
-    let mut payload_order = Vec::new();
-    let mut payloads = HashMap::new();
-    for item in older_items {
-        let payload = match item {
-            RolloutItem::DurableInterAgentCommunication {
-                communication,
-                start_options,
-                fingerprint,
-                turn_id,
-                compatibility_shadow,
-            } => Some(DurablePayload {
-                communication: communication.clone(),
-                start_options: start_options.clone(),
-                fingerprint: fingerprint.clone(),
-                turn_id: turn_id.clone(),
-                compatibility_shadow: *compatibility_shadow,
-            }),
             RolloutItem::InterAgentCommunicationMetadata {
                 mail_fingerprint: Some(fingerprint),
-                mail_communication: Some(communication),
-                mail_start_options: Some(start_options),
+                consumed_mail_id: Some(communication_id),
                 ..
-            } => Some(DurablePayload {
-                communication: communication.clone(),
-                start_options: start_options.clone(),
-                fingerprint: fingerprint.clone(),
-                turn_id: communication
-                    .internal_chat_message_metadata_passthrough
-                    .as_ref()
-                    .and_then(|metadata| metadata.turn_id.clone())
-                    .unwrap_or_default(),
-                compatibility_shadow: false,
-            }),
-            _ => None,
-        };
-        let Some(payload) = payload else {
-            continue;
-        };
-        let Some(id) = payload.communication.id.clone() else {
-            continue;
-        };
-        if !payloads.contains_key(&id) {
-            payload_order.push(id.clone());
-        }
-        payloads.insert(id, payload);
-    }
-
-    let selected_claim_indices = claim_indices.values().copied().collect::<HashSet<_>>();
-    let mut consumed_claim_fingerprints = HashMap::new();
-    for (index, claim) in claims.iter().enumerate() {
-        if selected_claim_indices.contains(&index) && claim.is_consumed() {
-            consumed_claim_fingerprints
-                .entry(claim.communication_id.clone())
-                .or_insert_with(|| claim.fingerprint.clone());
-        }
-    }
-
-    let bounded_claim_turn_ids = bounded_suffix
-        .iter()
-        .filter_map(|item| match item {
-            RolloutItem::DurableInterAgentCommunicationClaimed { turn_id, .. } => {
-                Some(turn_id.as_str())
+            } => {
+                consumed_fingerprints
+                    .entry(communication_id.clone())
+                    .or_insert_with(|| (position, fingerprint.clone()));
             }
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    let mut compacted = older_items
-        .iter()
-        .filter(|item| {
-            matches!(
-                item,
-                RolloutItem::EventMsg(EventMsg::TurnStarted(started))
-                    if bounded_claim_turn_ids.contains(started.turn_id.as_str())
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut represented_ids = HashSet::new();
-    for id in payload_order {
-        let Some(payload) = payloads.remove(&id) else {
-            continue;
-        };
-        let claim = claim_indices
-            .get(&(id.clone(), payload.fingerprint.clone()))
-            .and_then(|index| claims.get(*index));
-        represented_ids.insert(id.clone());
-        if let Some(fingerprint) = consumed_claim_fingerprints.get(&id) {
-            compacted.push(consumed_mail_marker(id, fingerprint.clone()));
-        } else if legacy_consumed_ids.contains(&id) {
-            compacted.push(consumed_mail_marker(id, payload.fingerprint));
-        } else {
-            compacted.push(RolloutItem::DurableInterAgentCommunication {
-                communication: payload.communication,
-                start_options: payload.start_options,
-                fingerprint: payload.fingerprint.clone(),
-                turn_id: payload.turn_id,
-                compatibility_shadow: payload.compatibility_shadow,
-            });
-            if let Some(claim) = claim
-                && claim.from_older_history
-            {
-                compacted.push(RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id: id,
-                    communication: claim.communication.clone(),
-                    delivered_response: None,
-                    fingerprint: payload.fingerprint,
-                    turn_id: claim.turn_id.clone(),
-                });
-            }
+            _ => {}
         }
     }
-
-    for pair in older_items.windows(2) {
+    let mut mcp10_receipts = HashMap::new();
+    for (position, pair) in chronological_items.windows(2).enumerate() {
         let [
             RolloutItem::InterAgentCommunicationMetadata {
                 mail_fingerprint: Some(fingerprint),
@@ -582,54 +409,106 @@ fn compact_durable_agent_state(
         else {
             continue;
         };
-        let Some(id) = response_item.id().cloned() else {
+        let Some(communication_id) = response_item.id().cloned() else {
             continue;
         };
-        if represented_ids.insert(id.clone()) {
-            compacted.push(consumed_mail_marker(id, fingerprint.clone()));
-        }
-    }
-
-    for item in older_items {
-        let RolloutItem::InterAgentCommunicationMetadata {
-            mail_fingerprint: Some(fingerprint),
-            consumed_mail_id: Some(id),
-            ..
-        } = item
-        else {
-            continue;
-        };
-        if represented_ids.insert(id.clone()) {
-            compacted.push(consumed_mail_marker(id.clone(), fingerprint.clone()));
-        }
-    }
-
-    for (index, claim) in claims.into_iter().enumerate() {
-        let DurableClaim {
-            communication_id: id,
-            fingerprint,
-            communication,
-            turn_id,
-            from_older_history,
-            delivered,
-            turn_started,
-        } = claim;
-        if !selected_claim_indices.contains(&index) {
-            continue;
-        }
-        if from_older_history && represented_ids.insert(id.clone()) {
-            if let Some(consumed_fingerprint) = consumed_claim_fingerprints.get(&id) {
-                compacted.push(consumed_mail_marker(id, consumed_fingerprint.clone()));
-            } else {
-                debug_assert!(!delivered && !turn_started);
-                compacted.push(RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id: id,
-                    communication,
-                    delivered_response: None,
-                    fingerprint,
-                    turn_id,
-                });
+        mcp10_receipts.insert(position, (communication_id.clone(), fingerprint.clone()));
+        match consumed_fingerprints.get_mut(&communication_id) {
+            Some((current_position, current_fingerprint)) if position < *current_position => {
+                *current_position = position;
+                *current_fingerprint = fingerprint.clone();
             }
+            Some(_) => {}
+            None => {
+                consumed_fingerprints.insert(communication_id, (position, fingerprint.clone()));
+            }
+        }
+    }
+
+    let mut compacted = Vec::new();
+    let mut emitted_consumed_ids = HashSet::new();
+    for (position, item) in older_items.iter().enumerate() {
+        if let Some((communication_id, fingerprint)) = mcp10_receipts.get(&position) {
+            if emitted_consumed_ids.insert(communication_id.clone()) {
+                compacted.push(consumed_mail_marker(
+                    communication_id.clone(),
+                    fingerprint.clone(),
+                ));
+            }
+            continue;
+        }
+        match item {
+            RolloutItem::DurableInterAgentCommunication { communication, .. } => {
+                let Some(communication_id) = communication.id.clone() else {
+                    continue;
+                };
+                if let Some((_, fingerprint)) = consumed_fingerprints.get(&communication_id) {
+                    if emitted_consumed_ids.insert(communication_id.clone()) {
+                        compacted.push(consumed_mail_marker(communication_id, fingerprint.clone()));
+                    }
+                } else {
+                    compacted.push(item.clone());
+                }
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id, ..
+            } => {
+                if let Some((_, fingerprint)) = consumed_fingerprints.get(communication_id) {
+                    if emitted_consumed_ids.insert(communication_id.clone()) {
+                        compacted.push(consumed_mail_marker(
+                            communication_id.clone(),
+                            fingerprint.clone(),
+                        ));
+                    }
+                } else {
+                    compacted.push(item.clone());
+                }
+            }
+            RolloutItem::InterAgentCommunicationMetadata {
+                mail_communication,
+                consumed_mail_id,
+                ..
+            } => {
+                if let Some(communication_id) = consumed_mail_id
+                    && let Some((_, fingerprint)) = consumed_fingerprints.get(communication_id)
+                    && emitted_consumed_ids.insert(communication_id.clone())
+                {
+                    compacted.push(consumed_mail_marker(
+                        communication_id.clone(),
+                        fingerprint.clone(),
+                    ));
+                }
+                let Some(communication_id) = mail_communication
+                    .as_ref()
+                    .and_then(|communication| communication.id.clone())
+                else {
+                    continue;
+                };
+                if let Some((_, fingerprint)) = consumed_fingerprints.get(&communication_id) {
+                    if emitted_consumed_ids.insert(communication_id.clone()) {
+                        compacted.push(consumed_mail_marker(communication_id, fingerprint.clone()));
+                    }
+                } else {
+                    let mut retained = item.clone();
+                    if let RolloutItem::InterAgentCommunicationMetadata {
+                        consumed_mail_id, ..
+                    } = &mut retained
+                    {
+                        *consumed_mail_id = None;
+                    }
+                    compacted.push(retained);
+                }
+            }
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::TerminalAgentStatus { .. }
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::EventMsg(_)
+            | RolloutItem::RealtimeItem(_) => {}
         }
     }
     compacted

@@ -116,6 +116,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
 
     let mut states = HashMap::<(ResponseItemId, String), DurableState>::new();
     let mut legacy_consumed = HashMap::<ResponseItemId, (usize, String)>::new();
+    let mut first_occurrence_by_id = HashMap::<ResponseItemId, usize>::new();
     for (index, item) in items.iter().enumerate() {
         match item {
             RolloutItem::DurableInterAgentCommunication {
@@ -128,6 +129,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 let Some(id) = communication.id.clone() else {
                     continue;
                 };
+                first_occurrence_by_id.entry(id.clone()).or_insert(index);
                 states.entry((id, fingerprint.clone())).or_default().payload =
                     Some(DurablePayload {
                         index,
@@ -149,6 +151,9 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 turn_id,
                 ..
             } => {
+                first_occurrence_by_id
+                    .entry(communication_id.clone())
+                    .or_insert(index);
                 let claim = DurableClaim {
                     index,
                     turn_id: turn_id.clone(),
@@ -176,6 +181,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 let Some(id) = communication.id.clone() else {
                     continue;
                 };
+                first_occurrence_by_id.entry(id.clone()).or_insert(index);
                 states
                     .entry((id.clone(), fingerprint.clone()))
                     .or_default()
@@ -192,6 +198,9 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                     size_limit: MailboxModelSizeLimit::LegacyRecovery,
                 });
                 if let Some(consumed_id) = consumed_mail_id {
+                    first_occurrence_by_id
+                        .entry(consumed_id.clone())
+                        .or_insert(index);
                     legacy_consumed
                         .entry(consumed_id.clone())
                         .or_insert_with(|| (index, fingerprint.clone()));
@@ -202,6 +211,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 consumed_mail_id: Some(id),
                 ..
             } => {
+                first_occurrence_by_id.entry(id.clone()).or_insert(index);
                 legacy_consumed
                     .entry(id.clone())
                     .or_insert_with(|| (index, fingerprint.clone()));
@@ -224,6 +234,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
             continue;
         };
         if let Some(id) = response_item.id().cloned() {
+            first_occurrence_by_id.entry(id.clone()).or_insert(index);
             legacy_consumed
                 .entry(id)
                 .or_insert_with(|| (index + 1, fingerprint.clone()));
@@ -245,13 +256,17 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
             .filter(|(_, consumed_fingerprint)| consumed_fingerprint == &fingerprint);
         let latest_index =
             matching_legacy_consumed.map_or(latest_index, |(index, _)| latest_index.max(*index));
-        let order_index = state
+        let state_order_index = state
             .payload
             .as_ref()
             .map(|payload| payload.index)
             .or_else(|| state.claim.as_ref().map(|claim| claim.index))
             .or_else(|| matching_legacy_consumed.map(|(index, _)| *index))
             .unwrap_or_default();
+        let order_index = first_occurrence_by_id
+            .get(&id)
+            .copied()
+            .unwrap_or(state_order_index);
         let delivery_index = state
             .claim
             .as_ref()
@@ -273,7 +288,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
     }
     for (id, (index, fingerprint)) in legacy_consumed {
         let entry = RecoveryEntry {
-            order_index: index,
+            order_index: first_occurrence_by_id.get(&id).copied().unwrap_or(index),
             latest_index: index,
             delivery_index: Some(index),
             id: id.clone(),

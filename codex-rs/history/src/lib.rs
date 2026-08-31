@@ -173,8 +173,7 @@ pub struct RolloutModelResponseProjection {
 
 const MAX_LEGACY_CLAIMS_PER_TURN: usize = 64;
 const MAX_BUFFERED_LEGACY_CLAIMS: usize = 4_096;
-const MAX_DURABLE_MODEL_ITEM_TOKENS: usize = 10_000;
-const APPROXIMATE_BYTES_PER_TOKEN: usize = 4;
+const MAX_DURABLE_MODEL_ITEM_BYTES: usize = 10_000;
 
 struct ModelItemSizeWriter {
     remaining: usize,
@@ -198,7 +197,10 @@ impl Write for ModelItemSizeWriter {
 
 fn bounded_durable_model_response(response: &ResponseItemEnvelope) -> bool {
     let mut writer = ModelItemSizeWriter {
-        remaining: MAX_DURABLE_MODEL_ITEM_TOKENS.saturating_mul(APPROXIMATE_BYTES_PER_TOKEN),
+        // A byte-level tokenizer cannot produce more tokens than the serialized UTF-8 byte
+        // length. Bounding the complete serialized item is therefore a conservative hard token
+        // bound independent of model-specific token density.
+        remaining: MAX_DURABLE_MODEL_ITEM_BYTES,
     };
     serde_json::to_writer(&mut writer, &response.item).is_ok()
 }
@@ -259,6 +261,26 @@ impl RolloutModelResponseProjection {
             }
             RolloutItem::ResponseItem(response) => {
                 vec![std::borrow::Cow::Borrowed(response)]
+            }
+            RolloutItem::InterAgentCommunicationMetadata {
+                consumed_mail_id: Some(communication_id),
+                ..
+            } => {
+                if self
+                    .delivered_communication_ids
+                    .insert(communication_id.clone())
+                {
+                    let mut removed = 0usize;
+                    for pending in self.pending_legacy_claims.values_mut() {
+                        let previous_len = pending.len();
+                        pending.retain(|(pending_id, _)| pending_id != communication_id);
+                        removed =
+                            removed.saturating_add(previous_len.saturating_sub(pending.len()));
+                    }
+                    self.pending_legacy_claim_count =
+                        self.pending_legacy_claim_count.saturating_sub(removed);
+                }
+                Vec::new()
             }
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,

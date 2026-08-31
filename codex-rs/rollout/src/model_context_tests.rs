@@ -439,7 +439,7 @@ fn durable_compaction_keeps_an_older_fingerprint_consumed_after_a_new_pending_pa
 }
 
 #[test]
-fn durable_compaction_keeps_latest_pending_payload_in_original_fifo_position() {
+fn durable_compaction_preserves_pending_occurrences_in_fifo_order() {
     let first_id = ResponseItemId::with_suffix("msg", "first");
     let second_id = ResponseItemId::with_suffix("msg", "second");
     let compacted = compact_durable_agent_state(
@@ -454,8 +454,103 @@ fn durable_compaction_keeps_latest_pending_payload_in_original_fifo_position() {
     assert_rollout_items_eq(
         &compacted,
         &[
-            durable_payload(&first_id, "first-new", "new first body"),
+            durable_payload(&first_id, "first-old", "old first body"),
             durable_payload(&second_id, "second", "second body"),
+            durable_payload(&first_id, "first-new", "new first body"),
         ],
+    );
+}
+
+#[test]
+fn durable_compaction_preserves_fifo_across_the_bounded_suffix() {
+    let first_id = ResponseItemId::with_suffix("msg", "cutoff-first");
+    let second_id = ResponseItemId::with_suffix("msg", "cutoff-second");
+    let older = [
+        durable_payload(&first_id, "first-old", "old first body"),
+        durable_payload(&second_id, "second", "second body"),
+    ];
+    let suffix = [durable_payload(&first_id, "first-new", "new first body")];
+    let mut reconstructed = compact_durable_agent_state(&older, &suffix);
+    reconstructed.extend(suffix);
+
+    assert_rollout_items_eq(
+        &reconstructed,
+        &[
+            durable_payload(&first_id, "first-old", "old first body"),
+            durable_payload(&second_id, "second", "second body"),
+            durable_payload(&first_id, "first-new", "new first body"),
+        ],
+    );
+}
+
+#[test]
+fn durable_compaction_keeps_mcp10_delivery_consumed_after_a_conflicting_payload() {
+    let id = ResponseItemId::with_suffix("msg", "mcp10-conflict");
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "delivered body".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(id.clone());
+    let compacted = compact_durable_agent_state(
+        &[
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: true,
+                mail_fingerprint: Some("delivered-fingerprint".to_string()),
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: None,
+            },
+            RolloutItem::ResponseItem(communication.to_model_input_item().into()),
+            durable_payload(&id, "pending-fingerprint", "pending body"),
+        ],
+        &[],
+    );
+
+    assert_rollout_items_eq(
+        &compacted,
+        &[RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: false,
+            mail_fingerprint: Some("delivered-fingerprint".to_string()),
+            delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: Some(id),
+        }],
+    );
+}
+
+#[test]
+fn durable_compaction_uses_a_suffix_delivery_to_suppress_an_older_payload() {
+    let id = ResponseItemId::with_suffix("msg", "suffix-delivered");
+    let compacted = compact_durable_agent_state(
+        &[durable_payload(&id, "old-fingerprint", "old body")],
+        &[durable_claim(
+            &id,
+            "delivered-fingerprint",
+            "suffix-turn",
+            /*delivered*/ true,
+        )],
+    );
+
+    assert_rollout_items_eq(
+        &compacted,
+        &[RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: false,
+            mail_fingerprint: Some("delivered-fingerprint".to_string()),
+            delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: Some(id),
+        }],
     );
 }

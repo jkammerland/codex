@@ -132,6 +132,57 @@ fn model_response_projection_only_suppresses_an_adjacent_identified_shadow() {
 }
 
 #[test]
+fn compacted_consumed_receipt_suppresses_later_duplicate_claims() {
+    let mut communication = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "already delivered result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let communication_id = ResponseItemId::with_suffix("msg", "compacted-duplicate");
+    communication.id = Some(communication_id.clone());
+    let items = [
+        RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: false,
+            mail_fingerprint: Some("delivered-fingerprint".to_string()),
+            delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: Some(communication_id.clone()),
+        },
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication_id.clone(),
+            communication: Some(communication.clone()),
+            delivered_response: Some(communication.to_model_input_item().into()),
+            fingerprint: "duplicate-current".to_string(),
+            turn_id: "current-turn".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            communication: Some(communication),
+            delivered_response: None,
+            fingerprint: "duplicate-legacy".to_string(),
+            turn_id: "legacy-turn".to_string(),
+        },
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: "legacy-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            },
+        )),
+    ];
+    let mut projection = RolloutModelResponseProjection::default();
+
+    assert!(items.iter().all(|item| projection.project(item).is_empty()));
+}
+
+#[test]
 fn model_response_projection_does_not_apply_a_prior_turn_start_to_a_later_claim() {
     let mut communication = InterAgentCommunication::new(
         codex_protocol::AgentPath::root(),
@@ -302,11 +353,7 @@ fn model_response_projection_rejects_inconsistent_or_oversized_claim_envelopes()
     let valid_response = ResponseItemEnvelope::new(communication.to_model_input_item());
     let mismatched_response = ResponseItemEnvelope::new(response_message("forged"));
     let mut oversized_communication = communication.clone();
-    oversized_communication.content = "x".repeat(
-        MAX_DURABLE_MODEL_ITEM_TOKENS
-            .saturating_mul(APPROXIMATE_BYTES_PER_TOKEN)
-            .saturating_add(1),
-    );
+    oversized_communication.content = "x".repeat(MAX_DURABLE_MODEL_ITEM_BYTES.saturating_add(1));
     let oversized_response =
         ResponseItemEnvelope::new(oversized_communication.to_model_input_item());
     let items = [
@@ -359,11 +406,7 @@ fn model_response_projection_rejects_oversized_or_mismatched_legacy_claims() {
         codex_protocol::AgentPath::root(),
         codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
         Vec::new(),
-        "x".repeat(
-            MAX_DURABLE_MODEL_ITEM_TOKENS
-                .saturating_mul(APPROXIMATE_BYTES_PER_TOKEN)
-                .saturating_add(1),
-        ),
+        "x".repeat(MAX_DURABLE_MODEL_ITEM_BYTES.saturating_add(1)),
         /*trigger_turn*/ true,
     );
     let oversized_id = ResponseItemId::with_suffix("msg", "oversized-legacy");

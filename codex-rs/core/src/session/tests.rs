@@ -2362,6 +2362,7 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     let (mut session, turn_context) = make_session_and_context().await;
     let rollout_path = attach_thread_persistence(&mut session).await;
     let session = Arc::new(session);
+    let turn_context = Arc::new(turn_context);
     let communication = InterAgentCommunication::new(
         AgentPath::root().join("worker").expect("worker path"),
         AgentPath::root(),
@@ -2441,9 +2442,9 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
 
 #[tokio::test]
 async fn cancelled_delivery_finishes_the_flushed_commit_before_a_successor_can_start() {
-    let (mut session, _) = make_session_and_context().await;
-    let rollout_path = attach_thread_persistence(&mut session).await;
-    let session = Arc::new(session);
+    let (mut session, _, rx) = make_session_and_context_with_rx().await;
+    let rollout_path =
+        attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
     let turn_id = "durable-turn";
     let communication_id = ResponseItemId::with_suffix("msg", "cancelled-commit");
     let mut communication = InterAgentCommunication::new(
@@ -2575,6 +2576,72 @@ async fn cancelled_delivery_finishes_the_flushed_commit_before_a_successor_can_s
             .await,
         DurableMailRetryStatus::Delivered
     );
+    let mut saw_raw_response = false;
+    while let Ok(event) = rx.try_recv() {
+        saw_raw_response |= matches!(
+            event.msg,
+            EventMsg::RawResponseItem(event)
+                if event.item.id() == Some(&communication_id)
+        );
+    }
+    assert!(saw_raw_response);
+}
+
+#[tokio::test]
+async fn every_successor_task_waits_for_the_durable_commit_gate() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let commit_permit = session
+        .durable_mail_commit_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("commit gate should remain open");
+
+    session
+        .start_task(turn_context, Vec::new(), CompletingTask)
+        .await;
+    tokio::task::yield_now().await;
+    assert!(rx.try_recv().is_err());
+
+    drop(commit_permit);
+    let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("successor should finish after the commit gate opens")
+        .expect("event channel should remain open");
+    assert!(matches!(event.msg, EventMsg::TurnComplete(_)));
+}
+
+#[tokio::test]
+async fn a_successor_waiting_for_a_stalled_commit_remains_interruptible() {
+    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let commit_permit = session
+        .durable_mail_commit_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("commit gate should remain open");
+    session
+        .start_task(turn_context, Vec::new(), CompletingTask)
+        .await;
+
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        session.abort_all_tasks(TurnAbortReason::Interrupted),
+    )
+    .await
+    .expect("interrupt should not wait for a stalled commit");
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.expect("event channel should remain open");
+            if matches!(event.msg, EventMsg::TurnAborted(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("interrupt should emit a terminal event");
+
+    drop(commit_permit);
 }
 
 #[tokio::test]

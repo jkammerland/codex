@@ -56,6 +56,7 @@ use codex_protocol::protocol::WarningEvent;
 use codex_thread_store::PersistContext;
 
 use codex_features::Feature;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 pub(crate) use compact::CompactTask;
@@ -393,15 +394,33 @@ impl Session {
         let handle = tokio::spawn(
             async move {
                 let ctx_for_finish = Arc::clone(&ctx);
-                let task_result = task_for_run
-                    .run(
-                        Arc::clone(&session),
-                        ctx,
-                        task_input,
-                        task_cancellation_token.child_token(),
-                    )
-                    .instrument(trace_span!("session_task.run"))
-                    .await;
+                let task_result = async {
+                    // A cancelled predecessor can finish an already-started durable mailbox
+                    // commit in a shielded task. Gate every task kind before it can observe or
+                    // rewrite history; this includes compaction and precedes RegularTask's
+                    // persisted TurnStarted event. A successor blocked on a failed writer remains
+                    // explicitly interruptible without risking ambiguous replay.
+                    let durable_mail_commit_barrier = select! {
+                        biased;
+                        _ = task_cancellation_token.cancelled() => {
+                            return Err(CodexErr::TurnAborted);
+                        }
+                        permit = session.durable_mail_commit_gate.clone().acquire_owned() => {
+                            permit.map_err(|_| CodexErr::InternalAgentDied)?
+                        }
+                    };
+                    drop(durable_mail_commit_barrier);
+                    task_for_run
+                        .run(
+                            Arc::clone(&session),
+                            ctx,
+                            task_input,
+                            task_cancellation_token.child_token(),
+                        )
+                        .instrument(trace_span!("session_task.run"))
+                        .await
+                }
+                .await;
                 let sess = Arc::clone(&session);
                 if let Err(err) = sess.flush_rollout().await {
                     warn!("failed to flush rollout before completing turn: {err}");

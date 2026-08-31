@@ -3520,7 +3520,7 @@ impl Session {
 
     pub(crate) async fn record_inter_agent_communication(
         self: &Arc<Self>,
-        turn_context: &TurnContext,
+        turn_context: &Arc<TurnContext>,
         communication: InterAgentCommunication,
     ) -> std::io::Result<()> {
         let durable_claim = if let Some(id) = communication.id.as_ref() {
@@ -3583,6 +3583,7 @@ impl Session {
             let session = Arc::clone(self);
             let state_items = items.clone();
             let turn_id = turn_context.sub_id.clone();
+            let turn_context = Arc::clone(turn_context);
             let communication_id = claim.communication_id.clone();
             let truncation_policy = turn_context.model_info().truncation_policy.into();
             let commit = tokio::spawn(async move {
@@ -3613,6 +3614,9 @@ impl Session {
                         "durable mailbox delivery {communication_id} lost its in-flight claim"
                     )));
                 }
+                session
+                    .send_raw_response_items(turn_context.as_ref(), &state_items)
+                    .await;
                 Ok::<(), std::io::Error>(())
             });
             commit.await.map_err(|error| {
@@ -3641,14 +3645,17 @@ impl Session {
                     .await
                     .map_err(std::io::Error::other)?;
             }
-            let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(&items);
-            state.record_items(
-                items.iter(),
-                turn_context.model_info().truncation_policy.into(),
-            );
+            {
+                let mut state = self.state.lock().await;
+                state.current_time_reminder.note_recorded_items(&items);
+                state.record_items(
+                    items.iter(),
+                    turn_context.model_info().truncation_policy.into(),
+                );
+            }
+            self.send_raw_response_items(turn_context.as_ref(), &items)
+                .await;
         }
-        self.send_raw_response_items(turn_context, &items).await;
         Ok(())
     }
 

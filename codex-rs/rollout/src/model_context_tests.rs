@@ -558,3 +558,41 @@ fn durable_compaction_uses_a_suffix_delivery_to_suppress_an_older_payload() {
 
     assert_eq!(projected, vec![expected.clone()]);
 }
+
+#[test]
+fn durable_compaction_upgrades_a_fingerprintless_receipt_in_the_bounded_suffix() {
+    let id = ResponseItemId::with_suffix("msg", "suffix-fingerprintless-receipt");
+    let suffix = [RolloutItem::InterAgentCommunicationMetadata {
+        trigger_turn: false,
+        mail_fingerprint: None,
+        delivery_id: None,
+        terminal_turn_id: None,
+        terminal_status: None,
+        mail_communication: None,
+        mail_start_options: None,
+        consumed_mail_id: Some(id.clone()),
+    }];
+
+    let compacted = compact_durable_agent_state(
+        &[durable_payload(
+            &id,
+            "recovered-fingerprint",
+            "older payload",
+        )],
+        &suffix,
+    );
+
+    assert_rollout_items_eq(
+        &compacted,
+        &[RolloutItem::InterAgentCommunicationMetadata {
+            trigger_turn: false,
+            mail_fingerprint: Some("recovered-fingerprint".to_string()),
+            delivery_id: None,
+            terminal_turn_id: None,
+            terminal_status: None,
+            mail_communication: None,
+            mail_start_options: None,
+            consumed_mail_id: Some(id),
+        }],
+    );
+}

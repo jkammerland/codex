@@ -373,7 +373,7 @@ fn compact_durable_agent_state(
         }
     }
 
-    let mut consumed_fingerprints = HashMap::<ResponseItemId, (usize, String)>::new();
+    let mut consumed_fingerprints = HashMap::<ResponseItemId, (usize, String, bool)>::new();
     let mut latest_fingerprint_by_id = HashMap::<ResponseItemId, String>::new();
     for (position, item) in chronological_items.iter().enumerate() {
         match item {
@@ -395,7 +395,7 @@ fn compact_durable_agent_state(
                 if delivered_claim_positions.contains(&position) {
                     consumed_fingerprints
                         .entry(communication_id.clone())
-                        .or_insert_with(|| (position, fingerprint.clone()));
+                        .or_insert_with(|| (position, fingerprint.clone(), true));
                 }
             }
             RolloutItem::InterAgentCommunicationMetadata {
@@ -410,7 +410,7 @@ fn compact_durable_agent_state(
                 if let Some(communication_id) = consumed_mail_id {
                     consumed_fingerprints
                         .entry(communication_id.clone())
-                        .or_insert_with(|| (position, fingerprint.clone()));
+                        .or_insert_with(|| (position, fingerprint.clone(), true));
                 }
             }
             RolloutItem::InterAgentCommunicationMetadata {
@@ -420,7 +420,7 @@ fn compact_durable_agent_state(
             } => {
                 consumed_fingerprints
                     .entry(communication_id.clone())
-                    .or_insert_with(|| (position, fingerprint.clone()));
+                    .or_insert_with(|| (position, fingerprint.clone(), true));
             }
             RolloutItem::InterAgentCommunicationMetadata {
                 mail_fingerprint: None,
@@ -430,7 +430,7 @@ fn compact_durable_agent_state(
                 if let Some(fingerprint) = latest_fingerprint_by_id.get(communication_id) {
                     consumed_fingerprints
                         .entry(communication_id.clone())
-                        .or_insert_with(|| (position, fingerprint.clone()));
+                        .or_insert_with(|| (position, fingerprint.clone(), false));
                 }
             }
             _ => {}
@@ -455,13 +455,17 @@ fn compact_durable_agent_state(
         };
         mcp10_receipts.insert(position, (communication_id.clone(), fingerprint.clone()));
         match consumed_fingerprints.get_mut(&communication_id) {
-            Some((current_position, current_fingerprint)) if position < *current_position => {
+            Some((current_position, current_fingerprint, fingerprint_persisted))
+                if position < *current_position =>
+            {
                 *current_position = position;
                 *current_fingerprint = fingerprint.clone();
+                *fingerprint_persisted = true;
             }
             Some(_) => {}
             None => {
-                consumed_fingerprints.insert(communication_id, (position, fingerprint.clone()));
+                consumed_fingerprints
+                    .insert(communication_id, (position, fingerprint.clone(), true));
             }
         }
     }
@@ -571,10 +575,10 @@ fn emit_compacted_consumed_marker(
     emitted_consumed_ids: &mut HashSet<ResponseItemId>,
     bounded_suffix_start: usize,
     communication_id: &ResponseItemId,
-    consumed: &(usize, String),
+    consumed: &(usize, String, bool),
 ) {
-    let (delivery_position, fingerprint) = consumed;
-    if *delivery_position < bounded_suffix_start
+    let (delivery_position, fingerprint, fingerprint_persisted) = consumed;
+    if (*delivery_position < bounded_suffix_start || !fingerprint_persisted)
         && emitted_consumed_ids.insert(communication_id.clone())
     {
         compacted.push(consumed_mail_marker(

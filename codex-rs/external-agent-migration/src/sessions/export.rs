@@ -25,6 +25,8 @@ use std::io;
 use std::path::Path;
 
 pub(super) const EXTERNAL_SESSION_IMPORTED_MARKER: &str = "<EXTERNAL SESSION IMPORTED>";
+const MAX_IMPORTED_MODEL_ITEM_BYTES: usize = 10_000;
+const TRUNCATED_EXTERNAL_MESSAGE_MARKER: &str = "\n… [external message truncated]";
 
 #[cfg(test)]
 fn load_session_for_import(path: &Path) -> io::Result<Option<ImportedExternalAgentSession>> {
@@ -91,6 +93,7 @@ pub(super) fn rollout_items_from_messages(messages: Vec<ConversationMessage>) ->
     let completed_at = messages.last().and_then(|message| message.timestamp);
 
     for message in messages {
+        let message = bounded_model_message(message);
         match message.role {
             MessageRole::User => {
                 let started_at = message.timestamp;
@@ -176,6 +179,62 @@ fn response_item(message: ConversationMessage) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+fn bounded_model_message(mut message: ConversationMessage) -> ConversationMessage {
+    if serialized_response_item_len(message.role, &message.text) <= MAX_IMPORTED_MODEL_ITEM_BYTES {
+        return message;
+    }
+
+    let boundaries = message
+        .text
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(message.text.len()))
+        .collect::<Vec<_>>();
+    let mut lower = 0usize;
+    let mut upper = boundaries.len();
+    while lower + 1 < upper {
+        let middle = lower + (upper - lower) / 2;
+        let candidate = format!(
+            "{}{}",
+            &message.text[..boundaries[middle]],
+            TRUNCATED_EXTERNAL_MESSAGE_MARKER
+        );
+        if serialized_response_item_len(message.role, &candidate) <= MAX_IMPORTED_MODEL_ITEM_BYTES {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    message.text = format!(
+        "{}{}",
+        &message.text[..boundaries[lower]],
+        TRUNCATED_EXTERNAL_MESSAGE_MARKER
+    );
+    message
+}
+
+fn serialized_response_item_len(role: MessageRole, text: &str) -> usize {
+    let content = match role {
+        MessageRole::Assistant => ContentItem::OutputText {
+            text: text.to_string(),
+        },
+        MessageRole::User => ContentItem::InputText {
+            text: text.to_string(),
+        },
+    };
+    let response = ResponseItem::Message {
+        id: None,
+        role: match role {
+            MessageRole::Assistant => "assistant".to_string(),
+            MessageRole::User => "user".to_string(),
+        },
+        content: vec![content],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    serde_json::to_vec(&response).map_or(usize::MAX, |serialized| serialized.len())
 }
 
 fn message_byte_count(message: &ConversationMessage) -> i64 {
@@ -346,6 +405,72 @@ mod tests {
 
         assert_eq!(response_message_count, 2);
         assert_eq!(visible_message_event_count, 2);
+    }
+
+    #[test]
+    fn bounds_imported_model_items_and_matching_visible_events() {
+        let oversized = "\\\"🦀\n".repeat(MAX_IMPORTED_MODEL_ITEM_BYTES);
+        let items = rollout_items_from_messages(vec![
+            ConversationMessage {
+                role: MessageRole::User,
+                text: oversized.clone(),
+                timestamp: Some(1),
+            },
+            ConversationMessage {
+                role: MessageRole::Assistant,
+                text: oversized,
+                timestamp: Some(2),
+            },
+        ]);
+        let response_messages = items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::ResponseItem(response) => match &response.item {
+                    ResponseItem::Message { role, content, .. } => match content.as_slice() {
+                        [ContentItem::InputText { text } | ContentItem::OutputText { text }] => {
+                            Some((role.as_str(), text.as_str()))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let event_texts = items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::UserMessage(event)) => Some(event.message.as_str()),
+                RolloutItem::EventMsg(EventMsg::AgentMessage(event))
+                    if event.message != EXTERNAL_SESSION_IMPORTED_MARKER =>
+                {
+                    Some(event.message.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            event_texts,
+            response_messages
+                .iter()
+                .map(|(_, text)| *text)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(response_messages.len(), 2);
+        for (role, text) in response_messages {
+            assert!(text.ends_with(TRUNCATED_EXTERNAL_MESSAGE_MARKER));
+            assert!(
+                serialized_response_item_len(
+                    if role == "user" {
+                        MessageRole::User
+                    } else {
+                        MessageRole::Assistant
+                    },
+                    text,
+                ) <= MAX_IMPORTED_MODEL_ITEM_BYTES
+            );
+        }
     }
 
     #[test]

@@ -544,7 +544,7 @@ async fn internal_guardian_sessions_exclude_optional_core_tools() {
             .iter()
             .map(codex_tools::ToolSpec::name)
             .collect::<Vec<_>>(),
-        vec!["exec_command", "write_stdin", "view_image"]
+        vec!["exec_command", "wait_process", "write_stdin", "view_image"]
     );
 }
 
@@ -647,7 +647,7 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
     for (secondary_profile, expected_tools) in [
         (
             codex_protocol::models::PermissionProfile::workspace_write(),
-            vec!["exec_command", "write_stdin", "view_image"],
+            vec!["exec_command", "wait_process", "write_stdin", "view_image"],
         ),
         (
             codex_protocol::models::PermissionProfile::Disabled,

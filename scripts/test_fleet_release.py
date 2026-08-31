@@ -68,8 +68,12 @@ class FleetReleaseTest(unittest.TestCase):
         installer = (Path(__file__).parent / "install-user-fork.sh").read_text()
         self.assertIn("SELECTED_CODEX_HASH", installer)
         self.assertIn("selected Codex binaries changed during the build", installer)
-        self.assertIn('UPSTREAM_VERSION=$(printf \'%s\\n\' "$CURRENT_VERSION"', installer)
-        self.assertNotIn('UPSTREAM_VERSION=$(printf \'%s\\n\' "$BUILT_VERSION"', installer)
+        self.assertIn(
+            "UPSTREAM_VERSION=$(printf '%s\\n' \"$CURRENT_VERSION\"", installer
+        )
+        self.assertNotIn(
+            "UPSTREAM_VERSION=$(printf '%s\\n' \"$BUILT_VERSION\"", installer
+        )
 
     def test_manifest_rejects_relative_host_paths(self) -> None:
         raw = json.loads(fleet_release.DEFAULT_MANIFEST.read_text())

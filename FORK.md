@@ -5,9 +5,9 @@ maintained separately from upstream releases.
 
 ## Identity
 
-- Branch: `release/jkammerland.mcp.14`
+- Branch: `release/jkammerland.mcp.15`
 - Upstream base: `60fc6995608e8188c0c9f8407d6cd98676efa247` (`origin/main`)
-- User-visible suffix: `+jkammerland.mcp.14`
+- User-visible suffix: `+jkammerland.mcp.15`
 - Git remote for the existing personal fork: `fork`
 
 Both the startup header and `codex --version` include the suffix. Internal
@@ -75,7 +75,18 @@ not prompt for an npm update that would overwrite the fork.
 20. Fleet staging writes a commit-, version-, and SHA-256-bound receipt for the
     executable pair. macOS and Windows activation fail closed before mutation
     when source cleanliness, the receipt, staged binaries, active binaries, or
-    rollback-pair verification fails.
+    rollback-pair verification fails. Final fleet status re-hashes both active
+    binaries against that receipt, and local installation retains an official
+    upstream binary under its actual version.
+21. Durable compaction and cold resume retain global mail FIFO order and exact
+    consumed fingerprints across the bounded suffix. External migration resumes
+    exact raw transaction tails under a cross-process ledger lock, while imported
+    model messages have a hard serialized-size bound.
+22. Nested code-mode dispatch cannot start after cancellation admission closes;
+    unified exec recovers its authoritative bounded terminal transcript after a
+    broadcast lag; MCP cancellation errors preserve their real turn origin; and
+    multi-agent wait coverage proves one stopped peer cannot wake a wait while
+    another peer remains live.
 
 The terminal-status marker is intentionally model-invisible. Current builds can
 recover both the dedicated marker and the overloaded `.mcp.11` metadata form.
@@ -95,10 +106,10 @@ Each fleet release uses two commits and one immutable local source ref because a
 commit cannot contain its own Git object ID:
 
 1. The reviewed source commit contains the versioned code and installer marker.
-2. `fleet/jkammerland.mcp.14-source` points exactly at that source commit and is
+2. `fleet/jkammerland.mcp.15-source` points exactly at that source commit and is
    the ref exported in deployment bundles.
 3. A direct manifest descendant pins both the source commit and source ref in
-   `fleet/release.json`; `release/jkammerland.mcp.14` points at this manifest
+   `fleet/release.json`; `release/jkammerland.mcp.15` points at this manifest
    commit.
 
 Run fleet preparation and installation from the manifest commit. The controller

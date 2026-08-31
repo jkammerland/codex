@@ -247,6 +247,44 @@ async fn streaming_output_drains_a_chunk_queued_at_the_exit_cutoff() -> anyhow::
     Ok(())
 }
 
+#[tokio::test]
+async fn streaming_output_recovers_the_terminal_transcript_after_receiver_lag() -> anyhow::Result<()>
+{
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        ..
+    } = streaming_output_harness().await?;
+    let output_drained = process.output_drained_notify();
+    let drained = output_drained.notified();
+    tokio::pin!(drained);
+    let mut expected = Vec::new();
+    {
+        let mut authoritative_transcript = process.output_handles().output_buffer.lock().await;
+        for index in 0..100u8 {
+            let chunk = vec![index];
+            expected.extend_from_slice(&chunk);
+            authoritative_transcript.push_chunk(&chunk);
+        }
+    }
+    for index in 0..100u8 {
+        let chunk = vec![index];
+        process.publish_output_for_test(chunk);
+    }
+    drop(stdout_tx);
+    exit_tx.send(0).expect("send exit");
+    (&mut drained).await;
+
+    assert_eq!(
+        transcript.lock().await.to_bytes_with_omission_marker(),
+        expected
+    );
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_server_root_exit_bounds_an_inherited_output_descriptor() -> anyhow::Result<()> {
@@ -258,7 +296,7 @@ async fn exec_server_root_exit_bounds_an_inherited_output_descriptor() -> anyhow
             argv: vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
-                "sleep 1 & exit 0".to_string(),
+                "(sleep 0.1; printf LATE-OUTPUT) & exit 0".to_string(),
             ],
             cwd: PathUri::from_host_native_path(std::env::current_dir()?)?,
             shell_snapshot: None,
@@ -301,17 +339,21 @@ async fn exec_server_root_exit_bounds_an_inherited_output_descriptor() -> anyhow
         /*plugin_metrics_sidecar*/ None,
     );
 
-    let event = tokio::time::timeout(Duration::from_millis(750), rx_event.recv())
-        .await
-        .expect("root exit should not wait for the inherited descriptor")
-        .expect("command end event");
-    let EventMsg::ItemCompleted(completed) = event.msg else {
-        panic!("expected ItemCompleted");
-    };
+    let completed = tokio::time::timeout(Duration::from_millis(750), async {
+        loop {
+            let event = rx_event.recv().await.expect("command event");
+            if let EventMsg::ItemCompleted(completed) = event.msg {
+                return completed;
+            }
+        }
+    })
+    .await
+    .expect("root exit should not wait for the inherited descriptor");
     let TurnItem::CommandExecution(item) = completed.item else {
         panic!("expected CommandExecution");
     };
     assert_eq!(item.status, CommandExecutionStatus::Completed);
+    assert_eq!(item.aggregated_output.as_deref(), Some("LATE-OUTPUT"));
     assert!(
         started_at.elapsed() < Duration::from_millis(750),
         "completion should use the bounded post-exit grace"

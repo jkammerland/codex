@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 /// dropping the middle once it exceeds the configured maximum. The buffer is
 /// symmetric meaning 50% of the capacity is allocated to the head and 50% is
 /// allocated to the tail.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
 pub(crate) struct HeadTailBuffer<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES> {
     head: Vec<u8>,

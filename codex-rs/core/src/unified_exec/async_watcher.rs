@@ -62,6 +62,7 @@ pub(crate) fn start_streaming_output(
     let output_task_abort_handle = process.output_task_abort_handle();
     let exit_token = process.cancellation_token();
     let OutputHandles {
+        output_buffer: authoritative_transcript,
         output_closed,
         output_closed_notify,
         ..
@@ -86,6 +87,7 @@ pub(crate) fn start_streaming_output(
         let output_closed_notified = output_closed_notify.notified();
         tokio::pin!(output_closed_notified);
         let mut process_exited = false;
+        let mut receiver_lagged = false;
         let mut post_exit_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         loop {
@@ -139,6 +141,7 @@ pub(crate) fn start_streaming_output(
                     let chunk = match received {
                         Ok(chunk) => chunk,
                         Err(RecvError::Lagged(_)) => {
+                            receiver_lagged = true;
                             continue;
                         },
                         Err(RecvError::Closed) => break,
@@ -155,7 +158,10 @@ pub(crate) fn start_streaming_output(
         loop {
             let chunk = match receiver.try_recv() {
                 Ok(chunk) => chunk,
-                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                    receiver_lagged = true;
+                    continue;
+                }
                 Err(
                     tokio::sync::broadcast::error::TryRecvError::Empty
                     | tokio::sync::broadcast::error::TryRecvError::Closed,
@@ -165,6 +171,10 @@ pub(crate) fn start_streaming_output(
             output.push(chunk).await;
         }
 
+        if receiver_lagged && !Arc::ptr_eq(&output.transcript, &authoritative_transcript) {
+            let authoritative_transcript = authoritative_transcript.lock().await.clone();
+            *output.transcript.lock().await = authoritative_transcript;
+        }
         output.finish().await;
         output_drained.notify_one();
     });

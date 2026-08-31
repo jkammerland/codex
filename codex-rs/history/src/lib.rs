@@ -1,6 +1,7 @@
 //! Model-history and persisted-rollout domain types.
 
 use std::borrow::Borrow;
+use std::io::Write;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::PathBuf;
@@ -172,6 +173,45 @@ pub struct RolloutModelResponseProjection {
 
 const MAX_LEGACY_CLAIMS_PER_TURN: usize = 64;
 const MAX_BUFFERED_LEGACY_CLAIMS: usize = 4_096;
+const MAX_DURABLE_MODEL_ITEM_TOKENS: usize = 10_000;
+const APPROXIMATE_BYTES_PER_TOKEN: usize = 4;
+
+struct ModelItemSizeWriter {
+    remaining: usize,
+}
+
+impl Write for ModelItemSizeWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if buffer.len() > self.remaining {
+            return Err(std::io::Error::other(
+                "durable model item exceeds its persisted-history bound",
+            ));
+        }
+        self.remaining -= buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_durable_model_response(response: &ResponseItemEnvelope) -> bool {
+    let mut writer = ModelItemSizeWriter {
+        remaining: MAX_DURABLE_MODEL_ITEM_TOKENS.saturating_mul(APPROXIMATE_BYTES_PER_TOKEN),
+    };
+    serde_json::to_writer(&mut writer, &response.item).is_ok()
+}
+
+fn exact_durable_model_response(
+    communication_id: &ResponseItemId,
+    communication: &InterAgentCommunication,
+    response: &ResponseItemEnvelope,
+) -> bool {
+    communication.id.as_ref() == Some(communication_id)
+        && response == &ResponseItemEnvelope::new(communication.to_model_input_item())
+        && bounded_durable_model_response(response)
+}
 
 impl RolloutModelResponseProjection {
     /// Applies one rollout item in persistence order and returns its model-visible responses.
@@ -203,12 +243,9 @@ impl RolloutModelResponseProjection {
                     })
                     .collect()
             }
-            RolloutItem::DurableInterAgentCommunication {
-                communication,
-                compatibility_shadow,
-                ..
-            } if *compatibility_shadow
-                || legacy_claim_shadow_id.as_ref() == communication.id.as_ref() =>
+            RolloutItem::DurableInterAgentCommunication { communication, .. }
+                if communication.id.is_some()
+                    || legacy_claim_shadow_id.as_ref() == communication.id.as_ref() =>
             {
                 self.compatibility_shadow_id = communication.id.clone();
                 Vec::new()
@@ -225,11 +262,13 @@ impl RolloutModelResponseProjection {
             }
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
+                communication: Some(communication),
                 delivered_response: Some(response),
                 ..
-            } if self
-                .delivered_communication_ids
-                .insert(communication_id.clone()) =>
+            } if exact_durable_model_response(communication_id, communication, response)
+                && self
+                    .delivered_communication_ids
+                    .insert(communication_id.clone()) =>
             {
                 vec![std::borrow::Cow::Borrowed(response)]
             }
@@ -241,6 +280,13 @@ impl RolloutModelResponseProjection {
                 ..
             } => {
                 let mut communication = communication.clone();
+                if communication
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| id != communication_id)
+                {
+                    return Vec::new();
+                }
                 communication
                     .id
                     .get_or_insert_with(|| communication_id.clone());
@@ -249,7 +295,8 @@ impl RolloutModelResponseProjection {
                 // Historical admission capped each mailbox turn at 64 items. Keep a second global
                 // cap so a malformed rollout containing unmatched claims cannot grow this replay
                 // buffer without bound. Excess claims fail closed and stay out of model context.
-                if self.pending_legacy_claim_count < MAX_BUFFERED_LEGACY_CLAIMS
+                if bounded_durable_model_response(&response)
+                    && self.pending_legacy_claim_count < MAX_BUFFERED_LEGACY_CLAIMS
                     && !self.delivered_communication_ids.contains(communication_id)
                 {
                     let pending = self

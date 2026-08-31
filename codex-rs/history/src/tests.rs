@@ -289,6 +289,119 @@ fn model_response_projection_bounds_malformed_legacy_claim_batches() {
 }
 
 #[test]
+fn model_response_projection_rejects_inconsistent_or_oversized_claim_envelopes() {
+    let mut communication = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "bounded delivery".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let communication_id = ResponseItemId::with_suffix("msg", "validated-claim");
+    communication.id = Some(communication_id.clone());
+    let valid_response = ResponseItemEnvelope::new(communication.to_model_input_item());
+    let mismatched_response = ResponseItemEnvelope::new(response_message("forged"));
+    let mut oversized_communication = communication.clone();
+    oversized_communication.content = "x".repeat(
+        MAX_DURABLE_MODEL_ITEM_TOKENS
+            .saturating_mul(APPROXIMATE_BYTES_PER_TOKEN)
+            .saturating_add(1),
+    );
+    let oversized_response =
+        ResponseItemEnvelope::new(oversized_communication.to_model_input_item());
+    let items = [
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication_id.clone(),
+            communication: Some(communication.clone()),
+            delivered_response: Some(mismatched_response),
+            fingerprint: "forged".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication_id.clone(),
+            communication: None,
+            delivered_response: Some(valid_response.clone()),
+            fingerprint: "missing-body".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication_id.clone(),
+            communication: Some(oversized_communication),
+            delivered_response: Some(oversized_response),
+            fingerprint: "oversized".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            communication: Some(communication),
+            delivered_response: Some(valid_response.clone()),
+            fingerprint: "valid".to_string(),
+            turn_id: "turn-1".to_string(),
+        },
+    ];
+    let mut projection = RolloutModelResponseProjection::default();
+
+    assert_eq!(
+        items
+            .iter()
+            .flat_map(|item| projection
+                .project(item)
+                .into_iter()
+                .map(std::borrow::Cow::into_owned))
+            .collect::<Vec<_>>(),
+        vec![valid_response]
+    );
+}
+
+#[test]
+fn model_response_projection_rejects_oversized_or_mismatched_legacy_claims() {
+    let mut oversized = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "x".repeat(
+            MAX_DURABLE_MODEL_ITEM_TOKENS
+                .saturating_mul(APPROXIMATE_BYTES_PER_TOKEN)
+                .saturating_add(1),
+        ),
+        /*trigger_turn*/ true,
+    );
+    let oversized_id = ResponseItemId::with_suffix("msg", "oversized-legacy");
+    oversized.id = Some(oversized_id.clone());
+    let mut mismatched = oversized.clone();
+    let mismatched_outer_id = ResponseItemId::with_suffix("msg", "mismatched-outer");
+    mismatched.content = "bounded".to_string();
+    let items = [
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: oversized_id,
+            communication: Some(oversized),
+            delivered_response: None,
+            fingerprint: "oversized".to_string(),
+            turn_id: "legacy-turn".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: mismatched_outer_id,
+            communication: Some(mismatched),
+            delivered_response: None,
+            fingerprint: "mismatched".to_string(),
+            turn_id: "legacy-turn".to_string(),
+        },
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: "legacy-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            },
+        )),
+    ];
+    let mut projection = RolloutModelResponseProjection::default();
+
+    assert!(items.iter().all(|item| projection.project(item).is_empty()));
+}
+
+#[test]
 /// Keeps legacy response-item rollout lines readable and byte-shape compatible.
 fn response_item_rollout_line_preserves_shape() -> Result<()> {
     let legacy_line = json!({

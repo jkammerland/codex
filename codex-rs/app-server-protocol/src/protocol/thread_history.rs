@@ -4604,7 +4604,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuilds_durable_response_at_claim_instead_of_compatibility_shadow() {
+    fn rejects_inconsistent_durable_response_and_compatibility_shadow() {
         let response_id = codex_protocol::ResponseItemId::with_suffix("msg", "durable-hook");
         let mut hook_prompt =
             build_hook_prompt_message(&[CoreHookPromptFragment::from_single_hook(
@@ -4660,15 +4660,7 @@ mod tests {
 
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].id, "turn-a");
-        assert!(matches!(
-            turns[0].items.as_slice(),
-            [ThreadItem::HookPrompt { fragments, .. }]
-                if fragments.as_slice()
-                    == [crate::protocol::v2::HookPromptFragment {
-                        text: "Retry with tests.".into(),
-                        hook_run_id: "hook-run-1".into(),
-                    }]
-        ));
+        assert!(turns[0].items.is_empty());
     }
 
     #[test]

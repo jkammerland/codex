@@ -162,6 +162,10 @@ async fn durable_claim_with_a_later_turn_start_enters_model_history_once() {
         /*trigger_turn*/ true,
     );
     communication.id = Some(ResponseItemId::with_suffix("msg", "pending-claim"));
+    let mut mail_turn_context = turn_context.to_turn_context_item();
+    mail_turn_context.turn_id = Some("turn-not-started".to_string());
+    mail_turn_context.model = "legacy-mail-model".to_string();
+    mail_turn_context.comp_hash = Some("legacy-mail-comp-hash".to_string());
 
     let reconstruction = session
         .reconstruct_history_from_rollout(
@@ -191,6 +195,7 @@ async fn durable_claim_with_a_later_turn_start_enters_model_history_once() {
                         collaboration_mode_kind: Default::default(),
                     },
                 )),
+                RolloutItem::TurnContext(mail_turn_context),
             ],
         )
         .await;
@@ -202,6 +207,14 @@ async fn durable_claim_with_a_later_turn_start_enters_model_history_once() {
             .map(ResponseItemEnvelope::into_item)
             .collect::<Vec<_>>(),
         vec![communication.to_model_input_item()]
+    );
+    assert_eq!(
+        reconstruction.previous_turn_settings,
+        Some(PreviousTurnSettings {
+            model: "legacy-mail-model".to_string(),
+            comp_hash: Some("legacy-mail-comp-hash".to_string()),
+            realtime_active: Some(turn_context.realtime_active),
+        })
     );
 }
 

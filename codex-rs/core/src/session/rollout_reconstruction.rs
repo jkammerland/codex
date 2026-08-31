@@ -1,9 +1,8 @@
 use super::*;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
-use crate::session::input_queue::MailboxModelSizeLimit;
-use crate::session::input_queue::validate_stored_mailbox_model_communication;
 use codex_history::ResponseItemEnvelope;
+use codex_history::RolloutModelResponseProjection;
 use codex_protocol::protocol::SessionContextWindow;
 use uuid::Uuid;
 
@@ -118,116 +117,11 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> RolloutReconstruction {
-        let mut future_turn_starts = HashSet::new();
-        let mut legacy_claim_model_item_ids = HashMap::new();
-        let valid_durable_claim_ids = rollout_items
+        let mut model_response_projection = RolloutModelResponseProjection::default();
+        let projected_model_responses = rollout_items
             .iter()
-            .filter_map(|item| match item {
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    communication: Some(communication),
-                    ..
-                } if validate_stored_mailbox_model_communication(
-                    communication,
-                    MailboxModelSizeLimit::LegacyRecovery,
-                )
-                .is_ok() =>
-                {
-                    Some(communication_id.clone())
-                }
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let invalid_durable_model_item_ids = rollout_items
-            .iter()
-            .filter_map(|item| match item {
-                RolloutItem::DurableInterAgentCommunication {
-                    communication,
-                    compatibility_shadow: false,
-                    ..
-                } if communication.id.as_ref().is_some_and(|communication_id| {
-                    !valid_durable_claim_ids.contains(communication_id)
-                        && validate_stored_mailbox_model_communication(
-                            communication,
-                            MailboxModelSizeLimit::LegacyRecovery,
-                        )
-                        .is_err()
-                }) =>
-                {
-                    communication.id.clone()
-                }
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    communication: Some(communication),
-                    ..
-                } if validate_stored_mailbox_model_communication(
-                    communication,
-                    MailboxModelSizeLimit::LegacyRecovery,
-                )
-                .is_err() =>
-                {
-                    Some(communication_id.clone())
-                }
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        for item in rollout_items.iter().rev() {
-            match item {
-                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                    future_turn_starts.insert(event.turn_id.as_str());
-                }
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    communication: Some(_),
-                    delivered_response: None,
-                    turn_id,
-                    ..
-                } => {
-                    legacy_claim_model_item_ids
-                        .entry(communication_id.clone())
-                        .or_insert_with(|| {
-                            future_turn_starts.contains(turn_id.as_str())
-                                && !invalid_durable_model_item_ids.contains(communication_id)
-                        });
-                }
-                _ => {}
-            }
-        }
-        let mut compatibility_shadow_ids = rollout_items
-            .windows(2)
-            .filter_map(|pair| match pair {
-                [
-                    RolloutItem::DurableInterAgentCommunication {
-                        communication,
-                        compatibility_shadow: true,
-                        ..
-                    },
-                    RolloutItem::ResponseItem(response),
-                ] if communication.id.as_ref() == response.id() => response.id().cloned(),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        compatibility_shadow_ids.extend(rollout_items.windows(3).filter_map(|items| match items {
-            [
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    communication: Some(_),
-                    delivered_response: None,
-                    ..
-                },
-                RolloutItem::DurableInterAgentCommunication {
-                    communication,
-                    compatibility_shadow: false,
-                    ..
-                },
-                RolloutItem::ResponseItem(response),
-            ] if Some(communication_id) == communication.id.as_ref()
-                && communication.id.as_ref() == response.id() =>
-            {
-                response.id().cloned()
-            }
-            _ => None,
-        }));
+            .map(|item| model_response_projection.project(item))
+            .collect::<Vec<_>>();
         // Replay metadata should already match the shape of the future lazy reverse loader, even
         // while history materialization still uses an eager bridge. Scan newest-to-oldest,
         // stopping once a surviving replacement-history checkpoint and the required resume metadata
@@ -259,12 +153,24 @@ impl Session {
         let mut pending_rollback_turns = 0usize;
         // Borrowed suffix of rollout items newer than the newest surviving replacement-history
         // checkpoint. If no such checkpoint exists, this remains the full rollout.
-        let mut rollout_suffix = rollout_items;
+        let mut rollout_suffix_start = 0usize;
         // Reverse replay accumulates rollout items into the newest in-progress turn segment until
         // we hit its matching `TurnStarted`, at which point the segment can be finalized.
         let mut active_segment: Option<ActiveReplaySegment<'_>> = None;
 
         for (index, item) in rollout_items.iter().enumerate().rev() {
+            if !projected_model_responses[index].is_empty() {
+                let active_segment =
+                    active_segment.get_or_insert_with(ActiveReplaySegment::default);
+                if let RolloutItem::EventMsg(EventMsg::TurnStarted(event)) = item {
+                    active_segment
+                        .turn_id
+                        .get_or_insert_with(|| event.turn_id.clone());
+                }
+                active_segment.counts_as_user_turn |= projected_model_responses[index]
+                    .iter()
+                    .any(|response| is_user_turn_boundary(&response.item));
+            }
             match item {
                 RolloutItem::Compacted(compacted) => {
                     let active_segment =
@@ -295,7 +201,7 @@ impl Session {
                         && let Some(replacement_history) = &compacted.replacement_history
                     {
                         active_segment.base_replacement_history = Some(replacement_history);
-                        rollout_suffix = &rollout_items[index + 1..];
+                        rollout_suffix_start = index.saturating_add(1);
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
@@ -381,51 +287,6 @@ impl Session {
                         );
                     }
                 }
-                RolloutItem::ResponseItem(response_item) => {
-                    if response_item.id().is_none_or(|id| {
-                        !compatibility_shadow_ids.contains(id)
-                            && !invalid_durable_model_item_ids.contains(id)
-                            && legacy_claim_model_item_ids.get(id).copied().unwrap_or(true)
-                    }) {
-                        let active_segment =
-                            active_segment.get_or_insert_with(ActiveReplaySegment::default);
-                        active_segment.counts_as_user_turn |=
-                            is_user_turn_boundary(&response_item.item);
-                    }
-                }
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    delivered_response: Some(response_item),
-                    turn_id,
-                    ..
-                } if !invalid_durable_model_item_ids.contains(communication_id) => {
-                    let active_segment =
-                        active_segment.get_or_insert_with(ActiveReplaySegment::default);
-                    active_segment
-                        .turn_id
-                        .get_or_insert_with(|| turn_id.clone());
-                    active_segment.counts_as_user_turn |=
-                        is_user_turn_boundary(&response_item.item);
-                }
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    communication: Some(communication),
-                    delivered_response: None,
-                    turn_id,
-                    ..
-                } if legacy_claim_model_item_ids
-                    .get(communication_id)
-                    .copied()
-                    .unwrap_or(false) =>
-                {
-                    let active_segment =
-                        active_segment.get_or_insert_with(ActiveReplaySegment::default);
-                    active_segment
-                        .turn_id
-                        .get_or_insert_with(|| turn_id.clone());
-                    active_segment.counts_as_user_turn |=
-                        is_user_turn_boundary(&communication.to_model_input_item());
-                }
                 RolloutItem::InterAgentCommunication(_) => {
                     let active_segment =
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
@@ -437,6 +298,7 @@ impl Session {
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::TerminalAgentStatus { .. }
+                | RolloutItem::ResponseItem(_)
                 | RolloutItem::DurableInterAgentCommunication { .. }
                 | RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication: None | Some(_),
@@ -481,7 +343,6 @@ impl Session {
         .unwrap_or(u64::MAX);
 
         let mut history = ContextManager::new();
-        let mut recorded_claim_model_item_ids = HashSet::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
         if let Some(base_replacement_history) = base_replacement_history {
             history.replace_annotated(base_replacement_history.to_vec());
@@ -489,23 +350,15 @@ impl Session {
         // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
         // design should keep this same replay shape, but drive it from a resumable reverse source
         // instead of an eagerly loaded `&[RolloutItem]`.
-        for item in rollout_suffix {
+        for (offset, item) in rollout_items[rollout_suffix_start..].iter().enumerate() {
+            let index = rollout_suffix_start.saturating_add(offset);
+            for response_item in &projected_model_responses[index] {
+                history.record_annotated_items(
+                    std::slice::from_ref(response_item.as_ref()),
+                    turn_context.model_info().truncation_policy.into(),
+                );
+            }
             match item {
-                RolloutItem::ResponseItem(response_item) => {
-                    let record = response_item.id().is_none_or(|id| {
-                        !compatibility_shadow_ids.contains(id)
-                            && !invalid_durable_model_item_ids.contains(id)
-                            && legacy_claim_model_item_ids.get(id).is_none_or(|started| {
-                                *started && recorded_claim_model_item_ids.insert(id.clone())
-                            })
-                    });
-                    if record {
-                        history.record_annotated_items(
-                            std::slice::from_ref(response_item),
-                            turn_context.model_info().truncation_policy.into(),
-                        );
-                    }
-                }
                 RolloutItem::InterAgentCommunication(communication) => {
                     let response_item = communication.to_model_input_item();
                     history.record_items(
@@ -513,54 +366,9 @@ impl Session {
                         turn_context.model_info().truncation_policy.into(),
                     );
                 }
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    delivered_response: Some(response_item),
-                    ..
-                } if !invalid_durable_model_item_ids.contains(communication_id)
-                    && recorded_claim_model_item_ids.insert(communication_id.clone()) =>
-                {
-                    history.record_annotated_items(
-                        std::slice::from_ref(response_item),
-                        turn_context.model_info().truncation_policy.into(),
-                    );
-                }
-                RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id,
-                    communication: Some(communication),
-                    delivered_response: None,
-                    turn_id,
-                    ..
-                } if legacy_claim_model_item_ids
-                    .get(communication_id)
-                    .copied()
-                    .unwrap_or(false)
-                    && recorded_claim_model_item_ids.insert(communication_id.clone()) =>
-                {
-                    let mut communication = communication.clone();
-                    communication
-                        .id
-                        .get_or_insert_with(|| communication_id.clone());
-                    match validate_stored_mailbox_model_communication(
-                        &communication,
-                        MailboxModelSizeLimit::LegacyRecovery,
-                    ) {
-                        Ok(()) => {
-                            let response_item = communication.to_model_input_item();
-                            history.record_items(
-                                std::iter::once(&response_item),
-                                turn_context.model_info().truncation_policy.into(),
-                            );
-                        }
-                        Err(error) => warn!(
-                            %communication_id,
-                            %error,
-                            "skipping oversized legacy durable mailbox history item"
-                        ),
-                    }
-                }
                 RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::TerminalAgentStatus { .. }
+                | RolloutItem::ResponseItem(_)
                 | RolloutItem::DurableInterAgentCommunication { .. }
                 | RolloutItem::DurableInterAgentCommunicationClaimed {
                     communication: None | Some(_),
@@ -573,7 +381,8 @@ impl Session {
                 } => {}
                 RolloutItem::Compacted(compacted) => {
                     if let Some(replacement_history) = &compacted.replacement_history {
-                        // This should actually never happen, because the reverse loop above (to build rollout_suffix)
+                        // This should actually never happen, because the reverse loop above (to
+                        // choose `rollout_suffix_start`)
                         // should stop before any compaction that has Some replacement_history
                         history.replace_annotated(replacement_history.clone());
                     } else {

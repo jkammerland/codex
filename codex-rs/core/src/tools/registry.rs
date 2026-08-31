@@ -657,14 +657,6 @@ impl ToolRegistry {
                 &tool_result_tags,
                 &extra_trace_fields,
                 || async {
-                    if lifecycle
-                        .as_deref()
-                        .is_some_and(|lifecycle| !lifecycle.try_start_handler())
-                    {
-                        return Err(FunctionCallError::RespondToModel(
-                            "tool call was cancelled before handler dispatch".to_string(),
-                        ));
-                    }
                     let result = if let Some(lifecycle) = lifecycle.as_deref()
                         && tool.handles_cancellation_cooperatively()
                     {

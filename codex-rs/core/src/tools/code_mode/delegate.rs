@@ -144,17 +144,8 @@ impl CodeModeDispatchBroker {
         step_context: Arc<StepContext>,
         tracker: SharedTurnDiffTracker,
     ) -> CodeModeDispatchWorker {
-        let track_completeness = exec
-            .turn
-            .config
-            .features
-            .enabled(codex_features::Feature::ExecutedToolCallMetadata);
         let tool_runtime = ToolCallRuntime::new(Arc::clone(&exec.session), step_context, tracker);
-        let host = Arc::new(CoreTurnHost {
-            exec,
-            tool_runtime,
-            track_completeness,
-        });
+        let host = Arc::new(CoreTurnHost { exec, tool_runtime });
         let generation = self.next_host_generation.fetch_add(1, Ordering::Relaxed);
         if self.dispatcher_shutdown.is_cancelled() {
             return CodeModeDispatchWorker {
@@ -241,23 +232,19 @@ impl CodeModeDispatchBroker {
                             };
                             let dispatch_gates = Arc::clone(&dispatch_gates);
                             tokio::spawn(async move {
-                                let invocation = {
-                                    let dispatch_gate = host.track_completeness.then(|| {
-                                        dispatch_gates
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    });
-                                    if dispatch_gate.as_ref().is_some_and(|gates| {
-                                        cancellation_token.is_cancelled()
-                                            || !gates.contains_key(&cell_id)
-                                    }) {
-                                        return;
-                                    }
-                                    // Submission and cell closure share this gate.
-                                    span.in_scope(|| {
-                                        host.submit_tool(invocation, cancellation_token.clone())
-                                    })
-                                    .instrument(span)
+                                let Some(invocation) = with_active_cell_dispatch(
+                                    &dispatch_gates,
+                                    &cell_id,
+                                    &cancellation_token,
+                                    || {
+                                        // Submission and cell closure share this gate.
+                                        span.in_scope(|| {
+                                            host.submit_tool(invocation, cancellation_token.clone())
+                                        })
+                                        .instrument(span)
+                                    },
+                                ) else {
+                                    return;
                                 };
                                 tokio::pin!(invocation);
                                 let response = tokio::select! {
@@ -333,6 +320,21 @@ fn remove_dispatch_gate(
         Err(poisoned) => poisoned.into_inner(),
     };
     dispatch_gates.remove(cell_id);
+}
+
+fn with_active_cell_dispatch<T>(
+    dispatch_gates: &Mutex<HashMap<CellId, CellDispatchGate>>,
+    cell_id: &CellId,
+    cancellation_token: &CancellationToken,
+    dispatch: impl FnOnce() -> T,
+) -> Option<T> {
+    let dispatch_gates = dispatch_gates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cancellation_token.is_cancelled() || !dispatch_gates.contains_key(cell_id) {
+        return None;
+    }
+    Some(dispatch())
 }
 
 async fn wait_until_cell_ready_for_dispatch(
@@ -471,7 +473,6 @@ impl Drop for CodeModeDispatchWorker {
 struct CoreTurnHost {
     exec: ExecContext,
     tool_runtime: ToolCallRuntime,
-    track_completeness: bool,
 }
 
 impl CoreTurnHost {
@@ -514,3 +515,7 @@ impl CoreTurnHost {
             })
     }
 }
+
+#[cfg(test)]
+#[path = "delegate_tests.rs"]
+mod tests;

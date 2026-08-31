@@ -159,6 +159,11 @@ impl ToolCallRuntime {
                 } else {
                     Either::Right(lock.write().await)
                 };
+                if !dispatch_lifecycle.try_start_handler() {
+                    return Err(FunctionCallError::RespondToModel(
+                        "tool call was cancelled before handler dispatch".to_string(),
+                    ));
+                }
                 // Admission through the parallel-execution gate marks the end
                 // of dispatch waiting and the start of handler execution.
                 if let Some(execution_started_at) = execution_started_at {
@@ -438,6 +443,7 @@ impl Drop for ToolCallTimingGuard {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use crate::session::step_context::StepContext;
@@ -504,7 +510,16 @@ mod tests {
     #[tokio::test]
     async fn cancellation_before_dispatch_admission_logs_dispatch_only_timing() -> anyhow::Result<()>
     {
-        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let lifecycle_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lifecycle_finishes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut extensions =
+            codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+        extensions.tool_lifecycle_contributor(Arc::new(AdmissionLifecycleRecorder {
+            starts: Arc::clone(&lifecycle_starts),
+            finishes: Arc::clone(&lifecycle_finishes),
+        }));
+        session.services.extensions = Arc::new(extensions.build());
         let session = Arc::new(session);
         let turn_context = Arc::new(turn_context);
         let tool_name = codex_tools::ToolName::plain("test_tool");
@@ -601,6 +616,14 @@ mod tests {
             dispatch_duration_ms, total_duration_ms,
             "tool cancelled before admission should attribute all elapsed time to dispatch: {timing_event}"
         );
+        assert_eq!(lifecycle_starts.load(Ordering::Acquire), 0);
+        assert_eq!(
+            lifecycle_finishes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[ToolCallOutcome::Aborted]
+        );
         release_execution_gate_tx
             .send(())
             .expect("execution gate task should remain available");
@@ -645,6 +668,32 @@ mod tests {
     }
 
     impl CoreToolRuntime for ImmediateHandler {}
+
+    struct AdmissionLifecycleRecorder {
+        starts: Arc<std::sync::atomic::AtomicUsize>,
+        finishes: Arc<std::sync::Mutex<Vec<ToolCallOutcome>>>,
+    }
+
+    impl codex_extension_api::ToolLifecycleContributor for AdmissionLifecycleRecorder {
+        fn on_tool_start<'a>(
+            &'a self,
+            _input: codex_extension_api::ToolStartInput<'a>,
+        ) -> codex_extension_api::ToolLifecycleFuture<'a> {
+            self.starts.fetch_add(1, Ordering::AcqRel);
+            Box::pin(std::future::ready(()))
+        }
+
+        fn on_tool_finish<'a>(
+            &'a self,
+            input: codex_extension_api::ToolFinishInput<'a>,
+        ) -> codex_extension_api::ToolLifecycleFuture<'a> {
+            self.finishes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(input.outcome);
+            Box::pin(std::future::ready(()))
+        }
+    }
 
     struct ImmediateCooperativeFailureHandler {
         tool_name: codex_tools::ToolName,

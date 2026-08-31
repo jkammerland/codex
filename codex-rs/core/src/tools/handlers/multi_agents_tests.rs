@@ -3457,6 +3457,72 @@ async fn multi_agent_v2_wait_agent_wakes_when_last_worker_is_interrupted() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_wait_agent_keeps_waiting_after_one_of_two_workers_stops() {
+    let (session, turn, manager, first_worker) = spawn_v2_wait_test_worker().await;
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "wait for interruption",
+                "task_name": "second_worker"
+            })),
+        ))
+        .await
+        .expect("second worker should spawn");
+    let second_worker_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "second_worker")
+        .await
+        .expect("second worker should resolve");
+    let second_worker = manager
+        .get_thread(second_worker_id)
+        .await
+        .expect("second worker should be resident");
+    let mut wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandlerV2
+                .handle(invocation(
+                    session,
+                    turn,
+                    "wait_agent",
+                    function_payload(json!({})),
+                ))
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+
+    first_worker.session.mark_interrupted();
+    assert!(
+        timeout(Duration::from_millis(50), &mut wait_task)
+            .await
+            .is_err()
+    );
+    second_worker.session.mark_interrupted();
+
+    let output = timeout(Duration::from_millis(500), wait_task)
+        .await
+        .expect("last worker status transition should wake wait_agent")
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "No live agents to wait for.".to_string(),
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
 async fn multi_agent_v2_child_error_waits_for_terminal_status() {
     let (session, _turn, manager, worker) = spawn_v2_wait_test_worker().await;
     let parent = manager

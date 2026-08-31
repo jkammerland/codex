@@ -37,6 +37,7 @@ use codex_rollout::RolloutItem;
 use codex_rollout::is_persisted_rollout_item;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::CreateThreadParams;
+use codex_thread_store::DeleteThreadsParams;
 use codex_thread_store::PersistContext;
 use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadPersistenceMetadata;
@@ -367,6 +368,19 @@ impl ExternalAgentSessionImporter {
             });
         let cwd = session.cwd.clone();
         let title = session.title.clone();
+        if initial_import_reservation.replaces_incomplete_thread() {
+            self.thread_store
+                .delete_threads(DeleteThreadsParams {
+                    thread_ids: vec![imported_thread_id],
+                })
+                .await
+                .map_err(|err| SessionImportFailure {
+                    source_path: source_path.clone(),
+                    message: format!("failed to recover interrupted session import: {err}"),
+                    stage: "session_recovery",
+                    sub_error_type: "failed_to_remove_incomplete_import".to_string(),
+                })?;
+        }
         self.persist_session(session, imported_thread_id)
             .await
             .map_err(|failure| SessionImportFailure {
@@ -573,53 +587,59 @@ impl ExternalAgentSessionImporter {
                     format!("failed to import session: {err}"),
                 )
             })?;
-        if !rollout_items.is_empty()
-            && let Err(err) = self
-                .thread_store
-                .append_items(AppendThreadItemsParams {
+        let persist_result = async {
+            if !rollout_items.is_empty() {
+                self.thread_store
+                    .append_items(AppendThreadItemsParams {
+                        thread_id,
+                        items: rollout_items,
+                    })
+                    .await
+                    .map_err(|err| {
+                        SessionImportStepFailure::new(
+                            "failed_to_append_thread_items",
+                            format!("failed to import session: {err}"),
+                        )
+                    })?;
+            }
+
+            self.thread_store
+                .update_thread_metadata(UpdateThreadMetadataParams {
                     thread_id,
-                    items: rollout_items,
+                    patch: metadata,
+                    include_archived: false,
                 })
                 .await
-        {
-            let _ = self.thread_store.discard_thread(thread_id).await;
-            return Err(SessionImportStepFailure::new(
-                "failed_to_append_thread_items",
-                format!("failed to import session: {err}"),
-            ));
+                .map_err(|err| {
+                    SessionImportStepFailure::new(
+                        "failed_to_update_thread_metadata",
+                        format!("failed to update imported session: {err}"),
+                    )
+                })?;
+            self.thread_store
+                .persist_thread(thread_id, PersistContext::Standard)
+                .await
+                .map_err(|err| {
+                    SessionImportStepFailure::new(
+                        "failed_to_persist_thread",
+                        format!("failed to persist imported session: {err}"),
+                    )
+                })?;
+            self.thread_store
+                .shutdown_thread(thread_id)
+                .await
+                .map_err(|err| {
+                    SessionImportStepFailure::new(
+                        "failed_to_shutdown_thread",
+                        format!("failed to shutdown imported session: {err}"),
+                    )
+                })
         }
-
-        self.thread_store
-            .update_thread_metadata(UpdateThreadMetadataParams {
-                thread_id,
-                patch: metadata,
-                include_archived: false,
-            })
-            .await
-            .map_err(|err| {
-                SessionImportStepFailure::new(
-                    "failed_to_update_thread_metadata",
-                    format!("failed to update imported session: {err}"),
-                )
-            })?;
-        self.thread_store
-            .persist_thread(thread_id, PersistContext::Standard)
-            .await
-            .map_err(|err| {
-                SessionImportStepFailure::new(
-                    "failed_to_persist_thread",
-                    format!("failed to persist imported session: {err}"),
-                )
-            })?;
-        self.thread_store
-            .shutdown_thread(thread_id)
-            .await
-            .map_err(|err| {
-                SessionImportStepFailure::new(
-                    "failed_to_shutdown_thread",
-                    format!("failed to shutdown imported session: {err}"),
-                )
-            })?;
+        .await;
+        if let Err(err) = persist_result {
+            let _ = self.thread_store.discard_thread(thread_id).await;
+            return Err(err);
+        }
         Ok(thread_id)
     }
 }

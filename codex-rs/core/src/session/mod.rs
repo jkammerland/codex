@@ -3519,7 +3519,7 @@ impl Session {
     }
 
     pub(crate) async fn record_inter_agent_communication(
-        &self,
+        self: &Arc<Self>,
         turn_context: &TurnContext,
         communication: InterAgentCommunication,
     ) -> std::io::Result<()> {
@@ -3549,95 +3549,106 @@ impl Session {
             turn_context,
             std::slice::from_ref(&response_item),
         );
-        let items = items.as_ref();
+        let items = items.into_owned();
         let response_item = items[0].clone();
         if durable_claim.is_some() && self.live_thread().is_none() {
             return Err(std::io::Error::other(
                 "cannot commit durable mailbox delivery without a live rollout writer",
             ));
         }
-        // Hold the live-history lock before crossing the durable commit point. Once the rollout
-        // flush succeeds, inserting the exact response below is synchronous, so cancellation
-        // cannot leave durable history ahead of the context observed by later live turns.
-        let mut durable_history = if durable_claim.is_some() {
-            Some(self.state.lock().await)
-        } else {
-            None
-        };
-        if let Some(live_thread) = self.live_thread() {
-            if let Some(id) = communication.id.as_ref()
-                && durable_claim.is_some()
-                && !self
-                    .input_queue
-                    .mark_inflight_mail_commit_started(id, &turn_context.sub_id)
-                    .await
+        if let Some(claim) = durable_claim.as_ref() {
+            let id = &claim.communication_id;
+            let commit_permit = self
+                .durable_mail_commit_gate
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| std::io::Error::other("durable mailbox commit gate closed"))?;
+            if !self
+                .input_queue
+                .mark_inflight_mail_commit_started(id, &turn_context.sub_id)
+                .await
             {
                 return Err(std::io::Error::other(format!(
                     "durable mailbox delivery {id} lost its in-flight claim before persistence"
                 )));
             }
-            let metadata = durable_claim.as_ref().map_or_else(
-                || RolloutItem::InterAgentCommunicationMetadata {
-                    trigger_turn: communication.trigger_turn,
-                    mail_fingerprint: None,
-                    delivery_id: None,
-                    terminal_turn_id: None,
-                    terminal_status: None,
-                    mail_communication: None,
-                    mail_start_options: None,
-                    consumed_mail_id: None,
-                },
-                |claim| RolloutItem::DurableInterAgentCommunicationClaimed {
-                    communication_id: claim.communication_id.clone(),
-                    communication: Some(model_communication.clone()),
-                    delivered_response: Some(response_item.clone().into()),
-                    fingerprint: claim.fingerprint.clone(),
-                    turn_id: turn_context.sub_id.clone(),
-                },
-            );
-            let items = if durable_claim.is_some() {
-                vec![metadata]
-            } else {
-                vec![
+            let rollout_items = vec![RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: claim.communication_id.clone(),
+                communication: Some(model_communication.clone()),
+                delivered_response: Some(response_item.clone().into()),
+                fingerprint: claim.fingerprint.clone(),
+                turn_id: turn_context.sub_id.clone(),
+            }];
+            let session = Arc::clone(self);
+            let state_items = items.clone();
+            let turn_id = turn_context.sub_id.clone();
+            let communication_id = claim.communication_id.clone();
+            let truncation_policy = turn_context.model_info().truncation_policy.into();
+            let commit = tokio::spawn(async move {
+                let _commit_permit = commit_permit;
+                let live_thread = session.live_thread().ok_or_else(|| {
+                    std::io::Error::other(
+                        "cannot commit durable mailbox delivery without a live rollout writer",
+                    )
+                })?;
+                live_thread
+                    .append_items(&rollout_items)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                session.flush_rollout().await?;
+                {
+                    let mut state = session.state.lock().await;
+                    state
+                        .current_time_reminder
+                        .note_recorded_items(&state_items);
+                    state.record_items(state_items.iter(), truncation_policy);
+                }
+                if !session
+                    .input_queue
+                    .mark_inflight_mail_delivered(&communication_id, &turn_id)
+                    .await
+                {
+                    return Err(std::io::Error::other(format!(
+                        "durable mailbox delivery {communication_id} lost its in-flight claim"
+                    )));
+                }
+                Ok::<(), std::io::Error>(())
+            });
+            commit.await.map_err(|error| {
+                std::io::Error::other(format!("durable mailbox commit task failed: {error}"))
+            })??;
+        } else {
+            let metadata =
+                self.live_thread()
+                    .map(|_| RolloutItem::InterAgentCommunicationMetadata {
+                        trigger_turn: communication.trigger_turn,
+                        mail_fingerprint: None,
+                        delivery_id: None,
+                        terminal_turn_id: None,
+                        terminal_status: None,
+                        mail_communication: None,
+                        mail_start_options: None,
+                        consumed_mail_id: None,
+                    });
+            if let (Some(live_thread), Some(metadata)) = (self.live_thread(), metadata) {
+                let rollout_items = vec![
                     metadata,
                     RolloutItem::ResponseItem(response_item.clone().into()),
-                ]
-            };
-            live_thread
-                .append_items(&items)
-                .await
-                .map_err(std::io::Error::other)?;
-            if durable_claim.is_some() {
-                self.flush_rollout().await?;
+                ];
+                live_thread
+                    .append_items(&rollout_items)
+                    .await
+                    .map_err(std::io::Error::other)?;
             }
-        }
-        if let Some(state) = durable_history.as_mut() {
-            state.current_time_reminder.note_recorded_items(items);
-            state.record_items(
-                items.iter(),
-                turn_context.model_info().truncation_policy.into(),
-            );
-        } else {
             let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(items);
+            state.current_time_reminder.note_recorded_items(&items);
             state.record_items(
                 items.iter(),
                 turn_context.model_info().truncation_policy.into(),
             );
         }
-        drop(durable_history);
-        if let Some(id) = communication.id.as_ref()
-            && durable_claim.is_some()
-            && !self
-                .input_queue
-                .mark_inflight_mail_delivered(id, &turn_context.sub_id)
-                .await
-        {
-            return Err(std::io::Error::other(format!(
-                "durable mailbox delivery {id} lost its in-flight claim"
-            )));
-        }
-        self.send_raw_response_items(turn_context, items).await;
+        self.send_raw_response_items(turn_context, &items).await;
         Ok(())
     }
 

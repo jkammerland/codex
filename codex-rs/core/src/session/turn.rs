@@ -160,6 +160,15 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    // A cancelled predecessor can finish an already-started durable mailbox commit in a shielded
+    // task. Do not let this turn observe or sample the history until that exact commit resolves.
+    let durable_mail_commit_barrier = sess
+        .durable_mail_commit_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| CodexErr::InternalAgentDied)?;
+    drop(durable_mail_commit_barrier);
     let spawn_admission_barrier = sess.take_spawn_admission_barrier().await;
 
     // Record results from hooks that finished after the previous turn before this turn's user prompt.

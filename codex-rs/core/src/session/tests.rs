@@ -1,3 +1,6 @@
+use super::input_queue::DurableMailRetryStatus;
+use super::input_queue::MailboxModelSizeLimit;
+use super::input_queue::prepare_mailbox_model_communication;
 use super::mcp_refresh::McpRefresh;
 use super::step_settings::ResolvedStepSettings;
 use super::step_settings::StepSettings;
@@ -2358,6 +2361,7 @@ async fn subagent_activity_emits_matching_start_and_completion() {
 async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     let (mut session, turn_context) = make_session_and_context().await;
     let rollout_path = attach_thread_persistence(&mut session).await;
+    let session = Arc::new(session);
     let communication = InterAgentCommunication::new(
         AgentPath::root().join("worker").expect("worker path"),
         AgentPath::root(),
@@ -2432,6 +2436,144 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     assert_eq!(
         strip_response_item_ids(&raw_history_items(&resumed_session.clone_history().await)),
         strip_response_item_ids(std::slice::from_ref(&expected_item))
+    );
+}
+
+#[tokio::test]
+async fn cancelled_delivery_finishes_the_flushed_commit_before_a_successor_can_start() {
+    let (mut session, _) = make_session_and_context().await;
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    let session = Arc::new(session);
+    let turn_id = "durable-turn";
+    let communication_id = ResponseItemId::with_suffix("msg", "cancelled-commit");
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "finish after cancellation".to_string(),
+        /*trigger_turn*/ false,
+    );
+    communication.id = Some(communication_id.clone());
+    let prepared = prepare_mailbox_model_communication(
+        &communication,
+        turn_id,
+        MailboxModelSizeLimit::Current,
+    )
+    .expect("valid durable model item");
+    assert!(
+        session
+            .input_queue
+            .prepare_persisted_mailbox_communication(
+                communication.clone(),
+                prepared,
+                Default::default(),
+                "fingerprint".to_string(),
+                turn_id.to_string(),
+                MailboxModelSizeLimit::Current,
+            )
+            .await
+            .expect("valid durable mail")
+    );
+    assert!(
+        session
+            .input_queue
+            .mark_mailbox_communication_persisted(&communication_id)
+            .await
+    );
+    session
+        .claim_and_drain_mailbox_input_items(turn_id)
+        .await
+        .expect("mail should be claimed");
+    let turn_context = session
+        .new_turn_with_default_settings(turn_id.to_string(), Default::default())
+        .await;
+
+    // Holding live state forces the cancellation-shielded commit to stop immediately after its
+    // rollout flush, proving persistence I/O itself does not hold this lock. Use a blocking helper
+    // so the test itself never suspends while owning a Tokio mutex guard.
+    let (state_locked_tx, state_locked_rx) = tokio::sync::oneshot::channel();
+    let (release_state_tx, release_state_rx) = std::sync::mpsc::channel();
+    let session_for_state_blocker = Arc::clone(&session);
+    let state_blocker = tokio::task::spawn_blocking(move || {
+        let state_guard = session_for_state_blocker.state.blocking_lock();
+        state_locked_tx
+            .send(())
+            .expect("state lock observer should remain active");
+        release_state_rx
+            .recv()
+            .expect("state lock release sender should remain active");
+        drop(state_guard);
+    });
+    state_locked_rx
+        .await
+        .expect("state blocker should acquire lock");
+    let session_for_record = Arc::clone(&session);
+    let record = tokio::spawn(async move {
+        session_for_record
+            .record_inter_agent_communication(&turn_context, communication)
+            .await
+    });
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            let InitialHistory::Resumed(stored) =
+                RolloutRecorder::get_rollout_history(&rollout_path)
+                    .await
+                    .expect("read flushed rollout")
+            else {
+                panic!("expected resumed rollout");
+            };
+            if stored.history.iter().any(|item| {
+                matches!(
+                    item,
+                    RolloutItem::DurableInterAgentCommunicationClaimed {
+                        communication_id: stored_id,
+                        delivered_response: Some(_),
+                        ..
+                    } if stored_id == &communication_id
+                )
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("durable claim should flush before live insertion");
+
+    record.abort();
+    assert!(
+        record
+            .await
+            .expect_err("recording task should be cancelled")
+            .is_cancelled()
+    );
+    release_state_tx
+        .send(())
+        .expect("state blocker should remain active");
+    state_blocker.await.expect("state blocker should not panic");
+    let commit_barrier = session
+        .durable_mail_commit_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("commit gate should remain open");
+    drop(commit_barrier);
+
+    assert_eq!(
+        session
+            .clone_history()
+            .await
+            .raw_items()
+            .filter(|item| item.id() == Some(&communication_id))
+            .count(),
+        1
+    );
+    assert_eq!(
+        session
+            .input_queue
+            .durable_mail_retry_status(&communication_id)
+            .await,
+        DurableMailRetryStatus::Delivered
     );
 }
 
@@ -6398,6 +6540,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         agent_delivery_gate: Arc::new(Semaphore::new(1)),
+        durable_mail_commit_gate: Arc::new(Semaphore::new(1)),
         spawn_admission_barrier: Mutex::new(None),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
@@ -8679,6 +8822,7 @@ where
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         agent_delivery_gate: Arc::new(Semaphore::new(1)),
+        durable_mail_commit_gate: Arc::new(Semaphore::new(1)),
         spawn_admission_barrier: Mutex::new(None),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,

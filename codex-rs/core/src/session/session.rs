@@ -71,6 +71,8 @@ pub(crate) struct Session {
     pub(crate) input_queue: InputQueue,
     /// Linearizes durable agent-mail delivery with V2 residency eviction.
     pub(crate) agent_delivery_gate: Arc<Semaphore>,
+    /// Prevents a replacement turn from overtaking a cancellation-shielded mailbox commit.
+    pub(crate) durable_mail_commit_gate: Arc<Semaphore>,
     pub(super) spawn_admission_barrier: Mutex<Option<SpawnAdmissionBarrier>>,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
@@ -1513,6 +1515,7 @@ impl Session {
                 async_hook_results,
                 input_queue: InputQueue::new(),
                 agent_delivery_gate: Arc::new(Semaphore::new(1)),
+                durable_mail_commit_gate: Arc::new(Semaphore::new(1)),
                 spawn_admission_barrier: Mutex::new(None),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,

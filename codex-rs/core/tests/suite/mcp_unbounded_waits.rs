@@ -42,6 +42,7 @@ enum DispatchPath {
 struct BlockingCall {
     started_file: PathBuf,
     release_file: PathBuf,
+    exit_file: PathBuf,
     call_count_file: PathBuf,
     arguments: Value,
 }
@@ -50,15 +51,18 @@ impl BlockingCall {
     fn new(temp_dir: &tempfile::TempDir, name: &str) -> Self {
         let started_file = temp_dir.path().join(format!("{name}.started"));
         let release_file = temp_dir.path().join(format!("{name}.release"));
+        let exit_file = temp_dir.path().join(format!("{name}.exit"));
         let call_count_file = temp_dir.path().join(format!("{name}.calls"));
         let arguments = json!({
             "started_file": started_file,
             "release_file": release_file,
+            "exit_file": exit_file,
             "call_count_file": call_count_file,
         });
         Self {
             started_file,
             release_file,
+            exit_file,
             call_count_file,
             arguments,
         }
@@ -72,6 +76,11 @@ impl BlockingCall {
 
     fn release(&self) -> Result<()> {
         std::fs::write(&self.release_file, "release")?;
+        Ok(())
+    }
+
+    fn close_transport(&self) -> Result<()> {
+        std::fs::write(&self.exit_file, "exit")?;
         Ok(())
     }
 }
@@ -330,6 +339,45 @@ async fn omitted_and_positive_direct_timeouts_remain_finite() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn transport_loss_fails_unbounded_call_without_replay() -> Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let fixture = build_fixture(&server, Some(Duration::ZERO), DispatchPath::Direct).await?;
+    let temp_dir = tempfile::tempdir()?;
+    let blocking_call = BlockingCall::new(&temp_dir, "transport-loss");
+    let call = tokio::spawn({
+        let codex = Arc::clone(&fixture.codex);
+        let arguments = blocking_call.arguments.clone();
+        async move {
+            codex
+                .call_mcp_tool(MCP_SERVER, TOOL, Some(arguments), /*meta*/ None)
+                .await
+        }
+    });
+    wait_for_path_exists(&blocking_call.started_file, Duration::from_secs(5)).await?;
+
+    blocking_call.close_transport()?;
+    let result = tokio::time::timeout(Duration::from_secs(5), call)
+        .await
+        .expect("transport loss should release the pending call")?;
+    let error = result.expect_err("transport loss should fail the pending call");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("transport")
+            || message.contains("connection")
+            || message.contains("closed"),
+        "transport loss should retain a transport-specific error: {message}"
+    );
+    assert_eq!(blocking_call.count()?, 1, "transport loss must not replay");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[serial(mcp_unbounded_wait_time)]
 async fn code_mode_zero_timeout_survives_yield_and_one_day_without_a_model_turn() -> Result<()> {
     skip_if_wine_exec!(
@@ -363,7 +411,10 @@ async fn code_mode_zero_timeout_survives_yield_and_one_day_without_a_model_turn(
 
     blocking_call.release()?;
     let output = collect_code_mode_cell(&server, &fixture, &cell_id).await?;
-    assert!(output.contains("ok"), "unexpected nested MCP output: {output}");
+    assert!(
+        output.contains("ok"),
+        "unexpected nested MCP output: {output}"
+    );
     assert_eq!(blocking_call.count()?, 1);
     Ok(())
 }

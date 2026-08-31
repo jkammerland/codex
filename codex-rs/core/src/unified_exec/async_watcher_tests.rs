@@ -260,19 +260,33 @@ async fn streaming_output_recovers_the_terminal_transcript_after_receiver_lag() 
     let output_drained = process.output_drained_notify();
     let drained = output_drained.notified();
     tokio::pin!(drained);
-    let mut expected = Vec::new();
-    {
-        let mut authoritative_transcript = process.output_handles().output_buffer.lock().await;
-        for index in 0..100u8 {
-            let chunk = vec![index];
-            expected.extend_from_slice(&chunk);
-            authoritative_transcript.push_chunk(&chunk);
+    stdout_tx
+        .send(b"HEAD;".to_vec())
+        .expect("send initial output");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if transcript.lock().await.to_bytes_with_omission_marker() == b"HEAD;" {
+                break;
+            }
+            tokio::task::yield_now().await;
         }
-    }
+    })
+    .await
+    .expect("watcher should consume initial output");
+
+    let collected = std::mem::take(&mut *process.output_handles().output_buffer.lock().await);
+    assert_eq!(collected.to_bytes_with_omission_marker(), b"HEAD;");
+
+    let transcript_guard = transcript.lock().await;
+    let mut expected = b"HEAD;".to_vec();
+    let mut suffix = Vec::new();
     for index in 0..100u8 {
-        let chunk = vec![index];
-        process.publish_output_for_test(chunk);
+        let chunk = format!("{index:03};").into_bytes();
+        suffix.extend_from_slice(&chunk);
+        process.record_and_publish_output_for_test(chunk);
     }
+    expected.extend_from_slice(&suffix);
+    drop(transcript_guard);
     drop(stdout_tx);
     exit_tx.send(0).expect("send exit");
     (&mut drained).await;

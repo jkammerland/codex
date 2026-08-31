@@ -2865,7 +2865,10 @@ async fn multi_agent_v2_wait_stays_pending_until_steered() -> Result<()> {
         .expect("wait_agent output should be text");
     assert_eq!(
         serde_json::from_str::<Value>(wait_output)?,
-        json!({"message": "Wait interrupted by new input."})
+        json!({
+            "message": "Wait interrupted by new input.",
+            "timed_out": false,
+        })
     );
 
     let child = test

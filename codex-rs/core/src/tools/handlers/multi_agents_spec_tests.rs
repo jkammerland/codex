@@ -399,7 +399,7 @@ fn wait_agent_tool_v2_uses_event_only_summary_output() {
         .as_ref()
         .expect("wait_agent should use object params");
     assert!(!properties.contains_key("targets"));
-    assert!(properties.is_empty());
+    assert_eq!(properties.keys().collect::<Vec<_>>(), vec!["timeout_ms"]);
     assert!(
         description
             .contains("Does not return the content; returns a short summary when activity arrives")
@@ -410,7 +410,7 @@ fn wait_agent_tool_v2_uses_event_only_summary_output() {
         output_schema["properties"]["message"]["description"],
         json!("Brief wait summary without the agent's final content.")
     );
-    assert_eq!(output_schema["required"], json!(["message"]));
+    assert_eq!(output_schema["required"], json!(["message", "timed_out"]));
 }
 
 #[test]

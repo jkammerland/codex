@@ -379,7 +379,7 @@ async fn multi_agent_v2_wait_guidance_uses_overridable_developer_instructions(
             .pointer("/parameters/properties")
             .and_then(Value::as_object)
             .map(serde_json::Map::len),
-        Some(0)
+        Some(1)
     );
 
     Ok(())
@@ -556,7 +556,7 @@ async fn multi_agent_v2_cold_resume_refreshes_legacy_usage_hints_once(
                     .pointer("/parameters/properties")
                     .and_then(Value::as_object)
                     .map(serde_json::Map::len),
-                Some(0)
+                Some(1)
             );
         }
     }

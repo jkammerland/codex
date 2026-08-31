@@ -2234,6 +2234,13 @@
     "MultiAgentV2ConfigToml": {
       "additionalProperties": false,
       "properties": {
+        "default_wait_timeout_ms": {
+          "description": "Deprecated compatibility field. Its value is ignored.",
+          "format": "int64",
+          "maximum": 3600000.0,
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -2247,6 +2254,20 @@
         "max_concurrent_threads_per_session": {
           "format": "uint",
           "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_wait_timeout_ms": {
+          "description": "Deprecated compatibility field. Its value is ignored.",
+          "format": "int64",
+          "maximum": 3600000.0,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "min_wait_timeout_ms": {
+          "description": "Deprecated compatibility field. Its value is ignored.",
+          "format": "int64",
+          "maximum": 3600000.0,
+          "minimum": 0.0,
           "type": "integer"
         },
         "multi_agent_mode_hint_text": {

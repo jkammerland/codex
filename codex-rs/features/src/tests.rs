@@ -651,6 +651,9 @@ tool_namespace = "agents"
 hide_spawn_agent_metadata = true
 expose_spawn_agent_model_overrides = true
 wait_agent_enabled = false
+min_wait_timeout_ms = 10000
+max_wait_timeout_ms = 3600000
+default_wait_timeout_ms = 30000
 non_code_mode_only = true
 "#,
     )
@@ -675,6 +678,9 @@ non_code_mode_only = true
             hide_spawn_agent_metadata: Some(true),
             expose_spawn_agent_model_overrides: Some(true),
             wait_agent_enabled: Some(false),
+            min_wait_timeout_ms: Some(10_000),
+            max_wait_timeout_ms: Some(3_600_000),
+            default_wait_timeout_ms: Some(30_000),
             non_code_mode_only: Some(true),
         }))
     );

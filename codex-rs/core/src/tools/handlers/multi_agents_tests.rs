@@ -2935,9 +2935,16 @@ async fn wait_agent_rejects_empty_targets() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_rejects_timeout_argument() {
-    let (session, turn) = make_session_and_context().await;
-    let Err(FunctionCallError::RespondToModel(message)) = WaitAgentHandlerV2
+async fn multi_agent_v2_wait_agent_accepts_ignored_timeout_argument() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let output = WaitAgentHandlerV2
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -2945,10 +2952,86 @@ async fn multi_agent_v2_wait_agent_rejects_timeout_argument() {
             function_payload(json!({"timeout_ms": 1})),
         ))
         .await
-    else {
-        panic!("v2 wait_agent should reject the removed timeout argument");
-    };
-    assert!(message.contains("unknown field `timeout_ms`"));
+        .expect("v2 wait_agent should accept the deprecated timeout argument");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&content).expect("wait result should be json"),
+        json!({
+            "message": "No live agents to wait for.",
+            "timed_out": false
+        })
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_child_wait_ignores_live_ancestors() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+
+    let child_path = AgentPath::try_from("/root/worker").expect("agent path");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .spawn_agent_with_metadata(
+            (*turn.config).clone(),
+            vec![UserInput::Text {
+                text: "inspect this repo".to_string(),
+                text_elements: Vec::new(),
+            }],
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: Some(child_path.clone()),
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            crate::agent::control::SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("worker spawn should succeed")
+        .thread_id;
+    session.thread_id = child_thread_id;
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root.thread_id,
+        depth: 1,
+        agent_path: Some(child_path),
+        agent_nickname: None,
+        agent_role: None,
+    });
+
+    let output = timeout(
+        Duration::from_millis(100),
+        WaitAgentHandlerV2.handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "wait_agent",
+            function_payload(json!({})),
+        )),
+    )
+    .await
+    .expect("a live ancestor must not keep a child wait pending")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&content).expect("wait result should be json"),
+        json!({
+            "message": "No live agents to wait for.",
+            "timed_out": false
+        })
+    );
+    assert_eq!(success, None);
 }
 
 #[tokio::test]
@@ -3038,6 +3121,7 @@ async fn multi_agent_v2_wait_agent_returns_on_mailbox_activity() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3300,6 +3384,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3384,6 +3469,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3413,6 +3499,7 @@ async fn multi_agent_v2_wait_agent_ignores_already_interrupted_worker() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "No live agents to wait for.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3451,6 +3538,7 @@ async fn multi_agent_v2_wait_agent_wakes_when_last_worker_is_interrupted() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "No live agents to wait for.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3517,6 +3605,7 @@ async fn multi_agent_v2_wait_agent_keeps_waiting_after_one_of_two_workers_stops(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "No live agents to wait for.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3711,6 +3800,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3802,6 +3892,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
+            timed_out: false,
         }
     );
     assert!(!content.contains("sensitive child output"));

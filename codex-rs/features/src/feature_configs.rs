@@ -274,6 +274,18 @@ pub struct MultiAgentV2ConfigToml {
     /// Expose the multi-agent v2 `wait_agent` tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_agent_enabled: Option<bool>,
+    /// Deprecated compatibility field. Its value is ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 3_600_000))]
+    pub min_wait_timeout_ms: Option<i64>,
+    /// Deprecated compatibility field. Its value is ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 3_600_000))]
+    pub max_wait_timeout_ms: Option<i64>,
+    /// Deprecated compatibility field. Its value is ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 3_600_000))]
+    pub default_wait_timeout_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub non_code_mode_only: Option<bool>,
 }

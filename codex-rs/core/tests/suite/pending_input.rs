@@ -713,6 +713,7 @@ async fn wait_agent_without_live_agents_returns_immediately() {
         serde_json::from_str::<Value>(wait_output).expect("parse wait_agent output"),
         json!({
             "message": "No live agents to wait for.",
+            "timed_out": false,
         })
     );
 

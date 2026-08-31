@@ -278,13 +278,20 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
 }
 
 pub fn create_wait_agent_tool_v2() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "timeout_ms".to_string(),
+        JsonSchema::number(Some(
+            "Deprecated compatibility field. Event-driven waits have no deadline; supplied values are ignored."
+                .to_string(),
+        )),
+    )]);
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns a short summary when activity arrives or when no live agents remain."
+        description: "Wait for a mailbox update from any live descendant agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns a short summary when activity arrives or when no live descendant agents remain."
             .to_string(),
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(BTreeMap::new(), /*required*/ None, Some(false.into())),
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: Some(wait_output_schema_v2()),
     })
 }
@@ -513,9 +520,13 @@ fn wait_output_schema_v2() -> Value {
             "message": {
                 "type": "string",
                 "description": "Brief wait summary without the agent's final content."
+            },
+            "timed_out": {
+                "type": "boolean",
+                "description": "Always false for event-driven waits; retained for compatibility."
             }
         },
-        "required": ["message"],
+        "required": ["message", "timed_out"],
         "additionalProperties": false
     })
 }

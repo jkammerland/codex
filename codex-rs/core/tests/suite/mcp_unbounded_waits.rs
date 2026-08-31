@@ -613,6 +613,96 @@ async fn explicit_turn_interrupt_aborts_an_unbounded_mcp_call_without_a_follow_u
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn session_shutdown_reports_its_origin_without_replaying_an_unbounded_mcp_call() -> Result<()>
+{
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let temp_dir = tempfile::tempdir()?;
+    let started_file = temp_dir.path().join("shutdown-unbounded.started");
+    let release_file = temp_dir.path().join("shutdown-unbounded.release");
+    let arguments = sync_arguments(
+        Some(&started_file),
+        Some(&release_file),
+        /*barrier_id*/ None,
+    );
+    let first_response = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_response_created("resp-unbounded-shutdown"),
+            responses::ev_function_call_with_namespace(
+                "call-unbounded-shutdown",
+                &format!("mcp__{MCP_SERVER}"),
+                "sync_readonly",
+                &serde_json::to_string(&arguments)?,
+            ),
+            responses::ev_completed("resp-unbounded-shutdown"),
+        ]),
+    )
+    .await;
+    let fixture = build_fixture(&server, Some(Duration::ZERO), DispatchPath::Direct).await?;
+
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "start an unbounded MCP call".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(
+            event,
+            EventMsg::McpToolCallBegin(begin) if begin.call_id == "call-unbounded-shutdown"
+        )
+    })
+    .await;
+    wait_for_path_exists(&started_file, Duration::from_secs(5)).await?;
+
+    fixture.codex.submit(Op::Shutdown).await?;
+    let terminal_item = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut terminal_item = None;
+        loop {
+            match fixture.codex.next_event().await?.msg {
+                EventMsg::ItemCompleted(event)
+                    if matches!(
+                        &event.item,
+                        TurnItem::McpToolCall(item)
+                            if item.id == "call-unbounded-shutdown"
+                    ) =>
+                {
+                    terminal_item = Some(event.item);
+                }
+                EventMsg::ShutdownComplete => break Ok::<_, anyhow::Error>(terminal_item),
+                _ => {}
+            }
+        }
+    })
+    .await??;
+    let Some(TurnItem::McpToolCall(terminal_item)) = terminal_item else {
+        anyhow::bail!("session shutdown did not emit a typed MCP terminal item");
+    };
+    assert_eq!(terminal_item.status, McpToolCallStatus::Failed);
+    assert!(
+        terminal_item
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("session_shutdown")),
+        "shutdown MCP error should preserve its cancellation origin: {:?}",
+        terminal_item.error
+    );
+    assert_eq!(
+        first_response.requests().len(),
+        1,
+        "session shutdown must not replay the MCP tool call or issue a follow-up model request"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[serial(mcp_unbounded_wait_time)]
 async fn code_mode_mcp_zero_timeout_stays_pending_without_an_intermediate_turn() -> Result<()> {
     skip_if_wine_exec!(

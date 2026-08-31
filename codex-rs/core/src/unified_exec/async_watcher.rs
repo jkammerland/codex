@@ -62,7 +62,7 @@ pub(crate) fn start_streaming_output(
     let output_task_abort_handle = process.output_task_abort_handle();
     let exit_token = process.cancellation_token();
     let OutputHandles {
-        output_buffer: authoritative_transcript,
+        output_transcript: authoritative_transcript,
         output_closed,
         output_closed_notify,
         ..

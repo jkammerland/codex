@@ -41,7 +41,7 @@ impl Handler {
             ..
         } = invocation;
         let arguments = function_arguments(payload)?;
-        let _: WaitArgs = parse_arguments(&arguments)?;
+        let WaitArgs { _timeout_ms: _ } = parse_arguments(&arguments)?;
 
         let turn_state = session
             .input_queue
@@ -136,11 +136,16 @@ impl CoreToolRuntime for Handler {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WaitArgs {}
+struct WaitArgs {
+    /// Deprecated compatibility field. Event-driven waits have no deadline.
+    #[serde(rename = "timeout_ms")]
+    _timeout_ms: Option<i64>,
+}
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct WaitAgentResult {
     pub(crate) message: String,
+    pub(crate) timed_out: bool,
 }
 
 impl WaitAgentResult {
@@ -153,6 +158,7 @@ impl WaitAgentResult {
         };
         Self {
             message: message.to_string(),
+            timed_out: false,
         }
     }
 }
@@ -198,7 +204,7 @@ async fn wait_for_activity(
     }
     loop {
         let agents = agent_control
-            .list_agents(session_source, /*path_prefix*/ None)
+            .list_agents(session_source, Some(current_agent_name))
             .await
             .map_err(collab_spawn_error)?;
         let mut status_receivers = Vec::new();

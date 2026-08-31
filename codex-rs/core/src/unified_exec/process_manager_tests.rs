@@ -304,6 +304,7 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
     let cancellation_token = CancellationToken::new();
     let output = OutputHandles {
         output_buffer: Arc::clone(&output_buffer),
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify: Arc::clone(&output_notify),
         output_closed: Arc::clone(&output_closed),
         output_closed_notify: Arc::clone(&output_closed_notify),
@@ -364,6 +365,7 @@ async fn output_collection_preserves_omissions_from_drained_buffer() {
     cancellation_token.cancel();
     let output = OutputHandles {
         output_buffer,
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify,
         output_closed,
         output_closed_notify,
@@ -391,6 +393,7 @@ async fn output_collection_prefers_published_close_over_invocation_cancellation(
     buffered_output.push_chunk(b"completed output");
     let output = OutputHandles {
         output_buffer: Arc::new(tokio::sync::Mutex::new(buffered_output)),
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify: Arc::new(Notify::new()),
         output_closed: Arc::new(AtomicBool::new(true)),
         output_closed_notify: Arc::new(Notify::new()),
@@ -416,6 +419,7 @@ async fn output_collection_prefers_published_close_over_invocation_cancellation(
 async fn output_collection_observes_cancellation_while_elicitation_is_paused() {
     let output = OutputHandles {
         output_buffer: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::<64>::default())),
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify: Arc::new(Notify::new()),
         output_closed: Arc::new(AtomicBool::new(false)),
         output_closed_notify: Arc::new(Notify::new()),
@@ -446,6 +450,7 @@ async fn output_collection_prefers_close_while_elicitation_is_paused_and_cancell
     buffered_output.push_chunk(b"final paused output");
     let output = OutputHandles {
         output_buffer: Arc::new(tokio::sync::Mutex::new(buffered_output)),
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify: Arc::new(Notify::new()),
         output_closed: Arc::new(AtomicBool::new(true)),
         output_closed_notify: Arc::new(Notify::new()),
@@ -476,6 +481,7 @@ async fn output_collection_cancellation_is_not_starved_by_continuous_output() {
     let output_notify = Arc::new(Notify::new());
     let output = OutputHandles {
         output_buffer: Arc::clone(&output_buffer),
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify: Arc::clone(&output_notify),
         output_closed: Arc::new(AtomicBool::new(false)),
         output_closed_notify: Arc::new(Notify::new()),
@@ -532,6 +538,7 @@ async fn completed_wait_drains_late_output_until_closed() {
     let cancellation_token = CancellationToken::new();
     let output = OutputHandles {
         output_buffer: Arc::clone(&output_buffer),
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify: Arc::clone(&output_notify),
         output_closed: Arc::clone(&output_closed),
         output_closed_notify: Arc::clone(&output_closed_notify),
@@ -577,6 +584,7 @@ async fn completed_wait_prefers_published_close_over_simultaneous_cancellation()
     let output_closed_notify = Arc::new(Notify::new());
     let output = OutputHandles {
         output_buffer: Arc::clone(&output_buffer),
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify: Arc::clone(&output_notify),
         output_closed: Arc::clone(&output_closed),
         output_closed_notify: Arc::clone(&output_closed_notify),
@@ -619,6 +627,7 @@ async fn cancelling_completed_wait_restores_partially_drained_output() {
     let process_cancellation = CancellationToken::new();
     let output = OutputHandles {
         output_buffer: Arc::clone(&output_buffer),
+        output_transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
         output_notify,
         output_closed,
         output_closed_notify,

@@ -62,10 +62,17 @@ not prompt for an npm update that would overwrite the fork.
     global FIFO order. A legacy `.mcp.13` claim becomes model-visible only when a
     later matching turn start proves the historical claim-before-turn sequence;
     an earlier turn start cannot complete a later claim. Compatibility shadows
-    are suppressed and duplicate communication IDs are projected once. MCP event
-    streams stop concurrently within one shared timeout window, and a late
-    interrupted event cannot erase an already persisted terminal failure.
-19. Fleet staging writes a commit-, version-, and SHA-256-bound receipt for the
+    are suppressed and duplicate communication IDs are projected once. A
+    consumed claim dominates later pending duplicates across fingerprints, while
+    genuinely pending duplicates retain the latest payload in their original
+    FIFO position. MCP event streams stop concurrently within one shared timeout
+    window, and a late interrupted event cannot erase an already persisted
+    terminal failure.
+19. External-session suffix migration assigns each released legacy mail item its
+    own append boundary. A serialized two-phase, atomically written ledger intent
+    makes a transcript append recoverable after interruption without replaying an
+    already persisted prefix or prematurely checkpointing the source hash.
+20. Fleet staging writes a commit-, version-, and SHA-256-bound receipt for the
     executable pair. macOS and Windows activation fail closed before mutation
     when source cleanliness, the receipt, staged binaries, active binaries, or
     rollback-pair verification fails.
@@ -130,11 +137,13 @@ For the event-liveness hardening in this release, the focused and crate-wide
 validation completed as follows before the final lint and formatting pass:
 
 - `codex-history`: 23 passed.
-- `codex-rollout`: 136 passed; one preexisting compressed-rollout search test
-  could not create its fixture because of local filesystem permissions. All 11
-  scanner tests passed.
+- `codex-rollout`: 139 passed; one preexisting compressed-rollout search test
+  could not create its fixture because of local filesystem permissions. All new
+  durable-compaction regressions and all 11 scanner tests passed.
 - `codex-thread-store`: 246 passed.
 - `codex-external-agent-migration`: 170 passed.
+- `codex-app-server`: all 6 focused external-session append and recovery tests
+  passed.
 - `codex-app-server-protocol`: 300 passed.
 - `codex-memories-write`: 44 passed.
 - `codex-core`: 3,988 passed, 12 failed, and 9 skipped. Every new durable-mail,

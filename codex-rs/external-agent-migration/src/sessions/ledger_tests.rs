@@ -13,6 +13,8 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::mpsc;
+use std::time::Duration;
 use tempfile::TempDir;
 
 #[test]
@@ -103,6 +105,55 @@ fn completed_import_refreshes_existing_record_metadata() {
 }
 
 #[test]
+fn ledger_mutations_wait_for_the_cross_process_write_lock() {
+    let root = TempDir::new().expect("tempdir");
+    let codex_home = root.path().join("codex-home");
+    let source_path = root.path().join("session.jsonl");
+    std::fs::write(&source_path, "session").expect("source");
+    let source_path = std::fs::canonicalize(source_path).expect("canonical source");
+    let mut lock = fd_lock::RwLock::new(
+        super::open_import_ledger_lock(&codex_home).expect("open ledger lock"),
+    );
+    let guard = lock.write().expect("hold ledger lock");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let worker_home = codex_home.clone();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).expect("started signal");
+        let result = record_completed_session_imports(
+            &worker_home,
+            vec![CompletedExternalAgentSessionImport {
+                source_path,
+                source_content_sha256: "content".to_string(),
+                imported_thread_id: ThreadId::new(),
+                connector_names: Vec::new(),
+                title: None,
+            }],
+        );
+        finished_tx.send(result).expect("finished signal");
+    });
+    started_rx.recv().expect("worker started");
+
+    assert!(matches!(
+        finished_rx.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(guard);
+    finished_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("mutation released after lock")
+        .expect("mutation succeeded");
+    worker.join().expect("worker joined");
+    assert_eq!(
+        super::load_import_ledger(&codex_home)
+            .expect("ledger")
+            .records
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata() {
     let root = TempDir::new().expect("tempdir");
     let codex_home = root.path().join("codex-home");
@@ -131,14 +182,16 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
         (thread_id, old_hash.as_str(), "not-the-source-hash"),
     ] {
         assert!(
-            !begin_existing_session_append(
+            begin_existing_session_append(
                 &codex_home,
                 &source_path,
                 candidate_thread_id,
                 expected_hash,
                 candidate_hash,
+                1,
             )
             .expect("rejected checkpoint")
+            .is_none()
         );
     }
     assert!(
@@ -153,9 +206,17 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
     );
     assert_eq!(ledger_bytes(&codex_home), ledger_before);
 
-    assert!(
-        begin_existing_session_append(&codex_home, &source_path, thread_id, &old_hash, &new_hash,)
-            .expect("begin append")
+    assert_eq!(
+        begin_existing_session_append(
+            &codex_home,
+            &source_path,
+            thread_id,
+            &old_hash,
+            &new_hash,
+            3,
+        )
+        .expect("begin append"),
+        Some(3)
     );
     let pending_ledger = super::load_import_ledger(&codex_home).expect("pending ledger");
     let [pending_record] = pending_ledger.records.as_slice() else {
@@ -166,15 +227,24 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
         pending_record.pending_content_sha256.as_deref(),
         Some(new_hash.as_str())
     );
+    assert_eq!(pending_record.pending_target_model_item_count, Some(3));
     assert!(
         !pending_ledger
             .contains_current_source(&source_path)
             .expect("pending append is not complete")
     );
     let pending_ledger_bytes = ledger_bytes(&codex_home);
-    assert!(
-        begin_existing_session_append(&codex_home, &source_path, thread_id, &old_hash, &new_hash,)
-            .expect("resume pending append")
+    assert_eq!(
+        begin_existing_session_append(
+            &codex_home,
+            &source_path,
+            thread_id,
+            &old_hash,
+            &new_hash,
+            9,
+        )
+        .expect("resume pending append"),
+        Some(3)
     );
     assert_eq!(ledger_bytes(&codex_home), pending_ledger_bytes);
 
@@ -198,6 +268,7 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
             source_path: source_path.clone(),
             content_sha256: new_hash,
             pending_content_sha256: None,
+            pending_target_model_item_count: None,
             imported_thread_id: thread_id,
             imported_at: record.imported_at,
             source_modified_at: super::session_modified_at(&source_path).expect("source mtime"),

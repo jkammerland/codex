@@ -3178,6 +3178,7 @@ dependencies = [
  "codex-thread-store",
  "codex-utils-output-truncation",
  "codex-utils-path",
+ "fd-lock",
  "pretty_assertions",
  "serde",
  "serde_json",

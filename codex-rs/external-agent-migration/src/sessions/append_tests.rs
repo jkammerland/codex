@@ -42,6 +42,97 @@ fn returns_the_missing_suffix_from_its_visible_boundary() {
 }
 
 #[test]
+fn interrupted_append_recovers_the_raw_tail_after_the_model_transcript_is_complete() {
+    let history = rollout(&[(MessageRole::User, "first request")]);
+    let source = rollout(&[
+        (MessageRole::User, "first request"),
+        (MessageRole::Assistant, "late answer"),
+    ]);
+    let append_base_model_item_count = history_model_items(&history)
+        .expect("history model items")
+        .len();
+    let ExistingSessionAppendPlan::Append(transaction) =
+        plan_existing_session_append_from_base(&source, &history, append_base_model_item_count)
+            .expect("initial append")
+    else {
+        panic!("initial transaction must append");
+    };
+    let response_position = transaction
+        .iter()
+        .rposition(|item| matches!(item, RolloutItem::ResponseItem(_)))
+        .expect("transaction response");
+    let mut interrupted_history = history;
+    interrupted_history.extend_from_slice(&transaction[..=response_position]);
+    assert!(model_transcripts_match(&source, &interrupted_history));
+
+    let ExistingSessionAppendPlan::Append(remainder) = plan_existing_session_append_from_base(
+        &source,
+        &interrupted_history,
+        append_base_model_item_count,
+    )
+    .expect("recover interrupted append") else {
+        panic!("raw tail must still append");
+    };
+
+    assert!(!remainder.is_empty());
+    assert!(
+        remainder
+            .iter()
+            .all(|item| !matches!(item, RolloutItem::ResponseItem(_)))
+    );
+    interrupted_history.extend(remainder);
+    assert!(matches!(
+        plan_existing_session_append_from_base(
+            &source,
+            &interrupted_history,
+            append_base_model_item_count,
+        ),
+        Some(ExistingSessionAppendPlan::AlreadyComplete)
+    ));
+}
+
+#[test]
+fn interrupted_append_rejects_a_nontransactional_raw_tail() {
+    let history = rollout(&[(MessageRole::User, "first request")]);
+    let source = rollout(&[
+        (MessageRole::User, "first request"),
+        (MessageRole::Assistant, "late answer"),
+    ]);
+    let append_base_model_item_count = history_model_items(&history)
+        .expect("history model items")
+        .len();
+    let ExistingSessionAppendPlan::Append(transaction) =
+        plan_existing_session_append_from_base(&source, &history, append_base_model_item_count)
+            .expect("initial append")
+    else {
+        panic!("initial transaction must append");
+    };
+    let response_position = transaction
+        .iter()
+        .rposition(|item| matches!(item, RolloutItem::ResponseItem(_)))
+        .expect("transaction response");
+    let mut divergent_history = history;
+    divergent_history.extend_from_slice(&transaction[..=response_position]);
+    divergent_history.push(RolloutItem::EventMsg(EventMsg::AgentMessage(
+        codex_protocol::protocol::AgentMessageEvent {
+            message: "unrelated concurrent append".to_string(),
+            phase: None,
+            memory_citation: None,
+            delivery: None,
+        },
+    )));
+
+    assert!(
+        plan_existing_session_append_from_base(
+            &source,
+            &divergent_history,
+            append_base_model_item_count,
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn requires_a_strict_nonempty_model_prefix() {
     let history = rollout(&[(MessageRole::User, "first request")]);
     let source = rollout(&[
@@ -227,6 +318,55 @@ fn legacy_claim_batch_appends_from_the_first_missing_claim() {
     ));
     partial_history.extend(suffix);
     assert!(model_transcripts_match(&source, &partial_history));
+}
+
+#[test]
+fn duplicate_claim_identity_keeps_the_first_raw_append_boundary() {
+    let history = rollout(&[(MessageRole::User, "first request")]);
+    let mut source = history.clone();
+    let mut communication = codex_protocol::protocol::InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "durable result".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(codex_protocol::ResponseItemId::with_suffix(
+        "msg",
+        "duplicate-boundary",
+    ));
+    let first_claim = RolloutItem::DurableInterAgentCommunicationClaimed {
+        communication_id: communication.id.clone().expect("communication id"),
+        communication: Some(communication.clone()),
+        delivered_response: None,
+        fingerprint: "fingerprint".to_string(),
+        turn_id: "turn-2".to_string(),
+    };
+    source.extend([
+        first_claim.clone(),
+        RolloutItem::DurableInterAgentCommunication {
+            communication: communication.clone(),
+            start_options: codex_protocol::turn_input::TurnStartOptions::default(),
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "turn-2".to_string(),
+            compatibility_shadow: false,
+        },
+        first_claim,
+        RolloutItem::ResponseItem(codex_rollout::ResponseItemEnvelope::new(
+            communication.to_model_input_item(),
+        )),
+    ]);
+
+    let suffix = plan_append(&source, &history).expect("durable delivery should append");
+
+    assert!(matches!(
+        suffix.first(),
+        Some(RolloutItem::DurableInterAgentCommunicationClaimed { .. })
+    ));
+    assert!(matches!(
+        suffix.get(1),
+        Some(RolloutItem::DurableInterAgentCommunication { .. })
+    ));
 }
 
 fn rollout(messages: &[(MessageRole, &str)]) -> Vec<RolloutItem> {

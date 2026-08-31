@@ -72,30 +72,41 @@ pub async fn append_existing_session(
     let Some(rollout_path) = thread.rollout_path else {
         return false;
     };
-    let Some(initial_plan) = plan_existing_session_append(source_items, &history.items) else {
+    let Some(target_model_item_count) =
+        history_model_items(&history.items).map(|items| items.len())
+    else {
         return false;
     };
+    if plan_existing_session_append(source_items, &history.items).is_none() {
+        return false;
+    }
 
     let codex_home_buf = codex_home.to_path_buf();
     let source_path_buf = source_path.to_path_buf();
     let expected_hash = expected_source_content_sha256.to_string();
     let source_hash = source_content_sha256.to_string();
-    let append_begun = matches!(
-        tokio::task::spawn_blocking(move || {
-            begin_existing_session_append(
-                &codex_home_buf,
-                &source_path_buf,
-                thread_id,
-                &expected_hash,
-                &source_hash,
-            )
-        })
-        .await,
-        Ok(Ok(true))
-    );
-    if !append_begun {
+    let append_base_model_item_count = match tokio::task::spawn_blocking(move || {
+        begin_existing_session_append(
+            &codex_home_buf,
+            &source_path_buf,
+            thread_id,
+            &expected_hash,
+            &source_hash,
+            target_model_item_count,
+        )
+    })
+    .await
+    {
+        Ok(Ok(Some(append_base_model_item_count))) => append_base_model_item_count,
+        Ok(Ok(None)) | Ok(Err(_)) | Err(_) => return false,
+    };
+    let Some(initial_plan) = plan_existing_session_append_from_base(
+        source_items,
+        &history.items,
+        append_base_model_item_count,
+    ) else {
         return false;
-    }
+    };
 
     if matches!(initial_plan, ExistingSessionAppendPlan::AlreadyComplete) {
         let codex_home = codex_home.to_path_buf();
@@ -143,7 +154,13 @@ pub async fn append_existing_session(
             .take()
             .filter(|history| history.thread_id == thread_id)
             .filter(|history| persistence_metadata(&history.items, thread_id).is_some())
-            .and_then(|history| plan_existing_session_append(source_items, &history.items)),
+            .and_then(|history| {
+                plan_existing_session_append_from_base(
+                    source_items,
+                    &history.items,
+                    append_base_model_item_count,
+                )
+            }),
         Ok(_) | Err(_) => None,
     };
     let Some(fresh_plan) = fresh_plan else {
@@ -184,7 +201,17 @@ pub async fn append_existing_session(
             .take()
             .filter(|history| history.thread_id == thread_id)
             .filter(|history| persistence_metadata(&history.items, thread_id).is_some())
-            .is_some_and(|history| model_transcripts_match(source_items, &history.items)),
+            .is_some_and(|history| {
+                model_transcripts_match(source_items, &history.items)
+                    && matches!(
+                        plan_existing_session_append_from_base(
+                            source_items,
+                            &history.items,
+                            append_base_model_item_count,
+                        ),
+                        Some(ExistingSessionAppendPlan::AlreadyComplete)
+                    )
+            }),
         Ok(_) | Err(_) => false,
     };
     if !target_matches_source {
@@ -230,6 +257,76 @@ fn plan_existing_session_append(
     } else {
         plan_append(source_items, history_items).map(ExistingSessionAppendPlan::Append)
     }
+}
+
+fn plan_existing_session_append_from_base(
+    source_items: &[RolloutItem],
+    history_items: &[RolloutItem],
+    append_base_model_item_count: usize,
+) -> Option<ExistingSessionAppendPlan> {
+    let source = source_model_items(source_items)?;
+    let history = history_model_items(history_items)?;
+    if append_base_model_item_count > history.len()
+        || history.len() > source.len()
+        || history
+            .iter()
+            .zip(&source)
+            .any(|(history, source)| history != &source.response_item)
+    {
+        return None;
+    }
+    if append_base_model_item_count == source.len() {
+        return (history.len() == source.len())
+            .then_some(ExistingSessionAppendPlan::AlreadyComplete);
+    }
+
+    let append_start_index = source.get(append_base_model_item_count)?.append_start_index;
+    let transaction = source_items[append_start_index..]
+        .iter()
+        .filter(|item| !is_import_marker(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected_persisted_model_items = history.len().saturating_sub(append_base_model_item_count);
+    let persisted_prefix_len = (0..=transaction.len()).rev().find(|&prefix_len| {
+        if prefix_len > history_items.len()
+            || projected_model_item_count(&transaction[..prefix_len])
+                != expected_persisted_model_items
+        {
+            return false;
+        }
+        let history_suffix = &history_items[history_items.len() - prefix_len..];
+        rollout_items_match(history_suffix, &transaction[..prefix_len]).unwrap_or(false)
+    })?;
+
+    if persisted_prefix_len == transaction.len() {
+        Some(ExistingSessionAppendPlan::AlreadyComplete)
+    } else {
+        Some(ExistingSessionAppendPlan::Append(
+            transaction[persisted_prefix_len..].to_vec(),
+        ))
+    }
+}
+
+fn projected_model_item_count(items: &[RolloutItem]) -> usize {
+    let mut projection = RolloutModelResponseProjection::default();
+    items
+        .iter()
+        .map(|item| projection.project(item).len())
+        .sum()
+}
+
+fn rollout_items_match(left: &[RolloutItem], right: &[RolloutItem]) -> Option<bool> {
+    if left.len() != right.len() {
+        return Some(false);
+    }
+    left.iter()
+        .zip(right)
+        .try_fold(true, |matches, (left, right)| {
+            if !matches {
+                return Some(false);
+            }
+            Some(serde_json::to_vec(left).ok()? == serde_json::to_vec(right).ok()?)
+        })
 }
 
 /// Returns the nonempty source suffix that can be safely appended to `history_items`.
@@ -295,7 +392,9 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem>> {
             ..
         } = item
         {
-            claim_append_start_indices.insert(communication_id.clone(), index);
+            claim_append_start_indices
+                .entry(communication_id.clone())
+                .or_insert(index);
         }
         if matches!(
             item,

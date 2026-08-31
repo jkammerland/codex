@@ -1,5 +1,6 @@
 use super::now_unix_seconds;
 use codex_protocol::ThreadId;
+use fd_lock::RwLock;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -8,12 +9,14 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 
 const SESSION_IMPORT_LEDGER_FILE: &str = "external_agent_session_imports.json";
+const SESSION_IMPORT_LEDGER_LOCK_FILE: &str = "external_agent_session_imports.lock";
 const SESSION_HASH_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +38,8 @@ struct ImportedExternalAgentSessionRecord {
     content_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_content_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_target_model_item_count: Option<usize>,
     imported_thread_id: ThreadId,
     imported_at: i64,
     #[serde(default)]
@@ -130,38 +135,43 @@ pub(super) fn begin_existing_session_append(
     thread_id: ThreadId,
     expected_source_content_sha256: &str,
     source_content_sha256: &str,
-) -> io::Result<bool> {
+    target_model_item_count: usize,
+) -> io::Result<Option<usize>> {
     if expected_source_content_sha256 == source_content_sha256 {
-        return Ok(false);
+        return Ok(None);
     }
     let Some((source_path, _)) = stable_source_version(source_path, source_content_sha256)? else {
-        return Ok(false);
+        return Ok(None);
     };
 
-    let mut ledger = load_import_ledger(codex_home)?;
-    let mut matching_indices = ledger
-        .records
-        .iter()
-        .enumerate()
-        .filter_map(|(index, record)| (record.source_path == source_path).then_some(index));
-    let Some(index) = matching_indices.next() else {
-        return Ok(false);
-    };
-    if matching_indices.next().is_some() {
-        return Ok(false);
-    }
-    let record = &mut ledger.records[index];
-    if record.imported_thread_id != thread_id
-        || record.content_sha256 != expected_source_content_sha256
-    {
-        return Ok(false);
-    }
-    if record.pending_content_sha256.as_deref() == Some(source_content_sha256) {
-        return Ok(true);
-    }
-    record.pending_content_sha256 = Some(source_content_sha256.to_string());
-    save_import_ledger(codex_home, &ledger)?;
-    Ok(true)
+    with_import_ledger_write(codex_home, |ledger| {
+        let mut matching_indices = ledger
+            .records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| (record.source_path == source_path).then_some(index));
+        let Some(index) = matching_indices.next() else {
+            return Ok((None, ImportLedgerMutation::Unchanged));
+        };
+        if matching_indices.next().is_some() {
+            return Ok((None, ImportLedgerMutation::Unchanged));
+        }
+        let record = &mut ledger.records[index];
+        if record.imported_thread_id != thread_id
+            || record.content_sha256 != expected_source_content_sha256
+        {
+            return Ok((None, ImportLedgerMutation::Unchanged));
+        }
+        if record.pending_content_sha256.as_deref() == Some(source_content_sha256) {
+            return Ok((
+                record.pending_target_model_item_count,
+                ImportLedgerMutation::Unchanged,
+            ));
+        }
+        record.pending_content_sha256 = Some(source_content_sha256.to_string());
+        record.pending_target_model_item_count = Some(target_model_item_count);
+        Ok((Some(target_model_item_count), ImportLedgerMutation::Changed))
+    })
 }
 
 pub(super) fn checkpoint_existing_session_import(
@@ -177,31 +187,32 @@ pub(super) fn checkpoint_existing_session_import(
         return Ok(false);
     };
 
-    let mut ledger = load_import_ledger(codex_home)?;
-    let mut matching_indices = ledger
-        .records
-        .iter()
-        .enumerate()
-        .filter_map(|(index, record)| (record.source_path == source_path).then_some(index));
-    let Some(index) = matching_indices.next() else {
-        return Ok(false);
-    };
-    if matching_indices.next().is_some() {
-        return Ok(false);
-    }
-    let record = &mut ledger.records[index];
-    if record.imported_thread_id != thread_id
-        || record.content_sha256 != expected_source_content_sha256
-        || record.pending_content_sha256.as_deref() != Some(source_content_sha256)
-    {
-        return Ok(false);
-    }
-    record.content_sha256 = source_content_sha256.to_string();
-    record.pending_content_sha256 = None;
-    record.imported_at = now_unix_seconds();
-    record.source_modified_at = source_modified_at;
-    save_import_ledger(codex_home, &ledger)?;
-    Ok(true)
+    with_import_ledger_write(codex_home, |ledger| {
+        let mut matching_indices = ledger
+            .records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| (record.source_path == source_path).then_some(index));
+        let Some(index) = matching_indices.next() else {
+            return Ok((false, ImportLedgerMutation::Unchanged));
+        };
+        if matching_indices.next().is_some() {
+            return Ok((false, ImportLedgerMutation::Unchanged));
+        }
+        let record = &mut ledger.records[index];
+        if record.imported_thread_id != thread_id
+            || record.content_sha256 != expected_source_content_sha256
+            || record.pending_content_sha256.as_deref() != Some(source_content_sha256)
+        {
+            return Ok((false, ImportLedgerMutation::Unchanged));
+        }
+        record.content_sha256 = source_content_sha256.to_string();
+        record.pending_content_sha256 = None;
+        record.pending_target_model_item_count = None;
+        record.imported_at = now_unix_seconds();
+        record.source_modified_at = source_modified_at;
+        Ok((true, ImportLedgerMutation::Changed))
+    })
 }
 
 pub fn record_completed_session_imports(
@@ -211,38 +222,41 @@ pub fn record_completed_session_imports(
     if imports.is_empty() {
         return Ok(());
     }
-    let mut ledger = load_import_ledger(codex_home)?;
-    let imported_at = now_unix_seconds();
-    for import in imports {
-        let source_modified_at = session_modified_at(&import.source_path).ok().flatten();
-        if let Some(index) = ledger.records.iter().rposition(|record| {
-            record.source_path == import.source_path
-                && record.content_sha256 == import.source_content_sha256
-        }) {
-            let mut record = ledger.records.remove(index);
-            record.imported_thread_id = import.imported_thread_id;
-            record.pending_content_sha256 = None;
-            record.imported_at = imported_at;
-            record.source_modified_at = source_modified_at.or(record.source_modified_at);
-            append_connector_names(&mut record.connector_names, import.connector_names);
-            record.title = import.title;
-            ledger.records.push(record);
-            continue;
+    with_import_ledger_write(codex_home, move |ledger| {
+        let imported_at = now_unix_seconds();
+        for import in imports {
+            let source_modified_at = session_modified_at(&import.source_path).ok().flatten();
+            if let Some(index) = ledger.records.iter().rposition(|record| {
+                record.source_path == import.source_path
+                    && record.content_sha256 == import.source_content_sha256
+            }) {
+                let mut record = ledger.records.remove(index);
+                record.imported_thread_id = import.imported_thread_id;
+                record.pending_content_sha256 = None;
+                record.pending_target_model_item_count = None;
+                record.imported_at = imported_at;
+                record.source_modified_at = source_modified_at.or(record.source_modified_at);
+                append_connector_names(&mut record.connector_names, import.connector_names);
+                record.title = import.title;
+                ledger.records.push(record);
+                continue;
+            }
+            let mut connector_names = Vec::new();
+            append_connector_names(&mut connector_names, import.connector_names);
+            ledger.records.push(ImportedExternalAgentSessionRecord {
+                source_path: import.source_path,
+                content_sha256: import.source_content_sha256,
+                pending_content_sha256: None,
+                pending_target_model_item_count: None,
+                imported_thread_id: import.imported_thread_id,
+                imported_at,
+                source_modified_at,
+                connector_names,
+                title: import.title,
+            });
         }
-        let mut connector_names = Vec::new();
-        append_connector_names(&mut connector_names, import.connector_names);
-        ledger.records.push(ImportedExternalAgentSessionRecord {
-            source_path: import.source_path,
-            content_sha256: import.source_content_sha256,
-            pending_content_sha256: None,
-            imported_thread_id: import.imported_thread_id,
-            imported_at,
-            source_modified_at,
-            connector_names,
-            title: import.title,
-        });
-    }
-    save_import_ledger(codex_home, &ledger)
+        Ok(((), ImportLedgerMutation::Changed))
+    })
 }
 
 pub fn record_detected_session_connectors(
@@ -252,27 +266,28 @@ pub fn record_detected_session_connectors(
     if connector_names_by_source_path.is_empty() {
         return Ok(());
     }
-    let mut ledger = load_import_ledger(codex_home)?;
-    for (source_path, connector_names) in connector_names_by_source_path {
-        let source_path = canonical_source_path(&source_path)?;
-        if let Some(record) = ledger
-            .detected_connector_records
-            .iter_mut()
-            .find(|record| record.source_path == source_path)
-        {
-            append_connector_names(&mut record.connector_names, connector_names);
-            continue;
+    with_import_ledger_write(codex_home, move |ledger| {
+        for (source_path, connector_names) in connector_names_by_source_path {
+            let source_path = canonical_source_path(&source_path)?;
+            if let Some(record) = ledger
+                .detected_connector_records
+                .iter_mut()
+                .find(|record| record.source_path == source_path)
+            {
+                append_connector_names(&mut record.connector_names, connector_names);
+                continue;
+            }
+            let mut detected_connector_names = Vec::new();
+            append_connector_names(&mut detected_connector_names, connector_names);
+            ledger
+                .detected_connector_records
+                .push(DetectedExternalAgentSessionConnectorRecord {
+                    source_path,
+                    connector_names: detected_connector_names,
+                });
         }
-        let mut detected_connector_names = Vec::new();
-        append_connector_names(&mut detected_connector_names, connector_names);
-        ledger
-            .detected_connector_records
-            .push(DetectedExternalAgentSessionConnectorRecord {
-                source_path,
-                connector_names: detected_connector_names,
-            });
-    }
-    save_import_ledger(codex_home, &ledger)
+        Ok(((), ImportLedgerMutation::Changed))
+    })
 }
 
 pub fn append_imported_session_connector_names(
@@ -282,18 +297,19 @@ pub fn append_imported_session_connector_names(
     if connector_names_by_source_path.is_empty() {
         return Ok(());
     }
-    let mut ledger = load_import_ledger(codex_home)?;
-    for (source_path, connector_names) in connector_names_by_source_path {
-        let source_path = canonical_source_path(&source_path)?;
-        for record in ledger
-            .records
-            .iter_mut()
-            .filter(|record| record.source_path == source_path)
-        {
-            append_connector_names(&mut record.connector_names, connector_names.clone());
+    with_import_ledger_write(codex_home, move |ledger| {
+        for (source_path, connector_names) in connector_names_by_source_path {
+            let source_path = canonical_source_path(&source_path)?;
+            for record in ledger
+                .records
+                .iter_mut()
+                .filter(|record| record.source_path == source_path)
+            {
+                append_connector_names(&mut record.connector_names, connector_names.clone());
+            }
         }
-    }
-    save_import_ledger(codex_home, &ledger)
+        Ok(((), ImportLedgerMutation::Changed))
+    })
 }
 
 pub fn read_imported_connector_candidates(
@@ -411,7 +427,31 @@ impl ImportedExternalAgentSessionLedger {
     }
 }
 
+pub(crate) fn refresh_current_source(
+    codex_home: &Path,
+    source_path: &Path,
+    source_modified_at: i64,
+) -> io::Result<bool> {
+    with_import_ledger_write(codex_home, |ledger| {
+        let refreshed = ledger.refresh_current_source(source_path, source_modified_at)?;
+        Ok((
+            refreshed,
+            if refreshed {
+                ImportLedgerMutation::Changed
+            } else {
+                ImportLedgerMutation::Unchanged
+            },
+        ))
+    })
+}
+
 pub(crate) fn load_import_ledger(
+    codex_home: &Path,
+) -> io::Result<ImportedExternalAgentSessionLedger> {
+    with_import_ledger_read(codex_home, || load_import_ledger_unlocked(codex_home))
+}
+
+fn load_import_ledger_unlocked(
     codex_home: &Path,
 ) -> io::Result<ImportedExternalAgentSessionLedger> {
     let path = import_ledger_path(codex_home);
@@ -430,7 +470,7 @@ pub(crate) fn load_import_ledger(
     })
 }
 
-pub(crate) fn save_import_ledger(
+fn save_import_ledger_unlocked(
     codex_home: &Path,
     ledger: &ImportedExternalAgentSessionLedger,
 ) -> io::Result<()> {
@@ -438,6 +478,47 @@ pub(crate) fn save_import_ledger(
     let path = import_ledger_path(codex_home);
     let raw = serde_json::to_string_pretty(ledger).map_err(io::Error::other)?;
     codex_utils_path::write_atomically(&path, &raw)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportLedgerMutation {
+    Changed,
+    Unchanged,
+}
+
+fn with_import_ledger_read<T>(
+    codex_home: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let lock = RwLock::new(open_import_ledger_lock(codex_home)?);
+    let _guard = lock.read()?;
+    operation()
+}
+
+fn with_import_ledger_write<T>(
+    codex_home: &Path,
+    operation: impl FnOnce(
+        &mut ImportedExternalAgentSessionLedger,
+    ) -> io::Result<(T, ImportLedgerMutation)>,
+) -> io::Result<T> {
+    let mut lock = RwLock::new(open_import_ledger_lock(codex_home)?);
+    let _guard = lock.write()?;
+    let mut ledger = load_import_ledger_unlocked(codex_home)?;
+    let (result, mutation) = operation(&mut ledger)?;
+    if mutation == ImportLedgerMutation::Changed {
+        save_import_ledger_unlocked(codex_home, &ledger)?;
+    }
+    Ok(result)
+}
+
+fn open_import_ledger_lock(codex_home: &Path) -> io::Result<File> {
+    fs::create_dir_all(codex_home)?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(codex_home.join(SESSION_IMPORT_LEDGER_LOCK_FILE))
 }
 
 fn import_ledger_path(codex_home: &Path) -> PathBuf {

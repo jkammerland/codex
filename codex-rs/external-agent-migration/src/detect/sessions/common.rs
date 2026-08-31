@@ -2,7 +2,7 @@ use crate::model::ExternalAgentSessionImportLimits;
 use crate::sessions::ExternalAgentSessionMigration;
 use crate::sessions::SessionRecordFormat;
 use crate::sessions::ledger::load_import_ledger;
-use crate::sessions::ledger::save_import_ledger;
+use crate::sessions::ledger::refresh_current_source;
 use crate::sessions::now_unix_seconds;
 use crate::sessions::records_cla;
 use crate::sessions::records_cur;
@@ -26,7 +26,7 @@ pub(super) fn detect_recent_sessions(
     limits: ExternalAgentSessionImportLimits,
 ) -> io::Result<Vec<ExternalAgentSessionMigration>> {
     let now = now_unix_seconds();
-    let mut ledger = load_import_ledger(codex_home)?;
+    let ledger = load_import_ledger(codex_home)?;
     let source_states = ledger.source_states();
     let mut recent = BinaryHeap::new();
 
@@ -68,13 +68,12 @@ pub(super) fn detect_recent_sessions(
     }
 
     drop(source_states);
+    drop(ledger);
     let mut migrations = Vec::new();
-    let mut ledger_changed = false;
     for (modified_at, path, fallback_cwd, record_format) in recent.into_sorted_vec() {
-        match ledger.refresh_current_source(&path, modified_at.0) {
+        match refresh_current_source(codex_home, &path, modified_at.0) {
             Ok(false) => {}
             Ok(true) => {
-                ledger_changed = true;
                 continue;
             }
             Err(_) => continue,
@@ -93,9 +92,5 @@ pub(super) fn detect_recent_sessions(
         }
         migrations.push(summary.migration);
     }
-    if ledger_changed {
-        save_import_ledger(codex_home, &ledger)?;
-    }
-
     Ok(migrations)
 }

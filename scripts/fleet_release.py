@@ -98,6 +98,10 @@ class Host:
         separator = "\\" if self.windows else "/"
         return f"{dirname(self.source_root)}{separator}codex-{release.name}.bundle"
 
+    def build_receipt(self) -> str:
+        separator = "\\" if self.windows else "/"
+        return f"{self.build_root}.fleet{separator}build-receipt-v1"
+
 
 @dataclass(frozen=True)
 class Status:
@@ -272,16 +276,22 @@ def error_message(action: str, result: subprocess.CompletedProcess[str]) -> str:
 
 def status_script(host: Host) -> str:
     if host.windows:
-        return f"""$ErrorActionPreference = 'Continue'
+        return f"""$ErrorActionPreference = 'Stop'
 function Field($Name, $Value) {{ Write-Output "$Name=$Value" }}
 function GitValue($Path, [string[]]$Arguments) {{
   if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) {{ return 'missing' }}
-  return ((& git -C $Path @Arguments 2>$null | Out-String).Trim())
+  $value = ((& git -C $Path @Arguments 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0) {{ throw "git failed in $Path: $($Arguments -join ' ')" }}
+  return $value
 }}
 $cli = {quote_ps(host.cli_binary)}
 $server = {quote_ps(host.server_root)}
 $source = {quote_ps(host.source_root)}
-Field 'cliVersion' $(if (Test-Path -LiteralPath $cli) {{ ((& $cli --version 2>&1 | Out-String).Trim()) }} else {{ 'missing' }})
+if (Test-Path -LiteralPath $cli) {{
+  $cliVersion = ((& $cli --version 2>&1 | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0) {{ throw 'Codex version check failed' }}
+}} else {{ $cliVersion = 'missing' }}
+Field 'cliVersion' $cliVersion
 Field 'serverCommit' (GitValue $server @('rev-parse', 'HEAD'))
 Field 'serverStatus' (GitValue $server @('status', '--porcelain'))
 Field 'sourceCommit' (GitValue $source @('rev-parse', 'HEAD'))
@@ -289,13 +299,18 @@ Field 'sourceStatus' (GitValue $source @('status', '--porcelain'))
 """
     return f"""set -u
 field() {{ printf '%s=%s\\n' "$1" "$2"; }}
-git_value() {{ path=$1; shift; if [ -d "$path/.git" ]; then git -C "$path" "$@" 2>/dev/null || true; else printf missing; fi; }}
+git_value() {{ path=$1; shift; if [ -d "$path/.git" ]; then git -C "$path" "$@" 2>/dev/null; else printf missing; fi; }}
 cli={shlex.quote(host.cli_binary)}
-field cliVersion "$(if [ -x "$cli" ]; then "$cli" --version 2>&1 || true; else printf missing; fi)"
-field serverCommit "$(git_value {shlex.quote(host.server_root)} rev-parse HEAD)"
-field serverStatus "$(git_value {shlex.quote(host.server_root)} status --porcelain)"
-field sourceCommit "$(git_value {shlex.quote(host.source_root)} rev-parse HEAD)"
-field sourceStatus "$(git_value {shlex.quote(host.source_root)} status --porcelain)"
+if [ -x "$cli" ]; then cli_version=$("$cli" --version 2>&1) || exit 1; else cli_version=missing; fi
+server_commit=$(git_value {shlex.quote(host.server_root)} rev-parse HEAD) || exit 1
+server_status=$(git_value {shlex.quote(host.server_root)} status --porcelain) || exit 1
+source_commit=$(git_value {shlex.quote(host.source_root)} rev-parse HEAD) || exit 1
+source_status=$(git_value {shlex.quote(host.source_root)} status --porcelain) || exit 1
+field cliVersion "$cli_version"
+field serverCommit "$server_commit"
+field serverStatus "$server_status"
+field sourceCommit "$source_commit"
+field sourceStatus "$source_status"
 """
 
 
@@ -379,6 +394,7 @@ def build_script(host: Host, release: Release, use_bundle: bool) -> str:
 $ProgressPreference = 'SilentlyContinue'
 function Normalize-ReleaseLock($Path) {{
   $status = @(& git -C $Path status --short --untracked-files=all)
+  if ($LASTEXITCODE -ne 0) {{ throw 'Could not inspect the build root status' }}
   if ($status.Count -eq 0) {{ return }}
   if ($status.Count -ne 1 -or $status[0].Trim() -ne 'M codex-rs/Cargo.lock') {{ throw 'Build root contains changes other than the generated release lockfile' }}
   $changedLines = @(& git -C $Path diff --unified=0 -- codex-rs/Cargo.lock | Where-Object {{ ($_ -match '^[+-]') -and ($_ -notmatch '^(---|\\+\\+\\+)') }})
@@ -389,14 +405,21 @@ function Normalize-ReleaseLock($Path) {{
 }}
 $source = {quote_ps(source)}; $build = {quote_ps(build)}
 if (Test-Path -LiteralPath $source) {{
-  if (-not (Test-Path -LiteralPath (Join-Path $source '.git')) -or -not [string]::IsNullOrEmpty((git -C $source status --porcelain))) {{ throw 'Source root must be a clean Git checkout' }}
+  if (-not (Test-Path -LiteralPath (Join-Path $source '.git'))) {{ throw 'Source root must be a Git checkout' }}
+  $sourceStatus = ((& git -C $source status --porcelain 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrEmpty($sourceStatus)) {{ throw 'Source root must be a clean Git checkout' }}
 }} else {{ git clone --origin fork {quote_ps(release.fork_remote)} $source; if ($LASTEXITCODE -ne 0) {{ throw 'Clone failed' }} }}
 {ps_fetch}; if ($LASTEXITCODE -ne 0) {{ throw 'Fetch failed' }}
 git -C $source switch -C {quote_ps(release.fork_ref)} {quote_ps(staged_ref)}; if ($LASTEXITCODE -ne 0) {{ throw 'Switch failed' }}
-if ((git -C $source rev-parse HEAD) -ne {quote_ps(release.fork_commit)}) {{ throw 'Source commit does not match manifest' }}
+$sourceCommit = ((& git -C $source rev-parse HEAD 2>$null | Out-String).Trim())
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -ne {quote_ps(release.fork_commit)}) {{ throw 'Source commit does not match manifest' }}
 if (Test-Path -LiteralPath $build) {{
   Normalize-ReleaseLock $build
-  if (-not (Test-Path -LiteralPath (Join-Path $build '.git')) -or -not [string]::IsNullOrEmpty((git -C $build status --porcelain)) -or (git -C $build rev-parse HEAD) -ne {quote_ps(release.fork_commit)}) {{ throw 'Existing build root is not the clean release worktree' }}
+  if (-not (Test-Path -LiteralPath (Join-Path $build '.git'))) {{ throw 'Existing build root is not a Git worktree' }}
+  $buildStatus = ((& git -C $build status --porcelain 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0) {{ throw 'Could not inspect the build root status' }}
+  $buildCommit = ((& git -C $build rev-parse HEAD 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrEmpty($buildStatus) -or $buildCommit -ne {quote_ps(release.fork_commit)}) {{ throw 'Existing build root is not the clean release worktree' }}
 }} else {{ git -C $source worktree add --detach $build {quote_ps(release.fork_commit)}; if ($LASTEXITCODE -ne 0) {{ throw 'Worktree creation failed' }} }}
 $vswhere = Join-Path ${"{"}env:ProgramFiles(x86){"}"} 'Microsoft Visual Studio\\Installer\\vswhere.exe'
 $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -437,6 +460,21 @@ $version = & {quote_ps(host.build_binary("codex"))} --version
 if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
 & {quote_ps(host.build_binary("codex"))} agents --help *> $null
 if ($LASTEXITCODE -ne 0) {{ throw 'Built fork does not support codex agents' }}
+$receipt = {quote_ps(host.build_receipt())}
+$receiptPartial = "$receipt.partial-$PID-$([guid]::NewGuid().ToString('N'))"
+$receiptLines = @(
+  'format=v1',
+  'forkCommit={release.fork_commit}',
+  'cliVersion={release.cli_version}',
+  "cliSha256=$((Get-FileHash -LiteralPath {quote_ps(host.build_binary("codex"))} -Algorithm SHA256).Hash.ToLowerInvariant())",
+  "hostSha256=$((Get-FileHash -LiteralPath {quote_ps(host.build_binary("codex-code-mode-host"))} -Algorithm SHA256).Hash.ToLowerInvariant())"
+)
+try {{
+  [System.IO.File]::WriteAllLines($receiptPartial, $receiptLines, [System.Text.UTF8Encoding]::new($false))
+  Move-Item -Force -LiteralPath $receiptPartial -Destination $receipt
+}} finally {{
+  if (Test-Path -LiteralPath $receiptPartial) {{ Remove-Item -Force -LiteralPath $receiptPartial }}
+}}
 Write-Output "build-version=$version"
 """
     assert host.rustup is not None
@@ -452,25 +490,38 @@ normalize_release_lock() {{
   git -C "$1" restore --worktree -- codex-rs/Cargo.lock
 }}
 source={shlex.quote(source)}; build={shlex.quote(build)}
-if [ -e "$source" ]; then [ -d "$source/.git" ] && [ -z "$(git -C "$source" status --porcelain)" ]; else git clone --origin fork {shlex.quote(release.fork_remote)} "$source"; fi
+if [ -e "$source" ]; then
+  [ -d "$source/.git" ] || exit 1
+  source_status=$(git -C "$source" status --porcelain) || exit 1
+  [ -z "$source_status" ] || exit 1
+else
+  git clone --origin fork {shlex.quote(release.fork_remote)} "$source"
+fi
 {fetch}
 git -C "$source" switch -C {shlex.quote(release.fork_ref)} {shlex.quote(staged_ref)}
-[ "$(git -C "$source" rev-parse HEAD)" = {release.fork_commit} ]
-[ -z "$(git -C "$source" status --porcelain)" ]
+source_commit=$(git -C "$source" rev-parse HEAD) || exit 1
+source_status=$(git -C "$source" status --porcelain) || exit 1
+[ "$source_commit" = {release.fork_commit} ]
+[ -z "$source_status" ]
 if [ -e "$build" ]; then
   normalize_release_lock "$build"
-  [ -e "$build/.git" ] && [ -z "$(git -C "$build" status --porcelain)" ] && [ "$(git -C "$build" rev-parse HEAD)" = {release.fork_commit} ]
+  [ -e "$build/.git" ] || exit 1
+  build_status=$(git -C "$build" status --porcelain) || exit 1
+  build_commit=$(git -C "$build" rev-parse HEAD) || exit 1
+  [ -z "$build_status" ] && [ "$build_commit" = {release.fork_commit} ]
 else
   git -C "$source" worktree add --detach "$build" {release.fork_commit}
 fi
 cd "$build/codex-rs"
-v8_directory="$build.fleet/rusty-v8"
+fleet_directory="$build.fleet"
+v8_directory="$fleet_directory/rusty-v8"
+receipt="$fleet_directory/build-receipt-v1"
 v8_base_url={shlex.quote(v8_base_url)}
 v8_archive_name={shlex.quote(v8_archive)}
 v8_binding_name={shlex.quote(v8_binding)}
 v8_checksums_name={shlex.quote(v8_checksums)}
 mkdir -p "$v8_directory"
-cleanup_v8_downloads() {{ rm -f "$v8_directory"/*.partial.$$; }}
+cleanup_v8_downloads() {{ rm -f "$v8_directory"/*.partial.$$ "$receipt.partial.$$"; }}
 trap cleanup_v8_downloads EXIT HUP INT TERM
 download_v8_artifact() {{
   destination="$v8_directory/$1"
@@ -494,6 +545,15 @@ normalize_release_lock "$build"
 version=$(target/release/codex --version)
 target/release/codex agents --help >/dev/null
 [ "$version" = {shlex.quote(release.cli_version)} ] || {{ echo "Unexpected fork version: $version" >&2; exit 1; }}
+cli_hash=$(shasum -a 256 target/release/codex | awk '{{print $1}}')
+host_hash=$(shasum -a 256 target/release/codex-code-mode-host | awk '{{print $1}}')
+printf '%s\\n' \
+  'format=v1' \
+  'forkCommit={release.fork_commit}' \
+  {shlex.quote(f"cliVersion={release.cli_version}")} \
+  "cliSha256=$cli_hash" \
+  "hostSha256=$host_hash" > "$receipt.partial.$$"
+mv -f "$receipt.partial.$$" "$receipt"
 printf 'build-version=%s\\n' "$version"
 """
 
@@ -501,6 +561,7 @@ printf 'build-version=%s\\n' "$version"
 def activation_script(host: Host, release: Release) -> str:
     source_cli = host.build_binary("codex")
     source_host = host.build_binary("codex-code-mode-host")
+    receipt = host.build_receipt()
     backup_cli = f"{host.cli_binary}.{release.name}-previous"
     backup_host = f"{host.code_mode_host_binary}.{release.name}-previous"
     if host.windows:
@@ -510,6 +571,20 @@ using System; using System.Runtime.InteropServices;
 public static class FleetFileOps {{ [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ReplaceFile(string target, string replacement, string backup, uint flags, IntPtr exclude, IntPtr reserved); }}
 '@
 function Hash($Path) {{ (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }}
+function Assert-CleanGit($Path, $ExpectedCommit, $Label) {{
+  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) {{ throw "$Label is not a Git checkout" }}
+  $commit = ((& git -C $Path rev-parse HEAD 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0) {{ throw "Could not inspect $Label commit" }}
+  $status = ((& git -C $Path status --porcelain 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0) {{ throw "Could not inspect $Label status" }}
+  if ($commit -ne $ExpectedCommit -or -not [string]::IsNullOrEmpty($status)) {{ throw "$Label is not clean at the manifest commit" }}
+}}
+function Receipt-Value($Path, $Name) {{
+  $prefix = "$Name="
+  $matches = @(Get-Content -LiteralPath $Path | Where-Object {{ $_.StartsWith($prefix, [StringComparison]::Ordinal) }})
+  if ($matches.Count -ne 1) {{ throw "Invalid build receipt field: $Name" }}
+  return $matches[0].Substring($prefix.Length)
+}}
 function Replace($Target, $Source, $Backup) {{
   $stage = "$Target.{release.name}-$([guid]::NewGuid().ToString('N'))"
   try {{
@@ -529,15 +604,21 @@ function Restore-One($Target, $Backup) {{
     if (Test-Path -LiteralPath $stage) {{ Remove-Item -Force -LiteralPath $stage }}
   }}
 }}
-$canonical = {quote_ps(host.source_root)}; $build = {quote_ps(host.build_root)}; $sourceCli = {quote_ps(source_cli)}; $sourceHost = {quote_ps(source_host)}
+$canonical = {quote_ps(host.source_root)}; $build = {quote_ps(host.build_root)}; $sourceCli = {quote_ps(source_cli)}; $sourceHost = {quote_ps(source_host)}; $receipt = {quote_ps(receipt)}
 $targetCli = {quote_ps(host.cli_binary)}; $targetHost = {quote_ps(host.code_mode_host_binary)}
 $backupCli = {quote_ps(backup_cli)}; $backupHost = {quote_ps(backup_host)}
 $server = {quote_ps(host.server_root)}
-if ((git -C $canonical rev-parse HEAD) -ne {quote_ps(release.fork_commit)} -or -not [string]::IsNullOrEmpty((git -C $canonical status --porcelain))) {{ throw 'Canonical checkout is not clean at the manifest commit' }}
-if ((git -C $build rev-parse HEAD) -ne {quote_ps(release.fork_commit)} -or -not [string]::IsNullOrEmpty((git -C $build status --porcelain))) {{ throw 'Build worktree is not clean at the manifest commit' }}
-if ((git -C $server rev-parse HEAD) -ne {quote_ps(release.server_commit)} -or -not [string]::IsNullOrEmpty((git -C $server status --porcelain))) {{ throw 'MCP server is not clean at the compatible manifest commit' }}
+Assert-CleanGit $canonical {quote_ps(release.fork_commit)} 'Canonical checkout'
+Assert-CleanGit $build {quote_ps(release.fork_commit)} 'Build worktree'
+Assert-CleanGit $server {quote_ps(release.server_commit)} 'MCP server'
 foreach ($path in @($sourceCli, $sourceHost, $targetCli, $targetHost)) {{ if (-not (Test-Path -LiteralPath $path)) {{ throw "Missing binary: $path" }} }}
+if (-not (Test-Path -LiteralPath $receipt)) {{ throw 'Missing reviewed build receipt' }}
 $sourceCliHash = Hash $sourceCli; $sourceHostHash = Hash $sourceHost
+if ((Receipt-Value $receipt 'format') -ne 'v1' -or
+    (Receipt-Value $receipt 'forkCommit') -ne {quote_ps(release.fork_commit)} -or
+    (Receipt-Value $receipt 'cliVersion') -ne {quote_ps(release.cli_version)} -or
+    (Receipt-Value $receipt 'cliSha256') -ne $sourceCliHash -or
+    (Receipt-Value $receipt 'hostSha256') -ne $sourceHostHash) {{ throw 'Build receipt does not match the reviewed binary pair' }}
 $needsActivation = (Hash $targetCli) -ne $sourceCliHash -or (Hash $targetHost) -ne $sourceHostHash
 if ($needsActivation) {{
   $backupCliExists = Test-Path -LiteralPath $backupCli
@@ -578,7 +659,9 @@ Write-Output "activated-version=$version"
 """
     return f"""set -eu
 sha() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
-canonical={shlex.quote(host.source_root)}; build={shlex.quote(host.build_root)}; source_cli={shlex.quote(source_cli)}; source_host={shlex.quote(source_host)}
+git_clean_at() {{ path=$1; expected=$2; commit=$(git -C "$path" rev-parse HEAD) || return 1; status=$(git -C "$path" status --porcelain) || return 1; [ "$commit" = "$expected" ] && [ -z "$status" ]; }}
+receipt_value() {{ awk -v key="$1" 'index($0, key "=") == 1 {{ count++; value=substr($0, length(key) + 2) }} END {{ if (count != 1) exit 1; print value }}' "$2"; }}
+canonical={shlex.quote(host.source_root)}; build={shlex.quote(host.build_root)}; source_cli={shlex.quote(source_cli)}; source_host={shlex.quote(source_host)}; receipt={shlex.quote(receipt)}
 target_cli={shlex.quote(host.cli_binary)}; target_host={shlex.quote(host.code_mode_host_binary)}
 backup_cli={shlex.quote(backup_cli)}; backup_host={shlex.quote(backup_host)}
 server={shlex.quote(host.server_root)}
@@ -622,11 +705,18 @@ trap finish_activation EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-[ "$(git -C "$canonical" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$canonical" status --porcelain)" ] || {{ echo 'Canonical source is not clean at the manifest commit' >&2; exit 1; }}
-[ "$(git -C "$build" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$build" status --porcelain)" ] || {{ echo 'Build worktree is not clean at the manifest commit' >&2; exit 1; }}
-[ "$(git -C "$server" rev-parse HEAD)" = {release.server_commit} ] && [ -z "$(git -C "$server" status --porcelain)" ] || {{ echo 'MCP server is not clean at the compatible manifest commit' >&2; exit 1; }}
+git_clean_at "$canonical" {release.fork_commit} || {{ echo 'Canonical source is not clean at the manifest commit' >&2; exit 1; }}
+git_clean_at "$build" {release.fork_commit} || {{ echo 'Build worktree is not clean at the manifest commit' >&2; exit 1; }}
+git_clean_at "$server" {release.server_commit} || {{ echo 'MCP server is not clean at the compatible manifest commit' >&2; exit 1; }}
 [ -x "$source_cli" ] && [ -x "$source_host" ] && [ -f "$target_cli" ] && [ -f "$target_host" ] || {{ echo 'Activation binary pair is incomplete' >&2; exit 1; }}
 source_cli_hash=$(sha "$source_cli"); source_host_hash=$(sha "$source_host")
+[ -f "$receipt" ] || {{ echo 'Missing reviewed build receipt' >&2; exit 1; }}
+receipt_format=$(receipt_value format "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+receipt_commit=$(receipt_value forkCommit "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+receipt_version=$(receipt_value cliVersion "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+receipt_cli_hash=$(receipt_value cliSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+receipt_host_hash=$(receipt_value hostSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+[ "$receipt_format" = v1 ] && [ "$receipt_commit" = {release.fork_commit} ] && [ "$receipt_version" = {shlex.quote(release.cli_version)} ] && [ "$receipt_cli_hash" = "$source_cli_hash" ] && [ "$receipt_host_hash" = "$source_host_hash" ] || {{ echo 'Build receipt does not match the reviewed binary pair' >&2; exit 1; }}
 if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
   if [ -e "$backup_cli" ] || [ -e "$backup_host" ]; then
     [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}

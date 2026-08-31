@@ -1,6 +1,7 @@
 """Tests for the manifest-driven native offload fleet controller."""
 
 import json
+import hashlib
 import os
 import shutil
 import sys
@@ -13,6 +14,27 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 import fleet_release
+
+
+def write_build_receipt(
+    host: fleet_release.Host, release: fleet_release.Release
+) -> None:
+    cli = Path(host.build_binary("codex"))
+    code_mode_host = Path(host.build_binary("codex-code-mode-host"))
+    receipt = Path(host.build_receipt())
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(
+        "\n".join(
+            [
+                "format=v1",
+                f"forkCommit={release.fork_commit}",
+                f"cliVersion={release.cli_version}",
+                f"cliSha256={hashlib.sha256(cli.read_bytes()).hexdigest()}",
+                f"hostSha256={hashlib.sha256(code_mode_host.read_bytes()).hexdigest()}",
+                "",
+            ]
+        )
+    )
 
 
 class FleetReleaseTest(unittest.TestCase):
@@ -106,19 +128,21 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn("ReplaceFile", windows_script)
         self.assertIn(".jkammerland.mcp.14-previous", windows_script)
         self.assertIn("Build worktree is not clean at the manifest commit", mac_script)
-        self.assertIn(
-            "Build worktree is not clean at the manifest commit", windows_script
-        )
+        self.assertIn("Assert-CleanGit $build", windows_script)
         self.assertIn("agents --help", mac_script)
         self.assertIn("agents --help", windows_script)
+        self.assertIn(
+            "Build receipt does not match the reviewed binary pair", mac_script
+        )
+        self.assertIn(
+            "Build receipt does not match the reviewed binary pair", windows_script
+        )
         self.assertIn("rollback_pair", mac_script)
         self.assertIn("Restore-One $targetHost $backupHost", windows_script)
         self.assertIn(
             "MCP server is not clean at the compatible manifest commit", mac_script
         )
-        self.assertIn(
-            "MCP server is not clean at the compatible manifest commit", windows_script
-        )
+        self.assertIn("Assert-CleanGit $server", windows_script)
 
     @unittest.skipUnless(shutil.which("shasum"), "requires shasum")
     def test_mac_activation_restores_pair_after_version_verification_failure(
@@ -210,6 +234,7 @@ class FleetReleaseTest(unittest.TestCase):
                 rust_target="aarch64-apple-darwin",
                 rustup=None,
             )
+            write_build_receipt(host, release)
 
             result = run(
                 ["sh", "-c", fleet_release.activation_script(host, release)],
@@ -231,6 +256,7 @@ class FleetReleaseTest(unittest.TestCase):
                 "exit 1\n"
             )
             source_cli.chmod(0o755)
+            write_build_receipt(host, release)
             retry = run(
                 ["sh", "-c", fleet_release.activation_script(host, release)],
                 check=False,
@@ -244,6 +270,18 @@ class FleetReleaseTest(unittest.TestCase):
 
             active_cli = target_cli.read_bytes()
             active_host = target_host.read_bytes()
+            Path(host.build_receipt()).unlink()
+            missing_receipt = run(
+                ["sh", "-c", fleet_release.activation_script(host, release)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(missing_receipt.returncode, 0)
+            self.assertIn("Missing reviewed build receipt", missing_receipt.stderr)
+            self.assertEqual(target_cli.read_bytes(), active_cli)
+            self.assertEqual(target_host.read_bytes(), active_host)
+            write_build_receipt(host, release)
             (canonical / "untracked-internal").write_text("must block activation\n")
             source_cli.write_text(source_cli.read_text() + "# distinct candidate\n")
             dirty_source = run(
@@ -367,6 +405,7 @@ class FleetReleaseTest(unittest.TestCase):
                 server_commit=commit,
                 rusty_v8_version="150.4.0",
             )
+            write_build_receipt(host, release)
 
             failed = run(
                 [
@@ -397,6 +436,7 @@ class FleetReleaseTest(unittest.TestCase):
                 server_commit=release.server_commit,
                 rusty_v8_version=release.rusty_v8_version,
             )
+            write_build_receipt(host, release)
             retry = run(
                 [
                     "powershell.exe",
@@ -439,7 +479,8 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn("RUSTY_V8_ARCHIVE", mac_script)
         self.assertIn("RUSTY_V8_SRC_BINDING_PATH", mac_script)
         self.assertIn("shasum -a 256 -c -", mac_script)
-        self.assertIn('v8_directory="$build.fleet/rusty-v8"', mac_script)
+        self.assertIn('v8_directory="$fleet_directory/rusty-v8"', mac_script)
+        self.assertIn("build-receipt-v1", mac_script)
         self.assertIn("refs/remotes/fleet/", windows_script)
         self.assertIn(
             "Existing build root is not the clean release worktree", windows_script
@@ -461,6 +502,7 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn("RUSTY_V8_SRC_BINDING_PATH", windows_script)
         self.assertIn("Get-FileHash", windows_script)
         self.assertIn("Join-Path ($build + '.fleet') 'rusty-v8'", windows_script)
+        self.assertIn("build-receipt-v1", windows_script)
 
     @mock.patch("fleet_release.activation_script")
     @mock.patch("fleet_release.build_script", return_value="build script")

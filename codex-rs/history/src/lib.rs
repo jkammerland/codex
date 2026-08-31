@@ -174,7 +174,6 @@ pub struct RolloutModelResponseProjection {
 const MAX_LEGACY_CLAIMS_PER_TURN: usize = 64;
 const MAX_BUFFERED_LEGACY_CLAIMS: usize = 4_096;
 const MAX_DURABLE_MODEL_ITEM_BYTES: usize = 10_000;
-const MAX_LEGACY_DURABLE_MODEL_ITEM_BYTES: usize = 40_000;
 
 struct ModelItemSizeWriter {
     remaining: usize,
@@ -318,7 +317,7 @@ impl RolloutModelResponseProjection {
                 // Historical admission capped each mailbox turn at 64 items. Keep a second global
                 // cap so a malformed rollout containing unmatched claims cannot grow this replay
                 // buffer without bound. Excess claims fail closed and stay out of model context.
-                if bounded_durable_model_response(&response, MAX_LEGACY_DURABLE_MODEL_ITEM_BYTES)
+                if bounded_durable_model_response(&response, MAX_DURABLE_MODEL_ITEM_BYTES)
                     && self.pending_legacy_claim_count < MAX_BUFFERED_LEGACY_CLAIMS
                     && !self.delivered_communication_ids.contains(communication_id)
                 {

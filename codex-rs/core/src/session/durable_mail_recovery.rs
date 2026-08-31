@@ -33,65 +33,66 @@ pub(super) struct DurableMailRecovery {
 }
 
 struct DurablePayload {
+    index: usize,
     communication: InterAgentCommunication,
     start_options: TurnStartOptions,
-    fingerprint: String,
     intended_turn_id: String,
     size_limit: MailboxModelSizeLimit,
 }
 
 struct DurableClaim {
-    communication_id: ResponseItemId,
-    fingerprint: String,
+    index: usize,
     turn_id: String,
     communication: Option<InterAgentCommunication>,
     delivered: bool,
-    turn_started: bool,
+}
+
+#[derive(Default)]
+struct DurableState {
+    payload: Option<DurablePayload>,
+    claim: Option<DurableClaim>,
+}
+
+struct RecoveryEntry {
+    index: usize,
+    id: ResponseItemId,
+    fingerprint: String,
+    payload: Option<DurablePayload>,
+    claim: Option<DurableClaim>,
+    legacy_consumed: bool,
+}
+
+impl RecoveryEntry {
+    fn delivered(&self) -> bool {
+        self.legacy_consumed || self.claim.as_ref().is_some_and(|claim| claim.delivered)
+    }
 }
 
 pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery {
-    let legacy_consumed_ids = items
-        .iter()
-        .filter_map(|item| match item {
-            RolloutItem::InterAgentCommunicationMetadata {
-                consumed_mail_id: Some(id),
-                ..
-            } => Some(id.clone()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    let mut claims = Vec::new();
-    let mut claim_indices = HashMap::new();
-    let mut started_turn_ids = HashSet::new();
-    for item in items {
+    let mut future_turn_starts = HashSet::new();
+    let mut claim_delivered = HashMap::new();
+    for (index, item) in items.iter().enumerate().rev() {
         match item {
             RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                started_turn_ids.insert(event.turn_id.clone());
+                future_turn_starts.insert(event.turn_id.clone());
             }
             RolloutItem::DurableInterAgentCommunicationClaimed {
-                communication_id,
-                communication,
                 delivered_response,
-                fingerprint,
                 turn_id,
+                ..
             } => {
-                let index = claims.len();
-                claims.push(DurableClaim {
-                    communication_id: communication_id.clone(),
-                    fingerprint: fingerprint.clone(),
-                    turn_id: turn_id.clone(),
-                    communication: communication.clone(),
-                    delivered: delivered_response.is_some(),
-                    turn_started: started_turn_ids.contains(turn_id),
-                });
-                claim_indices.insert((communication_id.clone(), fingerprint.clone()), index);
+                claim_delivered.insert(
+                    index,
+                    delivered_response.is_some() || future_turn_starts.contains(turn_id),
+                );
             }
             _ => {}
         }
     }
 
-    let mut payloads = Vec::new();
-    for item in items {
+    let mut states = HashMap::<(ResponseItemId, String), DurableState>::new();
+    let mut legacy_consumed = HashMap::<ResponseItemId, (usize, String)>::new();
+    for (index, item) in items.iter().enumerate() {
         match item {
             RolloutItem::DurableInterAgentCommunication {
                 communication,
@@ -99,75 +100,88 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 fingerprint,
                 turn_id,
                 compatibility_shadow,
-            } => payloads.push(DurablePayload {
-                communication: communication.clone(),
-                start_options: start_options.clone(),
-                fingerprint: fingerprint.clone(),
-                intended_turn_id: turn_id.clone(),
-                size_limit: if *compatibility_shadow {
-                    MailboxModelSizeLimit::Current
-                } else {
-                    MailboxModelSizeLimit::LegacyRecovery
-                },
-            }),
+            } => {
+                let Some(id) = communication.id.clone() else {
+                    continue;
+                };
+                states.entry((id, fingerprint.clone())).or_default().payload =
+                    Some(DurablePayload {
+                        index,
+                        communication: communication.clone(),
+                        start_options: start_options.clone(),
+                        intended_turn_id: turn_id.clone(),
+                        size_limit: if *compatibility_shadow {
+                            MailboxModelSizeLimit::Current
+                        } else {
+                            MailboxModelSizeLimit::LegacyRecovery
+                        },
+                    });
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
+                communication,
+                fingerprint,
+                turn_id,
+                ..
+            } => {
+                let claim = DurableClaim {
+                    index,
+                    turn_id: turn_id.clone(),
+                    communication: communication.clone(),
+                    delivered: claim_delivered.get(&index).copied().unwrap_or(false),
+                };
+                let state = states
+                    .entry((communication_id.clone(), fingerprint.clone()))
+                    .or_default();
+                if !state
+                    .claim
+                    .as_ref()
+                    .is_some_and(|current| current.delivered && !claim.delivered)
+                {
+                    state.claim = Some(claim);
+                }
+            }
             RolloutItem::InterAgentCommunicationMetadata {
                 mail_fingerprint: Some(fingerprint),
                 mail_communication: Some(communication),
                 mail_start_options: Some(start_options),
+                consumed_mail_id,
                 ..
-            } => payloads.push(DurablePayload {
-                communication: communication.clone(),
-                start_options: start_options.clone(),
-                fingerprint: fingerprint.clone(),
-                intended_turn_id: communication
-                    .internal_chat_message_metadata_passthrough
-                    .as_ref()
-                    .and_then(|metadata| metadata.turn_id.clone())
-                    .unwrap_or_default(),
-                size_limit: MailboxModelSizeLimit::LegacyRecovery,
-            }),
+            } => {
+                let Some(id) = communication.id.clone() else {
+                    continue;
+                };
+                states
+                    .entry((id.clone(), fingerprint.clone()))
+                    .or_default()
+                    .payload = Some(DurablePayload {
+                    index,
+                    communication: communication.clone(),
+                    start_options: start_options.clone(),
+                    intended_turn_id: communication
+                        .internal_chat_message_metadata_passthrough
+                        .as_ref()
+                        .and_then(|metadata| metadata.turn_id.clone())
+                        .unwrap_or_default(),
+                    size_limit: MailboxModelSizeLimit::LegacyRecovery,
+                });
+                if let Some(consumed_id) = consumed_mail_id {
+                    legacy_consumed.insert(consumed_id.clone(), (index, fingerprint.clone()));
+                }
+            }
+            RolloutItem::InterAgentCommunicationMetadata {
+                mail_fingerprint: Some(fingerprint),
+                consumed_mail_id: Some(id),
+                ..
+            } => {
+                legacy_consumed.insert(id.clone(), (index, fingerprint.clone()));
+            }
             _ => {}
         }
     }
 
-    let mut recovery = DurableMailRecovery::default();
-    let mut recovered_ids = HashSet::new();
-    for payload in payloads {
-        let Some(id) = payload.communication.id.clone() else {
-            continue;
-        };
-        if !recovered_ids.insert(id.clone()) {
-            continue;
-        }
-        let claim = claim_indices
-            .get(&(id.clone(), payload.fingerprint.clone()))
-            .and_then(|index| claims.get(*index));
-        let delivered = claim.is_some_and(|claim| claim.delivered || claim.turn_started);
-        if legacy_consumed_ids.contains(&id) || delivered {
-            recovery.consumed.push(ConsumedDurableMail {
-                id,
-                fingerprint: payload.fingerprint,
-                claimed_turn_id: claim
-                    .map(|claim| claim.turn_id.clone())
-                    .unwrap_or(payload.intended_turn_id),
-            });
-        } else {
-            recovery.pending.push(PendingDurableMail {
-                communication: payload.communication,
-                start_options: payload.start_options,
-                fingerprint: payload.fingerprint,
-                intended_turn_id: claim
-                    .map(|claim| claim.turn_id.clone())
-                    .unwrap_or(payload.intended_turn_id),
-                already_claimed: claim.is_some(),
-                size_limit: payload.size_limit,
-            });
-        }
-    }
-
-    // `.mcp.10` persisted the fingerprint directly before an already model-visible response
-    // item. Restoring it as consumed preserves idempotent same-ID retries without replaying mail.
-    for pair in items.windows(2) {
+    // `.mcp.10` persisted the fingerprint immediately before the model-visible response.
+    for (index, pair) in items.windows(2).enumerate() {
         let [
             RolloutItem::InterAgentCommunicationMetadata {
                 mail_fingerprint: Some(fingerprint),
@@ -179,75 +193,122 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
         else {
             continue;
         };
-        let Some(id) = response_item.id().cloned() else {
-            continue;
-        };
-        if recovered_ids.insert(id.clone()) {
-            recovery.consumed.push(ConsumedDurableMail {
-                id,
-                fingerprint: fingerprint.clone(),
-                claimed_turn_id: String::new(),
-            });
+        if let Some(id) = response_item.id().cloned() {
+            legacy_consumed.insert(id, (index + 1, fingerprint.clone()));
         }
     }
 
-    // Bounded paginated-history scans collapse already-consumed legacy mail into one
-    // model-invisible receipt so an old model-visible response does not leak across the newest
-    // compaction checkpoint.
-    for item in items {
-        let RolloutItem::InterAgentCommunicationMetadata {
-            mail_fingerprint: Some(fingerprint),
-            consumed_mail_id: Some(id),
-            ..
-        } = item
-        else {
-            continue;
-        };
-        if recovered_ids.insert(id.clone()) {
-            recovery.consumed.push(ConsumedDurableMail {
-                id: id.clone(),
-                fingerprint: fingerprint.clone(),
-                claimed_turn_id: String::new(),
-            });
-        }
-    }
-
-    // A `.mcp.13` claim carries enough payload to recover even when the older payload was
-    // compacted. Claims from earlier releases omitted that field; without a payload they retain
-    // the legacy consumed fallback because replaying an unknown body would be unsafe.
-    for (index, claim) in claims.into_iter().enumerate() {
-        let DurableClaim {
-            communication_id: id,
+    let mut entries_by_id = HashMap::<ResponseItemId, RecoveryEntry>::new();
+    for ((id, fingerprint), state) in states {
+        let state_index = state
+            .payload
+            .as_ref()
+            .map(|payload| payload.index)
+            .into_iter()
+            .chain(state.claim.as_ref().map(|claim| claim.index))
+            .max()
+            .unwrap_or_default();
+        let matching_legacy_consumed = legacy_consumed
+            .get(&id)
+            .filter(|(_, consumed_fingerprint)| consumed_fingerprint == &fingerprint);
+        let index =
+            matching_legacy_consumed.map_or(state_index, |(index, _)| state_index.max(*index));
+        let entry = RecoveryEntry {
+            index,
+            legacy_consumed: matching_legacy_consumed.is_some(),
+            id: id.clone(),
             fingerprint,
-            turn_id,
-            communication,
-            delivered,
-            turn_started,
-        } = claim;
-        if claim_indices.get(&(id.clone(), fingerprint.clone())) != Some(&index) {
-            continue;
-        }
-        if recovered_ids.insert(id.clone()) {
-            if let Some(communication) = communication
-                && !delivered
-                && !turn_started
-            {
-                recovery.pending.push(PendingDurableMail {
-                    communication,
-                    start_options: TurnStartOptions::default(),
-                    fingerprint,
-                    intended_turn_id: turn_id,
-                    already_claimed: true,
-                    size_limit: MailboxModelSizeLimit::LegacyRecovery,
-                });
-            } else {
-                recovery.consumed.push(ConsumedDurableMail {
-                    id,
-                    fingerprint,
-                    claimed_turn_id: turn_id,
-                });
+            payload: state.payload,
+            claim: state.claim,
+        };
+        match entries_by_id.get(&id) {
+            Some(current) if current.delivered() && !entry.delivered() => {}
+            Some(current) if current.delivered() == entry.delivered() && current.index > index => {}
+            _ => {
+                entries_by_id.insert(id, entry);
             }
         }
+    }
+    for (id, (index, fingerprint)) in legacy_consumed {
+        let entry = RecoveryEntry {
+            index,
+            id: id.clone(),
+            fingerprint,
+            payload: None,
+            claim: None,
+            legacy_consumed: true,
+        };
+        match entries_by_id.get(&id) {
+            Some(current) if current.delivered() && current.index > index => {}
+            _ => {
+                entries_by_id.insert(id, entry);
+            }
+        }
+    }
+
+    let mut entries = entries_by_id.into_values().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.index);
+    let mut recovery = DurableMailRecovery::default();
+    for entry in entries {
+        let claimed_turn_id = entry
+            .claim
+            .as_ref()
+            .map(|claim| claim.turn_id.clone())
+            .or_else(|| {
+                entry
+                    .payload
+                    .as_ref()
+                    .map(|payload| payload.intended_turn_id.clone())
+            })
+            .unwrap_or_default();
+        if entry.delivered() {
+            recovery.consumed.push(ConsumedDurableMail {
+                id: entry.id,
+                fingerprint: entry.fingerprint,
+                claimed_turn_id,
+            });
+            continue;
+        }
+        let claim_communication = entry
+            .claim
+            .as_ref()
+            .and_then(|claim| claim.communication.clone());
+        let (communication, start_options, size_limit) =
+            if let Some(communication) = claim_communication {
+                let start_options = entry
+                    .payload
+                    .as_ref()
+                    .map(|payload| payload.start_options.clone())
+                    .unwrap_or_default();
+                (
+                    communication,
+                    start_options,
+                    MailboxModelSizeLimit::LegacyRecovery,
+                )
+            } else if let Some(payload) = entry.payload {
+                (
+                    payload.communication,
+                    payload.start_options,
+                    payload.size_limit,
+                )
+            } else {
+                // A claim without any recoverable body is consumed fail-closed: replaying an unknown
+                // MCP-era mailbox occurrence would risk duplicating a side effect.
+                recovery.consumed.push(ConsumedDurableMail {
+                    id: entry.id,
+                    fingerprint: entry.fingerprint,
+                    claimed_turn_id,
+                });
+                continue;
+            };
+        recovery.pending.push(PendingDurableMail {
+            communication,
+            start_options,
+            fingerprint: entry.fingerprint,
+            intended_turn_id: claimed_turn_id,
+            already_claimed: entry.claim.is_some(),
+            size_limit,
+        });
     }
     recovery
 }

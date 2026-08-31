@@ -286,7 +286,6 @@ struct InflightMailboxCommunication {
     model_communication: InterAgentCommunication,
     start_options: TurnStartOptions,
     fingerprint: String,
-    intended_turn_id: Option<String>,
     claimed_turn_id: String,
     model_tokens: usize,
     size_limit: MailboxModelSizeLimit,
@@ -366,7 +365,7 @@ impl InputQueue {
             .pending_mails
             .push_back(PendingMailboxCommunication {
                 communication,
-                model_communication: prepared.unstamped_communication,
+                model_communication: prepared.communication,
                 start_options,
                 fingerprint: Some(fingerprint.clone()),
                 intended_turn_id: Some(claimed_turn_id.clone()),
@@ -477,7 +476,7 @@ impl InputQueue {
             .pending_mails
             .push_back(PendingMailboxCommunication {
                 communication,
-                model_communication: prepared.unstamped_communication,
+                model_communication: prepared.communication,
                 start_options,
                 fingerprint: Some(fingerprint),
                 intended_turn_id: Some(intended_turn_id),
@@ -716,7 +715,6 @@ impl InputQueue {
                             model_communication: claim.model_communication.clone(),
                             start_options: mail.start_options.clone(),
                             fingerprint: mail.fingerprint.clone()?,
-                            intended_turn_id: mail.intended_turn_id.clone(),
                             claimed_turn_id: turn_id.to_string(),
                             model_tokens: claim.model_tokens,
                             size_limit: mail.size_limit,
@@ -840,15 +838,18 @@ impl InputQueue {
         mailbox.inflight_mails = retained;
         let released_count = released.len();
         while let Some(mail) = released.pop_back() {
+            let intended_turn_id = uuid::Uuid::new_v4().to_string();
+            let prepared =
+                stamped_mailbox_model_communication(mail.model_communication, &intended_turn_id);
             mailbox
                 .pending_mails
                 .push_front(PendingMailboxCommunication {
                     communication: mail.communication,
-                    model_communication: mail.model_communication,
+                    model_communication: prepared.communication,
                     start_options: mail.start_options,
                     fingerprint: Some(mail.fingerprint),
-                    intended_turn_id: mail.intended_turn_id,
-                    model_tokens: mail.model_tokens,
+                    intended_turn_id: Some(intended_turn_id),
+                    model_tokens: prepared.model_tokens,
                     size_limit: mail.size_limit,
                     persisted: true,
                     _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
@@ -1733,6 +1734,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_admission_delivers_the_exact_persisted_stamp() {
+        let input_queue = InputQueue::new();
+        let id = ResponseItemId::with_suffix("msg", "exact-stamp");
+        let mut communication = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "exact stamp",
+            /*trigger_turn*/ true,
+        );
+        communication.id = Some(id.clone());
+        let prepared = prepare_mailbox_model_communication(
+            &communication,
+            "intended-turn",
+            MailboxModelSizeLimit::Current,
+        )
+        .expect("valid model item");
+        let persisted_model_communication = prepared.communication.clone();
+        assert!(
+            input_queue
+                .prepare_persisted_mailbox_communication(
+                    communication,
+                    prepared,
+                    Default::default(),
+                    "fingerprint".to_string(),
+                    "intended-turn".to_string(),
+                    MailboxModelSizeLimit::Current,
+                )
+                .await
+                .expect("valid durable mail")
+        );
+        assert!(input_queue.mark_mailbox_communication_persisted(&id).await);
+
+        let snapshot = input_queue
+            .pending_mailbox_claim_snapshot("intended-turn")
+            .await
+            .expect("persisted mail should fit its intended turn");
+
+        assert_eq!(
+            snapshot.durable_mail[0].model_communication,
+            persisted_model_communication
+        );
+    }
+
+    #[tokio::test]
     async fn interrupted_durable_claim_returns_to_the_front_until_delivery_commits() {
         let input_queue = InputQueue::new();
         let id = ResponseItemId::with_suffix("msg", "interrupted");
@@ -1790,9 +1835,15 @@ mod tests {
                 .await,
             1
         );
+        let released_turn_id = input_queue
+            .pending_mailbox_turn_id()
+            .await
+            .expect("released durable mail should have a fresh turn");
+        assert_ne!(released_turn_id, "first-turn");
+        assert_ne!(released_turn_id, "intended-turn");
 
         let second_snapshot = input_queue
-            .pending_mailbox_claim_snapshot("second-turn")
+            .pending_mailbox_claim_snapshot(&released_turn_id)
             .await
             .expect("mail should fit second turn");
         assert_eq!(
@@ -1801,11 +1852,11 @@ mod tests {
                 .internal_chat_message_metadata_passthrough
                 .as_ref()
                 .and_then(|metadata| metadata.turn_id.as_deref()),
-            Some("second-turn")
+            Some(released_turn_id.as_str())
         );
         assert_eq!(
             input_queue
-                .drain_claimed_mailbox_input_items(&second_snapshot, "second-turn")
+                .drain_claimed_mailbox_input_items(&second_snapshot, &released_turn_id)
                 .await
                 .expect("released mail should be reclaimable")
                 .0,
@@ -1813,13 +1864,13 @@ mod tests {
         );
         assert!(
             input_queue
-                .mark_inflight_mail_delivered(&id, "second-turn")
+                .mark_inflight_mail_delivered(&id, &released_turn_id)
                 .await
         );
         assert!(input_queue.durable_mail_was_consumed(&id).await);
         assert_eq!(
             input_queue
-                .release_inflight_mail_for_turn("second-turn")
+                .release_inflight_mail_for_turn(&released_turn_id)
                 .await,
             0
         );

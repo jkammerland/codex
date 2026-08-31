@@ -166,6 +166,7 @@ fn mcp13_claim_with_turn_start_retains_legacy_consumption_semantics() {
     assert_eq!(
         recover_durable_mail(&[
             payload(&communication),
+            mcp13_claim(&communication),
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "claimed-turn".to_string(),
                 trace_id: None,
@@ -173,7 +174,6 @@ fn mcp13_claim_with_turn_start_retains_legacy_consumption_semantics() {
                 model_context_window: None,
                 collaboration_mode_kind: Default::default(),
             })),
-            mcp13_claim(&communication),
         ]),
         DurableMailRecovery {
             pending: Vec::new(),
@@ -187,12 +187,11 @@ fn mcp13_claim_with_turn_start_retains_legacy_consumption_semantics() {
 }
 
 #[test]
-fn later_turn_start_does_not_retroactively_consume_mcp13_claim() {
-    let communication = mail("mcp13-future-turn");
+fn earlier_turn_start_does_not_consume_a_later_mcp13_claim() {
+    let communication = mail("mcp13-prior-turn");
 
     assert_eq!(
         recover_durable_mail(&[
-            mcp13_claim(&communication),
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "claimed-turn".to_string(),
                 trace_id: None,
@@ -200,6 +199,7 @@ fn later_turn_start_does_not_retroactively_consume_mcp13_claim() {
                 model_context_window: None,
                 collaboration_mode_kind: Default::default(),
             })),
+            mcp13_claim(&communication),
         ]),
         DurableMailRecovery {
             pending: vec![PendingDurableMail {
@@ -314,5 +314,124 @@ fn claim_only_recovery_preserves_fifo_order() {
             .map(|pending| pending.communication.id.clone())
             .collect::<Vec<_>>(),
         vec![first.id, second.id]
+    );
+}
+
+#[test]
+fn mixed_payload_and_claim_only_recovery_preserves_global_fifo_order() {
+    let first = mail("payload-first");
+    let second = mail("claim-second");
+    let third = mail("payload-third");
+
+    let recovered = recover_durable_mail(&[payload(&first), mcp13_claim(&second), payload(&third)]);
+
+    assert_eq!(
+        recovered
+            .pending
+            .iter()
+            .map(|pending| pending.communication.id.clone())
+            .collect::<Vec<_>>(),
+        vec![first.id, second.id, third.id]
+    );
+}
+
+#[test]
+fn latest_exact_payload_wins_for_a_reused_id() {
+    let first = mail("latest");
+    let mut latest = first.clone();
+    latest.content = "latest exact payload".to_string();
+    let mut latest_payload = payload(&latest);
+    let RolloutItem::DurableInterAgentCommunication { fingerprint, .. } = &mut latest_payload
+    else {
+        unreachable!("payload helper returns durable mail");
+    };
+    *fingerprint = "latest-fingerprint".to_string();
+
+    let recovered = recover_durable_mail(&[payload(&first), latest_payload]);
+
+    assert_eq!(
+        recovered.pending,
+        vec![PendingDurableMail {
+            communication: latest,
+            start_options: TurnStartOptions::default(),
+            fingerprint: "latest-fingerprint".to_string(),
+            intended_turn_id: "intended-turn".to_string(),
+            already_claimed: false,
+            size_limit: MailboxModelSizeLimit::Current,
+        }]
+    );
+}
+
+#[test]
+fn an_older_delivered_occurrence_wins_over_a_conflicting_pending_reuse() {
+    let delivered = mail("delivered-conflict");
+    let id = delivered.id.clone().expect("message id");
+    let mut conflicting = delivered.clone();
+    conflicting.content = "conflicting later payload".to_string();
+    let mut conflicting_payload = payload(&conflicting);
+    let RolloutItem::DurableInterAgentCommunication { fingerprint, .. } = &mut conflicting_payload
+    else {
+        unreachable!("payload helper returns durable mail");
+    };
+    *fingerprint = "conflicting-fingerprint".to_string();
+
+    let recovered = recover_durable_mail(&[committed_delivery(&delivered), conflicting_payload]);
+
+    assert_eq!(
+        recovered,
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "fingerprint".to_string(),
+                claimed_turn_id: "claimed-turn".to_string(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn an_older_delivered_occurrence_wins_over_an_exact_pending_reuse() {
+    let delivered = mail("delivered-exact-conflict");
+    let id = delivered.id.clone().expect("message id");
+
+    let recovered = recover_durable_mail(&[
+        committed_delivery(&delivered),
+        payload(&delivered),
+        claim(&delivered),
+    ]);
+
+    assert_eq!(
+        recovered,
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "fingerprint".to_string(),
+                claimed_turn_id: "claimed-turn".to_string(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn mcp13_claim_body_supersedes_its_unbounded_compatibility_payload() {
+    let bounded = mail("bounded-claim");
+    let mut raw = bounded.clone();
+    raw.content = "raw legacy body".repeat(20_000);
+    let raw_payload = RolloutItem::DurableInterAgentCommunication {
+        communication: raw,
+        start_options: TurnStartOptions::default(),
+        fingerprint: "fingerprint".to_string(),
+        turn_id: "claimed-turn".to_string(),
+        compatibility_shadow: false,
+    };
+
+    let recovered = recover_durable_mail(&[mcp13_claim(&bounded), raw_payload]);
+
+    assert_eq!(recovered.pending[0].communication, bounded);
+    assert_eq!(
+        recovered.pending[0].size_limit,
+        MailboxModelSizeLimit::LegacyRecovery
     );
 }

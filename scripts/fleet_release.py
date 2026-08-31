@@ -622,10 +622,10 @@ trap finish_activation EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-[ "$(git -C "$canonical" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$canonical" status --porcelain)" ]
+[ "$(git -C "$canonical" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$canonical" status --porcelain)" ] || {{ echo 'Canonical source is not clean at the manifest commit' >&2; exit 1; }}
 [ "$(git -C "$build" rev-parse HEAD)" = {release.fork_commit} ] && [ -z "$(git -C "$build" status --porcelain)" ] || {{ echo 'Build worktree is not clean at the manifest commit' >&2; exit 1; }}
 [ "$(git -C "$server" rev-parse HEAD)" = {release.server_commit} ] && [ -z "$(git -C "$server" status --porcelain)" ] || {{ echo 'MCP server is not clean at the compatible manifest commit' >&2; exit 1; }}
-[ -x "$source_cli" ] && [ -x "$source_host" ] && [ -f "$target_cli" ] && [ -f "$target_host" ]
+[ -x "$source_cli" ] && [ -x "$source_host" ] && [ -f "$target_cli" ] && [ -f "$target_host" ] || {{ echo 'Activation binary pair is incomplete' >&2; exit 1; }}
 source_cli_hash=$(sha "$source_cli"); source_host_hash=$(sha "$source_host")
 if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
   if [ -e "$backup_cli" ] || [ -e "$backup_host" ]; then
@@ -636,13 +636,13 @@ if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")"
   old_cli_hash=$(sha "$target_cli"); old_host_hash=$(sha "$target_host")
   stage_cli=$(mktemp "$target_cli.{release.name}.XXXXXX"); stage_host=$(mktemp "$target_host.{release.name}.XXXXXX")
   install -m 0755 "$source_cli" "$stage_cli"; install -m 0755 "$source_host" "$stage_host"
-  [ "$(sha "$stage_cli")" = "$source_cli_hash" ] && [ "$(sha "$stage_host")" = "$source_host_hash" ]
+  [ "$(sha "$stage_cli")" = "$source_cli_hash" ] && [ "$(sha "$stage_host")" = "$source_host_hash" ] || {{ echo 'Staged binary hash verification failed' >&2; exit 1; }}
   if ! cp -p "$target_cli" "$backup_cli" || ! cp -p "$target_host" "$backup_host"; then
     rm -f "$backup_cli" "$backup_host"
     echo 'Failed to create the release rollback pair' >&2
     exit 1
   fi
-  [ "$(sha "$backup_cli")" = "$old_cli_hash" ] && [ "$(sha "$backup_host")" = "$old_host_hash" ]
+  [ "$(sha "$backup_cli")" = "$old_cli_hash" ] && [ "$(sha "$backup_host")" = "$old_host_hash" ] || {{ echo 'Release rollback pair hash verification failed' >&2; exit 1; }}
   activated=1
   mv -f "$stage_cli" "$target_cli"
   stage_cli=
@@ -653,11 +653,11 @@ if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")"
   echo 'Activated binary hash verification failed' >&2
   exit 1
 fi
-if ! version=$($target_cli --version) || [ "$version" != {shlex.quote(release.cli_version)} ]; then
+if ! version=$("$target_cli" --version) || [ "$version" != {shlex.quote(release.cli_version)} ]; then
   echo "Unexpected fork version: ${{version:-missing}}" >&2
   exit 1
 fi
-if ! $target_cli agents --help >/dev/null; then
+if ! "$target_cli" agents --help >/dev/null; then
   echo 'Activated fork does not support codex agents' >&2
   exit 1
 fi

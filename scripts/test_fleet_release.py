@@ -23,9 +23,7 @@ class FleetReleaseTest(unittest.TestCase):
 
     def test_checked_in_manifest_is_valid(self) -> None:
         self.assertEqual(self.release.marker, "+jkammerland.mcp.14")
-        self.assertEqual(
-            self.release.fork_ref, "fleet/jkammerland.mcp.14-source"
-        )
+        self.assertEqual(self.release.fork_ref, "fleet/jkammerland.mcp.14-source")
         self.assertEqual(self.release.rusty_v8_version, "150.4.0")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
         self.assertEqual(
@@ -243,6 +241,25 @@ class FleetReleaseTest(unittest.TestCase):
             self.assertEqual(retry.returncode, 0, retry.stderr)
             self.assertEqual(target_cli.read_bytes(), source_cli.read_bytes())
             self.assertEqual(target_host.read_bytes(), source_host.read_bytes())
+
+            active_cli = target_cli.read_bytes()
+            active_host = target_host.read_bytes()
+            (canonical / "untracked-internal").write_text("must block activation\n")
+            source_cli.write_text(source_cli.read_text() + "# distinct candidate\n")
+            dirty_source = run(
+                ["sh", "-c", fleet_release.activation_script(host, release)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(dirty_source.returncode, 0)
+            self.assertIn(
+                "Canonical source is not clean at the manifest commit",
+                dirty_source.stderr,
+            )
+            self.assertEqual(target_cli.read_bytes(), active_cli)
+            self.assertEqual(target_host.read_bytes(), active_host)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows activation test")
     def test_windows_activation_restores_pair_after_version_verification_failure(

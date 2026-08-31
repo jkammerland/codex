@@ -33,6 +33,8 @@ struct DetectedExternalAgentSessionConnectorRecord {
 struct ImportedExternalAgentSessionRecord {
     source_path: PathBuf,
     content_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_content_sha256: Option<String>,
     imported_thread_id: ThreadId,
     imported_at: i64,
     #[serde(default)]
@@ -122,7 +124,7 @@ pub(crate) fn find_existing_session_import(
     })
 }
 
-pub(super) fn checkpoint_existing_session_import(
+pub(super) fn begin_existing_session_append(
     codex_home: &Path,
     source_path: &Path,
     thread_id: ThreadId,
@@ -132,13 +134,9 @@ pub(super) fn checkpoint_existing_session_import(
     if expected_source_content_sha256 == source_content_sha256 {
         return Ok(false);
     }
-    let source_path = canonical_source_path(source_path)?;
-    let source_modified_at = session_modified_at(&source_path)?;
-    if session_content_sha256(&source_path)? != source_content_sha256
-        || source_modified_at != session_modified_at(&source_path)?
-    {
+    let Some((source_path, _)) = stable_source_version(source_path, source_content_sha256)? else {
         return Ok(false);
-    }
+    };
 
     let mut ledger = load_import_ledger(codex_home)?;
     let mut matching_indices = ledger
@@ -158,7 +156,48 @@ pub(super) fn checkpoint_existing_session_import(
     {
         return Ok(false);
     }
+    if record.pending_content_sha256.as_deref() == Some(source_content_sha256) {
+        return Ok(true);
+    }
+    record.pending_content_sha256 = Some(source_content_sha256.to_string());
+    save_import_ledger(codex_home, &ledger)?;
+    Ok(true)
+}
+
+pub(super) fn checkpoint_existing_session_import(
+    codex_home: &Path,
+    source_path: &Path,
+    thread_id: ThreadId,
+    expected_source_content_sha256: &str,
+    source_content_sha256: &str,
+) -> io::Result<bool> {
+    let Some((source_path, source_modified_at)) =
+        stable_source_version(source_path, source_content_sha256)?
+    else {
+        return Ok(false);
+    };
+
+    let mut ledger = load_import_ledger(codex_home)?;
+    let mut matching_indices = ledger
+        .records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| (record.source_path == source_path).then_some(index));
+    let Some(index) = matching_indices.next() else {
+        return Ok(false);
+    };
+    if matching_indices.next().is_some() {
+        return Ok(false);
+    }
+    let record = &mut ledger.records[index];
+    if record.imported_thread_id != thread_id
+        || record.content_sha256 != expected_source_content_sha256
+        || record.pending_content_sha256.as_deref() != Some(source_content_sha256)
+    {
+        return Ok(false);
+    }
     record.content_sha256 = source_content_sha256.to_string();
+    record.pending_content_sha256 = None;
     record.imported_at = now_unix_seconds();
     record.source_modified_at = source_modified_at;
     save_import_ledger(codex_home, &ledger)?;
@@ -182,6 +221,7 @@ pub fn record_completed_session_imports(
         }) {
             let mut record = ledger.records.remove(index);
             record.imported_thread_id = import.imported_thread_id;
+            record.pending_content_sha256 = None;
             record.imported_at = imported_at;
             record.source_modified_at = source_modified_at.or(record.source_modified_at);
             append_connector_names(&mut record.connector_names, import.connector_names);
@@ -194,6 +234,7 @@ pub fn record_completed_session_imports(
         ledger.records.push(ImportedExternalAgentSessionRecord {
             source_path: import.source_path,
             content_sha256: import.source_content_sha256,
+            pending_content_sha256: None,
             imported_thread_id: import.imported_thread_id,
             imported_at,
             source_modified_at,
@@ -395,8 +436,8 @@ pub(crate) fn save_import_ledger(
 ) -> io::Result<()> {
     fs::create_dir_all(codex_home)?;
     let path = import_ledger_path(codex_home);
-    let raw = serde_json::to_vec_pretty(ledger).map_err(io::Error::other)?;
-    fs::write(path, raw)
+    let raw = serde_json::to_string_pretty(ledger).map_err(io::Error::other)?;
+    codex_utils_path::write_atomically(&path, &raw)
 }
 
 fn import_ledger_path(codex_home: &Path) -> PathBuf {
@@ -428,6 +469,20 @@ fn session_modified_at(path: &Path) -> io::Result<Option<i64>> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok()))
+}
+
+fn stable_source_version(
+    source_path: &Path,
+    source_content_sha256: &str,
+) -> io::Result<Option<(PathBuf, Option<i64>)>> {
+    let source_path = canonical_source_path(source_path)?;
+    let source_modified_at = session_modified_at(&source_path)?;
+    if session_content_sha256(&source_path)? != source_content_sha256
+        || source_modified_at != session_modified_at(&source_path)?
+    {
+        return Ok(None);
+    }
+    Ok(Some((source_path, source_modified_at)))
 }
 
 #[cfg(test)]

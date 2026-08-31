@@ -343,15 +343,17 @@ async fn cold_diverged_target_is_deferred_without_checkpoint() -> Result<()> {
 }
 
 #[tokio::test]
-async fn changed_hash_with_equal_transcript_is_deferred_without_checkpoint() -> Result<()> {
+async fn changed_hash_with_complete_transcript_checkpoints_without_duplicate_items() -> Result<()> {
     let mut fixture = ImportFixture::new().await?;
     let original = fixture.import_one().await?;
     let ledger_before = std::fs::read(fixture.ledger_path())?;
     fixture.append_raw("\n")?;
 
-    fixture
-        .assert_one_deferred(&ledger_before, &original, &[("user", FIRST_USER)])
-        .await
+    assert_eq!(fixture.import_detected().await?, vec![original.clone()]);
+    assert_history(&fixture.read(&original).await?, &[("user", FIRST_USER)]);
+    assert_ne!(std::fs::read(fixture.ledger_path())?, ledger_before);
+    assert!(fixture.detect().await?.items.is_empty());
+    Ok(())
 }
 
 #[tokio::test]

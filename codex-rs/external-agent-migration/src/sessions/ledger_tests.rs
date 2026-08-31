@@ -2,6 +2,7 @@ use super::CompletedExternalAgentSessionImport;
 use super::ImportedConnectorCandidate;
 use super::ImportedExternalAgentSessionLedger;
 use super::append_imported_session_connector_names;
+use super::begin_existing_session_append;
 use super::checkpoint_existing_session_import;
 use super::read_imported_connector_candidates;
 use super::record_completed_session_imports;
@@ -102,7 +103,7 @@ fn completed_import_refreshes_existing_record_metadata() {
 }
 
 #[test]
-fn checkpoint_is_compare_and_swap_and_preserves_record_metadata() {
+fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata() {
     let root = TempDir::new().expect("tempdir");
     let codex_home = root.path().join("codex-home");
     let source_path = root.path().join("session.jsonl");
@@ -130,7 +131,7 @@ fn checkpoint_is_compare_and_swap_and_preserves_record_metadata() {
         (thread_id, old_hash.as_str(), "not-the-source-hash"),
     ] {
         assert!(
-            !checkpoint_existing_session_import(
+            !begin_existing_session_append(
                 &codex_home,
                 &source_path,
                 candidate_thread_id,
@@ -140,7 +141,42 @@ fn checkpoint_is_compare_and_swap_and_preserves_record_metadata() {
             .expect("rejected checkpoint")
         );
     }
+    assert!(
+        !checkpoint_existing_session_import(
+            &codex_home,
+            &source_path,
+            thread_id,
+            &old_hash,
+            &new_hash,
+        )
+        .expect("checkpoint without append intent")
+    );
     assert_eq!(ledger_bytes(&codex_home), ledger_before);
+
+    assert!(
+        begin_existing_session_append(&codex_home, &source_path, thread_id, &old_hash, &new_hash,)
+            .expect("begin append")
+    );
+    let pending_ledger = super::load_import_ledger(&codex_home).expect("pending ledger");
+    let [pending_record] = pending_ledger.records.as_slice() else {
+        panic!("append intent must preserve one record");
+    };
+    assert_eq!(pending_record.content_sha256, old_hash);
+    assert_eq!(
+        pending_record.pending_content_sha256.as_deref(),
+        Some(new_hash.as_str())
+    );
+    assert!(
+        !pending_ledger
+            .contains_current_source(&source_path)
+            .expect("pending append is not complete")
+    );
+    let pending_ledger_bytes = ledger_bytes(&codex_home);
+    assert!(
+        begin_existing_session_append(&codex_home, &source_path, thread_id, &old_hash, &new_hash,)
+            .expect("resume pending append")
+    );
+    assert_eq!(ledger_bytes(&codex_home), pending_ledger_bytes);
 
     assert!(
         checkpoint_existing_session_import(
@@ -150,7 +186,7 @@ fn checkpoint_is_compare_and_swap_and_preserves_record_metadata() {
             &old_hash,
             &new_hash,
         )
-        .expect("checkpoint")
+        .expect("checkpoint append")
     );
     let ledger = super::load_import_ledger(&codex_home).expect("updated ledger");
     let [record] = ledger.records.as_slice() else {
@@ -161,6 +197,7 @@ fn checkpoint_is_compare_and_swap_and_preserves_record_metadata() {
         &super::ImportedExternalAgentSessionRecord {
             source_path: source_path.clone(),
             content_sha256: new_hash,
+            pending_content_sha256: None,
             imported_thread_id: thread_id,
             imported_at: record.imported_at,
             source_modified_at: super::session_modified_at(&source_path).expect("source mtime"),

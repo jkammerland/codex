@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::export::EXTERNAL_SESSION_IMPORTED_MARKER;
+use super::ledger::begin_existing_session_append;
 use super::ledger::checkpoint_existing_session_import;
 use codex_core::ThreadManager;
 use codex_protocol::ThreadId;
@@ -42,6 +44,9 @@ pub async fn append_existing_session(
         thread_id,
         source_items,
     } = request;
+    let Ok(_checkpoint_permit) = checkpoint_permits.acquire().await else {
+        return false;
+    };
     let Ok(mut thread) = thread_store
         .read_thread(ReadThreadParams {
             thread_id,
@@ -67,8 +72,49 @@ pub async fn append_existing_session(
     let Some(rollout_path) = thread.rollout_path else {
         return false;
     };
-    if plan_append(source_items, &history.items).is_none() {
+    let Some(initial_plan) = plan_existing_session_append(source_items, &history.items) else {
         return false;
+    };
+
+    let codex_home_buf = codex_home.to_path_buf();
+    let source_path_buf = source_path.to_path_buf();
+    let expected_hash = expected_source_content_sha256.to_string();
+    let source_hash = source_content_sha256.to_string();
+    let append_begun = matches!(
+        tokio::task::spawn_blocking(move || {
+            begin_existing_session_append(
+                &codex_home_buf,
+                &source_path_buf,
+                thread_id,
+                &expected_hash,
+                &source_hash,
+            )
+        })
+        .await,
+        Ok(Ok(true))
+    );
+    if !append_begun {
+        return false;
+    }
+
+    if matches!(initial_plan, ExistingSessionAppendPlan::AlreadyComplete) {
+        let codex_home = codex_home.to_path_buf();
+        let source_path = source_path.to_path_buf();
+        let expected_source_content_sha256 = expected_source_content_sha256.to_string();
+        let source_content_sha256 = source_content_sha256.to_string();
+        return matches!(
+            tokio::task::spawn_blocking(move || {
+                checkpoint_existing_session_import(
+                    &codex_home,
+                    &source_path,
+                    thread_id,
+                    &expected_source_content_sha256,
+                    &source_content_sha256,
+                )
+            })
+            .await,
+            Ok(Ok(true))
+        );
     }
     if thread_store
         .resume_thread(ResumeThreadParams {
@@ -84,7 +130,7 @@ pub async fn append_existing_session(
         return false;
     }
 
-    let fresh_items = match thread_store
+    let fresh_plan = match thread_store
         .read_thread(ReadThreadParams {
             thread_id,
             include_archived: true,
@@ -97,30 +143,34 @@ pub async fn append_existing_session(
             .take()
             .filter(|history| history.thread_id == thread_id)
             .filter(|history| persistence_metadata(&history.items, thread_id).is_some())
-            .and_then(|history| plan_append(source_items, &history.items)),
+            .and_then(|history| plan_existing_session_append(source_items, &history.items)),
         Ok(_) | Err(_) => None,
     };
-    let Some(items) = fresh_items else {
+    let Some(fresh_plan) = fresh_plan else {
         let _ = thread_store.discard_thread(thread_id).await;
         return false;
     };
-    if thread_store
-        .append_items(AppendThreadItemsParams { thread_id, items })
-        .await
-        .is_err()
-    {
-        let _ = thread_store.discard_thread(thread_id).await;
-        return false;
+    match fresh_plan {
+        ExistingSessionAppendPlan::Append(items) => {
+            if thread_store
+                .append_items(AppendThreadItemsParams { thread_id, items })
+                .await
+                .is_err()
+            {
+                let _ = thread_store.discard_thread(thread_id).await;
+                return false;
+            }
+            if thread_store.shutdown_thread(thread_id).await.is_err() {
+                let _ = thread_store.discard_thread(thread_id).await;
+                return false;
+            }
+        }
+        ExistingSessionAppendPlan::AlreadyComplete => {
+            if thread_store.discard_thread(thread_id).await.is_err() {
+                return false;
+            }
+        }
     }
-    if thread_store.shutdown_thread(thread_id).await.is_err() {
-        let _ = thread_store.discard_thread(thread_id).await;
-        return false;
-    }
-
-    let Ok(_checkpoint_permit) = checkpoint_permits.acquire().await else {
-        let _ = thread_store.discard_thread(thread_id).await;
-        return false;
-    };
     let target_matches_source = match thread_store
         .read_thread(ReadThreadParams {
             thread_id,
@@ -138,7 +188,6 @@ pub async fn append_existing_session(
         Ok(_) | Err(_) => false,
     };
     if !target_matches_source {
-        let _ = thread_store.discard_thread(thread_id).await;
         return false;
     }
 
@@ -159,15 +208,28 @@ pub async fn append_existing_session(
         .await,
         Ok(Ok(true))
     );
-    if !checkpointed {
-        let _ = thread_store.discard_thread(thread_id).await;
-    }
     checkpointed
 }
 
 struct SourceModelItem {
     response_item: ResponseItem,
     append_start_index: usize,
+}
+
+enum ExistingSessionAppendPlan {
+    AlreadyComplete,
+    Append(Vec<RolloutItem>),
+}
+
+fn plan_existing_session_append(
+    source_items: &[RolloutItem],
+    history_items: &[RolloutItem],
+) -> Option<ExistingSessionAppendPlan> {
+    if model_transcripts_match(source_items, history_items) {
+        Some(ExistingSessionAppendPlan::AlreadyComplete)
+    } else {
+        plan_append(source_items, history_items).map(ExistingSessionAppendPlan::Append)
+    }
 }
 
 /// Returns the nonempty source suffix that can be safely appended to `history_items`.
@@ -223,8 +285,18 @@ fn model_transcripts_match(source_items: &[RolloutItem], history_items: &[Rollou
 fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem>> {
     let mut model_items = Vec::new();
     let mut append_start_index = None;
+    let mut claim_append_start_indices = HashMap::new();
     let mut model_response_projection = RolloutModelResponseProjection::default();
     for (index, item) in items.iter().enumerate() {
+        if let RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            communication: Some(_),
+            delivered_response: None,
+            ..
+        } = item
+        {
+            claim_append_start_indices.insert(communication_id.clone(), index);
+        }
         if matches!(
             item,
             RolloutItem::EventMsg(EventMsg::TurnStarted(_))
@@ -240,9 +312,14 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem>> {
         if !projected.is_empty() {
             let projected_append_start_index = append_start_index.take().unwrap_or(index);
             for response_item in projected {
+                let response_append_start_index = response_item
+                    .item
+                    .id()
+                    .and_then(|id| claim_append_start_indices.remove(id))
+                    .unwrap_or(projected_append_start_index);
                 model_items.push(SourceModelItem {
                     response_item: response_item.item.clone(),
-                    append_start_index: projected_append_start_index,
+                    append_start_index: response_append_start_index,
                 });
             }
         }

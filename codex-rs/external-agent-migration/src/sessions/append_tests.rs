@@ -163,7 +163,7 @@ fn legacy_claim_delivery_appends_from_claim_through_its_later_turn_start() {
 }
 
 #[test]
-fn legacy_claim_batch_appends_from_the_earliest_claim() {
+fn legacy_claim_batch_appends_from_the_first_missing_claim() {
     let base_history = rollout(&[(MessageRole::User, "first request")]);
     let mut source = base_history.clone();
     let communications = ["first durable result", "second durable result"].map(|content| {
@@ -219,12 +219,14 @@ fn legacy_claim_batch_appends_from_the_earliest_claim() {
         Some(RolloutItem::DurableInterAgentCommunicationClaimed {
             communication_id,
             ..
-        }) if communication_id == communications[0].id.as_ref().expect("communication id")
+        }) if communication_id == communications[1].id.as_ref().expect("communication id")
     ));
     assert!(matches!(
         suffix.last(),
         Some(RolloutItem::EventMsg(EventMsg::TurnStarted(event))) if event.turn_id == "turn-2"
     ));
+    partial_history.extend(suffix);
+    assert!(model_transcripts_match(&source, &partial_history));
 }
 
 fn rollout(messages: &[(MessageRole, &str)]) -> Vec<RolloutItem> {

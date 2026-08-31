@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use crate::unified_exec::MAX_UNIFIED_EXEC_PROCESSES;
 use codex_code_mode::CellId;
 use serde_json::Value as JsonValue;
 
@@ -11,7 +13,13 @@ const WRITE_STDIN_TOOL: &str = "write_stdin";
 
 #[derive(Default)]
 pub(super) struct LiveExecSessionRegistry {
-    sessions_by_cell: Mutex<HashMap<CellId, BTreeSet<i32>>>,
+    state: Mutex<LiveExecSessionState>,
+}
+
+#[derive(Default)]
+struct LiveExecSessionState {
+    sessions_by_cell: HashMap<CellId, BTreeSet<i32>>,
+    observation_order: VecDeque<i32>,
 }
 
 impl LiveExecSessionRegistry {
@@ -51,40 +59,62 @@ impl LiveExecSessionRegistry {
     }
 
     pub(super) fn sessions_for_cell(&self, cell_id: &CellId) -> Vec<i32> {
-        self.sessions_by_cell
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions_by_cell
             .get(cell_id)
             .map(|sessions| sessions.iter().copied().collect())
             .unwrap_or_default()
     }
 
     fn move_to_cell(&self, session_id: i32, cell_id: &CellId) {
-        let mut sessions_by_cell = self
-            .sessions_by_cell
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        remove_session(&mut sessions_by_cell, session_id);
-        sessions_by_cell
+        state.remove(session_id);
+        state
+            .observation_order
+            .push_back(session_id);
+        state
+            .sessions_by_cell
             .entry(cell_id.clone())
             .or_default()
             .insert(session_id);
+        while state.observation_order.len() > MAX_UNIFIED_EXEC_PROCESSES {
+            if let Some(oldest_session_id) = state.observation_order.pop_front() {
+                remove_session_from_cells(&mut state.sessions_by_cell, oldest_session_id);
+            }
+        }
     }
 
     fn remove(&self, session_id: i32) {
-        remove_session(
-            &mut self
-                .sessions_by_cell
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            session_id,
-        );
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
     }
 }
 
-fn remove_session(sessions_by_cell: &mut HashMap<CellId, BTreeSet<i32>>, session_id: i32) {
+impl LiveExecSessionState {
+    fn remove(&mut self, session_id: i32) {
+        self.observation_order
+            .retain(|observed_session_id| *observed_session_id != session_id);
+        remove_session_from_cells(&mut self.sessions_by_cell, session_id);
+    }
+}
+
+fn remove_session_from_cells(
+    sessions_by_cell: &mut HashMap<CellId, BTreeSet<i32>>,
+    session_id: i32,
+) {
     sessions_by_cell.retain(|_, sessions| {
         sessions.remove(&session_id);
         !sessions.is_empty()
     });
 }
+
+#[cfg(test)]
+#[path = "live_exec_sessions_tests.rs"]
+mod tests;

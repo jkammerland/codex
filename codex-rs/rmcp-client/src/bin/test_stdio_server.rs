@@ -296,6 +296,7 @@ impl TestToolServer {
                 "sleep_after_ms": { "type": "number" },
                 "started_file": { "type": "string" },
                 "release_file": { "type": "string" },
+                "exit_file": { "type": "string" },
                 "call_count_file": { "type": "string" },
                 "barrier": {
                     "type": "object",
@@ -475,6 +476,8 @@ struct SyncArgs {
     started_file: Option<PathBuf>,
     #[serde(default)]
     release_file: Option<PathBuf>,
+    #[serde(default)]
+    exit_file: Option<PathBuf>,
     #[serde(default)]
     call_count_file: Option<PathBuf>,
     #[serde(default)]
@@ -933,8 +936,18 @@ impl TestToolServer {
             })?;
         }
 
-        if let Some(path) = args.release_file {
-            while !path.is_file() {
+        if args.release_file.is_some() || args.exit_file.is_some() {
+            loop {
+                if args.exit_file.as_ref().is_some_and(|path| path.is_file()) {
+                    std::process::exit(42);
+                }
+                if args
+                    .release_file
+                    .as_ref()
+                    .is_some_and(|path| path.is_file())
+                {
+                    break;
+                }
                 sleep(Duration::from_millis(10)).await;
             }
         }

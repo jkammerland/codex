@@ -19,13 +19,7 @@ use std::collections::HashSet;
 
 pub(crate) fn initial_history_has_prior_user_turns(conversation_history: &InitialHistory) -> bool {
     let items = conversation_history.get_rollout_items();
-    let started_turn_ids = items
-        .iter()
-        .filter_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.as_str()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
+    let delivered_legacy_claim_indices = delivered_legacy_claim_indices(items);
     let durable_claim_model_item_ids = items
         .iter()
         .filter_map(|item| match item {
@@ -38,7 +32,7 @@ pub(crate) fn initial_history_has_prior_user_turns(conversation_history: &Initia
         })
         .collect::<HashSet<_>>();
     let compatibility_shadow_ids = compatibility_shadow_ids(items);
-    items.iter().any(|item| match item {
+    items.iter().enumerate().any(|(index, item)| match item {
         RolloutItem::ResponseItem(item) => {
             item.id().is_none_or(|id| {
                 !durable_claim_model_item_ids.contains(id) && !compatibility_shadow_ids.contains(id)
@@ -48,9 +42,8 @@ pub(crate) fn initial_history_has_prior_user_turns(conversation_history: &Initia
         RolloutItem::DurableInterAgentCommunicationClaimed {
             communication: Some(_),
             delivered_response: None,
-            turn_id,
             ..
-        } => started_turn_ids.contains(turn_id.as_str()),
+        } => delivered_legacy_claim_indices.contains(&index),
         RolloutItem::DurableInterAgentCommunicationClaimed {
             delivered_response: Some(_),
             ..
@@ -109,13 +102,7 @@ pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize
 fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
     let mut rollback_turn_positions = Vec::new();
     let mut fork_turn_positions = Vec::new();
-    let started_turn_ids = items
-        .iter()
-        .filter_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => Some(event.turn_id.as_str()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
+    let delivered_legacy_claim_indices = delivered_legacy_claim_indices(items);
     let durable_claim_model_item_ids = items
         .iter()
         .filter_map(|item| match item {
@@ -194,10 +181,9 @@ fn rollout_turn_positions(items: &[RolloutItem]) -> (Vec<usize>, Vec<usize>) {
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication: Some(communication),
                 delivered_response: None,
-                turn_id,
                 ..
             } => {
-                if !started_turn_ids.contains(turn_id.as_str()) {
+                if !delivered_legacy_claim_indices.contains(&idx) {
                     continue;
                 }
                 if communication
@@ -426,7 +412,7 @@ fn is_trigger_turn_boundary(item: &ResponseItem) -> bool {
 }
 
 fn compatibility_shadow_ids(items: &[RolloutItem]) -> HashSet<&codex_protocol::ResponseItemId> {
-    items
+    let mut shadow_ids = items
         .windows(2)
         .filter_map(|pair| match pair {
             [
@@ -439,7 +425,51 @@ fn compatibility_shadow_ids(items: &[RolloutItem]) -> HashSet<&codex_protocol::R
             ] if communication.id.as_ref() == response_item.id() => response_item.id(),
             _ => None,
         })
-        .collect()
+        .collect::<HashSet<_>>();
+    shadow_ids.extend(items.windows(3).filter_map(|items| match items {
+        [
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id,
+                communication: Some(_),
+                delivered_response: None,
+                ..
+            },
+            RolloutItem::DurableInterAgentCommunication {
+                communication,
+                compatibility_shadow: false,
+                ..
+            },
+            RolloutItem::ResponseItem(response),
+        ] if Some(communication_id) == communication.id.as_ref()
+            && communication.id.as_ref() == response.id() =>
+        {
+            response.id()
+        }
+        _ => None,
+    }));
+    shadow_ids
+}
+
+fn delivered_legacy_claim_indices(items: &[RolloutItem]) -> HashSet<usize> {
+    let mut future_turn_starts = HashSet::new();
+    let mut delivered = HashSet::new();
+    for (index, item) in items.iter().enumerate().rev() {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                future_turn_starts.insert(event.turn_id.as_str());
+            }
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication: Some(_),
+                delivered_response: None,
+                turn_id,
+                ..
+            } if future_turn_starts.contains(turn_id.as_str()) => {
+                delivered.insert(index);
+            }
+            _ => {}
+        }
+    }
+    delivered
 }
 
 #[cfg(test)]

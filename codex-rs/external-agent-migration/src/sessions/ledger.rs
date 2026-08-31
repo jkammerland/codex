@@ -36,6 +36,8 @@ struct DetectedExternalAgentSessionConnectorRecord {
 struct ImportedExternalAgentSessionRecord {
     source_path: PathBuf,
     content_sha256: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    initial_import_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_content_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,7 +63,10 @@ pub struct CompletedExternalAgentSessionImport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionImportSourceMapping {
-    None,
+    New {
+        imported_thread_id: ThreadId,
+    },
+    Current,
     Unique {
         source_content_sha256: String,
         imported_thread_id: ThreadId,
@@ -75,10 +80,15 @@ pub struct ImportedConnectorCandidate {
     pub session_count: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ExistingSessionAppendPosition {
+    pub current_model_item_count: usize,
+    pub legacy_pending_model_item_count: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ImportedSourceState {
     pub source_modified_at: Option<i64>,
-    pub imported_at: i64,
 }
 
 pub fn has_current_session_been_imported(
@@ -107,25 +117,62 @@ pub(crate) fn record_imported_session(
     )
 }
 
-pub(crate) fn find_existing_session_import(
+pub(crate) fn reserve_session_import(
     codex_home: &Path,
     source_path: &Path,
+    source_content_sha256: &str,
+    candidate_thread_id: ThreadId,
 ) -> io::Result<SessionImportSourceMapping> {
-    let source_path = canonical_source_path(source_path)?;
-    let ledger = load_import_ledger(codex_home)?;
-    let mut matching_records = ledger
-        .records
-        .iter()
-        .filter(|record| record.source_path == source_path);
-    let Some(record) = matching_records.next() else {
-        return Ok(SessionImportSourceMapping::None);
-    };
-    if matching_records.next().is_some() {
+    let Some((source_path, source_modified_at)) =
+        stable_source_version(source_path, source_content_sha256)?
+    else {
         return Ok(SessionImportSourceMapping::Ambiguous);
-    }
-    Ok(SessionImportSourceMapping::Unique {
-        source_content_sha256: record.content_sha256.clone(),
-        imported_thread_id: record.imported_thread_id,
+    };
+
+    with_import_ledger_write(codex_home, |ledger| {
+        let mut matching_records = ledger
+            .records
+            .iter()
+            .filter(|record| record.source_path == source_path);
+        let Some(record) = matching_records.next() else {
+            ledger.records.push(ImportedExternalAgentSessionRecord {
+                source_path,
+                content_sha256: source_content_sha256.to_string(),
+                initial_import_pending: true,
+                pending_content_sha256: None,
+                pending_target_model_item_count: None,
+                imported_thread_id: candidate_thread_id,
+                imported_at: now_unix_seconds(),
+                source_modified_at,
+                connector_names: Vec::new(),
+                title: None,
+            });
+            return Ok((
+                SessionImportSourceMapping::New {
+                    imported_thread_id: candidate_thread_id,
+                },
+                ImportLedgerMutation::Changed,
+            ));
+        };
+        if matching_records.next().is_some() {
+            return Ok((
+                SessionImportSourceMapping::Ambiguous,
+                ImportLedgerMutation::Unchanged,
+            ));
+        }
+        let mapping = if record.initial_import_pending {
+            SessionImportSourceMapping::New {
+                imported_thread_id: record.imported_thread_id,
+            }
+        } else if record.content_sha256 == source_content_sha256 {
+            SessionImportSourceMapping::Current
+        } else {
+            SessionImportSourceMapping::Unique {
+                source_content_sha256: record.content_sha256.clone(),
+                imported_thread_id: record.imported_thread_id,
+            }
+        };
+        Ok((mapping, ImportLedgerMutation::Unchanged))
     })
 }
 
@@ -135,7 +182,7 @@ pub(super) fn begin_existing_session_append(
     thread_id: ThreadId,
     expected_source_content_sha256: &str,
     source_content_sha256: &str,
-    target_model_item_count: usize,
+    position: ExistingSessionAppendPosition,
 ) -> io::Result<Option<usize>> {
     if expected_source_content_sha256 == source_content_sha256 {
         return Ok(None);
@@ -162,15 +209,31 @@ pub(super) fn begin_existing_session_append(
         {
             return Ok((None, ImportLedgerMutation::Unchanged));
         }
-        if record.pending_content_sha256.as_deref() == Some(source_content_sha256) {
-            return Ok((
-                record.pending_target_model_item_count,
-                ImportLedgerMutation::Unchanged,
-            ));
+        if record.pending_content_sha256.is_some() {
+            let Some(append_base_model_item_count) = record
+                .pending_target_model_item_count
+                .or(position.legacy_pending_model_item_count)
+            else {
+                return Ok((None, ImportLedgerMutation::Unchanged));
+            };
+            let mutation = if record.pending_content_sha256.as_deref()
+                != Some(source_content_sha256)
+                || record.pending_target_model_item_count != Some(append_base_model_item_count)
+            {
+                record.pending_content_sha256 = Some(source_content_sha256.to_string());
+                record.pending_target_model_item_count = Some(append_base_model_item_count);
+                ImportLedgerMutation::Changed
+            } else {
+                ImportLedgerMutation::Unchanged
+            };
+            return Ok((Some(append_base_model_item_count), mutation));
         }
         record.pending_content_sha256 = Some(source_content_sha256.to_string());
-        record.pending_target_model_item_count = Some(target_model_item_count);
-        Ok((Some(target_model_item_count), ImportLedgerMutation::Changed))
+        record.pending_target_model_item_count = Some(position.current_model_item_count);
+        Ok((
+            Some(position.current_model_item_count),
+            ImportLedgerMutation::Changed,
+        ))
     })
 }
 
@@ -225,9 +288,31 @@ pub fn record_completed_session_imports(
     with_import_ledger_write(codex_home, move |ledger| {
         let imported_at = now_unix_seconds();
         for import in imports {
-            let source_modified_at = session_modified_at(&import.source_path).ok().flatten();
+            let source_modified_at =
+                stable_source_version(&import.source_path, &import.source_content_sha256)
+                    .ok()
+                    .flatten()
+                    .and_then(|(_, source_modified_at)| source_modified_at);
             if let Some(index) = ledger.records.iter().rposition(|record| {
                 record.source_path == import.source_path
+                    && record.initial_import_pending
+                    && record.imported_thread_id == import.imported_thread_id
+            }) {
+                let mut record = ledger.records.remove(index);
+                record.content_sha256 = import.source_content_sha256;
+                record.initial_import_pending = false;
+                record.pending_content_sha256 = None;
+                record.pending_target_model_item_count = None;
+                record.imported_at = imported_at;
+                record.source_modified_at = source_modified_at;
+                append_connector_names(&mut record.connector_names, import.connector_names);
+                record.title = import.title;
+                ledger.records.push(record);
+                continue;
+            }
+            if let Some(index) = ledger.records.iter().rposition(|record| {
+                record.source_path == import.source_path
+                    && !record.initial_import_pending
                     && record.content_sha256 == import.source_content_sha256
             }) {
                 let mut record = ledger.records.remove(index);
@@ -246,6 +331,7 @@ pub fn record_completed_session_imports(
             ledger.records.push(ImportedExternalAgentSessionRecord {
                 source_path: import.source_path,
                 content_sha256: import.source_content_sha256,
+                initial_import_pending: false,
                 pending_content_sha256: None,
                 pending_target_model_item_count: None,
                 imported_thread_id: import.imported_thread_id,
@@ -371,11 +457,13 @@ impl ImportedExternalAgentSessionLedger {
     pub(crate) fn source_states(&self) -> HashMap<&Path, ImportedSourceState> {
         let mut states = HashMap::new();
         for record in &self.records {
+            if record.initial_import_pending {
+                continue;
+            }
             states.insert(
                 record.source_path.as_path(),
                 ImportedSourceState {
                     source_modified_at: record.source_modified_at,
-                    imported_at: record.imported_at,
                 },
             );
         }
@@ -396,7 +484,9 @@ impl ImportedExternalAgentSessionLedger {
         }
         let content_sha256 = session_content_sha256(&source_path)?;
         Ok(self.records.iter().any(|record| {
-            record.source_path == source_path && record.content_sha256 == content_sha256
+            record.source_path == source_path
+                && !record.initial_import_pending
+                && record.content_sha256 == content_sha256
         }))
     }
 
@@ -415,7 +505,9 @@ impl ImportedExternalAgentSessionLedger {
         }
         let content_sha256 = session_content_sha256(&source_path)?;
         let Some(index) = self.records.iter().rposition(|record| {
-            record.source_path == source_path && record.content_sha256 == content_sha256
+            record.source_path == source_path
+                && !record.initial_import_pending
+                && record.content_sha256 == content_sha256
         }) else {
             return Ok(false);
         };

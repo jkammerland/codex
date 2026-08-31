@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::export::EXTERNAL_SESSION_IMPORTED_MARKER;
+use super::export::bounded_external_response_item;
+use super::ledger::ExistingSessionAppendPosition;
 use super::ledger::begin_existing_session_append;
 use super::ledger::checkpoint_existing_session_import;
 use codex_core::ThreadManager;
@@ -16,6 +18,8 @@ use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::sync::Semaphore;
 
 /// A changed external session and the existing native thread it may extend.
@@ -77,6 +81,7 @@ pub async fn append_existing_session(
     else {
         return false;
     };
+    let legacy_pending_model_item_count = legacy_import_base_model_item_count(&history.items);
     if plan_existing_session_append(source_items, &history.items).is_none() {
         return false;
     }
@@ -92,7 +97,10 @@ pub async fn append_existing_session(
             thread_id,
             &expected_hash,
             &source_hash,
-            target_model_item_count,
+            ExistingSessionAppendPosition {
+                current_model_item_count: target_model_item_count,
+                legacy_pending_model_item_count,
+            },
         )
     })
     .await
@@ -271,7 +279,7 @@ fn plan_existing_session_append_from_base(
         || history
             .iter()
             .zip(&source)
-            .any(|(history, source)| history != &source.response_item)
+            .any(|(history, source)| !model_items_match(history, &source.response_item))
     {
         return None;
     }
@@ -287,16 +295,11 @@ fn plan_existing_session_append_from_base(
         .cloned()
         .collect::<Vec<_>>();
     let expected_persisted_model_items = history.len().saturating_sub(append_base_model_item_count);
-    let persisted_prefix_len = (0..=transaction.len()).rev().find(|&prefix_len| {
-        if prefix_len > history_items.len()
-            || projected_model_item_count(&transaction[..prefix_len])
-                != expected_persisted_model_items
-        {
-            return false;
-        }
-        let history_suffix = &history_items[history_items.len() - prefix_len..];
-        rollout_items_match(history_suffix, &transaction[..prefix_len]).unwrap_or(false)
-    })?;
+    let persisted_prefix_len = matching_transaction_prefix_len(
+        &transaction,
+        history_items,
+        expected_persisted_model_items,
+    )?;
 
     if persisted_prefix_len == transaction.len() {
         Some(ExistingSessionAppendPlan::AlreadyComplete)
@@ -307,12 +310,66 @@ fn plan_existing_session_append_from_base(
     }
 }
 
-fn projected_model_item_count(items: &[RolloutItem]) -> usize {
+fn matching_transaction_prefix_len(
+    transaction: &[RolloutItem],
+    history_items: &[RolloutItem],
+    expected_model_item_count: usize,
+) -> Option<usize> {
+    let mut projected_counts = Vec::with_capacity(transaction.len().saturating_add(1));
+    projected_counts.push(0usize);
     let mut projection = RolloutModelResponseProjection::default();
-    items
-        .iter()
-        .map(|item| projection.project(item).len())
-        .sum()
+    let mut fingerprints = Vec::with_capacity(transaction.len());
+    for item in transaction {
+        projected_counts.push(
+            projected_counts
+                .last()
+                .copied()?
+                .saturating_add(projection.project(item).len()),
+        );
+        fingerprints.push(rollout_item_fingerprint(item)?);
+    }
+
+    let mut failure = vec![0usize; fingerprints.len()];
+    for index in 1..fingerprints.len() {
+        let mut prefix_len = failure[index - 1];
+        while prefix_len > 0 && fingerprints[index] != fingerprints[prefix_len] {
+            prefix_len = failure[prefix_len - 1];
+        }
+        if fingerprints[index] == fingerprints[prefix_len] {
+            prefix_len += 1;
+        }
+        failure[index] = prefix_len;
+    }
+
+    let mut matched = 0usize;
+    for item in history_items {
+        let fingerprint = rollout_item_fingerprint(item)?;
+        while matched > 0 && (matched == fingerprints.len() || fingerprint != fingerprints[matched])
+        {
+            matched = failure[matched - 1];
+        }
+        if matched < fingerprints.len() && fingerprint == fingerprints[matched] {
+            matched += 1;
+        }
+    }
+
+    loop {
+        if projected_counts.get(matched).copied() == Some(expected_model_item_count) {
+            let history_suffix = &history_items[history_items.len().saturating_sub(matched)..];
+            if rollout_items_match(history_suffix, &transaction[..matched])? {
+                return Some(matched);
+            }
+        }
+        if matched == 0 {
+            return None;
+        }
+        matched = failure[matched - 1];
+    }
+}
+
+fn rollout_item_fingerprint(item: &RolloutItem) -> Option<[u8; 32]> {
+    let serialized = serde_json::to_vec(item).ok()?;
+    Some(Sha256::digest(serialized).into())
 }
 
 fn rollout_items_match(left: &[RolloutItem], right: &[RolloutItem]) -> Option<bool> {
@@ -343,7 +400,7 @@ fn plan_append(
         || history
             .iter()
             .zip(&source)
-            .any(|(history, source)| history != &source.response_item)
+            .any(|(history, source)| !model_items_match(history, &source.response_item))
     {
         return None;
     }
@@ -376,7 +433,14 @@ fn model_transcripts_match(source_items: &[RolloutItem], history_items: &[Rollou
         && history
             .iter()
             .zip(&source)
-            .all(|(history, source)| history == &source.response_item)
+            .all(|(history, source)| model_items_match(history, &source.response_item))
+}
+
+fn model_items_match(history: &ResponseItem, source: &ResponseItem) -> bool {
+    history == source
+        || bounded_external_response_item(history)
+            .as_ref()
+            .is_some_and(|bounded_history| bounded_history == source)
 }
 
 fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem>> {
@@ -488,6 +552,18 @@ fn is_import_marker(item: &RolloutItem) -> bool {
         RolloutItem::EventMsg(EventMsg::AgentMessage(event))
             if event.message == EXTERNAL_SESSION_IMPORTED_MARKER
     )
+}
+
+fn legacy_import_base_model_item_count(history_items: &[RolloutItem]) -> Option<usize> {
+    let mut marker_positions = history_items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| is_import_marker(item).then_some(index));
+    let marker_position = marker_positions.next()?;
+    if marker_positions.next().is_some() {
+        return None;
+    }
+    history_model_items(&history_items[..marker_position]).map(|items| items.len())
 }
 
 fn persistence_metadata(

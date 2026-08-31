@@ -283,12 +283,13 @@ impl ExternalAgentSessionImporter {
             session,
         } = pending_import;
         match target {
-            SessionImportTarget::New => self
+            SessionImportTarget::New { thread_id } => self
                 .create_session_import(
                     source_path,
                     source_content_sha256,
                     attributed_mcp_server_ids,
                     session,
+                    thread_id,
                 )
                 .await
                 .map(SessionImportOutcome::Created)
@@ -329,6 +330,7 @@ impl ExternalAgentSessionImporter {
         source_content_sha256: String,
         attributed_mcp_server_ids: BTreeSet<String>,
         session: ImportedExternalAgentSession,
+        imported_thread_id: ThreadId,
     ) -> Result<CompletedSessionImport, SessionImportFailure> {
         let connector_attribution = source_path
             .file_stem()
@@ -341,15 +343,14 @@ impl ExternalAgentSessionImporter {
             });
         let cwd = session.cwd.clone();
         let title = session.title.clone();
-        let imported_thread_id =
-            self.persist_session(session)
-                .await
-                .map_err(|failure| SessionImportFailure {
-                    source_path: source_path.clone(),
-                    message: failure.message,
-                    stage: "session_persist",
-                    sub_error_type: failure.sub_error_type,
-                })?;
+        self.persist_session(session, imported_thread_id)
+            .await
+            .map_err(|failure| SessionImportFailure {
+                source_path: source_path.clone(),
+                message: failure.message,
+                stage: "session_persist",
+                sub_error_type: failure.sub_error_type,
+            })?;
         Ok(CompletedSessionImport {
             cwd,
             import: CompletedExternalAgentSessionImport {
@@ -390,6 +391,7 @@ impl ExternalAgentSessionImporter {
     async fn persist_session(
         &self,
         session: ImportedExternalAgentSession,
+        thread_id: ThreadId,
     ) -> Result<ThreadId, SessionImportStepFailure> {
         let ImportedExternalAgentSession {
             cwd,
@@ -444,7 +446,6 @@ impl ExternalAgentSessionImporter {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
-        let thread_id = ThreadId::new();
         let source = self.thread_manager.session_source();
         let cwd = config.cwd.to_path_buf();
         let model_provider = config.model_provider_id.clone();

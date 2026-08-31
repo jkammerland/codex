@@ -7,6 +7,7 @@ use super::checkpoint_existing_session_import;
 use super::read_imported_connector_candidates;
 use super::record_completed_session_imports;
 use super::record_detected_session_connectors;
+use super::reserve_session_import;
 use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 use sha2::Digest;
@@ -188,7 +189,10 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
                 candidate_thread_id,
                 expected_hash,
                 candidate_hash,
-                1,
+                super::ExistingSessionAppendPosition {
+                    current_model_item_count: 1,
+                    legacy_pending_model_item_count: Some(1),
+                },
             )
             .expect("rejected checkpoint")
             .is_none()
@@ -213,7 +217,10 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
             thread_id,
             &old_hash,
             &new_hash,
-            3,
+            super::ExistingSessionAppendPosition {
+                current_model_item_count: 3,
+                legacy_pending_model_item_count: Some(3),
+            },
         )
         .expect("begin append"),
         Some(3)
@@ -241,7 +248,10 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
             thread_id,
             &old_hash,
             &new_hash,
-            9,
+            super::ExistingSessionAppendPosition {
+                current_model_item_count: 9,
+                legacy_pending_model_item_count: Some(9),
+            },
         )
         .expect("resume pending append"),
         Some(3)
@@ -267,6 +277,7 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
         &super::ImportedExternalAgentSessionRecord {
             source_path: source_path.clone(),
             content_sha256: new_hash,
+            initial_import_pending: false,
             pending_content_sha256: None,
             pending_target_model_item_count: None,
             imported_thread_id: thread_id,
@@ -275,6 +286,192 @@ fn append_checkpoint_is_two_phase_compare_and_swap_and_preserves_record_metadata
             connector_names: vec!["Gmail".to_string()],
             title: Some("Original title".to_string()),
         }
+    );
+}
+
+#[test]
+fn predecessor_pending_append_recovers_missing_model_item_count() {
+    let root = TempDir::new().expect("tempdir");
+    let codex_home = root.path().join("codex-home");
+    let source_path = root.path().join("session.jsonl");
+    std::fs::write(&source_path, "old").expect("initial source");
+    let source_path = std::fs::canonicalize(source_path).expect("canonical source");
+    let thread_id = ThreadId::new();
+    let old_hash = format!("{:x}", Sha256::digest("old"));
+    let new_hash = format!("{:x}", Sha256::digest("new"));
+    record_completed_session_imports(
+        &codex_home,
+        vec![CompletedExternalAgentSessionImport {
+            source_path: source_path.clone(),
+            source_content_sha256: old_hash.clone(),
+            imported_thread_id: thread_id,
+            connector_names: Vec::new(),
+            title: None,
+        }],
+    )
+    .expect("record initial import");
+    std::fs::write(&source_path, "new").expect("updated source");
+    let mut predecessor: serde_json::Value =
+        serde_json::from_slice(&ledger_bytes(&codex_home)).expect("ledger JSON");
+    predecessor["records"][0]["pending_content_sha256"] =
+        serde_json::Value::String(new_hash.clone());
+    predecessor["records"][0]
+        .as_object_mut()
+        .expect("ledger record")
+        .remove("pending_target_model_item_count");
+    std::fs::write(
+        super::import_ledger_path(&codex_home),
+        serde_json::to_vec_pretty(&predecessor).expect("serialize predecessor ledger"),
+    )
+    .expect("write predecessor ledger");
+
+    assert_eq!(
+        begin_existing_session_append(
+            &codex_home,
+            &source_path,
+            thread_id,
+            &old_hash,
+            &new_hash,
+            super::ExistingSessionAppendPosition {
+                current_model_item_count: 2,
+                legacy_pending_model_item_count: Some(1),
+            },
+        )
+        .expect("resume predecessor append"),
+        Some(1)
+    );
+    let ledger = super::load_import_ledger(&codex_home).expect("upgraded ledger");
+    assert_eq!(ledger.records[0].pending_target_model_item_count, Some(1));
+}
+
+#[test]
+fn newer_source_preserves_the_pending_transaction_base() {
+    let root = TempDir::new().expect("tempdir");
+    let codex_home = root.path().join("codex-home");
+    let source_path = root.path().join("session.jsonl");
+    std::fs::write(&source_path, "v1").expect("initial source");
+    let source_path = std::fs::canonicalize(source_path).expect("canonical source");
+    let thread_id = ThreadId::new();
+    let hashes = ["v1", "v2", "v3"].map(|value| format!("{:x}", Sha256::digest(value)));
+    record_completed_session_imports(
+        &codex_home,
+        vec![CompletedExternalAgentSessionImport {
+            source_path: source_path.clone(),
+            source_content_sha256: hashes[0].clone(),
+            imported_thread_id: thread_id,
+            connector_names: Vec::new(),
+            title: None,
+        }],
+    )
+    .expect("record initial import");
+    std::fs::write(&source_path, "v2").expect("second source");
+    assert_eq!(
+        begin_existing_session_append(
+            &codex_home,
+            &source_path,
+            thread_id,
+            &hashes[0],
+            &hashes[1],
+            super::ExistingSessionAppendPosition {
+                current_model_item_count: 3,
+                legacy_pending_model_item_count: Some(3),
+            },
+        )
+        .expect("begin second source"),
+        Some(3)
+    );
+
+    std::fs::write(&source_path, "v3").expect("third source");
+    assert_eq!(
+        begin_existing_session_append(
+            &codex_home,
+            &source_path,
+            thread_id,
+            &hashes[0],
+            &hashes[2],
+            super::ExistingSessionAppendPosition {
+                current_model_item_count: 4,
+                legacy_pending_model_item_count: Some(3),
+            },
+        )
+        .expect("advance pending source"),
+        Some(3)
+    );
+    let ledger = super::load_import_ledger(&codex_home).expect("pending ledger");
+    assert_eq!(
+        (
+            ledger.records[0].pending_content_sha256.as_deref(),
+            ledger.records[0].pending_target_model_item_count,
+        ),
+        (Some(hashes[2].as_str()), Some(3))
+    );
+}
+
+#[test]
+fn concurrent_first_imports_share_one_reserved_thread() {
+    let root = TempDir::new().expect("tempdir");
+    let codex_home = root.path().join("codex-home");
+    let source_path = root.path().join("session.jsonl");
+    std::fs::write(&source_path, "source").expect("source");
+    let source_path = std::fs::canonicalize(source_path).expect("canonical source");
+    let source_hash = format!("{:x}", Sha256::digest("source"));
+    let first_candidate = ThreadId::new();
+    let second_candidate = ThreadId::new();
+
+    let first = reserve_session_import(&codex_home, &source_path, &source_hash, first_candidate)
+        .expect("first reservation");
+    let second = reserve_session_import(&codex_home, &source_path, &source_hash, second_candidate)
+        .expect("second reservation");
+
+    assert_eq!(
+        (first, second),
+        (
+            super::SessionImportSourceMapping::New {
+                imported_thread_id: first_candidate,
+            },
+            super::SessionImportSourceMapping::New {
+                imported_thread_id: first_candidate,
+            },
+        )
+    );
+    let ledger = super::load_import_ledger(&codex_home).expect("reserved ledger");
+    assert_eq!(ledger.records.len(), 1);
+    assert!(ledger.records[0].initial_import_pending);
+    assert!(
+        !ledger
+            .contains_current_source(&source_path)
+            .expect("reservation is not completion")
+    );
+}
+
+#[test]
+fn completion_does_not_pair_an_old_hash_with_a_new_source_mtime() {
+    let root = TempDir::new().expect("tempdir");
+    let codex_home = root.path().join("codex-home");
+    let source_path = root.path().join("session.jsonl");
+    std::fs::write(&source_path, "old").expect("initial source");
+    let source_path = std::fs::canonicalize(source_path).expect("canonical source");
+    let old_hash = format!("{:x}", Sha256::digest("old"));
+    std::fs::write(&source_path, "new").expect("updated source");
+
+    record_completed_session_imports(
+        &codex_home,
+        vec![CompletedExternalAgentSessionImport {
+            source_path: source_path.clone(),
+            source_content_sha256: old_hash,
+            imported_thread_id: ThreadId::new(),
+            connector_names: Vec::new(),
+            title: None,
+        }],
+    )
+    .expect("record raced completion");
+
+    let ledger = super::load_import_ledger(&codex_home).expect("ledger");
+    assert_eq!(ledger.records[0].source_modified_at, None);
+    assert!(
+        !ledger
+            .contains_current_source(&source_path)
+            .expect("changed source must remain detectable")
     );
 }
 

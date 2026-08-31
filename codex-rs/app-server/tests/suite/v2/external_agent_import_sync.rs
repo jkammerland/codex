@@ -289,6 +289,68 @@ async fn concurrent_changed_sessions_checkpoint_without_lost_update() -> Result<
 }
 
 #[tokio::test]
+async fn concurrent_first_imports_across_app_servers_share_one_thread() -> Result<()> {
+    let mut fixture = ImportFixture::new().await?;
+    let mut second_app_server = start_app_server(fixture._codex_home.path()).await?;
+    let first_detected = fixture.detect().await?;
+    let second_detect_request = second_app_server
+        .send_raw_request(
+            "externalAgentConfig/detect",
+            Some(json!({ "includeHome": true })),
+        )
+        .await?;
+    let second_detected: ExternalAgentConfigDetectResponse = timeout(
+        TIMEOUT,
+        second_app_server.read_response(second_detect_request),
+    )
+    .await??;
+    assert_eq!(first_detected.items.len(), 1);
+    assert_eq!(second_detected.items.len(), 1);
+
+    let first_request = fixture
+        .app_server
+        .send_raw_request(
+            "externalAgentConfig/import",
+            Some(json!({ "migrationItems": first_detected.items })),
+        )
+        .await?;
+    let second_request = second_app_server
+        .send_raw_request(
+            "externalAgentConfig/import",
+            Some(json!({ "migrationItems": second_detected.items })),
+        )
+        .await?;
+    let _: ExternalAgentConfigImportResponse =
+        timeout(TIMEOUT, fixture.app_server.read_response(first_request)).await??;
+    let _: ExternalAgentConfigImportResponse =
+        timeout(TIMEOUT, second_app_server.read_response(second_request)).await??;
+    let _: ExternalAgentConfigImportCompletedNotification = timeout(
+        TIMEOUT,
+        fixture
+            .app_server
+            .read_notification("externalAgentConfig/import/completed"),
+    )
+    .await??;
+    let _: ExternalAgentConfigImportCompletedNotification = timeout(
+        TIMEOUT,
+        second_app_server.read_notification("externalAgentConfig/import/completed"),
+    )
+    .await??;
+
+    assert_eq!(fixture.thread_count().await?, 1);
+    let ledger: Value = serde_json::from_slice(&std::fs::read(fixture.ledger_path())?)?;
+    assert_eq!(
+        ledger["records"]
+            .as_array()
+            .context("ledger records")?
+            .len(),
+        1
+    );
+    timeout(TIMEOUT, second_app_server.shutdown_gracefully()).await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn active_target_is_deferred_without_checkpoint() -> Result<()> {
     let mut fixture = ImportFixture::new().await?;
     let original = fixture.import_one().await?;

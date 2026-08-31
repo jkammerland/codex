@@ -50,9 +50,7 @@ pub(super) fn detect_recent_sessions(
             continue;
         };
         if let Some(state) = source_states.get(source_path.as_path())
-            && (state.source_modified_at == Some(modified_at_nanos)
-                || state.source_modified_at.is_none()
-                    && modified_at.as_secs() as i64 <= state.imported_at)
+            && state.source_modified_at == Some(modified_at_nanos)
         {
             continue;
         }

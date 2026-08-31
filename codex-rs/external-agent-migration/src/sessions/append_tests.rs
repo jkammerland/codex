@@ -92,6 +92,118 @@ fn interrupted_append_recovers_the_raw_tail_after_the_model_transcript_is_comple
 }
 
 #[test]
+fn interrupted_append_keeps_its_raw_tail_when_the_source_advances() {
+    let history = rollout(&[(MessageRole::User, "first request")]);
+    let second_source = rollout(&[
+        (MessageRole::User, "first request"),
+        (MessageRole::Assistant, "late answer"),
+    ]);
+    let append_base_model_item_count = history_model_items(&history)
+        .expect("history model items")
+        .len();
+    let ExistingSessionAppendPlan::Append(transaction) = plan_existing_session_append_from_base(
+        &second_source,
+        &history,
+        append_base_model_item_count,
+    )
+    .expect("initial append") else {
+        panic!("initial transaction must append");
+    };
+    let response_position = transaction
+        .iter()
+        .rposition(|item| matches!(item, RolloutItem::ResponseItem(_)))
+        .expect("transaction response");
+    let mut interrupted_history = history;
+    interrupted_history.extend_from_slice(&transaction[..=response_position]);
+    let third_source = rollout(&[
+        (MessageRole::User, "first request"),
+        (MessageRole::Assistant, "late answer"),
+        (MessageRole::User, "newer request"),
+    ]);
+
+    let ExistingSessionAppendPlan::Append(remainder) = plan_existing_session_append_from_base(
+        &third_source,
+        &interrupted_history,
+        append_base_model_item_count,
+    )
+    .expect("recover advanced source") else {
+        panic!("older raw tail and newer turn must append");
+    };
+
+    assert!(matches!(
+        remainder.first(),
+        Some(RolloutItem::EventMsg(EventMsg::TokenCount(_)))
+    ));
+    assert_eq!(
+        model_messages(&remainder),
+        vec![(MessageRole::User, "newer request")]
+    );
+    interrupted_history.extend(remainder);
+    assert!(matches!(
+        plan_existing_session_append_from_base(
+            &third_source,
+            &interrupted_history,
+            append_base_model_item_count,
+        ),
+        Some(ExistingSessionAppendPlan::AlreadyComplete)
+    ));
+}
+
+#[test]
+fn pre_cap_oversized_history_can_receive_a_bounded_suffix() {
+    let oversized = "legacy oversized message".repeat(1_000);
+    let mut history = rollout(&[(MessageRole::User, &oversized)]);
+    for item in &mut history {
+        if let RolloutItem::ResponseItem(response) = item
+            && let ResponseItem::Message { content, .. } = &mut response.item
+            && let [ContentItem::InputText { text }] = content.as_mut_slice()
+        {
+            *text = oversized.clone();
+        }
+    }
+    let source = rollout(&[
+        (MessageRole::User, &oversized),
+        (MessageRole::Assistant, "new bounded answer"),
+    ]);
+
+    let suffix = plan_append(&source, &history).expect("legacy prefix should remain compatible");
+
+    assert_eq!(
+        model_messages(&suffix),
+        vec![(MessageRole::Assistant, "new bounded answer")]
+    );
+}
+
+#[test]
+fn large_raw_transaction_prefix_is_recovered_linearly() {
+    let raw_item = RolloutItem::SecurityRiskScore(SecurityRiskScore {
+        scores: BTreeMap::new(),
+        call_id: None,
+        action: None,
+        sampled_at: None,
+    });
+    let transaction = vec![raw_item; 8_192];
+    let mut history = vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
+        codex_protocol::protocol::AgentMessageEvent {
+            message: "baseline".to_string(),
+            phase: None,
+            memory_citation: None,
+            delivery: None,
+        },
+    ))];
+    history.extend_from_slice(&transaction[..6_000]);
+
+    assert_eq!(
+        matching_transaction_prefix_len(
+            &transaction,
+            &history,
+            /*expected_model_item_count*/ 0,
+        ),
+        Some(6_000)
+    );
+}
+
+#[test]
 fn interrupted_append_rejects_a_nontransactional_raw_tail() {
     let history = rollout(&[(MessageRole::User, "first request")]);
     let source = rollout(&[

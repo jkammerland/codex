@@ -90,18 +90,20 @@ pub(super) fn rollout_items_from_messages(messages: Vec<ConversationMessage>) ->
     let mut response_item_bytes = 0i64;
     let mut last_model_visible_tokens = 0i64;
     let mut user_turn_count = 0usize;
-    let completed_at = messages.last().and_then(|message| message.timestamp);
+    let mut current_turn_completed_at = None;
 
     for message in messages {
         let message = bounded_model_message(message);
+        let message_timestamp = message.timestamp;
         match message.role {
             MessageRole::User => {
                 let started_at = message.timestamp;
                 if let Some((turn_id, previous_started_at)) = current_turn.take() {
+                    items.push(token_count_item(last_model_visible_tokens));
                     items.push(turn_complete_item(
                         turn_id,
                         previous_started_at,
-                        /*completed_at*/ None,
+                        current_turn_completed_at,
                     ));
                 }
                 user_turn_count += 1;
@@ -125,6 +127,7 @@ pub(super) fn rollout_items_from_messages(messages: Vec<ConversationMessage>) ->
                     response_item_bytes.saturating_add(message_byte_count(&message));
                 items.push(RolloutItem::ResponseItem(response_item(message).into()));
                 current_turn = Some((turn_id, started_at));
+                current_turn_completed_at = message_timestamp;
             }
             MessageRole::Assistant => {
                 if current_turn.is_none() {
@@ -142,6 +145,7 @@ pub(super) fn rollout_items_from_messages(messages: Vec<ConversationMessage>) ->
                     },
                 )));
                 items.push(RolloutItem::ResponseItem(response_item(message).into()));
+                current_turn_completed_at = message_timestamp;
             }
         }
     }
@@ -149,7 +153,11 @@ pub(super) fn rollout_items_from_messages(messages: Vec<ConversationMessage>) ->
     if let Some((turn_id, started_at)) = current_turn {
         items.push(external_session_imported_marker_item());
         items.push(token_count_item(last_model_visible_tokens));
-        items.push(turn_complete_item(turn_id, started_at, completed_at));
+        items.push(turn_complete_item(
+            turn_id,
+            started_at,
+            current_turn_completed_at,
+        ));
     }
 
     items
@@ -182,37 +190,57 @@ fn response_item(message: ConversationMessage) -> ResponseItem {
 }
 
 fn bounded_model_message(mut message: ConversationMessage) -> ConversationMessage {
-    if serialized_response_item_len(message.role, &message.text) <= MAX_IMPORTED_MODEL_ITEM_BYTES {
+    if message.text.len() <= MAX_IMPORTED_MODEL_ITEM_BYTES
+        && serialized_response_item_len(message.role, &message.text)
+            <= MAX_IMPORTED_MODEL_ITEM_BYTES
+    {
         return message;
     }
 
-    let boundaries = message
-        .text
-        .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(message.text.len()))
-        .collect::<Vec<_>>();
     let mut lower = 0usize;
-    let mut upper = boundaries.len();
-    while lower + 1 < upper {
-        let middle = lower + (upper - lower) / 2;
+    let mut upper = message
+        .text
+        .floor_char_boundary(message.text.len().min(MAX_IMPORTED_MODEL_ITEM_BYTES));
+    while lower < upper {
+        let middle = message
+            .text
+            .ceil_char_boundary(lower.midpoint(upper).saturating_add(1));
         let candidate = format!(
             "{}{}",
-            &message.text[..boundaries[middle]],
+            &message.text[..middle],
             TRUNCATED_EXTERNAL_MESSAGE_MARKER
         );
         if serialized_response_item_len(message.role, &candidate) <= MAX_IMPORTED_MODEL_ITEM_BYTES {
             lower = middle;
         } else {
-            upper = middle;
+            upper = message.text.floor_char_boundary(middle.saturating_sub(1));
         }
     }
     message.text = format!(
         "{}{}",
-        &message.text[..boundaries[lower]],
+        &message.text[..lower],
         TRUNCATED_EXTERNAL_MESSAGE_MARKER
     );
     message
+}
+
+pub(super) fn bounded_external_response_item(item: &ResponseItem) -> Option<ResponseItem> {
+    let mut bounded = item.clone();
+    let ResponseItem::Message { role, content, .. } = &mut bounded else {
+        return None;
+    };
+    let (message_role, text) = match (role.as_str(), content.as_mut_slice()) {
+        ("user", [ContentItem::InputText { text }]) => (MessageRole::User, text),
+        ("assistant", [ContentItem::OutputText { text }]) => (MessageRole::Assistant, text),
+        _ => return None,
+    };
+    let message = bounded_model_message(ConversationMessage {
+        role: message_role,
+        text: std::mem::take(text),
+        timestamp: None,
+    });
+    *text = message.text;
+    Some(bounded)
 }
 
 fn serialized_response_item_len(role: MessageRole, text: &str) -> usize {

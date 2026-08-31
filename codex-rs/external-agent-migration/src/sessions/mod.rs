@@ -86,7 +86,9 @@ pub struct ImportedExternalAgentSession {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionImportTarget {
-    New,
+    New {
+        thread_id: ThreadId,
+    },
     Existing {
         thread_id: ThreadId,
         expected_source_content_sha256: String,
@@ -122,8 +124,18 @@ pub fn prepare_validated_session_import_with_metadata_mode(
     else {
         return Ok(None);
     };
-    pending.target = match ledger::find_existing_session_import(codex_home, &pending.source_path)? {
-        ledger::SessionImportSourceMapping::None => SessionImportTarget::New,
+    pending.target = match ledger::reserve_session_import(
+        codex_home,
+        &pending.source_path,
+        &pending.source_content_sha256,
+        ThreadId::new(),
+    )? {
+        ledger::SessionImportSourceMapping::New { imported_thread_id } => {
+            SessionImportTarget::New {
+                thread_id: imported_thread_id,
+            }
+        }
+        ledger::SessionImportSourceMapping::Current => return Ok(None),
         ledger::SessionImportSourceMapping::Unique {
             source_content_sha256,
             imported_thread_id,
@@ -162,7 +174,9 @@ fn load_importable_session(
         .then_some(PendingSessionImport {
             source_path,
             source_content_sha256,
-            target: SessionImportTarget::New,
+            target: SessionImportTarget::New {
+                thread_id: ThreadId::new(),
+            },
             attributed_mcp_server_ids,
             session: imported_session,
         }))
@@ -319,7 +333,7 @@ mod tests {
             pending.source_content_sha256,
             format!("{:x}", Sha256::digest(contents))
         );
-        assert_eq!(pending.target, SessionImportTarget::New);
+        assert!(matches!(pending.target, SessionImportTarget::New { .. }));
     }
 
     #[test]

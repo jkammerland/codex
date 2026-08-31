@@ -104,6 +104,28 @@ impl Session {
         }
     }
 
+    /// Records input only when its originating turn is still the active turn.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the active turn check and history update must remain atomic"
+    )]
+    pub(crate) async fn record_conversation_items_if_running_for_turn(
+        &self,
+        turn_context: &TurnContext,
+        input: Vec<ResponseItem>,
+    ) -> Result<(), Vec<ResponseItem>> {
+        let active = self.active_turn.lock().await;
+        let is_originating_turn_active = active
+            .as_ref()
+            .and_then(|active_turn| active_turn.task.as_ref())
+            .is_some_and(|task| task.turn_context.sub_id == turn_context.sub_id);
+        if !is_originating_turn_active {
+            return Err(input);
+        }
+        self.record_conversation_items(turn_context, &input).await;
+        Ok(())
+    }
+
     /// Preserves trusted client provenance while items wait for an active turn.
     #[expect(
         clippy::await_holding_invalid_type,

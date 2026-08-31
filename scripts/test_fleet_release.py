@@ -68,6 +68,8 @@ class FleetReleaseTest(unittest.TestCase):
         installer = (Path(__file__).parent / "install-user-fork.sh").read_text()
         self.assertIn("SELECTED_CODEX_HASH", installer)
         self.assertIn("selected Codex binaries changed during the build", installer)
+        self.assertIn('UPSTREAM_VERSION=$(printf \'%s\\n\' "$CURRENT_VERSION"', installer)
+        self.assertNotIn('UPSTREAM_VERSION=$(printf \'%s\\n\' "$BUILT_VERSION"', installer)
 
     def test_manifest_rejects_relative_host_paths(self) -> None:
         raw = json.loads(fleet_release.DEFAULT_MANIFEST.read_text())
@@ -105,6 +107,12 @@ class FleetReleaseTest(unittest.TestCase):
             "\n".join(
                 [
                     f"cliVersion={self.release.cli_version}",
+                    "cliSha256=cli-hash",
+                    "codeModeHostSha256=host-hash",
+                    f"receiptForkCommit={self.release.fork_commit}",
+                    f"receiptCliVersion={self.release.cli_version}",
+                    "receiptCliSha256=cli-hash",
+                    "receiptCodeModeHostSha256=host-hash",
                     f"serverCommit={self.release.server_commit}",
                     "serverStatus=",
                     f"sourceCommit={self.release.fork_commit}",
@@ -117,6 +125,10 @@ class FleetReleaseTest(unittest.TestCase):
         values["cliVersion"] = "codex-cli 0.147.0"
         drifted = fleet_release.Status(host, values)
         self.assertEqual(drifted.drift(self.release), ("cliVersion",))
+        values["cliVersion"] = self.release.cli_version
+        values["cliSha256"] = "different-cli-hash"
+        hash_drifted = fleet_release.Status(host, values)
+        self.assertEqual(hash_drifted.drift(self.release), ("cliSha256",))
 
     def test_activation_scripts_preserve_rollback_and_use_atomic_replacement(
         self,
@@ -282,6 +294,20 @@ class FleetReleaseTest(unittest.TestCase):
             self.assertEqual(target_cli.read_bytes(), active_cli)
             self.assertEqual(target_host.read_bytes(), active_host)
             write_build_receipt(host, release)
+            Path(f"{target_host}.test.release-previous").unlink()
+            incomplete_rollback = run(
+                ["sh", "-c", fleet_release.activation_script(host, release)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(incomplete_rollback.returncode, 0)
+            self.assertIn(
+                "Release rollback pair is incomplete", incomplete_rollback.stderr
+            )
+            self.assertEqual(target_cli.read_bytes(), active_cli)
+            self.assertEqual(target_host.read_bytes(), active_host)
+            Path(f"{target_host}.test.release-previous").write_bytes(original_host)
             (canonical / "untracked-internal").write_text("must block activation\n")
             source_cli.write_text(source_cli.read_text() + "# distinct candidate\n")
             dirty_source = run(

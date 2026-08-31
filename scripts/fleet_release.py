@@ -116,12 +116,22 @@ class Status:
             "cliVersion": release.cli_version,
             "serverCommit": release.server_commit,
             "sourceCommit": release.fork_commit,
+            "receiptForkCommit": release.fork_commit,
+            "receiptCliVersion": release.cli_version,
         }
         drift = [
             key for key, value in expected.items() if self.values.get(key) != value
         ]
         drift.extend(
             key for key in ("serverStatus", "sourceStatus") if self.values.get(key, "")
+        )
+        drift.extend(
+            active_key
+            for active_key, receipt_key in (
+                ("cliSha256", "receiptCliSha256"),
+                ("codeModeHostSha256", "receiptCodeModeHostSha256"),
+            )
+            if self.values.get(active_key) != self.values.get(receipt_key)
         )
         return tuple(drift)
 
@@ -284,7 +294,20 @@ function GitValue($Path, [string[]]$Arguments) {{
   if ($LASTEXITCODE -ne 0) {{ throw "git failed in $Path: $($Arguments -join ' ')" }}
   return $value
 }}
+function HashValue($Path) {{
+  if (-not (Test-Path -LiteralPath $Path)) {{ return 'missing' }}
+  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}}
+function ReceiptValue($Path, $Name) {{
+  if (-not (Test-Path -LiteralPath $Path)) {{ return 'missing' }}
+  $prefix = "$Name="
+  $matches = @(Get-Content -LiteralPath $Path | Where-Object {{ $_.StartsWith($prefix, [StringComparison]::Ordinal) }})
+  if ($matches.Count -ne 1) {{ return 'invalid' }}
+  return $matches[0].Substring($prefix.Length)
+}}
 $cli = {quote_ps(host.cli_binary)}
+$codeModeHost = {quote_ps(host.code_mode_host_binary)}
+$receipt = {quote_ps(host.build_receipt())}
 $server = {quote_ps(host.server_root)}
 $source = {quote_ps(host.source_root)}
 if (Test-Path -LiteralPath $cli) {{
@@ -292,6 +315,12 @@ if (Test-Path -LiteralPath $cli) {{
   if ($LASTEXITCODE -ne 0) {{ throw 'Codex version check failed' }}
 }} else {{ $cliVersion = 'missing' }}
 Field 'cliVersion' $cliVersion
+Field 'cliSha256' (HashValue $cli)
+Field 'codeModeHostSha256' (HashValue $codeModeHost)
+Field 'receiptForkCommit' (ReceiptValue $receipt 'forkCommit')
+Field 'receiptCliVersion' (ReceiptValue $receipt 'cliVersion')
+Field 'receiptCliSha256' (ReceiptValue $receipt 'cliSha256')
+Field 'receiptCodeModeHostSha256' (ReceiptValue $receipt 'hostSha256')
 Field 'serverCommit' (GitValue $server @('rev-parse', 'HEAD'))
 Field 'serverStatus' (GitValue $server @('status', '--porcelain'))
 Field 'sourceCommit' (GitValue $source @('rev-parse', 'HEAD'))
@@ -300,13 +329,23 @@ Field 'sourceStatus' (GitValue $source @('status', '--porcelain'))
     return f"""set -u
 field() {{ printf '%s=%s\\n' "$1" "$2"; }}
 git_value() {{ path=$1; shift; if [ -d "$path/.git" ]; then git -C "$path" "$@" 2>/dev/null; else printf missing; fi; }}
+hash_value() {{ if [ -f "$1" ]; then shasum -a 256 "$1" | awk '{{print $1}}'; else printf missing; fi; }}
+receipt_value() {{ if [ ! -f "$2" ]; then printf missing; return; fi; value=$(awk -v key="$1" 'index($0, key "=") == 1 {{ count++; value=substr($0, length(key) + 2) }} END {{ if (count != 1) exit 1; print value }}' "$2") || {{ printf invalid; return; }}; printf '%s' "$value"; }}
 cli={shlex.quote(host.cli_binary)}
+code_mode_host={shlex.quote(host.code_mode_host_binary)}
+receipt={shlex.quote(host.build_receipt())}
 if [ -x "$cli" ]; then cli_version=$("$cli" --version 2>&1) || exit 1; else cli_version=missing; fi
 server_commit=$(git_value {shlex.quote(host.server_root)} rev-parse HEAD) || exit 1
 server_status=$(git_value {shlex.quote(host.server_root)} status --porcelain) || exit 1
 source_commit=$(git_value {shlex.quote(host.source_root)} rev-parse HEAD) || exit 1
 source_status=$(git_value {shlex.quote(host.source_root)} status --porcelain) || exit 1
 field cliVersion "$cli_version"
+field cliSha256 "$(hash_value "$cli")"
+field codeModeHostSha256 "$(hash_value "$code_mode_host")"
+field receiptForkCommit "$(receipt_value forkCommit "$receipt")"
+field receiptCliVersion "$(receipt_value cliVersion "$receipt")"
+field receiptCliSha256 "$(receipt_value cliSha256 "$receipt")"
+field receiptCodeModeHostSha256 "$(receipt_value hostSha256 "$receipt")"
 field serverCommit "$server_commit"
 field serverStatus "$server_status"
 field sourceCommit "$source_commit"
@@ -317,6 +356,12 @@ field sourceStatus "$source_status"
 def parse_status(output: str) -> dict[str, str]:
     fields = {
         "cliVersion",
+        "cliSha256",
+        "codeModeHostSha256",
+        "receiptForkCommit",
+        "receiptCliVersion",
+        "receiptCliSha256",
+        "receiptCodeModeHostSha256",
         "serverCommit",
         "serverStatus",
         "sourceCommit",
@@ -335,7 +380,7 @@ def host_status(host: Host) -> Status:
     if result.returncode:
         return Status(host, {}, error_message("status", result))
     values = parse_status(result.stdout)
-    if len(values) != 5:
+    if len(values) != 11:
         return Status(host, values, "status output was incomplete")
     return Status(host, values)
 
@@ -620,10 +665,10 @@ if ((Receipt-Value $receipt 'format') -ne 'v1' -or
     (Receipt-Value $receipt 'cliSha256') -ne $sourceCliHash -or
     (Receipt-Value $receipt 'hostSha256') -ne $sourceHostHash) {{ throw 'Build receipt does not match the reviewed binary pair' }}
 $needsActivation = (Hash $targetCli) -ne $sourceCliHash -or (Hash $targetHost) -ne $sourceHostHash
+$backupCliExists = Test-Path -LiteralPath $backupCli
+$backupHostExists = Test-Path -LiteralPath $backupHost
+if ($backupCliExists -ne $backupHostExists) {{ throw 'Release rollback pair is incomplete' }}
 if ($needsActivation) {{
-  $backupCliExists = Test-Path -LiteralPath $backupCli
-  $backupHostExists = Test-Path -LiteralPath $backupHost
-  if ($backupCliExists -ne $backupHostExists) {{ throw 'Release rollback pair is incomplete' }}
   if ($backupCliExists) {{
     if ((Hash $targetCli) -ne (Hash $backupCli) -or (Hash $targetHost) -ne (Hash $backupHost)) {{ throw 'Release rollback pair does not match the active binaries' }}
     Remove-Item -Force -LiteralPath $backupCli, $backupHost
@@ -717,6 +762,7 @@ receipt_version=$(receipt_value cliVersion "$receipt") || {{ echo 'Invalid build
 receipt_cli_hash=$(receipt_value cliSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
 receipt_host_hash=$(receipt_value hostSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
 [ "$receipt_format" = v1 ] && [ "$receipt_commit" = {release.fork_commit} ] && [ "$receipt_version" = {shlex.quote(release.cli_version)} ] && [ "$receipt_cli_hash" = "$source_cli_hash" ] && [ "$receipt_host_hash" = "$source_host_hash" ] || {{ echo 'Build receipt does not match the reviewed binary pair' >&2; exit 1; }}
+[ ! -e "$backup_cli" ] && [ ! -e "$backup_host" ] || {{ [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}; }}
 if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
   if [ -e "$backup_cli" ] || [ -e "$backup_host" ]; then
     [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}

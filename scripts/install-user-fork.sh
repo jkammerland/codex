@@ -221,9 +221,6 @@ if [ "$(sha256sum "$INSTALLED_CODEX" | awk '{print $1}')" != "$SELECTED_CODEX_HA
   exit 1
 fi
 
-UPSTREAM_VERSION=$(printf '%s\n' "$BUILT_VERSION" | sed -E 's/^codex-cli ([^+]+).*/\1/')
-UPSTREAM_BACKUP="$INSTALLED_CODEX.$UPSTREAM_VERSION-upstream"
-UPSTREAM_CODE_MODE_HOST_BACKUP="$INSTALLED_CODE_MODE_HOST.$UPSTREAM_VERSION-upstream"
 RELEASE_NAME=${FORK_MARKER#+}
 PREVIOUS_CODEX="$INSTALLED_CODEX.$RELEASE_NAME-previous"
 PREVIOUS_CODE_MODE_HOST="$INSTALLED_CODE_MODE_HOST.$RELEASE_NAME-previous"
@@ -231,7 +228,11 @@ CURRENT_VERSION=$($INSTALLED_CODEX --version 2>/dev/null || true)
 
 case "$CURRENT_VERSION" in
   *"$FORK_MARKER"*) ;;
-  "codex-cli $UPSTREAM_VERSION")
+  "codex-cli "*+*) ;;
+  "codex-cli "*)
+    UPSTREAM_VERSION=$(printf '%s\n' "$CURRENT_VERSION" | sed -E 's/^codex-cli ([^+]+).*/\1/')
+    UPSTREAM_BACKUP="$INSTALLED_CODEX.$UPSTREAM_VERSION-upstream"
+    UPSTREAM_CODE_MODE_HOST_BACKUP="$INSTALLED_CODE_MODE_HOST.$UPSTREAM_VERSION-upstream"
     if [ ! -e "$UPSTREAM_BACKUP" ]; then
       cp -p -- "$INSTALLED_CODEX" "$UPSTREAM_BACKUP"
     fi

@@ -280,7 +280,7 @@ pub(super) async fn handle_runtime_response(
     wall_time: Duration,
 ) -> Result<FunctionToolOutput, String> {
     let script_status = format_script_status(&response);
-    let live_exec_sessions = match &response {
+    let observed_live_exec_sessions = match &response {
         RuntimeResponse::Yielded { .. } => Vec::new(),
         RuntimeResponse::Terminated { cell_id, .. } | RuntimeResponse::Result { cell_id, .. } => {
             exec.session
@@ -289,6 +289,12 @@ pub(super) async fn handle_runtime_response(
                 .live_exec_sessions_for_cell(cell_id)
         }
     };
+    let live_exec_sessions = exec
+        .session
+        .services
+        .unified_exec_manager
+        .retain_live_process_ids(observed_live_exec_sessions)
+        .await;
 
     match response {
         RuntimeResponse::Yielded { content_items, .. } => {

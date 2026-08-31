@@ -33,6 +33,11 @@ struct ExecWaitArgs {
     terminate: bool,
 }
 
+enum WaitWake {
+    Completed(Result<codex_code_mode::WaitOutcome, String>),
+    Input(Result<(), tokio::sync::watch::error::RecvError>),
+}
+
 fn default_wait_yield_time_ms() -> u64 {
     DEFAULT_WAIT_YIELD_TIME_MS
 }
@@ -131,32 +136,42 @@ impl CodeModeWaitHandler {
                                 true,
                             )
                         } else {
-                            let wait = exec.session.services.code_mode_service.wait(
-                                codex_code_mode::WaitRequest {
-                                    cell_id: cell_id.clone(),
-                                    yield_time_ms,
-                                },
-                            );
-                            tokio::pin!(wait);
-                            tokio::select! {
-                                biased;
-                                result = &mut wait => {
+                            let wake = {
+                                let wait = exec.session.services.code_mode_service.wait(
+                                    codex_code_mode::WaitRequest {
+                                        cell_id: cell_id.clone(),
+                                        yield_time_ms,
+                                    },
+                                );
+                                tokio::pin!(wait);
+                                tokio::select! {
+                                    biased;
+                                    result = &mut wait => WaitWake::Completed(result),
+                                    changed = activity_rx.changed() => WaitWake::Input(changed),
+                                }
+                            };
+                            match wake {
+                                WaitWake::Completed(result) => {
                                     (result.map_err(FunctionCallError::RespondToModel), false)
                                 }
-                                changed = activity_rx.changed() => {
-                                    (match changed {
-                                        Ok(()) => exec.session.services.code_mode_service
-                                            .wait(codex_code_mode::WaitRequest {
-                                                cell_id: cell_id.clone(),
-                                                yield_time_ms: 0,
-                                            })
-                                            .await
-                                            .map_err(FunctionCallError::RespondToModel),
-                                        Err(_) => Err(FunctionCallError::Fatal(
-                                            "code-mode input activity channel closed".to_string(),
-                                        )),
-                                    }, true)
-                                }
+                                WaitWake::Input(Ok(())) => (
+                                    exec.session
+                                        .services
+                                        .code_mode_service
+                                        .wait(codex_code_mode::WaitRequest {
+                                            cell_id: cell_id.clone(),
+                                            yield_time_ms: 0,
+                                        })
+                                        .await
+                                        .map_err(FunctionCallError::RespondToModel),
+                                    true,
+                                ),
+                                WaitWake::Input(Err(_)) => (
+                                    Err(FunctionCallError::Fatal(
+                                        "code-mode input activity channel closed".to_string(),
+                                    )),
+                                    true,
+                                ),
                             }
                         };
                         let observation = observation.inspect_err(|_error| {

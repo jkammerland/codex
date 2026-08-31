@@ -107,6 +107,7 @@ mod mcp_extension_protocol;
 mod mcp_optional_startup_grace;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
+mod mcp_unbounded_waits;
 mod mcp_startup_refresh_http_proxy;
 mod mcp_tool_cache;
 mod mcp_tool_exposure;

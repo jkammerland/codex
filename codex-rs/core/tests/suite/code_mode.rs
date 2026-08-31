@@ -2588,9 +2588,9 @@ text("finished after quiet deadlines");
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "wait for the quiet cell".to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: "wait for the quiet cell".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event_match(&test.codex, |event| match event {
         EventMsg::RawResponseItem(raw) => match &raw.item {

@@ -182,6 +182,10 @@ impl UnifiedExecProcess {
         Arc::clone(&self.output_drained)
     }
 
+    pub(super) fn output_task_abort_handle(&self) -> Option<tokio::task::AbortHandle> {
+        self.output_task.as_ref().map(JoinHandle::abort_handle)
+    }
+
     pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.interaction_lock)
     }

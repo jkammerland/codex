@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
-const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
+pub(super) const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(250);
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 

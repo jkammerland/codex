@@ -153,27 +153,59 @@ async fn streaming_output_drains_late_output_after_exit_before_close() -> anyhow
 }
 
 #[tokio::test]
-async fn streaming_output_waits_for_close_without_a_timer() -> anyhow::Result<()> {
+async fn streaming_output_bounds_a_permanently_inherited_descriptor() -> anyhow::Result<()> {
     let StreamingOutputHarness {
         process,
         stdout_tx,
         exit_tx,
-        ..
+        transcript,
+        context,
+        rx_event,
     } = streaming_output_harness().await?;
-    let output_drained = process.output_drained_notify();
-
-    tokio::time::pause();
-    let drained = tokio::spawn(async move { output_drained.notified().await });
-    tokio::task::yield_now().await;
-    exit_tx.send(0).expect("send exit");
-    tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(
-        !drained.is_finished(),
-        "streaming output must not finish merely because time elapsed"
+    #[allow(deprecated)]
+    let cwd = context.step_context.turn.cwd.clone().into();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        Arc::clone(&context.session),
+        Arc::clone(&context.step_context.turn),
+        context.call_id,
+        vec!["descriptor-proof".to_string()],
+        cwd,
+        /*process_id*/ 124,
+        /*plugin_attribution*/ None,
+        transcript,
+        Instant::now(),
+        /*network_denial_monitor*/ None,
+        /*plugin_metrics_sidecar*/ None,
     );
+
+    tokio::task::yield_now().await;
+    let exited_at = Instant::now();
+    exit_tx.send(0).expect("send exit");
+    tokio::time::sleep(
+        super::super::process_manager::POST_EXIT_CLOSE_WAIT_CAP - Duration::from_millis(25),
+    )
+    .await;
+    assert!(
+        rx_event.try_recv().is_err(),
+        "streaming output must preserve the full post-exit grace"
+    );
+    let event = tokio::time::timeout(Duration::from_secs(2), rx_event.recv())
+        .await
+        .expect("exit watcher should finish after its grace")
+        .expect("command end event");
+    assert!(
+        exited_at.elapsed() >= super::super::process_manager::POST_EXIT_CLOSE_WAIT_CAP,
+        "output collection ended before the post-exit grace"
+    );
+    let EventMsg::ItemCompleted(completed) = event.msg else {
+        panic!("expected ItemCompleted");
+    };
+    let TurnItem::CommandExecution(item) = completed.item else {
+        panic!("expected CommandExecution");
+    };
+    assert_eq!(item.status, CommandExecutionStatus::Completed);
     drop(stdout_tx);
-    drained.await.expect("output drainer should not panic");
-    tokio::time::resume();
 
     Ok(())
 }

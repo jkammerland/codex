@@ -59,6 +59,7 @@ pub(crate) fn start_streaming_output(
 ) {
     let mut receiver = process.output_receiver();
     let output_drained = process.output_drained_notify();
+    let output_task_abort_handle = process.output_task_abort_handle();
     let exit_token = process.cancellation_token();
     let OutputHandles {
         output_closed,
@@ -85,6 +86,7 @@ pub(crate) fn start_streaming_output(
         let output_closed_notified = output_closed_notify.notified();
         tokio::pin!(output_closed_notified);
         let mut process_exited = false;
+        let mut post_exit_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         loop {
             // Register before checking the atomic so a close between the check
@@ -95,13 +97,30 @@ pub(crate) fn start_streaming_output(
             }
 
             tokio::select! {
+                biased;
                 _ = exit_token.cancelled(), if !process_exited => {
                     process_exited = true;
+                    post_exit_sleep = Some(Box::pin(tokio::time::sleep(
+                        super::process_manager::POST_EXIT_CLOSE_WAIT_CAP,
+                    )));
                 }
 
                 _ = &mut output_closed_notified, if process_exited => {
                     output_closed_notified.set(output_closed_notify.notified());
                 }
+
+                _ = async {
+                    if let Some(sleep) = post_exit_sleep.as_mut() {
+                        sleep.as_mut().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if process_exited => {
+                    if let Some(output_task_abort_handle) = output_task_abort_handle.as_ref() {
+                        output_task_abort_handle.abort();
+                    }
+                    break;
+                },
 
                 received = receiver.recv() => {
                     let chunk = match received {

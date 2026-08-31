@@ -7,6 +7,7 @@ use super::ModelContextScanProgress;
 use super::compact_durable_agent_state;
 use crate::CompactedItem;
 use crate::RolloutItem;
+use codex_history::RolloutModelResponseProjection;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::ReasoningSummary;
@@ -530,27 +531,30 @@ fn durable_compaction_keeps_mcp10_delivery_consumed_after_a_conflicting_payload(
 #[test]
 fn durable_compaction_uses_a_suffix_delivery_to_suppress_an_older_payload() {
     let id = ResponseItemId::with_suffix("msg", "suffix-delivered");
-    let compacted = compact_durable_agent_state(
+    let suffix = [durable_claim(
+        &id,
+        "delivered-fingerprint",
+        "suffix-turn",
+        /*delivered*/ true,
+    )];
+    let mut reconstructed = compact_durable_agent_state(
         &[durable_payload(&id, "old-fingerprint", "old body")],
-        &[durable_claim(
-            &id,
-            "delivered-fingerprint",
-            "suffix-turn",
-            /*delivered*/ true,
-        )],
+        &suffix,
     );
+    reconstructed.extend(suffix.clone());
+    let mut projection = RolloutModelResponseProjection::default();
+    let projected = reconstructed
+        .iter()
+        .flat_map(|item| projection.project(item))
+        .map(std::borrow::Cow::into_owned)
+        .collect::<Vec<_>>();
+    let RolloutItem::DurableInterAgentCommunicationClaimed {
+        delivered_response: Some(expected),
+        ..
+    } = &suffix[0]
+    else {
+        unreachable!("delivered claim fixture")
+    };
 
-    assert_rollout_items_eq(
-        &compacted,
-        &[RolloutItem::InterAgentCommunicationMetadata {
-            trigger_turn: false,
-            mail_fingerprint: Some("delivered-fingerprint".to_string()),
-            delivery_id: None,
-            terminal_turn_id: None,
-            terminal_status: None,
-            mail_communication: None,
-            mail_start_options: None,
-            consumed_mail_id: Some(id),
-        }],
-    );
+    assert_eq!(projected, vec![expected.clone()]);
 }

@@ -300,6 +300,46 @@ fn model_response_projection_applies_mcp13_claims_at_the_later_turn_start() {
 }
 
 #[test]
+fn model_response_projection_retains_pre_cap_mcp13_delivery() {
+    let mut communication = InterAgentCommunication::new(
+        codex_protocol::AgentPath::root(),
+        codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "x".repeat(15_000),
+        /*trigger_turn*/ true,
+    );
+    let id = ResponseItemId::with_suffix("msg", "legacy-large-delivery");
+    communication.id = Some(id.clone());
+    let expected = ResponseItemEnvelope::new(communication.to_model_input_item());
+    let items = [
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: id,
+            communication: Some(communication),
+            delivered_response: None,
+            fingerprint: "legacy-fingerprint".to_string(),
+            turn_id: "legacy-turn".to_string(),
+        },
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: "legacy-turn".to_string(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            },
+        )),
+    ];
+    let mut projection = RolloutModelResponseProjection::default();
+    let projected = items
+        .iter()
+        .flat_map(|item| projection.project(item))
+        .map(std::borrow::Cow::into_owned)
+        .collect::<Vec<_>>();
+
+    assert_eq!(projected, vec![expected]);
+}
+
+#[test]
 fn model_response_projection_bounds_malformed_legacy_claim_batches() {
     let mut projection = RolloutModelResponseProjection::default();
     for index in 0..=MAX_LEGACY_CLAIMS_PER_TURN {
@@ -406,7 +446,7 @@ fn model_response_projection_rejects_oversized_or_mismatched_legacy_claims() {
         codex_protocol::AgentPath::root(),
         codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
         Vec::new(),
-        "x".repeat(MAX_DURABLE_MODEL_ITEM_BYTES.saturating_add(1)),
+        "x".repeat(MAX_LEGACY_DURABLE_MODEL_ITEM_BYTES.saturating_add(1)),
         /*trigger_turn*/ true,
     );
     let oversized_id = ResponseItemId::with_suffix("msg", "oversized-legacy");

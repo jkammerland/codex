@@ -514,6 +514,116 @@ fn mcp10_delivery_wins_over_a_later_conflicting_pending_payload() {
 }
 
 #[test]
+fn fingerprintless_mcp11_receipt_consumes_its_pending_payload() {
+    let communication = mail("mcp11-fingerprintless-receipt");
+    let id = communication.id.clone().expect("message id");
+
+    assert_eq!(
+        recover_durable_mail(&[
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: true,
+                mail_fingerprint: Some("historical-fingerprint".to_string()),
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: Some(communication),
+                mail_start_options: Some(TurnStartOptions::default()),
+                consumed_mail_id: None,
+            },
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+                mail_fingerprint: None,
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: Some(id.clone()),
+            },
+        ]),
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "historical-fingerprint".to_string(),
+                claimed_turn_id: String::new(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn consumed_marker_is_not_reinterpreted_as_an_mcp10_prefix() {
+    let consumed = mail("consumed-marker");
+    let unrelated = mail("ordinary-response");
+    let consumed_id = consumed.id.expect("message id");
+
+    assert_eq!(
+        recover_durable_mail(&[
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+                mail_fingerprint: Some("consumed-fingerprint".to_string()),
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: Some(consumed_id.clone()),
+            },
+            RolloutItem::ResponseItem(unrelated.to_model_input_item().into()),
+        ]),
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id: consumed_id,
+                fingerprint: "consumed-fingerprint".to_string(),
+                claimed_turn_id: String::new(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn earlier_mcp10_fingerprint_wins_over_a_later_explicit_marker() {
+    let communication = mail("mixed-mcp10-marker");
+    let id = communication.id.clone().expect("message id");
+
+    assert_eq!(
+        recover_durable_mail(&[
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: true,
+                mail_fingerprint: Some("earlier-fingerprint".to_string()),
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: None,
+            },
+            RolloutItem::ResponseItem(communication.to_model_input_item().into()),
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+                mail_fingerprint: Some("later-fingerprint".to_string()),
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: Some(id.clone()),
+            },
+        ]),
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "earlier-fingerprint".to_string(),
+                claimed_turn_id: String::new(),
+            }],
+        }
+    );
+}
+
+#[test]
 fn an_older_delivered_occurrence_wins_over_a_conflicting_pending_reuse() {
     let delivered = mail("delivered-conflict");
     let id = delivered.id.clone().expect("message id");
@@ -536,6 +646,40 @@ fn an_older_delivered_occurrence_wins_over_a_conflicting_pending_reuse() {
                 id,
                 fingerprint: "fingerprint".to_string(),
                 claimed_turn_id: "claimed-turn".to_string(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn later_suffix_delivery_consumes_an_older_pending_occurrence() {
+    let older = mail("suffix-delivery");
+    let id = older.id.clone().expect("message id");
+    let mut delivered = older.clone();
+    delivered.content = "delivered suffix".to_string();
+    let mut older_payload = payload(&older);
+    let RolloutItem::DurableInterAgentCommunication { fingerprint, .. } = &mut older_payload else {
+        unreachable!("payload helper returns durable mail");
+    };
+    *fingerprint = "older-fingerprint".to_string();
+
+    assert_eq!(
+        recover_durable_mail(&[
+            older_payload,
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: id.clone(),
+                communication: Some(delivered.clone()),
+                delivered_response: Some(delivered.to_model_input_item().into()),
+                fingerprint: "suffix-fingerprint".to_string(),
+                turn_id: "suffix-turn".to_string(),
+            },
+        ]),
+        DurableMailRecovery {
+            pending: Vec::new(),
+            consumed: vec![ConsumedDurableMail {
+                id,
+                fingerprint: "suffix-fingerprint".to_string(),
+                claimed_turn_id: "suffix-turn".to_string(),
             }],
         }
     );

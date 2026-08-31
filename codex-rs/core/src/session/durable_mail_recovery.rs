@@ -88,6 +88,24 @@ fn insert_recovery_entry(
     }
 }
 
+fn insert_legacy_consumed(
+    legacy_consumed: &mut HashMap<ResponseItemId, (usize, String)>,
+    id: ResponseItemId,
+    index: usize,
+    fingerprint: String,
+) {
+    match legacy_consumed.get_mut(&id) {
+        Some((current_index, current_fingerprint)) if index < *current_index => {
+            *current_index = index;
+            *current_fingerprint = fingerprint;
+        }
+        Some(_) => {}
+        None => {
+            legacy_consumed.insert(id, (index, fingerprint));
+        }
+    }
+}
+
 pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery {
     let mut future_turn_starts = HashSet::new();
     let mut claim_delivered = HashMap::new();
@@ -117,6 +135,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
     let mut states = HashMap::<(ResponseItemId, String), DurableState>::new();
     let mut legacy_consumed = HashMap::<ResponseItemId, (usize, String)>::new();
     let mut first_occurrence_by_id = HashMap::<ResponseItemId, usize>::new();
+    let mut latest_fingerprint_by_id = HashMap::<ResponseItemId, String>::new();
     for (index, item) in items.iter().enumerate() {
         match item {
             RolloutItem::DurableInterAgentCommunication {
@@ -130,6 +149,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                     continue;
                 };
                 first_occurrence_by_id.entry(id.clone()).or_insert(index);
+                latest_fingerprint_by_id.insert(id.clone(), fingerprint.clone());
                 states.entry((id, fingerprint.clone())).or_default().payload =
                     Some(DurablePayload {
                         index,
@@ -154,6 +174,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 first_occurrence_by_id
                     .entry(communication_id.clone())
                     .or_insert(index);
+                latest_fingerprint_by_id.insert(communication_id.clone(), fingerprint.clone());
                 let claim = DurableClaim {
                     index,
                     turn_id: turn_id.clone(),
@@ -182,6 +203,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                     continue;
                 };
                 first_occurrence_by_id.entry(id.clone()).or_insert(index);
+                latest_fingerprint_by_id.insert(id.clone(), fingerprint.clone());
                 states
                     .entry((id.clone(), fingerprint.clone()))
                     .or_default()
@@ -201,9 +223,12 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                     first_occurrence_by_id
                         .entry(consumed_id.clone())
                         .or_insert(index);
-                    legacy_consumed
-                        .entry(consumed_id.clone())
-                        .or_insert_with(|| (index, fingerprint.clone()));
+                    insert_legacy_consumed(
+                        &mut legacy_consumed,
+                        consumed_id.clone(),
+                        index,
+                        fingerprint.clone(),
+                    );
                 }
             }
             RolloutItem::InterAgentCommunicationMetadata {
@@ -212,9 +237,27 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
                 ..
             } => {
                 first_occurrence_by_id.entry(id.clone()).or_insert(index);
-                legacy_consumed
-                    .entry(id.clone())
-                    .or_insert_with(|| (index, fingerprint.clone()));
+                insert_legacy_consumed(
+                    &mut legacy_consumed,
+                    id.clone(),
+                    index,
+                    fingerprint.clone(),
+                );
+            }
+            RolloutItem::InterAgentCommunicationMetadata {
+                mail_fingerprint: None,
+                consumed_mail_id: Some(id),
+                ..
+            } => {
+                first_occurrence_by_id.entry(id.clone()).or_insert(index);
+                if let Some(fingerprint) = latest_fingerprint_by_id.get(id) {
+                    insert_legacy_consumed(
+                        &mut legacy_consumed,
+                        id.clone(),
+                        index,
+                        fingerprint.clone(),
+                    );
+                }
             }
             _ => {}
         }
@@ -226,6 +269,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
             RolloutItem::InterAgentCommunicationMetadata {
                 mail_fingerprint: Some(fingerprint),
                 mail_communication: None,
+                consumed_mail_id: None,
                 ..
             },
             RolloutItem::ResponseItem(response_item),
@@ -235,9 +279,7 @@ pub(super) fn recover_durable_mail(items: &[RolloutItem]) -> DurableMailRecovery
         };
         if let Some(id) = response_item.id().cloned() {
             first_occurrence_by_id.entry(id.clone()).or_insert(index);
-            legacy_consumed
-                .entry(id)
-                .or_insert_with(|| (index + 1, fingerprint.clone()));
+            insert_legacy_consumed(&mut legacy_consumed, id, index + 1, fingerprint.clone());
         }
     }
 

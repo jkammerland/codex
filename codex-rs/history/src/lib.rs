@@ -174,6 +174,7 @@ pub struct RolloutModelResponseProjection {
 const MAX_LEGACY_CLAIMS_PER_TURN: usize = 64;
 const MAX_BUFFERED_LEGACY_CLAIMS: usize = 4_096;
 const MAX_DURABLE_MODEL_ITEM_BYTES: usize = 10_000;
+const MAX_LEGACY_DURABLE_MODEL_ITEM_BYTES: usize = 40_000;
 
 struct ModelItemSizeWriter {
     remaining: usize,
@@ -195,12 +196,12 @@ impl Write for ModelItemSizeWriter {
     }
 }
 
-fn bounded_durable_model_response(response: &ResponseItemEnvelope) -> bool {
+fn bounded_durable_model_response(response: &ResponseItemEnvelope, max_bytes: usize) -> bool {
     let mut writer = ModelItemSizeWriter {
         // A byte-level tokenizer cannot produce more tokens than the serialized UTF-8 byte
         // length. Bounding the complete serialized item is therefore a conservative hard token
         // bound independent of model-specific token density.
-        remaining: MAX_DURABLE_MODEL_ITEM_BYTES,
+        remaining: max_bytes,
     };
     serde_json::to_writer(&mut writer, &response.item).is_ok()
 }
@@ -212,7 +213,7 @@ fn exact_durable_model_response(
 ) -> bool {
     communication.id.as_ref() == Some(communication_id)
         && response == &ResponseItemEnvelope::new(communication.to_model_input_item())
-        && bounded_durable_model_response(response)
+        && bounded_durable_model_response(response, MAX_DURABLE_MODEL_ITEM_BYTES)
 }
 
 impl RolloutModelResponseProjection {
@@ -317,7 +318,7 @@ impl RolloutModelResponseProjection {
                 // Historical admission capped each mailbox turn at 64 items. Keep a second global
                 // cap so a malformed rollout containing unmatched claims cannot grow this replay
                 // buffer without bound. Excess claims fail closed and stay out of model context.
-                if bounded_durable_model_response(&response)
+                if bounded_durable_model_response(&response, MAX_LEGACY_DURABLE_MODEL_ITEM_BYTES)
                     && self.pending_legacy_claim_count < MAX_BUFFERED_LEGACY_CLAIMS
                     && !self.delivered_communication_ids.contains(communication_id)
                 {

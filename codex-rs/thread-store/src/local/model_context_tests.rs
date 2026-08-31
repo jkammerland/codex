@@ -355,6 +355,168 @@ async fn multi_agent_v2_scan_compacts_consumed_mail_behind_a_checkpoint() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_scan_keeps_a_suffix_delivery_authoritative() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1014);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let id = ResponseItemId::with_suffix("msg", "suffix-delivery");
+    let mut old = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "old pending body".to_string(),
+        /*trigger_turn*/ true,
+    );
+    old.id = Some(id.clone());
+    let mut delivered = old.clone();
+    delivered.content = "delivered body".to_string();
+    let path = write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-00-13",
+        uuid,
+        [
+            RolloutItem::DurableInterAgentCommunication {
+                communication: old,
+                start_options: TurnStartOptions::default(),
+                fingerprint: "old-fingerprint".to_string(),
+                turn_id: "mail-turn".to_string(),
+                compatibility_shadow: false,
+            },
+            turn_started("turn-1"),
+            user_message("newer turn"),
+            completed_user_message("turn-1", "newer turn"),
+            turn_context(home.path(), "turn-1"),
+            compacted("checkpoint", Some(Vec::new())),
+            turn_complete("turn-1"),
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: id.clone(),
+                communication: Some(delivered.clone()),
+                delivered_response: Some(delivered.to_model_input_item().into()),
+                fingerprint: "delivered-fingerprint".to_string(),
+                turn_id: "suffix-turn".to_string(),
+            },
+        ],
+    );
+    set_multi_agent_version(path.as_path(), MultiAgentVersion::V2);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load model context");
+
+    assert_eq!(
+        context
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::DurableInterAgentCommunicationClaimed {
+                        communication_id,
+                        delivered_response: Some(_),
+                        ..
+                    } if communication_id == &id
+                )
+            })
+            .count(),
+        1
+    );
+    assert!(!context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::InterAgentCommunicationMetadata {
+                consumed_mail_id: Some(consumed_id),
+                ..
+            } if consumed_id == &id
+        )
+    }));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_scan_recovers_fingerprintless_mcp11_receipts() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1015);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let id = ResponseItemId::with_suffix("msg", "mcp11-receipt");
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("agent path"),
+        Vec::new(),
+        "historical payload".to_string(),
+        /*trigger_turn*/ true,
+    );
+    communication.id = Some(id.clone());
+    let path = write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-00-14",
+        uuid,
+        [
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: true,
+                mail_fingerprint: Some("historical-fingerprint".to_string()),
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: Some(communication),
+                mail_start_options: Some(TurnStartOptions::default()),
+                consumed_mail_id: None,
+            },
+            RolloutItem::InterAgentCommunicationMetadata {
+                trigger_turn: false,
+                mail_fingerprint: None,
+                delivery_id: None,
+                terminal_turn_id: None,
+                terminal_status: None,
+                mail_communication: None,
+                mail_start_options: None,
+                consumed_mail_id: Some(id.clone()),
+            },
+            turn_started("turn-1"),
+            user_message("newer turn"),
+            completed_user_message("turn-1", "newer turn"),
+            turn_context(home.path(), "turn-1"),
+            compacted("checkpoint", Some(Vec::new())),
+            turn_complete("turn-1"),
+        ],
+    );
+    set_multi_agent_version(path.as_path(), MultiAgentVersion::V2);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load model context");
+
+    assert!(context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::InterAgentCommunicationMetadata {
+                mail_fingerprint: Some(fingerprint),
+                mail_communication: None,
+                consumed_mail_id: Some(consumed_id),
+                ..
+            } if consumed_id == &id && fingerprint == "historical-fingerprint"
+        )
+    }));
+    assert!(!context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::InterAgentCommunicationMetadata {
+                mail_communication: Some(communication),
+                ..
+            } if communication.id.as_ref() == Some(&id)
+        )
+    }));
+}
+
+#[tokio::test]
 async fn fork_context_excludes_items_after_frozen_cutoff() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1007);

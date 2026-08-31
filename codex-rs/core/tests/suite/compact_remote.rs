@@ -1605,7 +1605,9 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
             start_options: Default::default(),
         })
         .await?;
-    let delegated_task_ciphertext = format!("delegated compact task{}", "x".repeat(40_000));
+    // Keep this payload large enough to exercise encrypted compaction retention without
+    // crossing the durable mailbox's 1K-token item bound.
+    let delegated_task_ciphertext = format!("delegated compact task{}", "x".repeat(3_000));
     codex
         .submit(Op::InterAgentCommunication {
             communication: InterAgentCommunication::new_encrypted(

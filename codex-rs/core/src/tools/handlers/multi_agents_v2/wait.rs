@@ -74,18 +74,21 @@ impl Handler {
             .services
             .agent_control
             .register_session_root(session.thread_id, turn.parent_thread_id);
-        let current_agent_name = turn
-            .session_source
-            .get_agent_path()
-            .unwrap_or_else(AgentPath::root)
-            .to_string();
+        let current_agent_path = match turn.session_source.get_agent_path() {
+            Some(path) => Some(path.to_string()),
+            None if !turn.session_source.is_non_root_agent() => {
+                Some(codex_protocol::AgentPath::root().to_string())
+            }
+            None => None,
+        };
         let outcome = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => WaitOutcome::Interrupted,
             outcome = wait_for_activity(
                 &session.services.agent_control,
                 &turn.session_source,
-                &current_agent_name,
+                session.thread_id,
+                current_agent_path.as_deref(),
                 &mut activity_rx,
                 pending_activity,
             ) => outcome?,
@@ -192,7 +195,8 @@ enum WaitOutcome {
 async fn wait_for_activity(
     agent_control: &crate::agent::control::AgentControl,
     session_source: &SessionSource,
-    current_agent_name: &str,
+    current_thread_id: codex_protocol::ThreadId,
+    current_agent_path: Option<&str>,
     activity_rx: &mut tokio::sync::watch::Receiver<InputQueueActivity>,
     pending_activity: Option<InputQueueActivity>,
 ) -> Result<WaitOutcome, FunctionCallError> {
@@ -203,13 +207,18 @@ async fn wait_for_activity(
         });
     }
     loop {
-        let agents = agent_control
-            .list_agents(session_source, Some(current_agent_name))
-            .await
-            .map_err(collab_spawn_error)?;
+        let agents = match current_agent_path {
+            Some(current_agent_path) => agent_control
+                .list_agents(session_source, Some(current_agent_path))
+                .await
+                .map_err(collab_spawn_error)?,
+            // Legacy pathless children have no reliable descendant scope. Subscribing from `/root`
+            // can include both the caller and its live ancestor, creating a reciprocal deadlock.
+            None => Vec::new(),
+        };
         let mut status_receivers = Vec::new();
         for agent in agents {
-            if agent.agent_name == current_agent_name
+            if agent.thread_id == current_thread_id
                 || !matches!(
                     agent.agent_status,
                     AgentStatus::PendingInit | AgentStatus::Running

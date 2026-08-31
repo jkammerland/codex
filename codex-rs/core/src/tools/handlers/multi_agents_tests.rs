@@ -2965,6 +2965,86 @@ async fn multi_agent_v2_wait_agent_accepts_ignored_timeout_argument() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_wait_agent_ignores_timeout_while_a_child_is_live() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "remain live until mailbox release",
+                "task_name": "timeout_proof"
+            })),
+        ))
+        .await
+        .expect("spawn worker");
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandlerV2
+                .handle(invocation(
+                    session,
+                    turn,
+                    "wait_agent",
+                    function_payload(json!({"timeout_ms": 1})),
+                ))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !wait_task.is_finished(),
+        "deprecated timeout_ms must not wake a live event-driven wait"
+    );
+
+    session
+        .input_queue
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::try_from("/root/timeout_proof").expect("worker path"),
+                AgentPath::root(),
+                Vec::new(),
+                "release wait".to_string(),
+                /*trigger_turn*/ false,
+            ),
+            Default::default(),
+        )
+        .await
+        .expect("bounded mail");
+    let output = wait_task
+        .await
+        .expect("wait task should join")
+        .expect("wait should return after mailbox activity");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&content).expect("wait result should be json"),
+        json!({
+            "message": "Wait completed.",
+            "timed_out": false
+        })
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
 async fn multi_agent_v2_child_wait_ignores_live_ancestors() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3022,6 +3102,74 @@ async fn multi_agent_v2_child_wait_ignores_live_ancestors() {
     )
     .await
     .expect("a live ancestor must not keep a child wait pending")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&content).expect("wait result should be json"),
+        json!({
+            "message": "No live agents to wait for.",
+            "timed_out": false
+        })
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_pathless_child_does_not_wait_on_itself_or_its_ancestor() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    let child_thread_id = session
+        .services
+        .agent_control
+        .spawn_agent_with_metadata(
+            (*turn.config).clone(),
+            vec![UserInput::Text {
+                text: "legacy pathless worker".to_string(),
+                text_elements: Vec::new(),
+            }],
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            crate::agent::control::SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("pathless worker spawn should succeed")
+        .thread_id;
+    session.thread_id = child_thread_id;
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root.thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+
+    let output = timeout(
+        Duration::from_millis(100),
+        WaitAgentHandlerV2.handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "wait_agent",
+            function_payload(json!({})),
+        )),
+    )
+    .await
+    .expect("a pathless child must not subscribe to itself or a live ancestor")
     .expect("wait_agent should succeed");
     let (content, success) = expect_text_output(output);
     assert_eq!(

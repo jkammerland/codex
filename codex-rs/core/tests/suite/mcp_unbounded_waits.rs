@@ -625,11 +625,13 @@ async fn session_shutdown_reports_its_origin_without_replaying_an_unbounded_mcp_
     let temp_dir = tempfile::tempdir()?;
     let started_file = temp_dir.path().join("shutdown-unbounded.started");
     let release_file = temp_dir.path().join("shutdown-unbounded.release");
-    let arguments = sync_arguments(
+    let call_count_file = temp_dir.path().join("shutdown-unbounded.calls");
+    let mut arguments = sync_arguments(
         Some(&started_file),
         Some(&release_file),
         /*barrier_id*/ None,
     );
+    arguments["call_count_file"] = Value::String(call_count_file.to_string_lossy().into_owned());
     let first_response = responses::mount_sse_once(
         &server,
         sse(vec![
@@ -698,6 +700,11 @@ async fn session_shutdown_reports_its_origin_without_replaying_an_unbounded_mcp_
         first_response.requests().len(),
         1,
         "session shutdown must not replay the MCP tool call or issue a follow-up model request"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&call_count_file)?.lines().count(),
+        1,
+        "session shutdown must cancel exactly one MCP execution without replay"
     );
     Ok(())
 }

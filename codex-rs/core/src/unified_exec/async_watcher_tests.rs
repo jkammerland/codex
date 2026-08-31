@@ -299,6 +299,76 @@ async fn streaming_output_recovers_the_terminal_transcript_after_receiver_lag() 
     Ok(())
 }
 
+#[tokio::test]
+async fn streaming_output_recovers_output_published_before_subscription() -> anyhow::Result<()> {
+    let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let (stdout_tx, stdout_rx) = tokio::sync::broadcast::channel::<Vec<u8>>(8);
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<i32>();
+    let spawned = codex_utils_pty::spawn_from_driver(codex_utils_pty::ProcessDriver {
+        writer_tx,
+        stdout_rx,
+        stderr_rx: None,
+        exit_rx,
+        terminator: None,
+        writer_handle: None,
+        resizer: None,
+        #[cfg(windows)]
+        tty: false,
+    });
+    let process = Arc::new(
+        UnifiedExecProcess::from_spawned(spawned, SandboxType::None, Box::new(NoopSpawnLifecycle))
+            .await?,
+    );
+    stdout_tx
+        .send(b"BEFORE-SUBSCRIPTION".to_vec())
+        .expect("send output before watcher subscribes");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if process
+                .output_handles()
+                .output_transcript
+                .lock()
+                .await
+                .to_bytes_with_omission_marker()
+                == b"BEFORE-SUBSCRIPTION"
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("producer should record output before watcher subscription");
+    let initial_output = std::mem::take(&mut *process.output_handles().output_buffer.lock().await);
+    assert_eq!(
+        initial_output.to_bytes_with_omission_marker(),
+        b"BEFORE-SUBSCRIPTION"
+    );
+
+    let (session, turn, _rx_event) = make_session_and_context_with_rx().await;
+    let context = UnifiedExecContext::new(
+        session,
+        crate::session::step_context::StepContext::for_test(turn),
+        tokio_util::sync::CancellationToken::new(),
+        "pre-subscription-output-test".to_string(),
+    );
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let output_drained = process.output_drained_notify();
+    let drained = output_drained.notified();
+    tokio::pin!(drained);
+    start_streaming_output(&process, &context, Arc::clone(&transcript));
+    drop(stdout_tx);
+    exit_tx.send(0).expect("send exit");
+    (&mut drained).await;
+
+    assert_eq!(
+        transcript.lock().await.to_bytes_with_omission_marker(),
+        b"BEFORE-SUBSCRIPTION"
+    );
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_server_root_exit_bounds_an_inherited_output_descriptor() -> anyhow::Result<()> {

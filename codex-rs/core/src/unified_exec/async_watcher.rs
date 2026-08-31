@@ -87,7 +87,6 @@ pub(crate) fn start_streaming_output(
         let output_closed_notified = output_closed_notify.notified();
         tokio::pin!(output_closed_notified);
         let mut process_exited = false;
-        let mut receiver_lagged = false;
         let mut post_exit_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         loop {
@@ -140,10 +139,7 @@ pub(crate) fn start_streaming_output(
                 received = receiver.recv() => {
                     let chunk = match received {
                         Ok(chunk) => chunk,
-                        Err(RecvError::Lagged(_)) => {
-                            receiver_lagged = true;
-                            continue;
-                        },
+                        Err(RecvError::Lagged(_)) => continue,
                         Err(RecvError::Closed) => break,
                     };
 
@@ -158,10 +154,7 @@ pub(crate) fn start_streaming_output(
         loop {
             let chunk = match receiver.try_recv() {
                 Ok(chunk) => chunk,
-                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
-                    receiver_lagged = true;
-                    continue;
-                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
                 Err(
                     tokio::sync::broadcast::error::TryRecvError::Empty
                     | tokio::sync::broadcast::error::TryRecvError::Closed,
@@ -171,7 +164,10 @@ pub(crate) fn start_streaming_output(
             output.push(chunk).await;
         }
 
-        if receiver_lagged && !Arc::ptr_eq(&output.transcript, &authoritative_transcript) {
+        // A producer can publish before this watcher subscribes, in which case broadcast does not
+        // report lag. Reconcile at the terminal boundary unconditionally so the completed item is
+        // backed by the process-lifetime transcript rather than subscription timing.
+        if !Arc::ptr_eq(&output.transcript, &authoritative_transcript) {
             let authoritative_transcript = authoritative_transcript.lock().await.clone();
             *output.transcript.lock().await = authoritative_transcript;
         }

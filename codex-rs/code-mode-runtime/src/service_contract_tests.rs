@@ -358,7 +358,10 @@ async fn observed_natural_completion_wins_over_termination() {
     let service = InProcessCodeModeSession::new();
     let cell = service
         .execute(
-            execute_request(r#"yield_control(); store("finished", true); text("done");"#),
+            ExecuteRequest {
+                yield_time_ms: Some(60_000),
+                ..execute_request(r#"yield_control(); store("finished", true); text("done");"#)
+            },
             Arc::new(NoopCodeModeSessionDelegate),
         )
         .await

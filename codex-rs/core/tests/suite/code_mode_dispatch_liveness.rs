@@ -230,8 +230,8 @@ text("second cell done");
     second_turn.await?;
     fs_wait::wait_for_path_exists(&observed_cwd, Duration::from_secs(5)).await?;
     assert_eq!(
-        fs::read_to_string(observed_cwd)?.trim(),
-        first_cwd.to_string_lossy()
+        fs::canonicalize(fs::read_to_string(observed_cwd)?.trim())?,
+        fs::canonicalize(first_cwd.abs())?
     );
     let second_request = second_followup.single_request();
     assert!(

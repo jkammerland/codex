@@ -396,8 +396,16 @@ impl ThreadHistoryBuilder {
     pub fn handle_rollout_item(&mut self, item: &RolloutItem) {
         self.current_rollout_index = self.next_rollout_index;
         self.next_rollout_index += 1;
-        if let Some(response) = self.model_response_projection.project(item) {
+        let handled_turn_start = if let RolloutItem::EventMsg(EventMsg::TurnStarted(event)) = item {
+            self.handle_turn_started(event);
+            true
+        } else {
+            false
+        };
+        for response in self.model_response_projection.project(item) {
             self.handle_response_item(&response.item);
+        }
+        if handled_turn_start {
             return;
         }
         match item {

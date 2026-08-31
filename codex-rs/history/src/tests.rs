@@ -86,7 +86,12 @@ fn model_response_projection_moves_durable_delivery_from_shadow_to_claim() {
     let mut projection = RolloutModelResponseProjection::default();
     let projected = items
         .iter()
-        .filter_map(|item| projection.project(item).map(std::borrow::Cow::into_owned))
+        .flat_map(|item| {
+            projection
+                .project(item)
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+        })
         .collect::<Vec<_>>();
 
     assert_eq!(projected, vec![before, delivered, after]);
@@ -115,14 +120,19 @@ fn model_response_projection_only_suppresses_an_adjacent_identified_shadow() {
     let mut projection = RolloutModelResponseProjection::default();
     let projected = items
         .iter()
-        .filter_map(|item| projection.project(item).map(std::borrow::Cow::into_owned))
+        .flat_map(|item| {
+            projection
+                .project(item)
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+        })
         .collect::<Vec<_>>();
 
     assert_eq!(projected, vec![response]);
 }
 
 #[test]
-fn model_response_projection_includes_started_legacy_claim_once() {
+fn model_response_projection_does_not_apply_a_prior_turn_start_to_a_later_claim() {
     let mut communication = InterAgentCommunication::new(
         codex_protocol::AgentPath::root(),
         codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
@@ -132,7 +142,6 @@ fn model_response_projection_includes_started_legacy_claim_once() {
     );
     let id = ResponseItemId::with_suffix("msg", "legacy-claim");
     communication.id = Some(id.clone());
-    let expected = ResponseItemEnvelope::new(communication.to_model_input_item());
     let items = [
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
@@ -144,46 +153,77 @@ fn model_response_projection_includes_started_legacy_claim_once() {
             },
         )),
         RolloutItem::DurableInterAgentCommunicationClaimed {
-            communication_id: id.clone(),
-            communication: Some(communication.clone()),
+            communication_id: id,
+            communication: Some(communication),
             delivered_response: None,
             fingerprint: "legacy-fingerprint".to_string(),
             turn_id: "legacy-turn".to_string(),
-        },
-        RolloutItem::DurableInterAgentCommunicationClaimed {
-            communication_id: id,
-            communication: Some(communication),
-            delivered_response: Some(expected.clone()),
-            fingerprint: "legacy-fingerprint".to_string(),
-            turn_id: "replacement-turn".to_string(),
         },
     ];
     let mut projection = RolloutModelResponseProjection::default();
     let projected = items
         .iter()
-        .filter_map(|item| projection.project(item).map(std::borrow::Cow::into_owned))
+        .flat_map(|item| {
+            projection
+                .project(item)
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+        })
         .collect::<Vec<_>>();
 
-    assert_eq!(projected, vec![expected]);
+    assert_eq!(projected, Vec::<ResponseItemEnvelope>::new());
 }
 
 #[test]
-fn model_response_projection_does_not_apply_a_later_turn_start_to_a_claim() {
-    let communication = InterAgentCommunication::new(
+fn model_response_projection_applies_mcp13_claims_at_the_later_turn_start() {
+    let mut first = InterAgentCommunication::new(
         codex_protocol::AgentPath::root(),
         codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
         Vec::new(),
-        "still pending".to_string(),
+        "first delivered result".to_string(),
         /*trigger_turn*/ true,
     );
+    let first_id = ResponseItemId::with_suffix("msg", "future-start-1");
+    first.id = Some(first_id.clone());
+    let mut second = first.clone();
+    let second_id = ResponseItemId::with_suffix("msg", "future-start-2");
+    second.id = Some(second_id.clone());
+    second.content = "second delivered result".to_string();
+    let expected = vec![
+        ResponseItemEnvelope::new(first.to_model_input_item()),
+        ResponseItemEnvelope::new(second.to_model_input_item()),
+    ];
     let items = [
         RolloutItem::DurableInterAgentCommunicationClaimed {
-            communication_id: ResponseItemId::with_suffix("msg", "future-start"),
-            communication: Some(communication),
+            communication_id: first_id,
+            communication: Some(first.clone()),
             delivered_response: None,
             fingerprint: "legacy-fingerprint".to_string(),
             turn_id: "reused-turn".to_string(),
         },
+        RolloutItem::DurableInterAgentCommunication {
+            communication: first.clone(),
+            start_options: codex_protocol::turn_input::TurnStartOptions::default(),
+            fingerprint: "legacy-fingerprint".to_string(),
+            turn_id: "reused-turn".to_string(),
+            compatibility_shadow: false,
+        },
+        RolloutItem::ResponseItem(first.to_model_input_item().into()),
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: second_id,
+            communication: Some(second.clone()),
+            delivered_response: None,
+            fingerprint: "legacy-fingerprint-2".to_string(),
+            turn_id: "reused-turn".to_string(),
+        },
+        RolloutItem::DurableInterAgentCommunication {
+            communication: second.clone(),
+            start_options: codex_protocol::turn_input::TurnStartOptions::default(),
+            fingerprint: "legacy-fingerprint-2".to_string(),
+            turn_id: "reused-turn".to_string(),
+            compatibility_shadow: false,
+        },
+        RolloutItem::ResponseItem(second.to_model_input_item().into()),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: "reused-turn".to_string(),
@@ -199,10 +239,53 @@ fn model_response_projection_does_not_apply_a_later_turn_start_to_a_claim() {
     assert_eq!(
         items
             .iter()
-            .filter_map(|item| projection.project(item))
-            .count(),
-        0
+            .flat_map(|item| projection
+                .project(item)
+                .into_iter()
+                .map(std::borrow::Cow::into_owned))
+            .collect::<Vec<_>>(),
+        expected
     );
+}
+
+#[test]
+fn model_response_projection_bounds_malformed_legacy_claim_batches() {
+    let mut projection = RolloutModelResponseProjection::default();
+    for index in 0..=MAX_LEGACY_CLAIMS_PER_TURN {
+        let mut communication = InterAgentCommunication::new(
+            codex_protocol::AgentPath::root(),
+            codex_protocol::AgentPath::try_from("/root/worker").expect("agent path"),
+            Vec::new(),
+            format!("legacy delivery {index}"),
+            /*trigger_turn*/ true,
+        );
+        let communication_id = ResponseItemId::with_suffix("msg", index.to_string());
+        communication.id = Some(communication_id.clone());
+        assert!(
+            projection
+                .project(&RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication_id,
+                    communication: Some(communication),
+                    delivered_response: None,
+                    fingerprint: format!("fingerprint-{index}"),
+                    turn_id: "legacy-turn".to_string(),
+                })
+                .is_empty()
+        );
+    }
+
+    let turn_started = RolloutItem::EventMsg(EventMsg::TurnStarted(
+        codex_protocol::protocol::TurnStartedEvent {
+            turn_id: "legacy-turn".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        },
+    ));
+    let projected = projection.project(&turn_started);
+
+    assert_eq!(projected.len(), MAX_LEGACY_CLAIMS_PER_TURN);
 }
 
 #[test]

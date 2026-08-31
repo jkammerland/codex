@@ -163,38 +163,66 @@ pub enum RolloutItem {
 #[derive(Debug, Default)]
 pub struct RolloutModelResponseProjection {
     compatibility_shadow_id: Option<ResponseItemId>,
+    legacy_claim_shadow_id: Option<ResponseItemId>,
     delivered_communication_ids: std::collections::HashSet<ResponseItemId>,
-    started_turn_ids: std::collections::HashSet<String>,
+    pending_legacy_claims:
+        std::collections::HashMap<String, Vec<(ResponseItemId, ResponseItemEnvelope)>>,
+    pending_legacy_claim_count: usize,
 }
 
+const MAX_LEGACY_CLAIMS_PER_TURN: usize = 64;
+const MAX_BUFFERED_LEGACY_CLAIMS: usize = 4_096;
+
 impl RolloutModelResponseProjection {
-    /// Applies one rollout item in persistence order and returns its model-visible response, if any.
+    /// Applies one rollout item in persistence order and returns its model-visible responses.
+    ///
+    /// Legacy `.mcp.13` rollouts persisted all durable claims before their `TurnStarted` event.
+    /// Those claims are buffered until that event proves the delivery occurred. A turn can claim
+    /// more than one mailbox item, so one rollout item can release multiple responses.
     pub fn project<'a>(
         &mut self,
         item: &'a RolloutItem,
-    ) -> Option<std::borrow::Cow<'a, ResponseItemEnvelope>> {
+    ) -> Vec<std::borrow::Cow<'a, ResponseItemEnvelope>> {
         let compatibility_shadow_id = self.compatibility_shadow_id.take();
+        let legacy_claim_shadow_id = self.legacy_claim_shadow_id.take();
         match item {
             RolloutItem::EventMsg(EventMsg::TurnStarted(started)) => {
-                self.started_turn_ids.insert(started.turn_id.clone());
-                None
+                let pending = self
+                    .pending_legacy_claims
+                    .remove(&started.turn_id)
+                    .unwrap_or_default();
+                self.pending_legacy_claim_count = self
+                    .pending_legacy_claim_count
+                    .saturating_sub(pending.len());
+                pending
+                    .into_iter()
+                    .filter_map(|(communication_id, response)| {
+                        self.delivered_communication_ids
+                            .insert(communication_id)
+                            .then_some(std::borrow::Cow::Owned(response))
+                    })
+                    .collect()
             }
             RolloutItem::DurableInterAgentCommunication {
                 communication,
-                compatibility_shadow: true,
+                compatibility_shadow,
                 ..
-            } => {
+            } if *compatibility_shadow
+                || legacy_claim_shadow_id.as_ref() == communication.id.as_ref() =>
+            {
                 self.compatibility_shadow_id = communication.id.clone();
-                None
+                Vec::new()
             }
             RolloutItem::ResponseItem(response)
                 if compatibility_shadow_id
                     .as_ref()
                     .is_some_and(|shadow_id| Some(shadow_id) == response.id()) =>
             {
-                None
+                Vec::new()
             }
-            RolloutItem::ResponseItem(response) => Some(std::borrow::Cow::Borrowed(response)),
+            RolloutItem::ResponseItem(response) => {
+                vec![std::borrow::Cow::Borrowed(response)]
+            }
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
                 delivered_response: Some(response),
@@ -203,7 +231,7 @@ impl RolloutModelResponseProjection {
                 .delivered_communication_ids
                 .insert(communication_id.clone()) =>
             {
-                Some(std::borrow::Cow::Borrowed(response))
+                vec![std::borrow::Cow::Borrowed(response)]
             }
             RolloutItem::DurableInterAgentCommunicationClaimed {
                 communication_id,
@@ -211,18 +239,29 @@ impl RolloutModelResponseProjection {
                 delivered_response: None,
                 turn_id,
                 ..
-            } if self.started_turn_ids.contains(turn_id)
-                && self
-                    .delivered_communication_ids
-                    .insert(communication_id.clone()) =>
-            {
+            } => {
                 let mut communication = communication.clone();
                 communication
                     .id
                     .get_or_insert_with(|| communication_id.clone());
-                Some(std::borrow::Cow::Owned(
-                    communication.to_model_input_item().into(),
-                ))
+                let response = communication.to_model_input_item().into();
+                self.legacy_claim_shadow_id = Some(communication_id.clone());
+                // Historical admission capped each mailbox turn at 64 items. Keep a second global
+                // cap so a malformed rollout containing unmatched claims cannot grow this replay
+                // buffer without bound. Excess claims fail closed and stay out of model context.
+                if self.pending_legacy_claim_count < MAX_BUFFERED_LEGACY_CLAIMS
+                    && !self.delivered_communication_ids.contains(communication_id)
+                {
+                    let pending = self
+                        .pending_legacy_claims
+                        .entry(turn_id.clone())
+                        .or_default();
+                    if pending.len() < MAX_LEGACY_CLAIMS_PER_TURN {
+                        pending.push((communication_id.clone(), response));
+                        self.pending_legacy_claim_count += 1;
+                    }
+                }
+                Vec::new()
             }
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunication(_)
@@ -235,7 +274,7 @@ impl RolloutModelResponseProjection {
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_)
-            | RolloutItem::RealtimeItem(_) => None,
+            | RolloutItem::RealtimeItem(_) => Vec::new(),
         }
     }
 }

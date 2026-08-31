@@ -7,6 +7,7 @@
 //! before the writer makes its second streaming pass.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -41,6 +42,7 @@ pub(super) struct RollbackPlan {
     record_boundaries: Vec<Option<usize>>,
     boundary_alive: Vec<bool>,
     compacted_items: HashMap<usize, CompactedItem>,
+    claim_receipt_records: HashSet<usize>,
 }
 
 impl RollbackPlan {
@@ -76,6 +78,9 @@ impl RollbackPlan {
                 ..
             } = line.item
             {
+                if !self.claim_receipt_records.contains(&record_index) {
+                    return Ok(None);
+                }
                 line.item = RolloutItem::InterAgentCommunicationMetadata {
                     trigger_turn: false,
                     mail_fingerprint: Some(fingerprint),
@@ -108,6 +113,10 @@ pub(super) struct RollbackPlanner {
     compactions: Vec<CompactionFrame>,
     model_replay: ModelReplayPlanner,
     model_response_projection: RolloutModelResponseProjection,
+    legacy_claim_shadow: Option<(codex_protocol::ResponseItemId, String)>,
+    legacy_response_shadow: Option<(codex_protocol::ResponseItemId, String)>,
+    pending_legacy_shadow_records: HashMap<String, Vec<usize>>,
+    claim_records: HashMap<(codex_protocol::ResponseItemId, String), Vec<usize>>,
 }
 
 impl RollbackPlanner {
@@ -125,14 +134,71 @@ impl RollbackPlanner {
             compactions: Vec::new(),
             model_replay: ModelReplayPlanner::new(),
             model_response_projection: RolloutModelResponseProjection::default(),
+            legacy_claim_shadow: None,
+            legacy_response_shadow: None,
+            pending_legacy_shadow_records: HashMap::new(),
+            claim_records: HashMap::new(),
         }
     }
 
     pub(super) fn observe(&mut self, line: &RolloutLine) -> ThreadStoreResult<()> {
         let index = self.record_boundaries.len();
         self.model_replay.observe(index, &line.item);
-        let response_is_model_visible =
-            self.model_response_projection.project(&line.item).is_some();
+        let response_is_model_visible = !self
+            .model_response_projection
+            .project(&line.item)
+            .is_empty();
+        let legacy_claim_shadow = self.legacy_claim_shadow.take();
+        let legacy_response_shadow = self.legacy_response_shadow.take();
+        let legacy_claim_shadow_turn = match (&line.item, legacy_claim_shadow) {
+            (
+                RolloutItem::DurableInterAgentCommunication { communication, .. },
+                Some((communication_id, turn_id)),
+            ) if Some(&communication_id) == communication.id.as_ref() => {
+                Some((communication_id, turn_id))
+            }
+            _ => None,
+        };
+        let legacy_response_shadow_turn = match (&line.item, legacy_response_shadow) {
+            (RolloutItem::ResponseItem(response), Some((communication_id, turn_id)))
+                if Some(&communication_id) == response.id() =>
+            {
+                Some(turn_id)
+            }
+            _ => None,
+        };
+        if let RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            communication: Some(_),
+            delivered_response: None,
+            fingerprint,
+            turn_id,
+            ..
+        } = &line.item
+        {
+            self.legacy_claim_shadow = Some((communication_id.clone(), turn_id.clone()));
+            self.pending_legacy_shadow_records
+                .entry(turn_id.clone())
+                .or_default()
+                .push(index);
+            self.claim_records
+                .entry((communication_id.clone(), fingerprint.clone()))
+                .or_default()
+                .push(index);
+        } else if let RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            fingerprint,
+            ..
+        } = &line.item
+        {
+            self.claim_records
+                .entry((communication_id.clone(), fingerprint.clone()))
+                .or_default()
+                .push(index);
+        }
+        if let Some((communication_id, turn_id)) = legacy_claim_shadow_turn.as_ref() {
+            self.legacy_response_shadow = Some((communication_id.clone(), turn_id.clone()));
+        }
         self.record_boundaries
             .push(self.boundary_stack.last().copied());
         let paired_user_boundary = match (&self.pending_user_response, &line.item) {
@@ -159,6 +225,12 @@ impl RollbackPlanner {
             RolloutItem::ResponseItem(response) => {
                 if !response_is_model_visible {
                     self.record_boundaries[index] = None;
+                    if let Some(turn_id) = legacy_response_shadow_turn {
+                        self.pending_legacy_shadow_records
+                            .entry(turn_id)
+                            .or_default()
+                            .push(index);
+                    }
                 } else if let Some(boundary) = paired_delivery_boundary {
                     self.record_boundaries[index] = Some(boundary);
                 } else if rollback::counts_as_boundary(&response.item) {
@@ -184,7 +256,17 @@ impl RollbackPlanner {
             RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
                 self.active_turn_id = Some(event.turn_id.clone());
                 self.pending_turn_records.clear();
-                self.pending_turn_records.push(index);
+                if response_is_model_visible {
+                    let boundary = self.start_boundary(index);
+                    if let Some(records) = self.pending_legacy_shadow_records.remove(&event.turn_id)
+                    {
+                        for record in records {
+                            self.record_boundaries[record] = Some(boundary);
+                        }
+                    }
+                } else {
+                    self.pending_turn_records.push(index);
+                }
             }
             RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
                 self.assign_targeted_record(index, Some(event.turn_id.as_str()));
@@ -232,12 +314,18 @@ impl RollbackPlanner {
             RolloutItem::DurableInterAgentCommunication {
                 compatibility_shadow: false,
                 ..
-            } => {
+            } if legacy_claim_shadow_turn.is_none() => {
                 let boundary = self.start_boundary(index);
                 self.pending_delivery_boundary = Some(boundary);
             }
             RolloutItem::DurableInterAgentCommunication { .. } => {
                 self.record_boundaries[index] = None;
+                if let Some((_, turn_id)) = legacy_claim_shadow_turn {
+                    self.pending_legacy_shadow_records
+                        .entry(turn_id)
+                        .or_default()
+                        .push(index);
+                }
             }
             RolloutItem::TerminalAgentStatus { turn_id, .. } => {
                 self.assign_targeted_record(index, Some(turn_id));
@@ -299,6 +387,7 @@ impl RollbackPlanner {
             boundary_alive,
             compactions,
             model_replay,
+            claim_records,
             ..
         } = self;
         let replay_anchor = model_replay.finish().empty_replacement_history_compaction;
@@ -316,10 +405,24 @@ impl RollbackPlanner {
                     .then_some((frame.record_index, frame.item))
             })
             .collect::<HashMap<_, _>>();
+        let claim_receipt_records = claim_records
+            .into_values()
+            .filter(|records| {
+                !records.iter().any(|record| {
+                    record_boundaries[*record].is_some_and(|boundary| boundary_alive[boundary])
+                })
+            })
+            .filter_map(|records| {
+                records.into_iter().find(|record| {
+                    record_boundaries[*record].is_some_and(|boundary| !boundary_alive[boundary])
+                })
+            })
+            .collect();
         RollbackPlan {
             record_boundaries,
             boundary_alive,
             compacted_items,
+            claim_receipt_records,
         }
     }
 
@@ -402,6 +505,9 @@ impl RollbackPlanner {
         self.pending_context_records.clear();
         self.pending_user_response = None;
         self.pending_delivery_boundary = None;
+        self.legacy_claim_shadow = None;
+        self.legacy_response_shadow = None;
+        self.pending_legacy_shadow_records.clear();
         Ok(())
     }
 }

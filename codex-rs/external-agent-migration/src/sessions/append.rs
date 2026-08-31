@@ -192,7 +192,7 @@ fn plan_append(
     let mut model_response_projection = RolloutModelResponseProjection::default();
     suffix
         .iter()
-        .any(|item| model_response_projection.project(item).is_some())
+        .any(|item| !model_response_projection.project(item).is_empty())
         .then_some(suffix)
 }
 
@@ -219,12 +219,23 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem>> {
     let mut append_start_index = None;
     let mut model_response_projection = RolloutModelResponseProjection::default();
     for (index, item) in items.iter().enumerate() {
-        if let Some(response_item) = model_response_projection.project(item) {
+        if matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_))
+                | RolloutItem::DurableInterAgentCommunicationClaimed {
+                    communication: Some(_),
+                    delivered_response: None,
+                    ..
+                }
+        ) {
+            append_start_index.get_or_insert(index);
+        }
+        let projected = model_response_projection.project(item);
+        for response_item in projected {
             model_items.push(SourceModelItem {
                 response_item: response_item.item.clone(),
                 append_start_index: append_start_index.take().unwrap_or(index),
             });
-            continue;
         }
         match item {
             RolloutItem::SessionMeta(_)
@@ -234,9 +245,7 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem>> {
             | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
             | RolloutItem::RealtimeItem(_) => {}
             RolloutItem::ResponseItem(_) => {}
-            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
-                append_start_index = Some(index);
-            }
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {}
             RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
                 append_start_index.get_or_insert(index);
             }
@@ -263,9 +272,8 @@ fn history_model_items(items: &[RolloutItem]) -> Option<Vec<ResponseItem>> {
     let mut model_items = Vec::new();
     let mut model_response_projection = RolloutModelResponseProjection::default();
     for item in items {
-        if let Some(response_item) = model_response_projection.project(item) {
+        for response_item in model_response_projection.project(item) {
             model_items.push(response_item.item.clone());
-            continue;
         }
         match item {
             RolloutItem::SessionMeta(_)

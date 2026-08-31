@@ -40,6 +40,7 @@ pub(super) struct ModelReplayPlan {
 pub(super) struct ModelReplayPlanner {
     records: Vec<ReplayRecord>,
     model_response_projection: RolloutModelResponseProjection,
+    legacy_claim_shadow_id: Option<codex_protocol::ResponseItemId>,
 }
 
 impl ModelReplayPlanner {
@@ -47,14 +48,39 @@ impl ModelReplayPlanner {
         Self {
             records: Vec::new(),
             model_response_projection: RolloutModelResponseProjection::default(),
+            legacy_claim_shadow_id: None,
         }
     }
 
     pub(super) fn observe(&mut self, record_index: usize, item: &RolloutItem) {
+        let legacy_claim_shadow_id = self.legacy_claim_shadow_id.take();
+        let legacy_claim_shadow = matches!(
+            item,
+            RolloutItem::DurableInterAgentCommunication { communication, .. }
+                if legacy_claim_shadow_id.as_ref() == communication.id.as_ref()
+        );
+        if let RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id,
+            communication: Some(_),
+            delivered_response: None,
+            ..
+        } = item
+        {
+            self.legacy_claim_shadow_id = Some(communication_id.clone());
+        }
         let projected_response_counts_as_boundary = self
             .model_response_projection
             .project(item)
-            .is_some_and(|response| rollback::counts_as_boundary(&response.item));
+            .iter()
+            .any(|response| rollback::counts_as_boundary(&response.item));
+        if let RolloutItem::EventMsg(EventMsg::TurnStarted(event)) = item
+            && projected_response_counts_as_boundary
+        {
+            self.records
+                .push(ReplayRecord::TurnStarted(event.turn_id.clone()));
+            self.records.push(ReplayRecord::UserBoundary);
+            return;
+        }
         let record = match item {
             RolloutItem::Compacted(compacted) => ReplayRecord::Compacted {
                 record_index,
@@ -83,7 +109,7 @@ impl ModelReplayPlanner {
             RolloutItem::DurableInterAgentCommunication {
                 compatibility_shadow: false,
                 ..
-            } => ReplayRecord::UserBoundary,
+            } if !legacy_claim_shadow => ReplayRecord::UserBoundary,
             RolloutItem::SessionMeta(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::EventMsg(_)

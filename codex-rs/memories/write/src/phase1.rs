@@ -408,32 +408,18 @@ mod job {
         items: &[RolloutItem],
     ) -> codex_protocol::error::Result<String> {
         let mut model_response_projection = RolloutModelResponseProjection::default();
-        let filtered = items
-            .iter()
-            .filter_map(|item| {
-                if let Some(response) = model_response_projection.project(item) {
-                    return sanitize_response_item_for_memories(&response.item);
-                }
-
-                match item {
-                    RolloutItem::InterAgentCommunication(communication) => {
-                        Some(communication.to_model_input_item())
-                    }
-                    RolloutItem::SessionMeta(_)
-                    | RolloutItem::ResponseItem(_)
-                    | RolloutItem::InterAgentCommunicationMetadata { .. }
-                    | RolloutItem::TerminalAgentStatus { .. }
-                    | RolloutItem::DurableInterAgentCommunication { .. }
-                    | RolloutItem::DurableInterAgentCommunicationClaimed { .. }
-                    | RolloutItem::Compacted(_)
-                    | RolloutItem::TurnContext(_)
-                    | RolloutItem::RealtimeItem(_)
-                    | RolloutItem::WorldState(_)
-                    | RolloutItem::SecurityRiskScore(_)
-                    | RolloutItem::EventMsg(_) => None,
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut filtered = Vec::new();
+        for item in items {
+            filtered.extend(
+                model_response_projection
+                    .project(item)
+                    .into_iter()
+                    .filter_map(|response| sanitize_response_item_for_memories(&response.item)),
+            );
+            if let RolloutItem::InterAgentCommunication(communication) = item {
+                filtered.push(communication.to_model_input_item());
+            }
+        }
         let serialized = serde_json::to_string(&filtered).map_err(|err| {
             CodexErr::InvalidRequest(format!("failed to serialize rollout memory: {err}"))
         })?;
@@ -867,12 +853,19 @@ mod tests {
         let response_envelope = codex_rollout::ResponseItemEnvelope::new(response_item.clone());
 
         let serialized = job::serialize_filtered_rollout_response_items(&[
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: communication.id.clone().expect("communication id"),
+                communication: Some(communication.clone()),
+                delivered_response: None,
+                fingerprint: "fingerprint".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
             RolloutItem::DurableInterAgentCommunication {
-                communication: communication.clone(),
+                communication: communication,
                 start_options: codex_protocol::turn_input::TurnStartOptions::default(),
                 fingerprint: "fingerprint".to_string(),
                 turn_id: "turn-1".to_string(),
-                compatibility_shadow: true,
+                compatibility_shadow: false,
             },
             RolloutItem::ResponseItem(response_envelope),
             RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::TurnStarted(
@@ -884,13 +877,6 @@ mod tests {
                     collaboration_mode_kind: Default::default(),
                 },
             )),
-            RolloutItem::DurableInterAgentCommunicationClaimed {
-                communication_id: communication.id.clone().expect("communication id"),
-                communication: Some(communication),
-                delivered_response: None,
-                fingerprint: "fingerprint".to_string(),
-                turn_id: "turn-1".to_string(),
-            },
         ])
         .expect("serialize");
         let parsed: Vec<ResponseItem> = serde_json::from_str(&serialized).expect("parse");

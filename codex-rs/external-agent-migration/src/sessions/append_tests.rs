@@ -103,7 +103,7 @@ fn requires_a_strict_nonempty_model_prefix() {
 }
 
 #[test]
-fn legacy_claim_only_delivery_compares_and_appends_at_the_claim_position() {
+fn legacy_claim_delivery_appends_from_claim_through_its_later_turn_start() {
     let history = rollout(&[(MessageRole::User, "first request")]);
     let mut source = history.clone();
     let mut communication = codex_protocol::protocol::InterAgentCommunication::new(
@@ -120,12 +120,19 @@ fn legacy_claim_only_delivery_compares_and_appends_at_the_claim_position() {
     let delivered_response =
         codex_rollout::ResponseItemEnvelope::new(communication.to_model_input_item());
     source.extend([
+        RolloutItem::DurableInterAgentCommunicationClaimed {
+            communication_id: communication.id.clone().expect("communication id"),
+            communication: Some(communication.clone()),
+            delivered_response: None,
+            fingerprint: "fingerprint".to_string(),
+            turn_id: "turn-2".to_string(),
+        },
         RolloutItem::DurableInterAgentCommunication {
-            communication: communication.clone(),
+            communication,
             start_options: codex_protocol::turn_input::TurnStartOptions::default(),
             fingerprint: "fingerprint".to_string(),
             turn_id: "turn-2".to_string(),
-            compatibility_shadow: true,
+            compatibility_shadow: false,
         },
         RolloutItem::ResponseItem(delivered_response),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
@@ -137,27 +144,20 @@ fn legacy_claim_only_delivery_compares_and_appends_at_the_claim_position() {
                 collaboration_mode_kind: Default::default(),
             },
         )),
-        RolloutItem::DurableInterAgentCommunicationClaimed {
-            communication_id: communication.id.clone().expect("communication id"),
-            communication: Some(communication),
-            delivered_response: None,
-            fingerprint: "fingerprint".to_string(),
-            turn_id: "turn-2".to_string(),
-        },
     ]);
 
     let suffix = plan_append(&source, &history).expect("durable delivery should append");
 
     assert!(matches!(
         suffix.first(),
-        Some(RolloutItem::EventMsg(EventMsg::TurnStarted(event))) if event.turn_id == "turn-2"
-    ));
-    assert!(matches!(
-        suffix.last(),
         Some(RolloutItem::DurableInterAgentCommunicationClaimed {
             delivered_response: None,
             ..
         })
+    ));
+    assert!(matches!(
+        suffix.last(),
+        Some(RolloutItem::EventMsg(EventMsg::TurnStarted(event))) if event.turn_id == "turn-2"
     ));
     assert!(model_transcripts_match(&source, &source));
 }

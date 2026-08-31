@@ -1019,6 +1019,28 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
         thread_id,
         SessionSource::Cli,
         vec![
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: delivery_id.clone(),
+                communication: Some(delivery.clone()),
+                delivered_response: None,
+                fingerprint: "sha256:delivery".to_string(),
+                turn_id: "delivery-turn".to_string(),
+            },
+            RolloutItem::DurableInterAgentCommunication {
+                communication: delivery.clone(),
+                start_options: Default::default(),
+                fingerprint: "sha256:delivery".to_string(),
+                turn_id: "delivery-turn".to_string(),
+                compatibility_shadow: false,
+            },
+            rollout_response_item(delivery.to_model_input_item()),
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: delivery_id.clone(),
+                communication: Some(delivery.clone()),
+                delivered_response: None,
+                fingerprint: "sha256:delivery".to_string(),
+                turn_id: "delivery-turn".to_string(),
+            },
             RolloutItem::DurableInterAgentCommunication {
                 communication: delivery.clone(),
                 start_options: Default::default(),
@@ -1034,13 +1056,6 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
                 model_context_window: None,
                 collaboration_mode_kind: Default::default(),
             })),
-            RolloutItem::DurableInterAgentCommunicationClaimed {
-                communication_id: delivery_id.clone(),
-                communication: Some(delivery.clone()),
-                delivered_response: None,
-                fingerprint: "sha256:delivery".to_string(),
-                turn_id: "delivery-turn".to_string(),
-            },
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,
             })),
@@ -1062,14 +1077,20 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
         }
         _ => false,
     }));
-    assert!(migrated.iter().any(|line| matches!(
-        &line.item,
-        RolloutItem::InterAgentCommunicationMetadata {
-            consumed_mail_id: Some(communication_id),
-            mail_fingerprint: Some(fingerprint),
-            ..
-        } if communication_id == &delivery_id && fingerprint == "sha256:delivery"
-    )));
+    assert_eq!(
+        migrated
+            .iter()
+            .filter(|line| matches!(
+                &line.item,
+                RolloutItem::InterAgentCommunicationMetadata {
+                    consumed_mail_id: Some(communication_id),
+                    mail_fingerprint: Some(fingerprint),
+                    ..
+                } if communication_id == &delivery_id && fingerprint == "sha256:delivery"
+            ))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1090,6 +1111,13 @@ async fn migration_rolls_back_current_durable_delivery_without_replaying_pending
         thread_id,
         SessionSource::Cli,
         vec![
+            RolloutItem::DurableInterAgentCommunicationClaimed {
+                communication_id: delivery_id.clone(),
+                communication: Some(delivery.clone()),
+                delivered_response: None,
+                fingerprint: "sha256:current-delivery".to_string(),
+                turn_id: "never-started-duplicate".to_string(),
+            },
             RolloutItem::DurableInterAgentCommunication {
                 communication: delivery.clone(),
                 start_options: Default::default(),
@@ -1572,14 +1600,6 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
             completed("child-turn"),
         ],
     );
-    writeln!(
-        fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("open legacy subagent rollout"),
-        "{{not valid rollout json"
-    )
-    .expect("append malformed record");
     let store = indexed_store(home.path()).await;
 
     store
@@ -1609,6 +1629,58 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
         .expect("load migrated model context");
     assert!(context.items.iter().any(|item| {
         matches!(item, RolloutItem::Compacted(compacted) if compacted.message == "latest checkpoint")
+    }));
+    assert!(
+        list_active_summary_turns(&store, thread_id)
+            .await
+            .turns
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn malformed_subagent_tail_falls_back_to_full_tolerant_replay() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::SubAgent(SubAgentSource::Other("test".to_string())),
+        vec![
+            RolloutItem::Compacted(CompactedItem {
+                message: "fallback checkpoint".to_string(),
+                replacement_history: Some(Vec::new()),
+                mcp_resource_origins: None,
+                window_number: Some(1),
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+            }),
+            user_message("child question"),
+            agent_message("child answer"),
+        ],
+    );
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open legacy subagent rollout"),
+        "{{not valid rollout json"
+    )
+    .expect("append malformed record");
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate malformed legacy subagent");
+
+    let lines = read_rollout(&path);
+    assert!(lines.iter().any(|line| {
+        matches!(
+            &line.item,
+            RolloutItem::Compacted(compacted) if compacted.message == "fallback checkpoint"
+        )
     }));
     assert!(
         list_active_summary_turns(&store, thread_id)

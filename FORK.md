@@ -5,9 +5,9 @@ from upstream releases.
 
 ## Identity
 
-- Release: `jkammerland.mcp.16`
+- Release: `jkammerland.mcp.17`
 - Upstream base: `2f0a5d5516c566e40b7abefea5f3c1f81fcd64bd` (`origin/main`)
-- User-visible suffix: `+jkammerland.mcp.16`
+- User-visible suffix: `+jkammerland.mcp.17`
 - Personal Git remote: `fork`
 
 The startup header, `codex --version`, app-server handshake, daemon lifecycle,
@@ -39,9 +39,9 @@ object ID:
 
 1. The reviewed source commit contains the versioned implementation and
    installer marker.
-2. `fleet/jkammerland.mcp.16-source` points exactly at that source commit.
+2. `fleet/jkammerland.mcp.17-source` points exactly at that source commit.
 3. A direct descendant pins that source commit and ref in
-   `fleet/release.json`; `release/jkammerland.mcp.16` points at the descendant.
+   `fleet/release.json`; `release/jkammerland.mcp.17` points at the descendant.
 
 The fleet controller verifies the immutable source ref, native build receipts,
 binary hashes, CLI identity, executable pair, and compatible MCP-server commit
@@ -49,10 +49,9 @@ before reporting a host healthy. Nothing is pushed automatically.
 
 ## Validation
 
-The release candidate was reviewed by iterative Codex and validated on Linux,
-native Apple Silicon macOS, and the repository's Windows Wine executor. Release
-identity and fleet-controller tests are rerun before source and manifest commits
-are cut.
+Release identity and fleet-controller tests are rerun before source and manifest
+commits are cut. The pinned candidate is then built and validated independently
+on Linux, native Apple Silicon macOS, and Windows before activation.
 
 ## Local installation
 

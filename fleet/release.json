@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "release": {
-    "name": "jkammerland.mcp.16",
-    "forkCommit": "137127bcce94092424a330ab151e5ab4eb696183",
-    "forkRef": "fleet/jkammerland.mcp.16-source",
+    "name": "jkammerland.mcp.17",
+    "forkCommit": "502086027380448634281e474b921287a088de52",
+    "forkRef": "fleet/jkammerland.mcp.17-source",
     "forkRemote": "https://github.com/jkammerland/codex.git",
-    "expectedCliVersion": "codex-cli 0.0.0+jkammerland.mcp.16",
+    "expectedCliVersion": "codex-cli 0.0.0+jkammerland.mcp.17",
     "mcpServerCommit": "9129009ca8e25df2ca1a07fdd5c0c04aecc28c6b",
     "rustyV8Version": "150.4.0"
   },
@@ -15,7 +15,7 @@
       "platform": "darwin",
       "sshTarget": "work-computer-ai-dev",
       "sourceRoot": "/Users/ai-dev/repos/codex-mcp-fork",
-      "buildRoot": "/Users/ai-dev/repos/codex-mcp-fork-build-mcp16-prep-137127bcce",
+      "buildRoot": "/Users/ai-dev/repos/codex-mcp-fork-build-mcp17-prep-5020860273",
       "serverRoot": "/Users/ai-dev/repos/codex-mcp-server",
       "cliBinary": "/Users/ai-dev/.codex/packages/standalone/current/bin/codex",
       "codeModeHostBinary": "/Users/ai-dev/.codex/packages/standalone/current/bin/codex-code-mode-host",
@@ -28,7 +28,7 @@
       "platform": "windows",
       "sshTarget": "ai-dev1@windows-11",
       "sourceRoot": "B:\\repos\\codex-mcp-fork",
-      "buildRoot": "B:\\repos\\codex-mcp-fork-build-mcp16-prep-137127bcce",
+      "buildRoot": "B:\\repos\\codex-mcp-fork-build-mcp17-prep-5020860273",
       "serverRoot": "C:\\Users\\ai-dev1.DESKTOP-NMRV6E3\\repos\\codex-mcp-server",
       "cliBinary": "C:\\Users\\ai-dev1.DESKTOP-NMRV6E3\\AppData\\Local\\npm-global\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
       "codeModeHostBinary": "C:\\Users\\ai-dev1.DESKTOP-NMRV6E3\\AppData\\Local\\npm-global\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex-code-mode-host.exe",

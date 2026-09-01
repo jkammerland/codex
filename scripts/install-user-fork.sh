@@ -2,7 +2,7 @@
 
 set -eu
 
-FORK_MARKER="+jkammerland.mcp.16"
+FORK_MARKER="+jkammerland.mcp.17"
 RUSTY_V8_VERSION="150.4.0"
 RUSTY_V8_PROFILE="ptrcomp_sandbox_release"
 RUST_TARGET="x86_64-unknown-linux-gnu"

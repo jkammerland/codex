@@ -14,10 +14,10 @@ static BUILD_INFO: OnceLock<BuildInfo> = OnceLock::new();
 pub const CODEX_UPSTREAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Source-controlled identity for the maintained MCP lifecycle fork.
-pub const CODEX_FORK_BUILD_ID: &str = "jkammerland.mcp.16";
+pub const CODEX_FORK_BUILD_ID: &str = "jkammerland.mcp.17";
 
 /// The runtime protocol identity shared by the CLI and app-server.
-pub const CODEX_CLI_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+jkammerland.mcp.16");
+pub const CODEX_CLI_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+jkammerland.mcp.17");
 
 /// Initialize build information from the commit stamped into the calling executable.
 ///

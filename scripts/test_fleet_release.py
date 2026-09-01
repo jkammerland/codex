@@ -44,8 +44,8 @@ class FleetReleaseTest(unittest.TestCase):
         )
 
     def test_checked_in_manifest_is_valid(self) -> None:
-        self.assertEqual(self.release.marker, "+jkammerland.mcp.16")
-        self.assertEqual(self.release.fork_ref, "fleet/jkammerland.mcp.16-source")
+        self.assertEqual(self.release.marker, "+jkammerland.mcp.17")
+        self.assertEqual(self.release.fork_ref, "fleet/jkammerland.mcp.17-source")
         self.assertEqual(self.release.rusty_v8_version, "150.4.0")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
         self.assertEqual(
@@ -153,15 +153,21 @@ class FleetReleaseTest(unittest.TestCase):
         mode_drifted = fleet_release.Status(host, values)
         self.assertEqual(mode_drifted.drift(self.release), ("codeModeHostExecutable",))
 
+    def test_windows_status_script_delimits_path_before_colon(self) -> None:
+        script = fleet_release.status_script(self.hosts[1])
+
+        self.assertIn('"git failed in ${Path}:', script)
+        self.assertNotIn('"git failed in $Path:', script)
+
     def test_activation_scripts_preserve_rollback_and_use_atomic_replacement(
         self,
     ) -> None:
         mac_script = fleet_release.activation_script(self.hosts[0], self.release)
         windows_script = fleet_release.activation_script(self.hosts[1], self.release)
-        self.assertIn(".jkammerland.mcp.16-previous", mac_script)
+        self.assertIn(".jkammerland.mcp.17-previous", mac_script)
         self.assertIn("mv -f", mac_script)
         self.assertIn("ReplaceFile", windows_script)
-        self.assertIn(".jkammerland.mcp.16-previous", windows_script)
+        self.assertIn(".jkammerland.mcp.17-previous", windows_script)
         self.assertIn("Build worktree is not clean at the manifest commit", mac_script)
         self.assertIn("Assert-CleanGit $build", windows_script)
         self.assertIn("agents --help", mac_script)

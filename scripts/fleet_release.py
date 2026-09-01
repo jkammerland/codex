@@ -292,7 +292,7 @@ function Field($Name, $Value) {{ Write-Output "$Name=$Value" }}
 function GitValue($Path, [string[]]$Arguments) {{
   if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) {{ return 'missing' }}
   $value = ((& git -C $Path @Arguments 2>$null | Out-String).Trim())
-  if ($LASTEXITCODE -ne 0) {{ throw "git failed in $Path: $($Arguments -join ' ')" }}
+  if ($LASTEXITCODE -ne 0) {{ throw "git failed in ${{Path}}: $($Arguments -join ' ')" }}
   return $value
 }}
 function HashValue($Path) {{

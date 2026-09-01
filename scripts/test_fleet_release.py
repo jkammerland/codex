@@ -139,6 +139,12 @@ class FleetReleaseTest(unittest.TestCase):
         mode_drifted = fleet_release.Status(host, values)
         self.assertEqual(mode_drifted.drift(self.release), ("codeModeHostExecutable",))
 
+    def test_windows_status_script_delimits_path_before_colon(self) -> None:
+        script = fleet_release.status_script(self.hosts[1])
+
+        self.assertIn('"git failed in ${Path}:', script)
+        self.assertNotIn('"git failed in $Path:', script)
+
     def test_activation_scripts_preserve_rollback_and_use_atomic_replacement(
         self,
     ) -> None:

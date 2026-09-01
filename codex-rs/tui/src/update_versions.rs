@@ -13,7 +13,7 @@ pub(crate) fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::
 }
 
 pub(crate) fn is_source_build_version(version: &str) -> bool {
-    parse_version(version) == Some((0, 0, 0))
+    parse_version(version) == Some((0, 0, 0)) || version.contains("+jkammerland.")
 }
 
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
@@ -59,6 +59,7 @@ mod tests {
     #[test]
     fn source_build_version_is_not_checked() {
         assert!(is_source_build_version("0.0.0"));
+        assert!(is_source_build_version("0.0.0+jkammerland.mcp.16"));
         assert!(!is_source_build_version("0.1.0"));
     }
 

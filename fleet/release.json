@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "name": "jkammerland.mcp.16",
+    "forkCommit": "137127bcce94092424a330ab151e5ab4eb696183",
+    "forkRef": "fleet/jkammerland.mcp.16-source",
+    "forkRemote": "https://github.com/jkammerland/codex.git",
+    "expectedCliVersion": "codex-cli 0.0.0+jkammerland.mcp.16",
+    "mcpServerCommit": "9129009ca8e25df2ca1a07fdd5c0c04aecc28c6b",
+    "rustyV8Version": "150.4.0"
+  },
+  "hosts": [
+    {
+      "name": "mac",
+      "platform": "darwin",
+      "sshTarget": "work-computer-ai-dev",
+      "sourceRoot": "/Users/ai-dev/repos/codex-mcp-fork",
+      "buildRoot": "/Users/ai-dev/repos/codex-mcp-fork-build-mcp16-prep-137127bcce",
+      "serverRoot": "/Users/ai-dev/repos/codex-mcp-server",
+      "cliBinary": "/Users/ai-dev/.codex/packages/standalone/current/bin/codex",
+      "codeModeHostBinary": "/Users/ai-dev/.codex/packages/standalone/current/bin/codex-code-mode-host",
+      "rustup": "/opt/homebrew/opt/rustup/bin/rustup",
+      "rustToolchain": "1.95.0",
+      "rustTarget": "aarch64-apple-darwin"
+    },
+    {
+      "name": "windows",
+      "platform": "windows",
+      "sshTarget": "ai-dev1@windows-11",
+      "sourceRoot": "B:\\repos\\codex-mcp-fork",
+      "buildRoot": "B:\\repos\\codex-mcp-fork-build-mcp16-prep-137127bcce",
+      "serverRoot": "C:\\Users\\ai-dev1.DESKTOP-NMRV6E3\\repos\\codex-mcp-server",
+      "cliBinary": "C:\\Users\\ai-dev1.DESKTOP-NMRV6E3\\AppData\\Local\\npm-global\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+      "codeModeHostBinary": "C:\\Users\\ai-dev1.DESKTOP-NMRV6E3\\AppData\\Local\\npm-global\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex-code-mode-host.exe",
+      "rustToolchain": "1.95.0",
+      "rustTarget": "x86_64-pc-windows-msvc"
+    }
+  ]
+}

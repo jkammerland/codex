@@ -216,6 +216,9 @@ mod updates;
 #[cfg(any(not(debug_assertions), test))]
 mod updates_cache;
 mod version;
+pub use version::CODEX_CLI_VERSION;
+pub use version::CODEX_FORK_BUILD_ID;
+pub use version::CODEX_UPSTREAM_VERSION;
 mod vim_search;
 mod width;
 #[cfg(any(target_os = "windows", test))]

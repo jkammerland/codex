@@ -72,6 +72,7 @@ use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::WrapErr;
 use cwd_prompt::CwdPromptAction;
+use daemon_socket::maybe_probe_default_daemon_socket;
 pub use session_archive_commands::DeleteConfirmation;
 pub use session_archive_commands::SessionArchiveAction;
 pub use session_archive_commands::SessionArchiveCommandOptions;
@@ -121,6 +122,7 @@ mod pets;
 pub use custom_terminal::Terminal;
 mod auto_review_denials;
 mod cwd_prompt;
+mod daemon_socket;
 mod debug_config;
 mod diff_model;
 mod diff_render;
@@ -249,10 +251,6 @@ pub use public_widgets::composer_input::ComposerInput;
 
 const TUI_LOG_FILE_NAME: &str = "codex-tui.log";
 const INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(/*millis*/ 500);
-
-#[cfg(unix)]
-const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(50);
 
 #[allow(clippy::too_many_arguments)]
 async fn start_embedded_app_server(
@@ -434,7 +432,7 @@ async fn connect_remote_app_server(
     let app_server = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
         endpoint,
         client_name: "codex-tui".to_string(),
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        client_version: CODEX_CLI_VERSION.to_string(),
         experimental_api: true,
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
@@ -443,36 +441,6 @@ async fn connect_remote_app_server(
     .await
     .wrap_err("failed to connect to remote app server")?;
     Ok(AppServerClient::Remote(app_server))
-}
-
-#[cfg(unix)]
-async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<AbsolutePathBuf> {
-    let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home).ok()?;
-    match tokio::time::timeout(
-        AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT,
-        tokio::net::UnixStream::connect(socket_path.as_path()),
-    )
-    .await
-    {
-        Ok(Ok(_stream)) => Some(socket_path),
-        Ok(Err(err)) => {
-            tracing::debug!(%err, socket_path = %socket_path.display(), "skipping default app-server daemon socket");
-            None
-        }
-        Err(_) => {
-            tracing::debug!(
-                socket_path = %socket_path.display(),
-                timeout_ms = AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT.as_millis(),
-                "timed out probing default app-server daemon socket"
-            );
-            None
-        }
-    }
-}
-
-#[cfg(not(unix))]
-async fn maybe_probe_default_daemon_socket(_codex_home: &Path) -> Option<AbsolutePathBuf> {
-    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -591,7 +559,7 @@ where
             .unwrap_or_else(|err| panic!("cli session source should deserialize: {err}")),
         enable_codex_api_key_env: false,
         client_name: "codex-tui".to_string(),
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        client_version: CODEX_CLI_VERSION.to_string(),
         experimental_api: true,
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
@@ -1979,7 +1947,6 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serial_test::serial;
     use tempfile::TempDir;
-
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
         ConfigBuilder::default()
             .codex_home(temp_dir.path().to_path_buf())
@@ -2546,33 +2513,6 @@ mod tests {
                 "expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
             ));
         }
-    }
-
-    #[tokio::test]
-    async fn default_daemon_auto_connect_skips_missing_socket() -> color_eyre::Result<()> {
-        let codex_home = TempDir::new()?;
-        assert!(
-            maybe_probe_default_daemon_socket(codex_home.path())
-                .await
-                .is_none()
-        );
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn default_daemon_auto_connect_probes_socket_only() -> color_eyre::Result<()> {
-        let codex_home = TempDir::new()?;
-        let socket_path =
-            codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
-        std::fs::create_dir_all(socket_path.as_path().parent().expect("socket parent"))?;
-        let _listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
-
-        assert_eq!(
-            maybe_probe_default_daemon_socket(codex_home.path()).await,
-            Some(socket_path)
-        );
-        Ok(())
     }
 
     #[test]

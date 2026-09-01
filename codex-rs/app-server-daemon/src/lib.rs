@@ -297,6 +297,15 @@ impl Daemon {
     async fn start(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
         if let Ok(info) = client::probe(&self.socket_path).await {
+            if info.app_server_version != codex_build_info::CODEX_CLI_VERSION {
+                return Err(anyhow!(
+                    "running app-server version {} does not match this Codex runtime {}\n\n\
+                     The existing daemon was left running so active work is not interrupted. \
+                     Finish any daemon-backed jobs, then run:\n  codex app-server daemon restart",
+                    info.app_server_version,
+                    codex_build_info::CODEX_CLI_VERSION,
+                ));
+            }
             return Ok(self
                 .output(
                     LifecycleStatus::AlreadyRunning,
@@ -621,7 +630,7 @@ impl Daemon {
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
             socket_path: self.socket_path.clone(),
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_version: codex_build_info::CODEX_CLI_VERSION.to_string(),
             app_server_version: info.app_server_version,
         })
     }
@@ -763,7 +772,7 @@ impl Daemon {
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
             socket_path: self.socket_path.clone(),
-            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            cli_version: Some(codex_build_info::CODEX_CLI_VERSION.to_string()),
             app_server_version,
         }
     }
@@ -780,7 +789,7 @@ impl Daemon {
             backend,
             remote_control_enabled,
             socket_path: self.socket_path.clone(),
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_version: codex_build_info::CODEX_CLI_VERSION.to_string(),
             app_server_version,
         }
     }
@@ -849,8 +858,17 @@ fn try_lock_file(_file: &tokio::fs::File) -> Result<bool> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::path::PathBuf;
+
+    use anyhow::Context;
+    use anyhow::Result;
+    use futures::SinkExt;
+    use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
+    use tokio::net::UnixListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message;
 
     use super::BackendKind;
     use super::BootstrapOutput;
@@ -868,12 +886,116 @@ mod tests {
     use super::should_reexec_updater;
     use crate::client::ProbeInfo;
 
+    async fn serve_probe(
+        listener: UnixListener,
+        codex_home: PathBuf,
+        version: String,
+    ) -> Result<()> {
+        let (stream, _) = listener.accept().await?;
+        let mut websocket = accept_async(stream).await?;
+        let Message::Text(payload) = websocket
+            .next()
+            .await
+            .transpose()?
+            .context("missing initialize request")?
+        else {
+            anyhow::bail!("expected text initialize request");
+        };
+        let request: codex_app_server_protocol::JSONRPCRequest = serde_json::from_str(&payload)?;
+        let response = serde_json::json!({
+            "id": request.id,
+            "result": {
+                "userAgent": format!("codex_app_server/{version} (test)"),
+                "codexHome": codex_home,
+                "platformFamily": "unix",
+                "platformOs": "linux",
+            },
+        });
+        websocket
+            .send(Message::Text(response.to_string().into()))
+            .await?;
+        websocket
+            .next()
+            .await
+            .transpose()?
+            .context("missing initialized notification")?;
+        Ok(())
+    }
+
+    fn test_daemon(temp_dir: &TempDir, socket_path: PathBuf) -> Daemon {
+        Daemon {
+            socket_path,
+            pid_file: temp_dir.path().join("app-server.pid"),
+            update_pid_file: temp_dir.path().join("app-server-updater.pid"),
+            operation_lock_file: temp_dir.path().join("daemon.lock"),
+            settings_file: temp_dir.path().join("settings.json"),
+            managed_codex_bin: temp_dir.path().join("missing-codex"),
+        }
+    }
+
     #[test]
     fn remote_control_status_uses_camel_case_json() {
         assert_eq!(
             serde_json::to_string(&RemoteControlStatus::AlreadyEnabled).expect("serialize"),
             "\"alreadyEnabled\""
         );
+    }
+
+    #[tokio::test]
+    async fn start_reuses_daemon_with_matching_runtime_identity() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        let server = tokio::spawn(serve_probe(
+            listener,
+            temp_dir.path().to_path_buf(),
+            codex_build_info::CODEX_CLI_VERSION.to_string(),
+        ));
+        let daemon = test_daemon(&temp_dir, socket_path.clone());
+
+        assert_eq!(
+            daemon.start().await?,
+            LifecycleOutput {
+                status: LifecycleStatus::AlreadyRunning,
+                backend: None,
+                pid: None,
+                managed_codex_path: temp_dir.path().join("missing-codex"),
+                managed_codex_version: None,
+                socket_path,
+                cli_version: Some(codex_build_info::CODEX_CLI_VERSION.to_string()),
+                app_server_version: Some(codex_build_info::CODEX_CLI_VERSION.to_string()),
+            }
+        );
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn start_preserves_incompatible_daemon_and_reports_recovery() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        let server = tokio::spawn(serve_probe(
+            listener,
+            temp_dir.path().to_path_buf(),
+            "0.151.0".to_string(),
+        ));
+        let daemon = test_daemon(&temp_dir, socket_path);
+
+        let Err(err) = daemon.start().await else {
+            anyhow::bail!("incompatible daemon should be rejected");
+        };
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "running app-server version 0.151.0 does not match this Codex runtime {}\n\n\
+                 The existing daemon was left running so active work is not interrupted. \
+                 Finish any daemon-backed jobs, then run:\n  codex app-server daemon restart",
+                codex_build_info::CODEX_CLI_VERSION,
+            )
+        );
+        server.await??;
+        Ok(())
     }
 
     #[test]

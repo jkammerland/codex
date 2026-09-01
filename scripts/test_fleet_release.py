@@ -65,6 +65,7 @@ class FleetReleaseTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
         installer = (Path(__file__).parent / "install-user-fork.sh").read_text()
         self.assertIn("SELECTED_CODEX_HASH", installer)
         self.assertIn("selected Codex binaries changed during the build", installer)
@@ -74,6 +75,19 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertNotIn(
             "UPSTREAM_VERSION=$(printf '%s\\n' \"$BUILT_VERSION\"", installer
         )
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer test")
+    def test_linux_installer_preserves_incompatible_daemons(self) -> None:
+        daemon_result = run(
+            [
+                "sh",
+                str(Path(__file__).parent / "tests" / "install_user_fork_daemon.sh"),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(daemon_result.returncode, 0, daemon_result.stderr)
 
     def test_manifest_rejects_relative_host_paths(self) -> None:
         raw = json.loads(fleet_release.DEFAULT_MANIFEST.read_text())

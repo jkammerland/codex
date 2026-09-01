@@ -10,8 +10,9 @@ from upstream releases.
 - User-visible suffix: `+jkammerland.mcp.16`
 - Personal Git remote: `fork`
 
-The startup header and `codex --version` include the suffix. Internal protocol
-compatibility continues to use the upstream Cargo package version.
+The startup header, `codex --version`, app-server handshake, daemon lifecycle,
+and app-server client metadata share the suffix. Wire schemas remain compatible
+with the upstream Cargo workspace version.
 
 ## Maintained behavior
 
@@ -27,6 +28,9 @@ compatibility continues to use the upstream Cargo package version.
    environment, notifications, and hook context.
 7. Explicit interruption, shutdown, and real transport failure retain distinct
    lifecycle behavior.
+8. Shared app-server daemons are reused only when their runtime identity matches
+   the invoking fork; incompatible daemons are left running for explicit,
+   operator-controlled restart after active work finishes.
 
 ## Release layout
 

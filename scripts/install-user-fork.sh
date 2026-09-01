@@ -10,6 +10,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 RELEASE_MANIFEST="$REPO_ROOT/fleet/release.json"
 . "$SCRIPT_DIR/lib/install-user-fork-paths.sh"
+. "$SCRIPT_DIR/lib/install-user-fork-daemon.sh"
 . "$SCRIPT_DIR/lib/install-user-fork-transaction.sh"
 BUILT_CODEX="$REPO_ROOT/codex-rs/target/release/codex"
 BUILT_CODE_MODE_HOST="$REPO_ROOT/codex-rs/target/release/codex-code-mode-host"
@@ -105,7 +106,7 @@ if ! git -C "$REPO_ROOT" cat-file -e "$EXPECTED_FORK_COMMIT^{commit}" || \
   ! git -C "$REPO_ROOT" merge-base --is-ancestor "$EXPECTED_FORK_COMMIT" HEAD || \
   ! git -C "$REPO_ROOT" diff --quiet "$EXPECTED_FORK_COMMIT" -- \
     codex-rs scripts/install-user-fork.sh scripts/lib/install-user-fork-paths.sh \
-    scripts/lib/install-user-fork-transaction.sh; then
+    scripts/lib/install-user-fork-daemon.sh scripts/lib/install-user-fork-transaction.sh; then
   echo "Fork source does not match the reviewed fleet release commit: $EXPECTED_FORK_COMMIT" >&2
   exit 1
 fi
@@ -148,6 +149,9 @@ if [ ! -x "$INSTALLED_CODE_MODE_HOST" ]; then
   echo "Could not find the active standalone or npm-managed code-mode host at: $INSTALLED_CODE_MODE_HOST" >&2
   exit 1
 fi
+
+EXPECTED_RUNTIME_VERSION=${EXPECTED_CLI_VERSION#codex-cli }
+ensure_daemon_runtime_compatible "$INSTALLED_CODEX" "$EXPECTED_RUNTIME_VERSION" "$CODEX_STATE_DIR"
 
 SELECTED_CODEX_HASH=$(sha256sum "$INSTALLED_CODEX" | awk '{print $1}')
 SELECTED_CODE_MODE_HOST_HASH=$(sha256sum "$INSTALLED_CODE_MODE_HOST" | awk '{print $1}')
@@ -329,6 +333,8 @@ if ! codex agents --help >/dev/null 2>&1; then
   echo "The active fork does not support codex agents; the exit transaction will restore the selected target." >&2
   exit 1
 fi
+
+ensure_daemon_runtime_compatible "$INSTALLED_CODEX" "$EXPECTED_RUNTIME_VERSION" "$CODEX_STATE_DIR"
 
 ACTIVATION_PENDING=0
 printf 'Installed %s\n' "$STAGED_VERSION"

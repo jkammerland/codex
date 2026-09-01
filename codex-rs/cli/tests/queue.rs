@@ -10,6 +10,7 @@ use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -30,34 +31,11 @@ async fn respond_to_queue_request<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let mut websocket = accept_async(stream).await?;
-    let initialize = websocket
-        .next()
-        .await
-        .context("missing initialize request")??;
-    let initialize: Value = serde_json::from_str(initialize.to_text()?)?;
-    assert_eq!(initialize["method"], "initialize");
+    let (mut websocket, initialize) = accept_app_server_client(stream, codex_home).await?;
     assert_eq!(
         initialize["params"]["capabilities"]["experimentalApi"],
         true
     );
-    let initialized_response = json!({
-        "id": initialize["id"],
-        "result": {
-            "userAgent": "codex_cli_rs/0.0.0-test",
-            "codexHome": codex_home,
-        },
-    });
-    websocket
-        .send(Message::Text(initialized_response.to_string().into()))
-        .await?;
-
-    let initialized = websocket
-        .next()
-        .await
-        .context("missing initialized notification")??;
-    let initialized: Value = serde_json::from_str(initialized.to_text()?)?;
-    assert_eq!(initialized["method"], "initialized");
 
     let request = websocket.next().await.context("missing queue request")??;
     let request: Value = serde_json::from_str(request.to_text()?)?;
@@ -91,6 +69,52 @@ where
         .send(Message::Text(result.to_string().into()))
         .await?;
     Ok(request)
+}
+
+async fn accept_app_server_client<S>(
+    stream: S,
+    codex_home: &Path,
+) -> Result<(WebSocketStream<S>, Value)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut websocket = accept_async(stream).await?;
+    let initialize = websocket
+        .next()
+        .await
+        .context("missing initialize request")??;
+    let initialize: Value = serde_json::from_str(initialize.to_text()?)?;
+    assert_eq!(initialize["method"], "initialize");
+    let initialized_response = json!({
+        "id": initialize["id"],
+        "result": {
+            "userAgent": format!("codex_cli_rs/{} (test)", codex_tui::CODEX_CLI_VERSION),
+            "codexHome": codex_home,
+            "platformFamily": "unix",
+            "platformOs": "linux",
+        },
+    });
+    websocket
+        .send(Message::Text(initialized_response.to_string().into()))
+        .await?;
+
+    let initialized = websocket
+        .next()
+        .await
+        .context("missing initialized notification")??;
+    let initialized: Value = serde_json::from_str(initialized.to_text()?)?;
+    assert_eq!(initialized["method"], "initialized");
+    Ok((websocket, initialize))
+}
+
+#[cfg(unix)]
+async fn respond_to_daemon_probe<S>(stream: S, codex_home: &Path) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (_websocket, initialize) = accept_app_server_client(stream, codex_home).await?;
+    assert_eq!(initialize["params"]["capabilities"], Value::Null);
+    Ok(())
 }
 
 #[tokio::test]
@@ -203,7 +227,7 @@ async fn queue_rejects_local_daemon_that_does_not_support_queueing() -> Result<(
     let server_home = codex_home.path().to_path_buf();
     let server = tokio::spawn(async move {
         let (probe, _) = listener.accept().await?;
-        drop(probe);
+        respond_to_daemon_probe(probe, server_home.as_path()).await?;
         let (stream, _) = listener.accept().await?;
         respond_to_queue_request(
             stream,
@@ -241,10 +265,10 @@ async fn queue_rejects_overrides_that_bypass_local_daemon() -> Result<()> {
             .context("missing socket parent")?,
     )?;
     let listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+    let server_home = codex_home.path().to_path_buf();
     let server = tokio::spawn(async move {
         let (probe, _) = listener.accept().await?;
-        drop(probe);
-        Ok::<_, std::io::Error>(())
+        respond_to_daemon_probe(probe, server_home.as_path()).await
     });
 
     let output = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)

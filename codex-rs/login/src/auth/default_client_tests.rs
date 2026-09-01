@@ -42,7 +42,8 @@ impl Write for TestLogSink {
 fn test_get_codex_user_agent() {
     let user_agent = get_codex_user_agent();
     let originator = originator().value;
-    let prefix = format!("{originator}/");
+    let runtime_version = codex_build_info::CODEX_CLI_VERSION;
+    let prefix = format!("{originator}/{runtime_version} ");
     assert!(user_agent.starts_with(&prefix));
 }
 

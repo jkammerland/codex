@@ -339,7 +339,7 @@ async fn omitted_and_positive_direct_timeouts_remain_finite() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn transport_loss_fails_unbounded_call_without_replay() -> Result<()> {
+async fn model_originated_transport_loss_fails_without_replay_and_reconnects() -> Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "requires a Windows test_stdio_server in the Wine-exec environment"
@@ -350,23 +350,58 @@ async fn transport_loss_fails_unbounded_call_without_replay() -> Result<()> {
     let fixture = build_fixture(&server, Some(Duration::ZERO), DispatchPath::Direct).await?;
     let temp_dir = tempfile::tempdir()?;
     let blocking_call = BlockingCall::new(&temp_dir, "transport-loss");
-    let call = tokio::spawn({
-        let codex = Arc::clone(&fixture.codex);
-        let arguments = blocking_call.arguments.clone();
-        async move {
-            codex
-                .call_mcp_tool(MCP_SERVER, TOOL, Some(arguments), /*meta*/ None)
-                .await
+    let namespace = format!("mcp__{MCP_SERVER}");
+    let call_id = "call-transport-loss";
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_response_created("resp-find-unbounded-tool"),
+            responses::ev_tool_search_call(
+                "search-unbounded-tool",
+                &json!({ "query": "unbounded wait sync tool" }),
+            ),
+            responses::ev_completed("resp-find-unbounded-tool"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_response_created("resp-transport-loss"),
+            responses::ev_function_call_with_namespace(
+                call_id,
+                &namespace,
+                TOOL,
+                &serde_json::to_string(&blocking_call.arguments)?,
+            ),
+            responses::ev_completed("resp-transport-loss"),
+        ]),
+    )
+    .await;
+    let failed_call_output = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_assistant_message("msg-transport-loss", "transport lost"),
+            responses::ev_completed("resp-transport-loss-finished"),
+        ]),
+    )
+    .await;
+    let first_turn = fixture.submit_turn("start the MCP call that will lose its transport");
+    tokio::pin!(first_turn);
+    tokio::select! {
+        result = &mut first_turn => {
+            result?;
+            anyhow::bail!("model turn completed before the MCP tool started");
         }
-    });
-    wait_for_path_exists(&blocking_call.started_file, Duration::from_secs(5)).await?;
+        result = wait_for_path_exists(&blocking_call.started_file, Duration::from_secs(5)) => {
+            result?;
+        }
+    }
 
     blocking_call.close_transport()?;
-    let result = tokio::time::timeout(Duration::from_secs(5), call)
-        .await
-        .expect("transport loss should release the pending call")?;
-    let error = result.expect_err("transport loss should fail the pending call");
-    let message = format!("{error:#}");
+    first_turn.await?;
+    let failed_request = failed_call_output.single_request();
+    let message = failed_request.function_call_output(call_id).to_string();
     assert!(
         message.contains("transport")
             || message.contains("connection")
@@ -374,6 +409,53 @@ async fn transport_loss_fails_unbounded_call_without_replay() -> Result<()> {
         "transport loss should retain a transport-specific error: {message}"
     );
     assert_eq!(blocking_call.count()?, 1, "transport loss must not replay");
+
+    let recovered_call = BlockingCall::new(&temp_dir, "transport-reconnected");
+    let recovered_call_id = "call-transport-reconnected";
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_response_created("resp-transport-reconnected"),
+            responses::ev_function_call_with_namespace(
+                recovered_call_id,
+                &namespace,
+                TOOL,
+                &serde_json::to_string(&recovered_call.arguments)?,
+            ),
+            responses::ev_completed("resp-transport-reconnected"),
+        ]),
+    )
+    .await;
+    let recovered_call_output = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            responses::ev_assistant_message("msg-transport-reconnected", "reconnected"),
+            responses::ev_completed("resp-transport-reconnected-finished"),
+        ]),
+    )
+    .await;
+    let second_turn = fixture.submit_turn("make a new MCP call after reconnecting");
+    tokio::pin!(second_turn);
+    tokio::select! {
+        result = &mut second_turn => {
+            result?;
+            anyhow::bail!("model turn completed before the reconnected MCP tool started");
+        }
+        result = wait_for_path_exists(&recovered_call.started_file, Duration::from_secs(5)) => {
+            result?;
+        }
+    }
+    recovered_call.release()?;
+    second_turn.await?;
+    let recovered_output = recovered_call_output
+        .single_request()
+        .function_call_output(recovered_call_id)
+        .clone();
+    assert!(
+        recovered_output.to_string().contains("ok"),
+        "unexpected reconnected MCP output: {recovered_output:#}"
+    );
+    assert_eq!(recovered_call.count()?, 1);
     Ok(())
 }
 

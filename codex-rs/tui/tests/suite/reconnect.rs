@@ -53,7 +53,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             };
             loop {
                 let frame = tokio::select! {
-                    _ = &mut disconnect_rx, if connection == 0 => {
+                    _ = &mut disconnect_rx, if connection == 1 => {
                         socket.close(/*msg*/ None).await?;
                         break;
                     }
@@ -66,7 +66,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     continue;
                 };
                 methods.push(request.method.clone());
-                if connection == 1 && request.method == "initialize" {
+                if connection == 2 && request.method == "initialize" {
                     restore_rx.take().unwrap().await?;
                 }
                 // Keep failing past the original five-attempt limit.
@@ -84,7 +84,9 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     continue;
                 }
                 let result = match request.method.as_str() {
-                    "initialize" => json!({"userAgent": "reconnect-pty"}),
+                    "initialize" => json!({
+                        "userAgent": format!("reconnect-pty/{}", codex_tui::CODEX_CLI_VERSION)
+                    }),
                     // An older daemon can omit the client's default-disabled features.
                     "experimentalFeature/list" => {
                         json!({"data": (["code_mode_host", "auth_elicitation"].map(|name| json!({

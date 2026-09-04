@@ -878,3 +878,107 @@ repaired_modes=0
 trap - EXIT HUP INT TERM
 printf 'activated-version=%s\\n' "$version"
 """
+
+
+def print_status(statuses: list[Status], release: Release) -> bool:
+    print("host\tcli\tserver\tsource\tresult")
+    clean = True
+    for status in statuses:
+        drift = status.drift(release)
+        clean &= not drift
+        values = status.values
+        print(
+            "\t".join(
+                [
+                    status.host.name,
+                    values.get("cliVersion", "unavailable"),
+                    values.get("serverCommit", "unavailable"),
+                    values.get("sourceCommit", "unavailable"),
+                    "ok" if not drift else ",".join(drift),
+                ]
+            )
+        )
+    return clean
+
+
+def apply_stage(host: Host, release: Release, bundle: Path | None) -> None:
+    require_server(host, release)
+    if bundle:
+        copy_bundle(host, release, bundle)
+    result = remote(host, build_script(host, release, bundle is not None))
+    if result.returncode:
+        raise FleetError(f"{host.name}: {error_message('building fork', result)}")
+    print(f"{host.name}: {result.stdout.strip()}")
+
+
+def apply_rollout(host: Host, release: Release, bundle: Path | None) -> None:
+    apply_stage(host, release, bundle)
+    result = remote(host, activation_script(host, release))
+    if result.returncode:
+        raise FleetError(f"{host.name}: {error_message('activating fork', result)}")
+    print(f"{host.name}: {result.stdout.strip()}")
+
+
+def args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for command in ("status", "plan"):
+        child = commands.add_parser(command)
+        child.add_argument("--host", action="append")
+    for command in ("activate", "stage", "rollout"):
+        child = commands.add_parser(command)
+        child.add_argument("--host", action="append", required=True)
+        child.add_argument("--apply", action="store_true")
+        if command in {"stage", "rollout"}:
+            child.add_argument("--bundle", type=Path)
+    return parser.parse_args()
+
+
+def main() -> int:
+    parsed = args()
+    try:
+        release, hosts = load_manifest(parsed.manifest)
+        hosts = selected_hosts(hosts, parsed.host)
+        if parsed.command == "plan":
+            for host in hosts:
+                print(
+                    f"{host.name}: gate server → stage {release.fork_commit} → build {host.build_root} → atomic activate → status"
+                )
+            return 0
+        if parsed.command == "status":
+            return (
+                0 if print_status([host_status(host) for host in hosts], release) else 2
+            )
+        if not parsed.apply:
+            raise FleetError(
+                f"{parsed.command} changes remote state; re-run with --apply"
+            )
+        if parsed.command in {"stage", "rollout"}:
+            bundle = parsed.bundle
+            if bundle and not bundle.is_file():
+                raise FleetError(f"release bundle does not exist: {bundle}")
+            for host in hosts:
+                if parsed.command == "stage":
+                    apply_stage(host, release, bundle)
+                else:
+                    apply_rollout(host, release, bundle)
+            if parsed.command == "stage":
+                return 0
+        else:
+            for host in hosts:
+                result = remote(host, activation_script(host, release))
+                if result.returncode:
+                    raise FleetError(
+                        f"{host.name}: {error_message('activating fork', result)}"
+                    )
+                print(f"{host.name}: {result.stdout.strip()}")
+        statuses = [host_status(host) for host in hosts]
+        return 0 if print_status(statuses, release) else 2
+    except FleetError as error:
+        print(f"fleet-release: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

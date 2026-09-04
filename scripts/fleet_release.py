@@ -613,3 +613,268 @@ printf '%s\\n' \
 mv -f "$receipt.partial.$$" "$receipt"
 printf 'build-version=%s\\n' "$version"
 """
+
+
+def activation_script(host: Host, release: Release) -> str:
+    source_cli = host.build_binary("codex")
+    source_host = host.build_binary("codex-code-mode-host")
+    receipt = host.build_receipt()
+    backup_cli = f"{host.cli_binary}.{release.name}-previous"
+    backup_host = f"{host.code_mode_host_binary}.{release.name}-previous"
+    if host.windows:
+        return f"""$ErrorActionPreference = 'Stop'
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public static class FleetFileOps {{ [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ReplaceFile(string target, string replacement, string backup, uint flags, IntPtr exclude, IntPtr reserved); }}
+'@
+function Hash($Path) {{ (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }}
+function Assert-CleanGit($Path, $ExpectedCommit, $Label) {{
+  if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) {{ throw "$Label is not a Git checkout" }}
+  $commit = ((& git -C $Path rev-parse HEAD 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0) {{ throw "Could not inspect $Label commit" }}
+  $status = ((& git -C $Path status --porcelain 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0) {{ throw "Could not inspect $Label status" }}
+  if ($commit -ne $ExpectedCommit -or -not [string]::IsNullOrEmpty($status)) {{ throw "$Label is not clean at the manifest commit" }}
+}}
+function Receipt-Value($Path, $Name) {{
+  $prefix = "$Name="
+  $matches = @(Get-Content -LiteralPath $Path | Where-Object {{ $_.StartsWith($prefix, [StringComparison]::Ordinal) }})
+  if ($matches.Count -ne 1) {{ throw "Invalid build receipt field: $Name" }}
+  return $matches[0].Substring($prefix.Length)
+}}
+function Invoke-CodexWithHome($Codex, $CodexHome, [string[]]$Arguments) {{
+  $hadCodexHome = Test-Path Env:CODEX_HOME
+  $previousCodexHome = $env:CODEX_HOME
+  try {{
+    $env:CODEX_HOME = $CodexHome
+    $output = ((& $Codex @Arguments 2>$null | Out-String).Trim())
+    $exitCode = $LASTEXITCODE
+  }} finally {{
+    if ($hadCodexHome) {{ $env:CODEX_HOME = $previousCodexHome }}
+    else {{ Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue }}
+  }}
+  if ($exitCode -ne 0) {{ throw "Codex command failed: $($Arguments -join ' ')" }}
+  return $output
+}}
+function Assert-DaemonRuntimeCompatible($Codex, $ExpectedVersion, $CodexHome) {{
+  try {{
+    $rawStatus = Invoke-CodexWithHome -Codex $Codex -CodexHome $CodexHome -Arguments @('app-server', 'daemon', 'version')
+    $daemon = $rawStatus | ConvertFrom-Json -ErrorAction Stop
+  }} catch {{
+    throw "Could not verify the app-server daemon; refusing to replace Codex: $($_.Exception.Message)"
+  }}
+  if ($daemon.status -eq 'notRunning') {{ return }}
+  if ($daemon.status -ne 'running') {{
+    throw "Unexpected app-server daemon status '$($daemon.status)'; refusing to replace Codex"
+  }}
+  if (-not ($daemon.appServerVersion -is [string]) -or $daemon.appServerVersion -ne $ExpectedVersion) {{
+    $actualVersion = if ($daemon.appServerVersion -is [string]) {{ $daemon.appServerVersion }} else {{ 'unknown' }}
+    throw "App-server daemon version $actualVersion is running; the new Codex runtime is $ExpectedVersion. The daemon was left untouched"
+  }}
+}}
+function Replace($Target, $Source, $Backup) {{
+  $stage = "$Target.{release.name}-$([guid]::NewGuid().ToString('N'))"
+  try {{
+    Copy-Item -LiteralPath $Source -Destination $stage
+    if ((Hash $stage) -ne (Hash $Source)) {{ throw "Staging verification failed: $Target" }}
+    if (-not [FleetFileOps]::ReplaceFile($Target, $stage, $Backup, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Atomic replacement failed: $Target" }}
+  }} finally {{
+    if (Test-Path -LiteralPath $stage) {{ Remove-Item -Force -LiteralPath $stage }}
+  }}
+}}
+function Restore-One($Target, $Backup) {{
+  $stage = "$Target.rollback-$([guid]::NewGuid().ToString('N'))"
+  try {{
+    Copy-Item -LiteralPath $Backup -Destination $stage
+    if (-not [FleetFileOps]::ReplaceFile($Target, $stage, $null, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {{ throw "Rollback failed: $Target" }}
+  }} finally {{
+    if (Test-Path -LiteralPath $stage) {{ Remove-Item -Force -LiteralPath $stage }}
+  }}
+}}
+$canonical = {quote_ps(host.source_root)}; $build = {quote_ps(host.build_root)}; $sourceCli = {quote_ps(source_cli)}; $sourceHost = {quote_ps(source_host)}; $receipt = {quote_ps(receipt)}
+$targetCli = {quote_ps(host.cli_binary)}; $targetHost = {quote_ps(host.code_mode_host_binary)}
+$backupCli = {quote_ps(backup_cli)}; $backupHost = {quote_ps(backup_host)}
+$server = {quote_ps(host.server_root)}
+$codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {{ Join-Path $HOME '.codex' }} else {{ $env:CODEX_HOME }}
+Assert-CleanGit $canonical {quote_ps(release.fork_commit)} 'Canonical checkout'
+Assert-CleanGit $build {quote_ps(release.fork_commit)} 'Build worktree'
+Assert-CleanGit $server {quote_ps(release.server_commit)} 'MCP server'
+foreach ($path in @($sourceCli, $sourceHost, $targetCli, $targetHost)) {{ if (-not (Test-Path -LiteralPath $path)) {{ throw "Missing binary: $path" }} }}
+if (-not (Test-Path -LiteralPath $receipt)) {{ throw 'Missing reviewed build receipt' }}
+$sourceCliHash = Hash $sourceCli; $sourceHostHash = Hash $sourceHost
+if ((Receipt-Value $receipt 'format') -ne 'v1' -or
+    (Receipt-Value $receipt 'forkCommit') -ne {quote_ps(release.fork_commit)} -or
+    (Receipt-Value $receipt 'cliVersion') -ne {quote_ps(release.cli_version)} -or
+    (Receipt-Value $receipt 'cliSha256') -ne $sourceCliHash -or
+    (Receipt-Value $receipt 'hostSha256') -ne $sourceHostHash) {{ throw 'Build receipt does not match the reviewed binary pair' }}
+$needsActivation = (Hash $targetCli) -ne $sourceCliHash -or (Hash $targetHost) -ne $sourceHostHash
+$backupCliExists = Test-Path -LiteralPath $backupCli
+$backupHostExists = Test-Path -LiteralPath $backupHost
+if ($backupCliExists -ne $backupHostExists) {{ throw 'Release rollback pair is incomplete' }}
+Assert-DaemonRuntimeCompatible $sourceCli {quote_ps(release.runtime_version)} $codexHome
+if ($needsActivation) {{
+  if ($backupCliExists) {{
+    if ((Hash $targetCli) -ne (Hash $backupCli) -or (Hash $targetHost) -ne (Hash $backupHost)) {{ throw 'Release rollback pair does not match the active binaries' }}
+    Remove-Item -Force -LiteralPath $backupCli, $backupHost
+  }}
+  $oldCliHash = Hash $targetCli; $oldHostHash = Hash $targetHost
+  try {{
+    Replace $targetCli $sourceCli $backupCli
+    if ((Hash $targetCli) -ne $sourceCliHash -or (Hash $backupCli) -ne $oldCliHash) {{ throw 'CLI replacement verification failed' }}
+    Replace $targetHost $sourceHost $backupHost
+    if ((Hash $targetHost) -ne $sourceHostHash -or (Hash $backupHost) -ne $oldHostHash) {{ throw 'Code-mode host replacement verification failed' }}
+    $version = & $targetCli --version
+    if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
+    & $targetCli agents --help *> $null
+    if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
+    & $targetHost --help *> $null
+    if ($LASTEXITCODE -ne 0) {{ throw 'Activated code-mode host is not executable' }}
+  }} catch {{
+    $activationError = $_.Exception.Message
+    $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $backupHost) {{ try {{ Restore-One $targetHost $backupHost }} catch {{ $rollbackErrors.Add($_.Exception.Message) }} }}
+    if (Test-Path -LiteralPath $backupCli) {{ try {{ Restore-One $targetCli $backupCli }} catch {{ $rollbackErrors.Add($_.Exception.Message) }} }}
+    if ((Hash $targetCli) -ne $oldCliHash) {{ $rollbackErrors.Add('CLI rollback hash mismatch') }}
+    if ((Hash $targetHost) -ne $oldHostHash) {{ $rollbackErrors.Add('Code-mode host rollback hash mismatch') }}
+    if ($rollbackErrors.Count -eq 0) {{ Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $backupCli, $backupHost }}
+    if ($rollbackErrors.Count -ne 0) {{ throw "Activation failed: $activationError; rollback failed: $($rollbackErrors -join '; '); recovery copies: $backupCli, $backupHost" }}
+    throw "Activation failed and both binaries were restored: $activationError"
+  }}
+}} else {{
+  $version = & $targetCli --version
+  if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
+  & $targetCli agents --help *> $null
+  if ($LASTEXITCODE -ne 0) {{ throw 'Activated fork does not support codex agents' }}
+  & $targetHost --help *> $null
+  if ($LASTEXITCODE -ne 0) {{ throw 'Activated code-mode host is not executable' }}
+}}
+Write-Output "activated-version=$version"
+"""
+    daemon_helper_path = (
+        Path(__file__).resolve().parent / "lib" / "install-user-fork-daemon.sh"
+    )
+    try:
+        daemon_helper_source = daemon_helper_path.read_text()
+    except OSError as error:
+        raise FleetError(
+            f"could not embed daemon activation helper {daemon_helper_path}: {error}"
+        ) from error
+    return f"""set -eu
+{daemon_helper_source}
+sha() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
+file_mode() {{ stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }}
+git_clean_at() {{ path=$1; expected=$2; commit=$(git -C "$path" rev-parse HEAD) || return 1; status=$(git -C "$path" status --porcelain) || return 1; [ "$commit" = "$expected" ] && [ -z "$status" ]; }}
+receipt_value() {{ awk -v key="$1" 'index($0, key "=") == 1 {{ count++; value=substr($0, length(key) + 2) }} END {{ if (count != 1) exit 1; print value }}' "$2"; }}
+canonical={shlex.quote(host.source_root)}; build={shlex.quote(host.build_root)}; source_cli={shlex.quote(source_cli)}; source_host={shlex.quote(source_host)}; receipt={shlex.quote(receipt)}
+target_cli={shlex.quote(host.cli_binary)}; target_host={shlex.quote(host.code_mode_host_binary)}
+backup_cli={shlex.quote(backup_cli)}; backup_host={shlex.quote(backup_host)}
+server={shlex.quote(host.server_root)}
+activated=0; repaired_modes=0; old_cli_mode=; old_host_mode=; old_cli_hash=; old_host_hash=; restore_cli=; restore_host=; stage_cli=; stage_host=
+rollback_pair() {{
+  [ "$activated" -eq 1 ] || return 0
+  restore_cli=$(mktemp "$target_cli.rollback.XXXXXX"); restore_host=$(mktemp "$target_host.rollback.XXXXXX")
+  if ! cp -p "$backup_cli" "$restore_cli" || ! cp -p "$backup_host" "$restore_host"; then
+    rm -f "$restore_cli" "$restore_host"
+    restore_cli=; restore_host=
+    return 1
+  fi
+  rollback_failed=0
+  if ! mv -f "$restore_host" "$target_host"; then rollback_failed=1; fi
+  restore_host=
+  if ! mv -f "$restore_cli" "$target_cli"; then rollback_failed=1; fi
+  restore_cli=
+  [ "$(sha "$target_cli")" = "$old_cli_hash" ] || rollback_failed=1
+  [ "$(sha "$target_host")" = "$old_host_hash" ] || rollback_failed=1
+  if [ "$rollback_failed" -eq 0 ]; then
+    activated=0
+    rm -f "$backup_cli" "$backup_host"
+    return 0
+  fi
+  return 1
+}}
+finish_activation() {{
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$activated" -eq 1 ] && ! rollback_pair; then
+    echo "Activation rollback incomplete; recovery copies: $backup_cli, $backup_host" >&2
+    status=1
+  fi
+  if [ "$repaired_modes" -eq 1 ]; then
+    chmod "$old_cli_mode" "$target_cli" || status=1
+    chmod "$old_host_mode" "$target_host" || status=1
+  fi
+  [ -z "$restore_cli" ] || rm -f "$restore_cli"
+  [ -z "$restore_host" ] || rm -f "$restore_host"
+  [ -z "$stage_cli" ] || rm -f "$stage_cli"
+  [ -z "$stage_host" ] || rm -f "$stage_host"
+  exit "$status"
+}}
+trap finish_activation EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+git_clean_at "$canonical" {release.fork_commit} || {{ echo 'Canonical source is not clean at the manifest commit' >&2; exit 1; }}
+git_clean_at "$build" {release.fork_commit} || {{ echo 'Build worktree is not clean at the manifest commit' >&2; exit 1; }}
+git_clean_at "$server" {release.server_commit} || {{ echo 'MCP server is not clean at the compatible manifest commit' >&2; exit 1; }}
+[ -x "$source_cli" ] && [ -x "$source_host" ] && [ -f "$target_cli" ] && [ -f "$target_host" ] || {{ echo 'Activation binary pair is incomplete' >&2; exit 1; }}
+source_cli_hash=$(sha "$source_cli"); source_host_hash=$(sha "$source_host")
+[ -f "$receipt" ] || {{ echo 'Missing reviewed build receipt' >&2; exit 1; }}
+receipt_format=$(receipt_value format "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+receipt_commit=$(receipt_value forkCommit "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+receipt_version=$(receipt_value cliVersion "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+receipt_cli_hash=$(receipt_value cliSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+receipt_host_hash=$(receipt_value hostSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
+[ "$receipt_format" = v1 ] && [ "$receipt_commit" = {release.fork_commit} ] && [ "$receipt_version" = {shlex.quote(release.cli_version)} ] && [ "$receipt_cli_hash" = "$source_cli_hash" ] && [ "$receipt_host_hash" = "$source_host_hash" ] || {{ echo 'Build receipt does not match the reviewed binary pair' >&2; exit 1; }}
+[ ! -e "$backup_cli" ] && [ ! -e "$backup_host" ] || {{ [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}; }}
+codex_state_dir=${{CODEX_HOME:-"$HOME/.codex"}}
+ensure_daemon_runtime_compatible "$source_cli" {shlex.quote(release.runtime_version)} "$codex_state_dir"
+disable_daemon_auto_update "$source_cli" "$codex_state_dir"
+target_cli_hash=$(sha "$target_cli"); target_host_hash=$(sha "$target_host")
+if [ "$target_cli_hash" = "$source_cli_hash" ] && [ "$target_host_hash" = "$source_host_hash" ] && {{ [ ! -x "$target_cli" ] || [ ! -x "$target_host" ]; }}; then
+  old_cli_mode=$(file_mode "$target_cli"); old_host_mode=$(file_mode "$target_host")
+  repaired_modes=1
+  chmod 0755 "$target_cli" "$target_host"
+fi
+if [ "$target_cli_hash" != "$source_cli_hash" ] || [ "$target_host_hash" != "$source_host_hash" ]; then
+  if [ -e "$backup_cli" ] || [ -e "$backup_host" ]; then
+    [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}
+    cmp -s "$target_cli" "$backup_cli" && cmp -s "$target_host" "$backup_host" || {{ echo 'Release rollback pair does not match the active binaries' >&2; exit 1; }}
+    rm -f "$backup_cli" "$backup_host"
+  fi
+  old_cli_hash=$(sha "$target_cli"); old_host_hash=$(sha "$target_host")
+  stage_cli=$(mktemp "$target_cli.{release.name}.XXXXXX"); stage_host=$(mktemp "$target_host.{release.name}.XXXXXX")
+  install -m 0755 "$source_cli" "$stage_cli"; install -m 0755 "$source_host" "$stage_host"
+  [ "$(sha "$stage_cli")" = "$source_cli_hash" ] && [ "$(sha "$stage_host")" = "$source_host_hash" ] || {{ echo 'Staged binary hash verification failed' >&2; exit 1; }}
+  if ! cp -p "$target_cli" "$backup_cli" || ! cp -p "$target_host" "$backup_host"; then
+    rm -f "$backup_cli" "$backup_host"
+    echo 'Failed to create the release rollback pair' >&2
+    exit 1
+  fi
+  [ "$(sha "$backup_cli")" = "$old_cli_hash" ] && [ "$(sha "$backup_host")" = "$old_host_hash" ] || {{ echo 'Release rollback pair hash verification failed' >&2; exit 1; }}
+  activated=1
+  mv -f "$stage_cli" "$target_cli"
+  stage_cli=
+  mv -f "$stage_host" "$target_host"
+  stage_host=
+fi
+if [ "$(sha "$target_cli")" != "$source_cli_hash" ] || [ "$(sha "$target_host")" != "$source_host_hash" ]; then
+  echo 'Activated binary hash verification failed' >&2
+  exit 1
+fi
+if ! version=$("$target_cli" --version) || [ "$version" != {shlex.quote(release.cli_version)} ]; then
+  echo "Unexpected fork version: ${{version:-missing}}" >&2
+  exit 1
+fi
+if ! "$target_cli" agents --help >/dev/null; then
+  echo 'Activated fork does not support codex agents' >&2
+  exit 1
+fi
+if ! "$target_host" --help >/dev/null; then
+  echo 'Activated code-mode host is not executable' >&2
+  exit 1
+fi
+activated=0
+repaired_modes=0
+trap - EXIT HUP INT TERM
+printf 'activated-version=%s\\n' "$version"
+"""

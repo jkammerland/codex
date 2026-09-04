@@ -25,7 +25,13 @@ impl UnifiedExecProcessManager {
                 .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
             Arc::clone(&entry.process)
         };
-        let _interaction_guard = locked_process.interaction_lock().lock_owned().await;
+        // A single event-driven waiter owns the next observable process event.
+        // Reject duplicates instead of letting one drain the event and strand another.
+        let _wait_process_guard = locked_process
+            .wait_process_lock()
+            .try_lock_owned()
+            .map_err(|_| UnifiedExecError::WaitAlreadyActive { process_id })?;
+        let interaction_guard = locked_process.interaction_lock().lock_owned().await;
 
         let PreparedProcessHandles {
             process,
@@ -44,12 +50,17 @@ impl UnifiedExecProcessManager {
         let mut state_rx = process.subscribe_state();
         let has_buffered_output = tty && output.output_buffer.lock().await.total_bytes() > 0;
 
-        let wait_reason = if process.has_exited() || process.failure_message().is_some() {
-            ProcessWaitReason::Completed
+        let initial_wait_reason = if process.has_exited() || process.failure_message().is_some() {
+            Some(ProcessWaitReason::Completed)
         } else if pending_activity.is_some() {
-            ProcessWaitReason::Input
+            Some(ProcessWaitReason::Input)
         } else if has_buffered_output {
-            ProcessWaitReason::Output
+            Some(ProcessWaitReason::Output)
+        } else {
+            None
+        };
+        let (wait_reason, _interaction_guard) = if let Some(wait_reason) = initial_wait_reason {
+            (wait_reason, interaction_guard)
         } else {
             if let Some(interaction_event) = interaction_event.as_ref() {
                 let interaction = TerminalInteractionEvent {
@@ -65,6 +76,9 @@ impl UnifiedExecProcessManager {
                     )
                     .await;
             }
+            // The event listeners below protect the wait boundary; keeping the
+            // interaction lock here would prevent stdin from waking the process.
+            drop(interaction_guard);
 
             loop {
                 // Register all event listeners before re-checking state so no
@@ -80,17 +94,23 @@ impl UnifiedExecProcessManager {
                 // cannot be lost for an otherwise quiet interactive process.
                 output_notified.as_mut().enable();
 
+                let interaction_guard = locked_process.interaction_lock().lock_owned().await;
                 if process.has_exited() || process.failure_message().is_some() {
-                    break ProcessWaitReason::Completed;
+                    break (ProcessWaitReason::Completed, interaction_guard);
                 }
                 if tty && output.output_buffer.lock().await.total_bytes() > 0 {
-                    break ProcessWaitReason::Output;
+                    break (ProcessWaitReason::Output, interaction_guard);
                 }
+                drop(interaction_guard);
 
                 tokio::select! {
                     biased;
                     _ = &mut state_changed => {}
-                    _ = &mut activity_changed => break ProcessWaitReason::Input,
+                    _ = &mut activity_changed => {
+                        let interaction_guard =
+                            locked_process.interaction_lock().lock_owned().await;
+                        break (ProcessWaitReason::Input, interaction_guard);
+                    },
                     _ = &mut output_notified, if tty => {}
                 }
             }
@@ -125,7 +145,8 @@ impl UnifiedExecProcessManager {
             let message =
                 network_denial_message_for_session(session.as_ref(), network_approval.clone())
                     .await;
-            self.release_process_id(process_id).await;
+            self.release_process_id_if_matches(process_id, &process)
+                .await;
             return Err(fail_process_with_message(process.as_ref(), message));
         }
         if let Some(message) = process.failure_message() {
@@ -134,14 +155,15 @@ impl UnifiedExecProcessManager {
                 network_approval.clone(),
             )
             .await;
-            self.release_process_id(process_id).await;
+            self.release_process_id_if_matches(process_id, &process)
+                .await;
             if let Err(message) = finish_result {
                 return Err(fail_process_with_message(process.as_ref(), message));
             }
             return Err(UnifiedExecError::process_failed(message));
         }
 
-        let status = self.refresh_process_state(process_id).await;
+        let status = self.refresh_process_state(process_id, &process).await;
         let (process_id, exit_code, event_call_id, wait_reason) = match status {
             ProcessStatus::Alive {
                 exit_code,

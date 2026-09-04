@@ -154,3 +154,7 @@ pub(crate) async fn probe_default_daemon_socket(codex_home: &Path) -> DefaultDae
 #[cfg(all(test, unix))]
 #[path = "daemon_socket_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "daemon_socket_windows_tests.rs"]
+mod windows_tests;

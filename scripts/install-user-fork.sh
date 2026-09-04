@@ -276,10 +276,7 @@ if ! "$TEMP_CODEX" agents --help >/dev/null 2>&1; then
   echo "Staged executable does not support codex agents." >&2
   exit 1
 fi
-if ! CODEX_HOME="$CODEX_STATE_DIR" "$TEMP_CODEX" app-server daemon disable-auto-update; then
-  echo "Could not disable the official Codex daemon updater; refusing activation." >&2
-  exit 1
-fi
+disable_daemon_auto_update "$TEMP_CODEX" "$CODEX_STATE_DIR"
 
 ROLLBACK_CODEX=$(mktemp "$INSTALLED_CODEX.rollback.XXXXXX")
 ROLLBACK_CODE_MODE_HOST=$(mktemp "$INSTALLED_CODE_MODE_HOST.rollback.XXXXXX")

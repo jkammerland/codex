@@ -47,6 +47,10 @@ class FleetReleaseTest(unittest.TestCase):
     def test_checked_in_manifest_is_valid(self) -> None:
         self.assertEqual(self.release.marker, "+jkammerland.mcp.18")
         self.assertEqual(self.release.fork_ref, "fleet/jkammerland.mcp.18-source")
+        self.assertEqual(
+            self.release.runtime_version,
+            "0.154.0-alpha.3+jkammerland.mcp.18",
+        )
         self.assertEqual(self.release.rusty_v8_version, "150.4.0")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
         self.assertEqual(
@@ -198,6 +202,22 @@ class FleetReleaseTest(unittest.TestCase):
             "MCP server is not clean at the compatible manifest commit", mac_script
         )
         self.assertIn("Assert-CleanGit $server", windows_script)
+        self.assertIn("ensure_daemon_runtime_compatible", mac_script)
+        self.assertIn("disable_daemon_auto_update", mac_script)
+        self.assertIn("Assert-DaemonRuntimeCompatible", windows_script)
+        self.assertIn(self.release.runtime_version, windows_script)
+        self.assertLess(
+            mac_script.index('ensure_daemon_runtime_compatible "$source_cli"'),
+            mac_script.index('mv -f "$stage_cli" "$target_cli"'),
+        )
+        self.assertLess(
+            mac_script.index('disable_daemon_auto_update "$source_cli"'),
+            mac_script.index('mv -f "$stage_cli" "$target_cli"'),
+        )
+        self.assertLess(
+            windows_script.index("Assert-DaemonRuntimeCompatible $sourceCli"),
+            windows_script.index("Replace $targetCli $sourceCli $backupCli"),
+        )
 
     @unittest.skipUnless(shutil.which("shasum"), "requires shasum")
     def test_mac_activation_restores_pair_after_version_verification_failure(
@@ -209,6 +229,14 @@ class FleetReleaseTest(unittest.TestCase):
             build = root / "build"
             canonical.mkdir()
             (canonical / ".gitignore").write_text("codex-rs/target/\n")
+            daemon_helper = (
+                canonical / "scripts" / "lib" / "install-user-fork-daemon.sh"
+            )
+            daemon_helper.parent.mkdir(parents=True)
+            shutil.copy2(
+                Path(__file__).parent / "lib" / "install-user-fork-daemon.sh",
+                daemon_helper,
+            )
             run(["git", "init", "-q", str(canonical)], check=True)
             run(
                 [
@@ -221,6 +249,7 @@ class FleetReleaseTest(unittest.TestCase):
                     "user.email=fleet@example.invalid",
                     "add",
                     ".gitignore",
+                    "scripts/lib/install-user-fork-daemon.sh",
                 ],
                 check=True,
             )
@@ -259,7 +288,14 @@ class FleetReleaseTest(unittest.TestCase):
             source_host = source_dir / "codex-code-mode-host"
             target_cli = target_dir / "codex"
             target_host = target_dir / "codex-code-mode-host"
-            source_cli.write_text("#!/bin/sh\necho 'codex-cli wrong'\n")
+            source_cli.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1 $2 $3\" = 'app-server daemon version' ]; then "
+                "echo '{\"status\":\"notRunning\",\"appServerVersion\":null}'; exit 0; fi\n"
+                "if [ \"$1 $2 $3\" = 'app-server daemon disable-auto-update' ]; then exit 0; fi\n"
+                "if [ \"$1\" = --version ]; then echo 'codex-cli wrong'; exit 0; fi\n"
+                "exit 1\n"
+            )
             source_host.write_text("#!/bin/sh\nexit 0\n")
             target_cli.write_text("#!/bin/sh\necho 'codex-cli old'\n")
             target_host.write_text("#!/bin/sh\necho old-host\n")
@@ -289,14 +325,28 @@ class FleetReleaseTest(unittest.TestCase):
                 rust_target="aarch64-apple-darwin",
                 rustup=None,
             )
+            activation_environment = os.environ.copy()
+            activation_environment.update(
+                {
+                    "CODEX_HOME": str(root / "codex-home"),
+                    "FAKE_UPDATER_LOG": str(root / "updater.log"),
+                }
+            )
+
+            def activate(**overrides: str) -> CompletedProcess[str]:
+                environment = activation_environment.copy()
+                environment.update(overrides)
+                return run(
+                    ["sh", "-c", fleet_release.activation_script(host, release)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+
             write_build_receipt(host, release)
 
-            result = run(
-                ["sh", "-c", fleet_release.activation_script(host, release)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            result = activate()
 
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(target_cli.read_bytes(), original_cli)
@@ -307,18 +357,45 @@ class FleetReleaseTest(unittest.TestCase):
             fail_agents = root / "fail-agents"
             source_cli.write_text(
                 "#!/bin/sh\n"
+                "if [ \"$1 $2 $3\" = 'app-server daemon version' ]; then\n"
+                "  case \"${FAKE_DAEMON_MODE:-not-running}\" in\n"
+                "    matching) echo '{\"status\":\"running\",\"appServerVersion\":\"expected\"}' ;;\n"
+                "    incompatible) echo '{\"status\":\"running\",\"appServerVersion\":\"0.151.0\"}' ;;\n"
+                "    malformed) echo '{' ;;\n"
+                "    unavailable) exit 1 ;;\n"
+                "    *) echo '{\"status\":\"notRunning\",\"appServerVersion\":null}' ;;\n"
+                "  esac\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"$1 $2 $3\" = 'app-server daemon disable-auto-update' ]; then\n"
+                "  [ -z \"${FAKE_UPDATER_LOG:-}\" ] || printf 'disabled\\n' >>\"$FAKE_UPDATER_LOG\"\n"
+                "  [ \"${FAKE_UPDATER_MODE:-success}\" != failure ]\n"
+                "  exit $?\n"
+                "fi\n"
                 "if [ \"$1\" = --version ]; then echo 'codex-cli expected'; exit 0; fi\n"
                 f'if [ "$1" = agents ] && [ "$2" = --help ]; then [ ! -e "{fail_agents}" ]; exit $?; fi\n'
                 "exit 1\n"
             )
             source_cli.chmod(0o755)
             write_build_receipt(host, release)
-            retry = run(
-                ["sh", "-c", fleet_release.activation_script(host, release)],
-                check=False,
-                capture_output=True,
-                text=True,
+            incompatible_daemon = activate(FAKE_DAEMON_MODE="incompatible")
+            self.assertNotEqual(incompatible_daemon.returncode, 0)
+            self.assertIn("daemon version 0.151.0 is running", incompatible_daemon.stderr)
+            self.assertEqual(target_cli.read_bytes(), original_cli)
+            self.assertEqual(target_host.read_bytes(), original_host)
+            self.assertFalse(Path(f"{target_cli}.test.release-previous").exists())
+            self.assertFalse(Path(f"{target_host}.test.release-previous").exists())
+
+            updater_failure = activate(FAKE_UPDATER_MODE="failure")
+            self.assertNotEqual(updater_failure.returncode, 0)
+            self.assertIn(
+                "Could not disable the official Codex daemon updater",
+                updater_failure.stderr,
             )
+            self.assertEqual(target_cli.read_bytes(), original_cli)
+            self.assertEqual(target_host.read_bytes(), original_host)
+
+            retry = activate(FAKE_DAEMON_MODE="matching")
 
             self.assertEqual(retry.returncode, 0, retry.stderr)
             self.assertEqual(target_cli.read_bytes(), source_cli.read_bytes())
@@ -329,62 +406,42 @@ class FleetReleaseTest(unittest.TestCase):
             self.assertEqual(backup_cli.read_bytes(), original_cli)
             self.assertEqual(backup_host.read_bytes(), original_host)
             target_host.chmod(0o644)
-            repair_mode = run(
-                ["sh", "-c", fleet_release.activation_script(host, release)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            updater_calls_before = (root / "updater.log").read_text().splitlines()
+            repair_mode = activate()
 
             self.assertEqual(repair_mode.returncode, 0, repair_mode.stderr)
+            self.assertEqual(
+                len((root / "updater.log").read_text().splitlines()),
+                len(updater_calls_before) + 1,
+            )
             self.assertTrue(os.access(target_host, os.X_OK))
             self.assertEqual(backup_cli.read_bytes(), original_cli)
             self.assertEqual(backup_host.read_bytes(), original_host)
 
             target_host.chmod(0o644)
             fail_agents.write_text("fail post-repair validation\n")
-            failed_mode_repair = run(
-                ["sh", "-c", fleet_release.activation_script(host, release)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            failed_mode_repair = activate()
 
             self.assertNotEqual(failed_mode_repair.returncode, 0)
             self.assertFalse(os.access(target_host, os.X_OK))
             self.assertEqual(backup_cli.read_bytes(), original_cli)
             self.assertEqual(backup_host.read_bytes(), original_host)
             fail_agents.unlink()
-            repaired_after_failure = run(
-                ["sh", "-c", fleet_release.activation_script(host, release)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            repaired_after_failure = activate()
             self.assertEqual(repaired_after_failure.returncode, 0)
             self.assertTrue(os.access(target_host, os.X_OK))
 
             active_cli = target_cli.read_bytes()
             active_host = target_host.read_bytes()
             Path(host.build_receipt()).unlink()
-            missing_receipt = run(
-                ["sh", "-c", fleet_release.activation_script(host, release)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            missing_receipt = activate()
             self.assertNotEqual(missing_receipt.returncode, 0)
             self.assertIn("Missing reviewed build receipt", missing_receipt.stderr)
             self.assertEqual(target_cli.read_bytes(), active_cli)
             self.assertEqual(target_host.read_bytes(), active_host)
             write_build_receipt(host, release)
             Path(f"{target_host}.test.release-previous").unlink()
-            incomplete_rollback = run(
-                ["sh", "-c", fleet_release.activation_script(host, release)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            incomplete_rollback = activate()
             self.assertNotEqual(incomplete_rollback.returncode, 0)
             self.assertIn(
                 "Release rollback pair is incomplete", incomplete_rollback.stderr
@@ -394,12 +451,7 @@ class FleetReleaseTest(unittest.TestCase):
             Path(f"{target_host}.test.release-previous").write_bytes(original_host)
             (canonical / "untracked-internal").write_text("must block activation\n")
             source_cli.write_text(source_cli.read_text() + "# distinct candidate\n")
-            dirty_source = run(
-                ["sh", "-c", fleet_release.activation_script(host, release)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            dirty_source = activate()
 
             self.assertNotEqual(dirty_source.returncode, 0)
             self.assertIn(
@@ -515,6 +567,8 @@ class FleetReleaseTest(unittest.TestCase):
                 server_commit=commit,
                 rusty_v8_version="150.4.0",
             )
+            windows_environment = os.environ.copy()
+            windows_environment["CODEX_HOME"] = str(root / "codex-home")
             write_build_receipt(host, release)
 
             failed = run(
@@ -529,6 +583,7 @@ class FleetReleaseTest(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
+                env=windows_environment,
             )
 
             self.assertNotEqual(failed.returncode, 0)
@@ -559,6 +614,7 @@ class FleetReleaseTest(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
+                env=windows_environment,
             )
 
             self.assertEqual(retry.returncode, 0, retry.stderr)

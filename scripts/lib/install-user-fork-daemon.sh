@@ -90,3 +90,14 @@ print(version or "")
       ;;
   esac
 }
+
+disable_daemon_auto_update() {
+  daemon_codex=$1
+  codex_state_dir=$2
+
+  if ! CODEX_HOME="$codex_state_dir" \
+    "$daemon_codex" app-server daemon disable-auto-update; then
+    echo "Could not disable the official Codex daemon updater; refusing activation." >&2
+    return 1
+  fi
+}

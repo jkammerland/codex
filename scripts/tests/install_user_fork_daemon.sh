@@ -14,6 +14,12 @@ FAKE_CODEX="$FAKE_BIN_DIR/codex"
 cat >"$FAKE_CODEX" <<'EOF'
 #!/bin/sh
 
+if [ "${1:-} ${2:-} ${3:-}" = "app-server daemon disable-auto-update" ]; then
+  printf '%s\n' "${CODEX_HOME:-missing}" >>"${FAKE_UPDATER_LOG:?}"
+  [ "${FAKE_UPDATER_MODE:-success}" != failure ]
+  exit $?
+fi
+
 case "${FAKE_DAEMON_MODE:-not-running}" in
   not-running)
     printf '%s\n' '{"status":"notRunning","appServerVersion":null}'
@@ -40,6 +46,21 @@ chmod +x "$FAKE_CODEX"
 EXPECTED_VERSION="0.0.0+jkammerland.mcp.18"
 STATE_DIR="$TEST_DIR/state"
 ERROR_LOG="$TEST_DIR/error.log"
+FAKE_UPDATER_LOG="$TEST_DIR/updater.log"
+export FAKE_UPDATER_LOG
+
+disable_daemon_auto_update "$FAKE_CODEX" "$STATE_DIR"
+FAKE_UPDATER_MODE=success disable_daemon_auto_update "$FAKE_CODEX" "$STATE_DIR"
+if FAKE_UPDATER_MODE=failure \
+  disable_daemon_auto_update "$FAKE_CODEX" "$STATE_DIR" 2>"$ERROR_LOG"; then
+  echo "updater shutdown failure was ignored" >&2
+  exit 1
+fi
+grep -F "Could not disable the official Codex daemon updater" "$ERROR_LOG" >/dev/null
+if [ "$(grep -Fxc "$STATE_DIR" "$FAKE_UPDATER_LOG")" -ne 3 ]; then
+  echo "updater shutdown did not receive the isolated Codex state directory" >&2
+  exit 1
+fi
 
 FAKE_DAEMON_MODE=not-running \
   ensure_daemon_runtime_compatible "$FAKE_CODEX" "$EXPECTED_VERSION" "$STATE_DIR"

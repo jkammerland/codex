@@ -55,11 +55,15 @@ class Release:
         return f"+{self.name}"
 
     @property
-    def upstream_version(self) -> str:
+    def runtime_version(self) -> str:
         prefix = "codex-cli "
         if not self.cli_version.startswith(prefix):
             raise FleetError("expectedCliVersion must start with 'codex-cli '")
-        return self.cli_version.removeprefix(prefix).partition("+")[0]
+        return self.cli_version.removeprefix(prefix)
+
+    @property
+    def upstream_version(self) -> str:
+        return self.runtime_version.partition("+")[0]
 
 
 @dataclass(frozen=True)
@@ -638,6 +642,36 @@ function Receipt-Value($Path, $Name) {{
   if ($matches.Count -ne 1) {{ throw "Invalid build receipt field: $Name" }}
   return $matches[0].Substring($prefix.Length)
 }}
+function Invoke-CodexWithHome($Codex, $CodexHome, [string[]]$Arguments) {{
+  $hadCodexHome = Test-Path Env:CODEX_HOME
+  $previousCodexHome = $env:CODEX_HOME
+  try {{
+    $env:CODEX_HOME = $CodexHome
+    $output = ((& $Codex @Arguments 2>$null | Out-String).Trim())
+    $exitCode = $LASTEXITCODE
+  }} finally {{
+    if ($hadCodexHome) {{ $env:CODEX_HOME = $previousCodexHome }}
+    else {{ Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue }}
+  }}
+  if ($exitCode -ne 0) {{ throw "Codex command failed: $($Arguments -join ' ')" }}
+  return $output
+}}
+function Assert-DaemonRuntimeCompatible($Codex, $ExpectedVersion, $CodexHome) {{
+  try {{
+    $rawStatus = Invoke-CodexWithHome -Codex $Codex -CodexHome $CodexHome -Arguments @('app-server', 'daemon', 'version')
+    $daemon = $rawStatus | ConvertFrom-Json -ErrorAction Stop
+  }} catch {{
+    throw "Could not verify the app-server daemon; refusing to replace Codex: $($_.Exception.Message)"
+  }}
+  if ($daemon.status -eq 'notRunning') {{ return }}
+  if ($daemon.status -ne 'running') {{
+    throw "Unexpected app-server daemon status '$($daemon.status)'; refusing to replace Codex"
+  }}
+  if (-not ($daemon.appServerVersion -is [string]) -or $daemon.appServerVersion -ne $ExpectedVersion) {{
+    $actualVersion = if ($daemon.appServerVersion -is [string]) {{ $daemon.appServerVersion }} else {{ 'unknown' }}
+    throw "App-server daemon version $actualVersion is running; the new Codex runtime is $ExpectedVersion. The daemon was left untouched"
+  }}
+}}
 function Replace($Target, $Source, $Backup) {{
   $stage = "$Target.{release.name}-$([guid]::NewGuid().ToString('N'))"
   try {{
@@ -661,6 +695,7 @@ $canonical = {quote_ps(host.source_root)}; $build = {quote_ps(host.build_root)};
 $targetCli = {quote_ps(host.cli_binary)}; $targetHost = {quote_ps(host.code_mode_host_binary)}
 $backupCli = {quote_ps(backup_cli)}; $backupHost = {quote_ps(backup_host)}
 $server = {quote_ps(host.server_root)}
+$codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {{ Join-Path $HOME '.codex' }} else {{ $env:CODEX_HOME }}
 Assert-CleanGit $canonical {quote_ps(release.fork_commit)} 'Canonical checkout'
 Assert-CleanGit $build {quote_ps(release.fork_commit)} 'Build worktree'
 Assert-CleanGit $server {quote_ps(release.server_commit)} 'MCP server'
@@ -676,6 +711,7 @@ $needsActivation = (Hash $targetCli) -ne $sourceCliHash -or (Hash $targetHost) -
 $backupCliExists = Test-Path -LiteralPath $backupCli
 $backupHostExists = Test-Path -LiteralPath $backupHost
 if ($backupCliExists -ne $backupHostExists) {{ throw 'Release rollback pair is incomplete' }}
+Assert-DaemonRuntimeCompatible $sourceCli {quote_ps(release.runtime_version)} $codexHome
 if ($needsActivation) {{
   if ($backupCliExists) {{
     if ((Hash $targetCli) -ne (Hash $backupCli) -or (Hash $targetHost) -ne (Hash $backupHost)) {{ throw 'Release rollback pair does not match the active binaries' }}
@@ -780,6 +816,12 @@ receipt_cli_hash=$(receipt_value cliSha256 "$receipt") || {{ echo 'Invalid build
 receipt_host_hash=$(receipt_value hostSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
 [ "$receipt_format" = v1 ] && [ "$receipt_commit" = {release.fork_commit} ] && [ "$receipt_version" = {shlex.quote(release.cli_version)} ] && [ "$receipt_cli_hash" = "$source_cli_hash" ] && [ "$receipt_host_hash" = "$source_host_hash" ] || {{ echo 'Build receipt does not match the reviewed binary pair' >&2; exit 1; }}
 [ ! -e "$backup_cli" ] && [ ! -e "$backup_host" ] || {{ [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}; }}
+daemon_helper="$canonical/scripts/lib/install-user-fork-daemon.sh"
+[ -r "$daemon_helper" ] || {{ echo 'Missing daemon activation helper' >&2; exit 1; }}
+. "$daemon_helper"
+codex_state_dir=${{CODEX_HOME:-"$HOME/.codex"}}
+ensure_daemon_runtime_compatible "$source_cli" {shlex.quote(release.runtime_version)} "$codex_state_dir"
+disable_daemon_auto_update "$source_cli" "$codex_state_dir"
 target_cli_hash=$(sha "$target_cli"); target_host_hash=$(sha "$target_host")
 if [ "$target_cli_hash" = "$source_cli_hash" ] && [ "$target_host_hash" = "$source_host_hash" ] && {{ [ ! -x "$target_cli" ] || [ ! -x "$target_host" ]; }}; then
   old_cli_mode=$(file_mode "$target_cli"); old_host_mode=$(file_mode "$target_host")

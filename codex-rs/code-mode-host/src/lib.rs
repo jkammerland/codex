@@ -28,9 +28,9 @@ use codex_code_mode_protocol::host::RequestId;
 use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SessionId;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
-use codex_code_mode_protocol::host::WireWaitOutcome;
 use codex_code_mode_protocol::host::WAIT_YIELD_REASON_CAPABILITY;
 use codex_code_mode_protocol::host::YIELD_OBSERVATION_CAPABILITY;
+use codex_code_mode_protocol::host::WireWaitOutcome;
 use codex_code_mode_runtime::InProcessCodeModeSession;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -63,9 +63,7 @@ const OUTGOING_CHANNEL_CAPACITY: usize = 128;
 
 enum NegotiatedConnection {
     Rejected,
-    Accepted {
-        wait_yield_reason: bool,
-    },
+    Accepted { wait_yield_reason: bool },
 }
 
 struct HostLimits {

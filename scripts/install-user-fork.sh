@@ -2,7 +2,7 @@
 
 set -eu
 
-FORK_MARKER="+jkammerland.mcp.16"
+FORK_MARKER="+jkammerland.mcp.18"
 RUSTY_V8_VERSION="150.4.0"
 RUSTY_V8_PROFILE="ptrcomp_sandbox_release"
 RUST_TARGET="x86_64-unknown-linux-gnu"
@@ -11,6 +11,7 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 RELEASE_MANIFEST="$REPO_ROOT/fleet/release.json"
 . "$SCRIPT_DIR/lib/install-user-fork-paths.sh"
 . "$SCRIPT_DIR/lib/install-user-fork-daemon.sh"
+. "$SCRIPT_DIR/lib/install-user-fork-release-lock.sh"
 . "$SCRIPT_DIR/lib/install-user-fork-transaction.sh"
 BUILT_CODEX="$REPO_ROOT/codex-rs/target/release/codex"
 BUILT_CODE_MODE_HOST="$REPO_ROOT/codex-rs/target/release/codex-code-mode-host"
@@ -31,25 +32,6 @@ ACTIVATION_PENDING=0
 KEEP_ROLLBACK=0
 ROLLBACK_CODEX_HASH=""
 ROLLBACK_CODE_MODE_HOST_HASH=""
-
-normalize_generated_release_lock() {
-  status=$(git -C "$REPO_ROOT" status --short --untracked-files=all)
-  [ "$status" = ' M codex-rs/Cargo.lock' ] || return 0
-
-  changed_lines=$(git -C "$REPO_ROOT" diff --unified=0 -- codex-rs/Cargo.lock |
-    sed -n -e '/^---/d' -e '/^+++/d' -e '/^[+-]/p')
-  if [ -z "$changed_lines" ]; then
-    echo "Generated Cargo.lock has no release-version changes; refusing to restore it." >&2
-    return 1
-  fi
-  invalid_lines=$(printf '%s\n' "$changed_lines" |
-    grep -Ev '^[+-]version = "(0\.0\.0|0\.147\.0)"$' || true)
-  if [ -n "$invalid_lines" ]; then
-    echo "Cargo.lock contains changes other than the generated release versions; refusing to restore it." >&2
-    return 1
-  fi
-  git -C "$REPO_ROOT" restore --worktree -- codex-rs/Cargo.lock
-}
 
 cleanup() {
   saved_status=$?
@@ -106,7 +88,8 @@ if ! git -C "$REPO_ROOT" cat-file -e "$EXPECTED_FORK_COMMIT^{commit}" || \
   ! git -C "$REPO_ROOT" merge-base --is-ancestor "$EXPECTED_FORK_COMMIT" HEAD || \
   ! git -C "$REPO_ROOT" diff --quiet "$EXPECTED_FORK_COMMIT" -- \
     codex-rs scripts/install-user-fork.sh scripts/lib/install-user-fork-paths.sh \
-    scripts/lib/install-user-fork-daemon.sh scripts/lib/install-user-fork-transaction.sh; then
+    scripts/lib/install-user-fork-daemon.sh scripts/lib/install-user-fork-release-lock.sh \
+    scripts/lib/install-user-fork-transaction.sh; then
   echo "Fork source does not match the reviewed fleet release commit: $EXPECTED_FORK_COMMIT" >&2
   exit 1
 fi

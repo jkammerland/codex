@@ -810,6 +810,10 @@ enum AppServerDaemonSubcommand {
     /// [internal] Run the detached pid-backed standalone updater loop.
     #[clap(hide = true)]
     PidUpdateLoop,
+
+    /// [internal] Stop the detached official updater without stopping app-server.
+    #[clap(hide = true)]
+    DisableAutoUpdate,
 }
 
 #[derive(Debug, Args)]
@@ -1423,6 +1427,9 @@ async fn cli_main(
                             .map_err(anyhow::Error::from);
                         let http_client_factory = updater_http_client_factory(config);
                         codex_app_server_daemon::run_pid_update_loop(http_client_factory).await?;
+                    }
+                    AppServerDaemonSubcommand::DisableAutoUpdate => {
+                        codex_app_server_daemon::disable_auto_update().await?;
                     }
                 },
                 Some(AppServerSubcommand::Proxy(proxy_cli)) => {
@@ -2644,6 +2651,7 @@ fn app_server_subcommand_name(subcommand: Option<&AppServerSubcommand>) -> &'sta
             AppServerDaemonSubcommand::Stop => "app-server daemon stop",
             AppServerDaemonSubcommand::Version => "app-server daemon version",
             AppServerDaemonSubcommand::PidUpdateLoop => "app-server daemon pid-update-loop",
+            AppServerDaemonSubcommand::DisableAutoUpdate => "app-server daemon disable-auto-update",
         },
         Some(AppServerSubcommand::Proxy(_)) => "app-server proxy",
         Some(AppServerSubcommand::GenerateTs(_)) => "app-server generate-ts",
@@ -4920,6 +4928,13 @@ mod tests {
             app_server_from_args(["codex", "app-server", "daemon", "version"].as_ref()).subcommand,
             Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
                 subcommand: AppServerDaemonSubcommand::Version
+            }))
+        ));
+        assert!(matches!(
+            app_server_from_args(["codex", "app-server", "daemon", "disable-auto-update"].as_ref())
+                .subcommand,
+            Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
+                subcommand: AppServerDaemonSubcommand::DisableAutoUpdate
             }))
         ));
     }

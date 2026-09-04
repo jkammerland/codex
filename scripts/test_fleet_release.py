@@ -3,6 +3,7 @@
 import json
 import hashlib
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -573,7 +574,10 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn('normalize_release_lock "$build"', mac_script)
         self.assertIn("agents --help", mac_script)
         self.assertIn("agents --help", windows_script)
-        self.assertIn("0\\.0\\.0|0\\.0\\.0", mac_script)
+        release_versions = (
+            f"0\\.0\\.0|{re.escape(self.release.upstream_version)}"
+        )
+        self.assertIn(release_versions, mac_script)
         self.assertIn("refs/remotes/fleet/", mac_script)
         self.assertIn("rustup which --toolchain", mac_script)
         self.assertIn('if [ -e "$build" ]', mac_script)
@@ -602,7 +606,7 @@ class FleetReleaseTest(unittest.TestCase):
         )
         self.assertNotIn(r"""call "0\Common7""", windows_script)
         self.assertIn("Normalize-ReleaseLock $build", windows_script)
-        self.assertIn("0\\.0\\.0|0\\.0\\.0", windows_script)
+        self.assertIn(release_versions, windows_script)
         self.assertIn(
             "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz",
             windows_script,

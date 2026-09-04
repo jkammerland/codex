@@ -545,7 +545,15 @@ impl ExecCommandToolOutput {
 
     fn response_text(&self) -> String {
         let header = self.response_header();
-        let output_budget = (self.truncation_policy * 1.2)
+        // wait_process responses are already standalone context items. Keep the
+        // complete item within the configured policy instead of relying on the
+        // history serializer's legacy allowance for ordinary exec responses.
+        let response_policy = if self.wait_reason.is_some() {
+            self.truncation_policy
+        } else {
+            self.truncation_policy * 1.2
+        };
+        let output_budget = response_policy
             .byte_budget()
             .saturating_sub(header.len().saturating_add(/*rhs*/ 1));
         let mut policy = self.model_output_policy();

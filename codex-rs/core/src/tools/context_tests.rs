@@ -492,6 +492,44 @@ fn exec_command_tool_output_reserves_metadata_budget_and_preserves_policy_units(
     }
 }
 
+#[test_case::test_case(TruncationPolicy::Bytes(400); "byte budget")]
+#[test_case::test_case(TruncationPolicy::Tokens(100); "token budget")]
+fn wait_process_tool_output_stays_within_the_complete_item_policy(policy: TruncationPolicy) {
+    let payload = ToolPayload::Function {
+        arguments: "{}".to_string(),
+    };
+    let response = ExecCommandToolOutput {
+        event_call_id: "call-wait".to_string(),
+        chunk_id: "wait123".to_string(),
+        wall_time: std::time::Duration::from_secs(/*secs*/ 5),
+        raw_output: vec![b'x'; policy.byte_budget().saturating_mul(4)],
+        truncation_policy: policy,
+        max_output_tokens: None,
+        process_id: Some(/*process_id*/ 42),
+        exit_code: None,
+        wait_reason: Some(ProcessWaitReason::Output),
+        original_token_count: Some(/*original_token_count*/ 1_000),
+        output_omitted_bytes: None,
+        hook_command: None,
+    }
+    .to_response_item("call-wait", &payload);
+
+    let ResponseInputItem::FunctionCallOutput { output, .. } = response else {
+        panic!("expected FunctionCallOutput");
+    };
+    let text = output
+        .body
+        .to_text()
+        .expect("wait output should serialize as text");
+
+    assert!(
+        text.len() <= policy.byte_budget(),
+        "complete wait output exceeded its model-item policy: {} > {}",
+        text.len(),
+        policy.byte_budget(),
+    );
+}
+
 #[test]
 fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
     let payload = ToolPayload::Function {

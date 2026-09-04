@@ -415,3 +415,201 @@ def copy_bundle(host: Host, release: Release, bundle: Path) -> None:
     )
     if result.returncode:
         raise FleetError(error_message(f"copying bundle to {host.name}", result))
+
+
+def build_script(host: Host, release: Release, use_bundle: bool) -> str:
+    source = host.source_root
+    build = host.build_root
+    staged_ref = f"refs/remotes/fleet/{release.fork_ref}"
+    v8_profile = "ptrcomp_sandbox_release"
+    v8_archive = (
+        f"rusty_v8_{v8_profile}_{host.rust_target}.lib.gz"
+        if host.windows
+        else f"librusty_v8_{v8_profile}_{host.rust_target}.a.gz"
+    )
+    v8_binding = f"src_binding_{v8_profile}_{host.rust_target}.rs"
+    v8_checksums = f"rusty_v8_{v8_profile}_{host.rust_target}.sha256"
+    v8_base_url = (
+        "https://github.com/openai/codex/releases/download/"
+        f"rusty-v8-v{release.rusty_v8_version}"
+    )
+    fetch = (
+        f"git -C {shlex.quote(source)} fetch {shlex.quote(host.bundle_path(release))} refs/heads/{release.fork_ref}:{staged_ref}"
+        if use_bundle
+        else f"git -C {shlex.quote(source)} fetch fork {shlex.quote(release.fork_ref)}:{staged_ref}"
+    )
+    if host.windows:
+        ps_fetch = (
+            f"git -C $source fetch {quote_ps(host.bundle_path(release))} refs/heads/{release.fork_ref}:{staged_ref}"
+            if use_bundle
+            else f"git -C $source fetch fork {quote_ps(release.fork_ref)}:{staged_ref}"
+        )
+        return f"""$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+function Normalize-ReleaseLock($Path) {{
+  $status = @(& git -C $Path status --short --untracked-files=all)
+  if ($LASTEXITCODE -ne 0) {{ throw 'Could not inspect the build root status' }}
+  if ($status.Count -eq 0) {{ return }}
+  if ($status.Count -ne 1 -or $status[0].Trim() -ne 'M codex-rs/Cargo.lock') {{ throw 'Build root contains changes other than the generated release lockfile' }}
+  $changedLines = @(& git -C $Path diff --unified=0 -- codex-rs/Cargo.lock | Where-Object {{ ($_ -match '^[+-]') -and ($_ -notmatch '^(---|\\+\\+\\+)') }})
+  $invalidLines = @($changedLines | Where-Object {{ $_ -notmatch '^[+-]version = "(0\\.0\\.0|{re.escape(release.upstream_version)})"$' }})
+  if ($changedLines.Count -eq 0 -or $invalidLines.Count -ne 0) {{ throw 'Build root Cargo.lock contains unexpected changes' }}
+  & git -C $Path restore --worktree -- codex-rs/Cargo.lock
+  if ($LASTEXITCODE -ne 0) {{ throw 'Could not normalize the generated release lockfile' }}
+}}
+$source = {quote_ps(source)}; $build = {quote_ps(build)}
+if (Test-Path -LiteralPath $source) {{
+  if (-not (Test-Path -LiteralPath (Join-Path $source '.git'))) {{ throw 'Source root must be a Git checkout' }}
+  $sourceStatus = ((& git -C $source status --porcelain 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrEmpty($sourceStatus)) {{ throw 'Source root must be a clean Git checkout' }}
+}} else {{ git clone --origin fork {quote_ps(release.fork_remote)} $source; if ($LASTEXITCODE -ne 0) {{ throw 'Clone failed' }} }}
+{ps_fetch}; if ($LASTEXITCODE -ne 0) {{ throw 'Fetch failed' }}
+git -C $source switch -C {quote_ps(release.fork_ref)} {quote_ps(staged_ref)}; if ($LASTEXITCODE -ne 0) {{ throw 'Switch failed' }}
+$sourceCommit = ((& git -C $source rev-parse HEAD 2>$null | Out-String).Trim())
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -ne {quote_ps(release.fork_commit)}) {{ throw 'Source commit does not match manifest' }}
+if (Test-Path -LiteralPath $build) {{
+  Normalize-ReleaseLock $build
+  if (-not (Test-Path -LiteralPath (Join-Path $build '.git'))) {{ throw 'Existing build root is not a Git worktree' }}
+  $buildStatus = ((& git -C $build status --porcelain 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0) {{ throw 'Could not inspect the build root status' }}
+  $buildCommit = ((& git -C $build rev-parse HEAD 2>$null | Out-String).Trim())
+  if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrEmpty($buildStatus) -or $buildCommit -ne {quote_ps(release.fork_commit)}) {{ throw 'Existing build root is not the clean release worktree' }}
+}} else {{ git -C $source worktree add --detach $build {quote_ps(release.fork_commit)}; if ($LASTEXITCODE -ne 0) {{ throw 'Worktree creation failed' }} }}
+$vswhere = Join-Path ${"{"}env:ProgramFiles(x86){"}"} 'Microsoft Visual Studio\\Installer\\vswhere.exe'
+$vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if ([string]::IsNullOrEmpty($vs)) {{ throw 'No x64 MSVC toolchain found' }}
+$v8Directory = Join-Path ($build + '.fleet') 'rusty-v8'
+New-Item -ItemType Directory -Force -Path $v8Directory | Out-Null
+$v8BaseUrl = {quote_ps(v8_base_url)}
+$v8ArchiveName = {quote_ps(v8_archive)}
+$v8BindingName = {quote_ps(v8_binding)}
+$v8ChecksumsName = {quote_ps(v8_checksums)}
+foreach ($name in @($v8ArchiveName, $v8BindingName, $v8ChecksumsName)) {{
+  $destination = Join-Path $v8Directory $name
+  $partial = "$destination.partial-$PID-$([guid]::NewGuid().ToString('N'))"
+  try {{
+    Invoke-WebRequest -UseBasicParsing -Uri "$v8BaseUrl/$name" -OutFile $partial
+    Move-Item -Force -LiteralPath $partial -Destination $destination
+  }} finally {{
+    if (Test-Path -LiteralPath $partial) {{ Remove-Item -Force -LiteralPath $partial }}
+  }}
+}}
+$checksumLines = @(Get-Content -LiteralPath (Join-Path $v8Directory $v8ChecksumsName) | Where-Object {{ -not [string]::IsNullOrWhiteSpace($_) }})
+if ($checksumLines.Count -ne 2) {{ throw 'Expected exactly two rusty_v8 checksums' }}
+foreach ($line in $checksumLines) {{
+  if ($line -notmatch '^([0-9a-fA-F]{{64}})\\s+\\*?(.+)$') {{ throw "Invalid rusty_v8 checksum line: $line" }}
+  $expectedHash = $Matches[1]
+  $artifactPath = Join-Path $v8Directory $Matches[2]
+  if (-not (Test-Path -LiteralPath $artifactPath)) {{ throw "Missing rusty_v8 checksum target: $artifactPath" }}
+  $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash
+  if ($actualHash -ne $expectedHash) {{ throw "rusty_v8 checksum mismatch: $artifactPath" }}
+}}
+$env:RUSTY_V8_ARCHIVE = Join-Path $v8Directory $v8ArchiveName
+$env:RUSTY_V8_SRC_BINDING_PATH = Join-Path $v8Directory $v8BindingName
+$cargo = Join-Path $env:USERPROFILE '.cargo\\bin\\cargo.exe'
+$command = 'call "{{0}}\\Common7\\Tools\\VsDevCmd.bat" -arch=amd64 && cd /d "{{1}}\\codex-rs" && "{{2}}" +{{3}} build --release --bin codex --bin codex-code-mode-host' -f $vs, $build, $cargo, {quote_ps(host.rust_toolchain)}
+cmd.exe /d /s /c $command; if ($LASTEXITCODE -ne 0) {{ throw 'Cargo build failed' }}
+Normalize-ReleaseLock $build
+$version = & {quote_ps(host.build_binary("codex"))} --version
+if ($version -ne {quote_ps(release.cli_version)}) {{ throw "Unexpected fork version: $version" }}
+& {quote_ps(host.build_binary("codex"))} agents --help *> $null
+if ($LASTEXITCODE -ne 0) {{ throw 'Built fork does not support codex agents' }}
+& {quote_ps(host.build_binary("codex-code-mode-host"))} --help *> $null
+if ($LASTEXITCODE -ne 0) {{ throw 'Built code-mode host is not executable' }}
+$receipt = {quote_ps(host.build_receipt())}
+$receiptPartial = "$receipt.partial-$PID-$([guid]::NewGuid().ToString('N'))"
+$receiptLines = @(
+  'format=v1',
+  'forkCommit={release.fork_commit}',
+  'cliVersion={release.cli_version}',
+  "cliSha256=$((Get-FileHash -LiteralPath {quote_ps(host.build_binary("codex"))} -Algorithm SHA256).Hash.ToLowerInvariant())",
+  "hostSha256=$((Get-FileHash -LiteralPath {quote_ps(host.build_binary("codex-code-mode-host"))} -Algorithm SHA256).Hash.ToLowerInvariant())"
+)
+try {{
+  [System.IO.File]::WriteAllLines($receiptPartial, $receiptLines, [System.Text.UTF8Encoding]::new($false))
+  Move-Item -Force -LiteralPath $receiptPartial -Destination $receipt
+}} finally {{
+  if (Test-Path -LiteralPath $receiptPartial) {{ Remove-Item -Force -LiteralPath $receiptPartial }}
+}}
+Write-Output "build-version=$version"
+"""
+    assert host.rustup is not None
+    return f"""set -eu
+normalize_release_lock() {{
+  status=$(git -C "$1" status --short --untracked-files=all)
+  [ -z "$status" ] && return
+  [ "$status" = ' M codex-rs/Cargo.lock' ] || {{ echo 'Build root contains changes other than the generated release lockfile' >&2; exit 1; }}
+  changed_lines=$(git -C "$1" diff --unified=0 -- codex-rs/Cargo.lock | sed -n -e '/^---/d' -e '/^+++/d' -e '/^[+-]/p')
+  [ -n "$changed_lines" ] || {{ echo 'Build root Cargo.lock has no recoverable release-version changes' >&2; exit 1; }}
+  invalid_lines=$(printf '%s\\n' "$changed_lines" | grep -Ev '^[+-]version = "(0\\.0\\.0|{re.escape(release.upstream_version)})"$' || true)
+  [ -z "$invalid_lines" ] || {{ echo 'Build root Cargo.lock contains unexpected changes' >&2; exit 1; }}
+  git -C "$1" restore --worktree -- codex-rs/Cargo.lock
+}}
+source={shlex.quote(source)}; build={shlex.quote(build)}
+if [ -e "$source" ]; then
+  [ -d "$source/.git" ] || exit 1
+  source_status=$(git -C "$source" status --porcelain) || exit 1
+  [ -z "$source_status" ] || exit 1
+else
+  git clone --origin fork {shlex.quote(release.fork_remote)} "$source"
+fi
+{fetch}
+git -C "$source" switch -C {shlex.quote(release.fork_ref)} {shlex.quote(staged_ref)}
+source_commit=$(git -C "$source" rev-parse HEAD) || exit 1
+source_status=$(git -C "$source" status --porcelain) || exit 1
+[ "$source_commit" = {release.fork_commit} ]
+[ -z "$source_status" ]
+if [ -e "$build" ]; then
+  normalize_release_lock "$build"
+  [ -e "$build/.git" ] || exit 1
+  build_status=$(git -C "$build" status --porcelain) || exit 1
+  build_commit=$(git -C "$build" rev-parse HEAD) || exit 1
+  [ -z "$build_status" ] && [ "$build_commit" = {release.fork_commit} ]
+else
+  git -C "$source" worktree add --detach "$build" {release.fork_commit}
+fi
+cd "$build/codex-rs"
+fleet_directory="$build.fleet"
+v8_directory="$fleet_directory/rusty-v8"
+receipt="$fleet_directory/build-receipt-v1"
+v8_base_url={shlex.quote(v8_base_url)}
+v8_archive_name={shlex.quote(v8_archive)}
+v8_binding_name={shlex.quote(v8_binding)}
+v8_checksums_name={shlex.quote(v8_checksums)}
+mkdir -p "$v8_directory"
+cleanup_v8_downloads() {{ rm -f "$v8_directory"/*.partial.$$ "$receipt.partial.$$"; }}
+trap cleanup_v8_downloads EXIT HUP INT TERM
+download_v8_artifact() {{
+  destination="$v8_directory/$1"
+  partial="$destination.partial.$$"
+  rm -f "$partial"
+  curl -fsSL "$v8_base_url/$1" -o "$partial"
+  mv -f "$partial" "$destination"
+}}
+download_v8_artifact "$v8_archive_name"
+download_v8_artifact "$v8_binding_name"
+download_v8_artifact "$v8_checksums_name"
+[ "$(grep -cve '^[[:space:]]*$' "$v8_directory/$v8_checksums_name")" -eq 2 ]
+(cd "$v8_directory" && tr -d '\\r' < "$v8_checksums_name" | shasum -a 256 -c -)
+rustc=$({shlex.quote(host.rustup)} which --toolchain {shlex.quote(host.rust_toolchain)} rustc)
+toolchain_bin=$(dirname "$rustc")
+RUSTY_V8_ARCHIVE="$v8_directory/$v8_archive_name" \\
+RUSTY_V8_SRC_BINDING_PATH="$v8_directory/$v8_binding_name" \\
+PATH="$toolchain_bin:$PATH" \\
+  "$toolchain_bin/cargo" build --release --bin codex --bin codex-code-mode-host
+normalize_release_lock "$build"
+version=$(target/release/codex --version)
+target/release/codex agents --help >/dev/null
+target/release/codex-code-mode-host --help >/dev/null
+[ "$version" = {shlex.quote(release.cli_version)} ] || {{ echo "Unexpected fork version: $version" >&2; exit 1; }}
+cli_hash=$(shasum -a 256 target/release/codex | awk '{{print $1}}')
+host_hash=$(shasum -a 256 target/release/codex-code-mode-host | awk '{{print $1}}')
+printf '%s\\n' \
+  'format=v1' \
+  'forkCommit={release.fork_commit}' \
+  {shlex.quote(f"cliVersion={release.cli_version}")} \
+  "cliSha256=$cli_hash" \
+  "hostSha256=$host_hash" > "$receipt.partial.$$"
+mv -f "$receipt.partial.$$" "$receipt"
+printf 'build-version=%s\\n' "$version"
+"""

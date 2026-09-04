@@ -121,3 +121,52 @@ class FleetReleaseTest(unittest.TestCase):
         values["codeModeHostExecutable"] = "false"
         mode_drifted = fleet_release.Status(host, values)
         self.assertEqual(mode_drifted.drift(self.release), ("codeModeHostExecutable",))
+    def test_bundle_build_scripts_verify_the_pinned_commit(self) -> None:
+        mac_script = fleet_release.build_script(self.hosts[0], self.release, True)
+        windows_script = fleet_release.build_script(self.hosts[1], self.release, True)
+        self.assertIn(self.release.fork_commit, mac_script)
+        self.assertIn(self.release.fork_commit, windows_script)
+        self.assertIn('"$toolchain_bin/cargo" build --release', mac_script)
+        self.assertIn('normalize_release_lock "$build"', mac_script)
+        self.assertIn("agents --help", mac_script)
+        self.assertIn("agents --help", windows_script)
+        release_versions = f"0\\.0\\.0|{re.escape(self.release.upstream_version)}"
+        self.assertIn(release_versions, mac_script)
+        self.assertIn("refs/remotes/fleet/", mac_script)
+        self.assertIn("rustup which --toolchain", mac_script)
+        self.assertIn('if [ -e "$build" ]', mac_script)
+        self.assertIn(
+            "https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0",
+            mac_script,
+        )
+        self.assertIn(
+            "librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz",
+            mac_script,
+        )
+        self.assertIn("RUSTY_V8_ARCHIVE", mac_script)
+        self.assertIn("RUSTY_V8_SRC_BINDING_PATH", mac_script)
+        self.assertIn("shasum -a 256 -c -", mac_script)
+        self.assertIn('v8_directory="$fleet_directory/rusty-v8"', mac_script)
+        self.assertIn("build-receipt-v1", mac_script)
+        self.assertIn("refs/remotes/fleet/", windows_script)
+        self.assertIn(
+            "Existing build root is not the clean release worktree", windows_script
+        )
+        self.assertIn("cargo.exe", windows_script)
+        self.assertIn("$ProgressPreference = 'SilentlyContinue'", windows_script)
+        self.assertIn(
+            r'''$command = 'call "{0}\Common7\Tools\VsDevCmd.bat"''',
+            windows_script,
+        )
+        self.assertNotIn(r"""call "0\Common7""", windows_script)
+        self.assertIn("Normalize-ReleaseLock $build", windows_script)
+        self.assertIn(release_versions, windows_script)
+        self.assertIn(
+            "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz",
+            windows_script,
+        )
+        self.assertIn("RUSTY_V8_ARCHIVE", windows_script)
+        self.assertIn("RUSTY_V8_SRC_BINDING_PATH", windows_script)
+        self.assertIn("Get-FileHash", windows_script)
+        self.assertIn("Join-Path ($build + '.fleet') 'rusty-v8'", windows_script)
+        self.assertIn("build-receipt-v1", windows_script)

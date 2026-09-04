@@ -58,6 +58,36 @@ class FleetReleaseTest(unittest.TestCase):
             ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"],
         )
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer test")
+    def test_linux_installer_preserves_incompatible_daemons(self) -> None:
+        daemon_result = run(
+            [
+                "sh",
+                str(Path(__file__).parent / "tests" / "install_user_fork_daemon.sh"),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(daemon_result.returncode, 0, daemon_result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer test")
+    def test_linux_installer_normalizes_tagged_release_lock(self) -> None:
+        release_lock_result = run(
+            [
+                "sh",
+                str(
+                    Path(__file__).parent
+                    / "tests"
+                    / "install_user_fork_release_lock.sh"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(release_lock_result.returncode, 0, release_lock_result.stderr)
+
     def test_manifest_rejects_relative_host_paths(self) -> None:
         raw = json.loads(fleet_release.DEFAULT_MANIFEST.read_text())
         raw["hosts"][0]["sourceRoot"] = "repos/codex"

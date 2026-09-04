@@ -242,6 +242,51 @@ async fn wait_process_for_test(
         .await
 }
 
+async fn store_remote_tty_process_for_test(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    write_status: WriteStatus,
+) -> (i32, Arc<UnifiedExecProcess>) {
+    let manager = &session.services.unified_exec_manager;
+    let process_id = manager.allocate_process_id().await;
+    let process = Arc::new(
+        super::process_tests::remote_process(
+            write_status,
+            /*terminate_error*/ None,
+            SandboxType::None,
+        )
+        .await,
+    );
+    #[allow(deprecated)]
+    let cwd = turn.cwd.clone();
+    manager.process_store.lock().await.processes.insert(
+        process_id,
+        ProcessEntry {
+            process: Arc::clone(&process),
+            plugin_metrics_sidecar: None,
+            call_id: "remote-test".to_string(),
+            process_id,
+            cwd: cwd.into(),
+            initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            hook_command: "remote test process".to_string(),
+            tty: true,
+            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+            permissions: TerminalPermissions::for_launch(
+                turn.environments.primary().expect("turn environment"),
+                turn,
+                TerminalSandboxSource::Native,
+                SandboxPermissions::UseDefault,
+                /*additional_permissions*/ None,
+                /*internal_permissions*/ None,
+            ),
+            network_approval: None,
+            session: Arc::downgrade(session),
+            last_used: Instant::now(),
+        },
+    );
+    (process_id, process)
+}
+
 #[tokio::test]
 async fn wait_process_non_tty_ignores_output_until_nonzero_exit() -> anyhow::Result<()> {
     let (session, turn) = test_session_and_turn().await;
@@ -303,6 +348,129 @@ async fn wait_process_tty_wakes_on_output_then_completion() -> anyhow::Result<()
 }
 
 #[tokio::test]
+async fn wait_process_wakes_for_process_failure() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, process) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::Accepted).await;
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let mut waiting = Box::pin(wait_process_for_test(
+        &session,
+        process_id,
+        &mut activity_rx,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+
+    process.fail_and_terminate("forced test failure".to_string());
+    let error = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), waiting)
+        .await
+        .expect("process failure should wake wait_process")
+        .expect_err("wait_process should surface process failure");
+
+    assert!(matches!(
+        error,
+        UnifiedExecError::ProcessFailed { message } if message == "forced test failure"
+    ));
+    assert!(
+        session
+            .services
+            .unified_exec_manager
+            .retain_existing_process_ids(vec![process_id])
+            .await
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_process_allows_write_stdin_to_wake_the_same_session() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, _process) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::StdinClosed).await;
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let mut waiting = Box::pin(wait_process_for_test(
+        &session,
+        process_id,
+        &mut activity_rx,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+
+    let (waited, written) = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        tokio::join!(
+            waiting,
+            write_stdin(
+                &session,
+                &turn,
+                process_id,
+                "wake-up\n",
+                /*yield_time_ms*/ 250,
+            )
+        )
+    })
+    .await
+    .expect("write_stdin should not be blocked by wait_process");
+    let waited = waited?;
+    let written = written?;
+
+    assert_eq!(waited.wait_reason, Some(ProcessWaitReason::Completed));
+    assert_eq!(waited.process_id, None);
+    assert_eq!(written.process_id, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_process_rejects_a_duplicate_wait_without_consuming_the_wake() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, _process) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::StdinClosed).await;
+    let (_first_activity_tx, mut first_activity_rx) =
+        watch::channel(InputQueueActivity::Mailbox);
+    let (_second_activity_tx, mut second_activity_rx) =
+        watch::channel(InputQueueActivity::Mailbox);
+    let mut first_wait = Box::pin(wait_process_for_test(
+        &session,
+        process_id,
+        &mut first_activity_rx,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(first_wait.as_mut().poll(&mut task_context).is_pending());
+
+    let duplicate_error = tokio::time::timeout(
+        Duration::from_secs(/*secs*/ 1),
+        wait_process_for_test(&session, process_id, &mut second_activity_rx),
+    )
+    .await
+    .expect("a duplicate wait_process call should be rejected promptly")
+    .expect_err("a duplicate wait_process call should not start another wait");
+    assert_eq!(
+        duplicate_error.to_string(),
+        format!("wait_process is already active for process id {process_id}")
+    );
+
+    let (waited, written) = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        tokio::join!(
+            first_wait,
+            write_stdin(
+                &session,
+                &turn,
+                process_id,
+                "wake-up\n",
+                /*yield_time_ms*/ 250,
+            )
+        )
+    })
+    .await
+    .expect("the original wait should still observe the process wake");
+    let waited = waited?;
+    let written = written?;
+
+    assert_eq!(waited.wait_reason, Some(ProcessWaitReason::Completed));
+    assert_eq!(written.process_id, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_process_rejects_unknown_session() {
     let (session, _) = test_session_and_turn().await;
     let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
@@ -317,7 +485,7 @@ async fn wait_process_rejects_unknown_session() {
 
 #[cfg(not(windows))]
 #[tokio::test]
-async fn live_process_filter_excludes_completed_unconsumed_sessions() -> anyhow::Result<()> {
+async fn existing_process_filter_retains_completed_unconsumed_sessions() -> anyhow::Result<()> {
     let (session, turn) = test_session_and_turn().await;
     let started = exec_command_with_tty(
         &session,
@@ -334,7 +502,7 @@ async fn live_process_filter_excludes_completed_unconsumed_sessions() -> anyhow:
         session
             .services
             .unified_exec_manager
-            .retain_live_process_ids(vec![process_id])
+            .retain_existing_process_ids(vec![process_id, 404])
             .await,
         vec![process_id]
     );
@@ -343,14 +511,22 @@ async fn live_process_filter_excludes_completed_unconsumed_sessions() -> anyhow:
         session
             .services
             .unified_exec_manager
-            .retain_live_process_ids(vec![process_id])
+            .retain_existing_process_ids(vec![process_id])
             .await,
-        Vec::<i32>::new()
+        vec![process_id]
     );
 
     let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
     let completed = wait_process_for_test(&session, process_id, &mut activity_rx).await?;
     assert_eq!(completed.wait_reason, Some(ProcessWaitReason::Completed));
+    assert!(
+        session
+            .services
+            .unified_exec_manager
+            .retain_existing_process_ids(vec![process_id])
+            .await
+            .is_empty()
+    );
     Ok(())
 }
 

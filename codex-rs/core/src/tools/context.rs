@@ -544,8 +544,25 @@ impl ExecCommandToolOutput {
     }
 
     fn response_text(&self) -> String {
-        let header = self.response_header();
-        let output_budget = (self.truncation_policy * 1.2)
+        let mut header = self.response_header();
+        // wait_process responses are already standalone context items. Keep the
+        // complete item within the configured policy instead of relying on the
+        // history serializer's legacy allowance for ordinary exec responses.
+        let response_policy = if self.wait_reason.is_some() {
+            self.truncation_policy
+        } else {
+            self.truncation_policy * 1.2
+        };
+        if self.wait_reason.is_some()
+            && header.len().saturating_add(/*rhs*/ 1) > response_policy.byte_budget()
+        {
+            header = match (self.process_id, self.exit_code) {
+                (Some(process_id), _) => format!("session_id={process_id}\nOutput:"),
+                (None, Some(exit_code)) => format!("exit_code={exit_code}\nOutput:"),
+                (None, None) => "Output:".to_string(),
+            };
+        }
+        let output_budget = response_policy
             .byte_budget()
             .saturating_sub(header.len().saturating_add(/*rhs*/ 1));
         let mut policy = self.model_output_policy();
@@ -567,7 +584,15 @@ impl ExecCommandToolOutput {
             output = self.truncated_output_with_policy(policy);
         }
 
-        format!("{header}\n{output}")
+        let mut response = format!("{header}\n{output}");
+        if self.wait_reason.is_some() && response.len() > response_policy.byte_budget() {
+            let mut boundary = response_policy.byte_budget();
+            while !response.is_char_boundary(boundary) {
+                boundary = boundary.saturating_sub(1);
+            }
+            response.truncate(boundary);
+        }
+        response
     }
 }
 

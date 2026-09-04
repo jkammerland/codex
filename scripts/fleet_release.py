@@ -750,7 +750,17 @@ if ($needsActivation) {{
 }}
 Write-Output "activated-version=$version"
 """
+    daemon_helper_path = (
+        Path(__file__).resolve().parent / "lib" / "install-user-fork-daemon.sh"
+    )
+    try:
+        daemon_helper_source = daemon_helper_path.read_text()
+    except OSError as error:
+        raise FleetError(
+            f"could not embed daemon activation helper {daemon_helper_path}: {error}"
+        ) from error
     return f"""set -eu
+{daemon_helper_source}
 sha() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
 file_mode() {{ stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }}
 git_clean_at() {{ path=$1; expected=$2; commit=$(git -C "$path" rev-parse HEAD) || return 1; status=$(git -C "$path" status --porcelain) || return 1; [ "$commit" = "$expected" ] && [ -z "$status" ]; }}
@@ -816,9 +826,6 @@ receipt_cli_hash=$(receipt_value cliSha256 "$receipt") || {{ echo 'Invalid build
 receipt_host_hash=$(receipt_value hostSha256 "$receipt") || {{ echo 'Invalid build receipt' >&2; exit 1; }}
 [ "$receipt_format" = v1 ] && [ "$receipt_commit" = {release.fork_commit} ] && [ "$receipt_version" = {shlex.quote(release.cli_version)} ] && [ "$receipt_cli_hash" = "$source_cli_hash" ] && [ "$receipt_host_hash" = "$source_host_hash" ] || {{ echo 'Build receipt does not match the reviewed binary pair' >&2; exit 1; }}
 [ ! -e "$backup_cli" ] && [ ! -e "$backup_host" ] || {{ [ -e "$backup_cli" ] && [ -e "$backup_host" ] || {{ echo 'Release rollback pair is incomplete' >&2; exit 1; }}; }}
-daemon_helper="$canonical/scripts/lib/install-user-fork-daemon.sh"
-[ -r "$daemon_helper" ] || {{ echo 'Missing daemon activation helper' >&2; exit 1; }}
-. "$daemon_helper"
 codex_state_dir=${{CODEX_HOME:-"$HOME/.codex"}}
 ensure_daemon_runtime_compatible "$source_cli" {shlex.quote(release.runtime_version)} "$codex_state_dir"
 disable_daemon_auto_update "$source_cli" "$codex_state_dir"

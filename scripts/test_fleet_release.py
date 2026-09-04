@@ -204,6 +204,7 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn("Assert-CleanGit $server", windows_script)
         self.assertIn("ensure_daemon_runtime_compatible", mac_script)
         self.assertIn("disable_daemon_auto_update", mac_script)
+        self.assertNotIn('daemon_helper="$canonical', mac_script)
         self.assertIn("Assert-DaemonRuntimeCompatible", windows_script)
         self.assertIn(self.release.runtime_version, windows_script)
         self.assertLess(
@@ -229,14 +230,6 @@ class FleetReleaseTest(unittest.TestCase):
             build = root / "build"
             canonical.mkdir()
             (canonical / ".gitignore").write_text("codex-rs/target/\n")
-            daemon_helper = (
-                canonical / "scripts" / "lib" / "install-user-fork-daemon.sh"
-            )
-            daemon_helper.parent.mkdir(parents=True)
-            shutil.copy2(
-                Path(__file__).parent / "lib" / "install-user-fork-daemon.sh",
-                daemon_helper,
-            )
             run(["git", "init", "-q", str(canonical)], check=True)
             run(
                 [
@@ -249,7 +242,6 @@ class FleetReleaseTest(unittest.TestCase):
                     "user.email=fleet@example.invalid",
                     "add",
                     ".gitignore",
-                    "scripts/lib/install-user-fork-daemon.sh",
                 ],
                 check=True,
             )

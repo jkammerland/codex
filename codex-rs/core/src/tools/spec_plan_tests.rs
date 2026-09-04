@@ -1102,7 +1102,11 @@ async fn shell_zsh_fork_keeps_unified_exec_available() {
     .await;
 
     without_composition.assert_visible_contains(&["exec_command", "wait_process", "write_stdin"]);
-    without_composition.assert_registered_contains(&["exec_command", "wait_process", "write_stdin"]);
+    without_composition.assert_registered_contains(&[
+        "exec_command",
+        "wait_process",
+        "write_stdin",
+    ]);
 
     let composed = probe(|turn| {
         set_features(
@@ -1313,12 +1317,7 @@ async fn environment_tools_follow_the_step_context() {
         &Default::default(),
     ));
 
-    plan.assert_visible_contains(&[
-        "exec_command",
-        "wait_process",
-        "apply_patch",
-        "view_image",
-    ]);
+    plan.assert_visible_contains(&["exec_command", "wait_process", "apply_patch", "view_image"]);
 }
 
 #[tokio::test]

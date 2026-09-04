@@ -44,8 +44,8 @@ class FleetReleaseTest(unittest.TestCase):
         )
 
     def test_checked_in_manifest_is_valid(self) -> None:
-        self.assertEqual(self.release.marker, "+jkammerland.mcp.16")
-        self.assertEqual(self.release.fork_ref, "fleet/jkammerland.mcp.16-source")
+        self.assertEqual(self.release.marker, "+jkammerland.mcp.18")
+        self.assertEqual(self.release.fork_ref, "fleet/jkammerland.mcp.18-source")
         self.assertEqual(self.release.rusty_v8_version, "150.4.0")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
         self.assertEqual(
@@ -88,6 +88,23 @@ class FleetReleaseTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(daemon_result.returncode, 0, daemon_result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer test")
+    def test_linux_installer_normalizes_tagged_release_lock(self) -> None:
+        release_lock_result = run(
+            [
+                "sh",
+                str(
+                    Path(__file__).parent
+                    / "tests"
+                    / "install_user_fork_release_lock.sh"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(release_lock_result.returncode, 0, release_lock_result.stderr)
 
     def test_manifest_rejects_relative_host_paths(self) -> None:
         raw = json.loads(fleet_release.DEFAULT_MANIFEST.read_text())
@@ -158,10 +175,10 @@ class FleetReleaseTest(unittest.TestCase):
     ) -> None:
         mac_script = fleet_release.activation_script(self.hosts[0], self.release)
         windows_script = fleet_release.activation_script(self.hosts[1], self.release)
-        self.assertIn(".jkammerland.mcp.16-previous", mac_script)
+        self.assertIn(".jkammerland.mcp.18-previous", mac_script)
         self.assertIn("mv -f", mac_script)
         self.assertIn("ReplaceFile", windows_script)
-        self.assertIn(".jkammerland.mcp.16-previous", windows_script)
+        self.assertIn(".jkammerland.mcp.18-previous", windows_script)
         self.assertIn("Build worktree is not clean at the manifest commit", mac_script)
         self.assertIn("Assert-CleanGit $build", windows_script)
         self.assertIn("agents --help", mac_script)

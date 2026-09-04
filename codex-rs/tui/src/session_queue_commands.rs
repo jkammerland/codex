@@ -33,14 +33,13 @@ pub async fn run_session_queue_command(
     let explicit_remote = options.explicit_remote_endpoint.is_some();
     let mut app_server =
         start_app_server_for_session_command(options, codex_home.to_path_buf()).await?;
+    let default_daemon = super::probe_default_daemon_socket(codex_home.as_path()).await;
     if !explicit_remote
         && app_server.uses_embedded_app_server()
-        && super::maybe_probe_default_daemon_socket(codex_home.as_path())
-            .await
-            .is_some()
+        && default_daemon.blocks_embedded_mutation()
     {
         return Err(eyre!(
-            "cannot queue through an embedded app server while a local app-server daemon is running; remove configuration overrides or use --remote"
+            "cannot queue through an embedded app server while a local app-server daemon is present or unverifiable; resolve the daemon mismatch, remove configuration overrides, or use --remote"
         ));
     }
     let implicit_local_daemon = !explicit_remote && !app_server.uses_embedded_app_server();

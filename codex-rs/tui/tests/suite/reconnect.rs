@@ -36,7 +36,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             "status": {"type": "active", "activeFlags": []}, "cwd": server_cwd,
             "cliVersion": "0.0.0", "source": "cli", "turns": [{"id": "running", "items": [], "status": "inProgress", "error": null}]
         });
-        for connection in 0..3 {
+        for connection in 0..4 {
             let mut socket = loop {
                 let (stream, _) = listener.accept().await?;
                 // Startup probes the default daemon socket before opening its WebSocket.
@@ -46,7 +46,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             };
             loop {
                 let frame = tokio::select! {
-                    _ = &mut disconnect_rx, if connection == 0 => {
+                    _ = &mut disconnect_rx, if connection == 1 => {
                         socket.close(/*msg*/ None).await?;
                         break;
                     }
@@ -59,10 +59,10 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     continue;
                 };
                 methods.push(request.method.clone());
-                if connection == 1 && request.method == "initialize" {
+                if connection == 2 && request.method == "initialize" {
                     restore_rx.take().unwrap().await?;
                 }
-                if connection == 1 && request.method == "thread/resume" {
+                if connection == 2 && request.method == "thread/resume" {
                     socket
                         .send(Message::Text(
                             json!({"id": request.id, "error": {
@@ -76,7 +76,9 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     continue;
                 }
                 let result = match request.method.as_str() {
-                    "initialize" => json!({"userAgent": "reconnect-pty"}),
+                    "initialize" => json!({
+                        "userAgent": format!("reconnect-pty/{}", codex_tui::CODEX_CLI_VERSION)
+                    }),
                     "account/read" => {
                         json!({"account": {"type": "apiKey"}, "requiresOpenaiAuth": false})
                     }
@@ -115,7 +117,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                             .into(),
                     ))
                     .await?;
-                if connection == 2 && request.method == "thread/resume" {
+                if connection == 3 && request.method == "thread/resume" {
                     // Keep the recovered turn running: its output must appear without waiting
                     // for turn/completed or rebuilding the transcript.
                     socket

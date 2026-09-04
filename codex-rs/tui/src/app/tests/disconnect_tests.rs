@@ -308,7 +308,12 @@ where
         methods.push(request.method.clone());
         let request_id = request.id.clone();
         let response = match request.method.as_str() {
-            "initialize" => Some(json!({"result": {"userAgent": "reconnect-test/2.0.0"}})),
+            "initialize" => Some(json!({"result": {
+                "userAgent": format!(
+                    "reconnect-test/{}",
+                    crate::version::CODEX_CLI_VERSION
+                )
+            }})),
             "account/read" => {
                 Some(json!({"result": {"account": null, "requiresOpenaiAuth": false}}))
             }

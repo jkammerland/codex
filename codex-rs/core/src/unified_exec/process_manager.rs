@@ -444,15 +444,11 @@ fn terminate_process_on_network_denial(
 }
 
 impl UnifiedExecProcessManager {
-    pub(crate) async fn retain_live_process_ids(&self, process_ids: Vec<i32>) -> Vec<i32> {
+    pub(crate) async fn retain_existing_process_ids(&self, process_ids: Vec<i32>) -> Vec<i32> {
         let store = self.process_store.lock().await;
         process_ids
             .into_iter()
-            .filter(|process_id| {
-                store.processes.get(process_id).is_some_and(|entry| {
-                    !entry.process.has_exited() && entry.process.failure_message().is_none()
-                })
-            })
+            .filter(|process_id| store.processes.contains_key(process_id))
             .collect()
     }
 
@@ -486,6 +482,31 @@ impl UnifiedExecProcessManager {
     pub(crate) async fn release_process_id(&self, process_id: i32) {
         let removed = {
             let mut store = self.process_store.lock().await;
+            let entry = store.processes.remove(&process_id);
+            if !should_use_deterministic_process_ids() {
+                store.reserved_process_ids.remove(&process_id);
+            }
+            entry
+        };
+        if let Some(entry) = removed {
+            unregister_network_approval_for_entry(&entry).await;
+        }
+    }
+
+    async fn release_process_id_if_matches(
+        &self,
+        process_id: i32,
+        expected_process: &Arc<UnifiedExecProcess>,
+    ) {
+        let removed = {
+            let mut store = self.process_store.lock().await;
+            let process_matches = store
+                .processes
+                .get(&process_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.process, expected_process));
+            if !process_matches {
+                return;
+            }
             let entry = store.processes.remove(&process_id);
             if !should_use_deterministic_process_ids() {
                 store.reserved_process_ids.remove(&process_id);
@@ -700,7 +721,7 @@ impl UnifiedExecProcessManager {
         }
         let process_id = request.process_id;
         let (response_process_id, exit_code) = if process_started_alive {
-            match self.refresh_process_state(process_id).await {
+            match self.refresh_process_state(process_id, &process).await {
                 ProcessStatus::Alive {
                     exit_code,
                     process_id,
@@ -947,7 +968,7 @@ impl UnifiedExecProcessManager {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(err) => {
-                        let status = self.refresh_process_state(process_id).await;
+                        let status = self.refresh_process_state(process_id, &process).await;
                         if matches!(status, ProcessStatus::Exited { .. }) {
                             status_after_write = Some(status);
                         } else if matches!(err, UnifiedExecError::ProcessFailed { .. }) {
@@ -1015,7 +1036,7 @@ impl UnifiedExecProcessManager {
         let status = if let Some(status) = status_after_write {
             status
         } else {
-            self.refresh_process_state(process_id).await
+            self.refresh_process_state(process_id, &process).await
         };
         let (process_id, exit_code, event_call_id) = match status {
             ProcessStatus::Alive {
@@ -1078,11 +1099,18 @@ impl UnifiedExecProcessManager {
         Ok(response)
     }
 
-    async fn refresh_process_state(&self, process_id: i32) -> ProcessStatus {
+    async fn refresh_process_state(
+        &self,
+        process_id: i32,
+        expected_process: &Arc<UnifiedExecProcess>,
+    ) -> ProcessStatus {
         let mut store = self.process_store.lock().await;
         let Some(entry) = store.processes.get_mut(&process_id) else {
             return ProcessStatus::Unknown;
         };
+        if !Arc::ptr_eq(&entry.process, expected_process) {
+            return ProcessStatus::Unknown;
+        }
 
         let exit_code = entry.process.exit_code();
         let process_id = entry.process_id;
@@ -1643,14 +1671,16 @@ impl UnifiedExecProcessManager {
                 return None;
             }
 
-            // Do not prune processes while write_stdin or terminal event
-            // publication holds their interaction lock.
-            if let Some(interaction_lock) = candidate_process
-                .as_ref()
-                .map(|process| process.interaction_lock())
-                && let Ok(_interaction_guard) = interaction_lock.try_lock_owned()
-            {
-                return store.remove(process_id);
+            // Do not prune processes while an interaction, event-driven wait,
+            // or terminal event publication is active for them.
+            if let Some(candidate_process) = candidate_process.as_ref() {
+                let interaction_lock = candidate_process.interaction_lock();
+                let wait_process_lock = candidate_process.wait_process_lock();
+                if let Ok(_interaction_guard) = interaction_lock.try_lock_owned()
+                    && let Ok(_wait_process_guard) = wait_process_lock.try_lock_owned()
+                {
+                    return store.remove(process_id);
+                }
             }
             found_locked_exited_process |= candidate_has_exited
                 || candidate_process.is_some_and(|process| process.has_exited());

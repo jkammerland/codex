@@ -493,7 +493,9 @@ fn exec_command_tool_output_reserves_metadata_budget_and_preserves_policy_units(
 }
 
 #[test_case::test_case(TruncationPolicy::Bytes(400); "byte budget")]
+#[test_case::test_case(TruncationPolicy::Bytes(32); "small byte budget")]
 #[test_case::test_case(TruncationPolicy::Tokens(100); "token budget")]
+#[test_case::test_case(TruncationPolicy::Tokens(8); "small token budget")]
 fn wait_process_tool_output_stays_within_the_complete_item_policy(policy: TruncationPolicy) {
     let payload = ToolPayload::Function {
         arguments: "{}".to_string(),
@@ -527,6 +529,10 @@ fn wait_process_tool_output_stays_within_the_complete_item_policy(policy: Trunca
         "complete wait output exceeded its model-item policy: {} > {}",
         text.len(),
         policy.byte_budget(),
+    );
+    assert!(
+        text.contains("session ID 42") || text.contains("session_id=42"),
+        "a bounded live wait response lost its recovery handle: {text:?}",
     );
 }
 

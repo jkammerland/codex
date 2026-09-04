@@ -556,7 +556,10 @@ async fn exec_command_uses_installed_environment_shell_policy_with_explicit_over
     let output = parse_unified_exec_output(&harness.function_call_stdout(call_id).await)?;
     assert_eq!(
         output.output.trim(),
-        concat!("preserved:missing:missing:", env!("CARGO_PKG_VERSION")),
+        format!(
+            "preserved:missing:missing:{}",
+            codex_build_info::CODEX_CLI_VERSION
+        ),
     );
     Ok(())
 }
@@ -2551,9 +2554,9 @@ async fn wait_process_blocks_without_model_polling_and_wakes_for_input() -> Resu
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "new direction".to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: "new direction".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("steer input should interrupt wait_process");
     wait_for_event(&test.codex, |event| {

@@ -472,6 +472,12 @@ async fn start_app_server(
         match connection {
             Ok(app_server) => return Ok(app_server),
             Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
+                if err
+                    .downcast_ref::<app_server_connection::IncompatibleLocalDaemon>()
+                    .is_some()
+                {
+                    return Err(err);
+                }
                 tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
                 *target = AppServerTarget::Embedded;
                 *state_db = init_state_db_for_app_server_target(&config, target).await?;

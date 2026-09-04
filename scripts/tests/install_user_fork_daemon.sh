@@ -8,7 +8,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEST_DIR"' EXIT HUP INT TERM
 
-FAKE_CODEX="$TEST_DIR/codex"
+FAKE_BIN_DIR="$TEST_DIR/fake bin"
+mkdir -p "$FAKE_BIN_DIR"
+FAKE_CODEX="$FAKE_BIN_DIR/codex"
 cat >"$FAKE_CODEX" <<'EOF'
 #!/bin/sh
 
@@ -17,7 +19,7 @@ case "${FAKE_DAEMON_MODE:-not-running}" in
     printf '%s\n' '{"status":"notRunning","appServerVersion":null}'
     ;;
   matching)
-    printf '%s\n' '{"status":"running","appServerVersion":"0.0.0+jkammerland.mcp.17"}'
+    printf '%s\n' '{"status":"running","appServerVersion":"0.0.0+jkammerland.mcp.18"}'
     ;;
   stale)
     printf '%s\n' '{"status":"running","appServerVersion":"0.151.0"}'
@@ -35,7 +37,7 @@ esac
 EOF
 chmod +x "$FAKE_CODEX"
 
-EXPECTED_VERSION="0.0.0+jkammerland.mcp.17"
+EXPECTED_VERSION="0.0.0+jkammerland.mcp.18"
 STATE_DIR="$TEST_DIR/state"
 ERROR_LOG="$TEST_DIR/error.log"
 
@@ -68,11 +70,51 @@ if FAKE_DAEMON_MODE=malformed \
 fi
 grep -F "Could not parse app-server daemon status" "$ERROR_LOG" >/dev/null
 
-mkdir -p "$STATE_DIR/app-server-control"
-touch "$STATE_DIR/app-server-control/app-server-control.sock"
+SOCKET_DIR="$STATE_DIR/app-server-control"
+SOCKET_PATH="$SOCKET_DIR/app-server-control.sock"
+mkdir -p "$SOCKET_DIR"
+python3 - "$SOCKET_PATH" <<'PY'
+import socket
+import sys
+
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(sys.argv[1])
+listener.close()
+PY
+FAKE_DAEMON_MODE=unavailable \
+  ensure_daemon_runtime_compatible "$FAKE_CODEX" "$EXPECTED_VERSION" "$STATE_DIR"
+
+rm -f -- "$SOCKET_PATH"
+touch "$SOCKET_PATH"
 if FAKE_DAEMON_MODE=unavailable \
   ensure_daemon_runtime_compatible "$FAKE_CODEX" "$EXPECTED_VERSION" "$STATE_DIR" 2>"$ERROR_LOG"; then
   echo "unverifiable daemon socket was accepted" >&2
   exit 1
 fi
+grep -F "Could not verify the app-server daemon" "$ERROR_LOG" >/dev/null
+
+rm -f -- "$SOCKET_PATH"
+READY_FILE="$TEST_DIR/listener.ready"
+python3 - "$SOCKET_PATH" "$READY_FILE" <<'PY' &
+import socket
+import sys
+
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(sys.argv[1])
+listener.listen(1)
+open(sys.argv[2], "w").close()
+connection, _ = listener.accept()
+connection.close()
+listener.close()
+PY
+LISTENER_PID=$!
+while [ ! -e "$READY_FILE" ]; do
+  sleep 0.01
+done
+if FAKE_DAEMON_MODE=unavailable \
+  ensure_daemon_runtime_compatible "$FAKE_CODEX" "$EXPECTED_VERSION" "$STATE_DIR" 2>"$ERROR_LOG"; then
+  echo "reachable but unverifiable daemon socket was accepted" >&2
+  exit 1
+fi
+wait "$LISTENER_PID"
 grep -F "Could not verify the app-server daemon" "$ERROR_LOG" >/dev/null

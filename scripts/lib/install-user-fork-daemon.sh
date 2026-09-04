@@ -3,19 +3,51 @@
 # Refuse binary replacement when a daemon with a different runtime identity is
 # reachable. The installer never stops a daemon because it cannot know whether
 # the daemon still owns active work.
+daemon_socket_is_confirmed_absent() {
+  python3 - "$1" <<'PY'
+import errno
+import os
+import socket
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    mode = os.lstat(path).st_mode
+except FileNotFoundError:
+    raise SystemExit(0)
+
+if not stat.S_ISSOCK(mode):
+    raise SystemExit(1)
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(0.25)
+try:
+    client.connect(path)
+except OSError as error:
+    if error.errno in (errno.ENOENT, errno.ECONNREFUSED):
+        raise SystemExit(0)
+    raise SystemExit(1)
+else:
+    raise SystemExit(1)
+finally:
+    client.close()
+PY
+}
+
 ensure_daemon_runtime_compatible() {
   daemon_codex=$1
   expected_runtime_version=$2
   codex_state_dir=$3
   daemon_socket="$codex_state_dir/app-server-control/app-server-control.sock"
 
-  if ! daemon_output=$($daemon_codex app-server daemon version 2>/dev/null); then
-    if [ -e "$daemon_socket" ]; then
-      echo "Could not verify the app-server daemon at $daemon_socket; refusing to replace Codex." >&2
-      echo "The daemon was left untouched. Finish active daemon-backed jobs, stop it, then rerun the installer." >&2
-      return 1
+  if ! daemon_output=$("$daemon_codex" app-server daemon version 2>/dev/null); then
+    if daemon_socket_is_confirmed_absent "$daemon_socket"; then
+      return 0
     fi
-    return 0
+    echo "Could not verify the app-server daemon at $daemon_socket; refusing to replace Codex." >&2
+    echo "The daemon was left untouched. Finish active daemon-backed jobs, stop it, then rerun the installer." >&2
+    return 1
   fi
 
   if ! daemon_fields=$(printf '%s\n' "$daemon_output" | python3 -c '

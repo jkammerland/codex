@@ -59,6 +59,29 @@ class FleetReleaseTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer test")
+    def test_linux_installer_resolves_only_the_active_managed_install(self) -> None:
+        result = run(
+            [
+                "sh",
+                str(Path(__file__).parent / "tests" / "install_user_fork_paths.sh"),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        installer = (Path(__file__).parent / "install-user-fork.sh").read_text()
+        self.assertIn("SELECTED_CODEX_HASH", installer)
+        self.assertIn("selected Codex binaries changed during the build", installer)
+        self.assertIn(
+            "UPSTREAM_VERSION=$(printf '%s\\n' \"$CURRENT_VERSION\"", installer
+        )
+        self.assertNotIn(
+            "UPSTREAM_VERSION=$(printf '%s\\n' \"$BUILT_VERSION\"", installer
+        )
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer test")
     def test_linux_installer_preserves_incompatible_daemons(self) -> None:
         daemon_result = run(
             [

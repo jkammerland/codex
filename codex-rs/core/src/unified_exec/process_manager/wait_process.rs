@@ -111,7 +111,14 @@ impl UnifiedExecProcessManager {
                             locked_process.interaction_lock().lock_owned().await;
                         break (ProcessWaitReason::Input, interaction_guard);
                     },
-                    _ = &mut output_notified, if tty => {}
+                    _ = &mut output_notified, if tty => {
+                        // The producer event remains meaningful even if a
+                        // concurrent write drains its bytes before this waiter
+                        // reacquires the interaction lock.
+                        let interaction_guard =
+                            locked_process.interaction_lock().lock_owned().await;
+                        break (ProcessWaitReason::Output, interaction_guard);
+                    }
                 }
             }
         };

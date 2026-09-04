@@ -415,6 +415,68 @@ async fn wait_process_allows_write_stdin_to_wake_the_same_session() -> anyhow::R
 }
 
 #[tokio::test]
+async fn wait_process_returns_after_write_stdin_drains_the_waking_output() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, process) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::Accepted).await;
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let mut waiting = Box::pin(wait_process_for_test(
+        &session,
+        process_id,
+        &mut activity_rx,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+
+    let mut writing = Box::pin(write_stdin(
+        &session,
+        &turn,
+        process_id,
+        "accepted input",
+        /*yield_time_ms*/ 250,
+    ));
+    assert!(writing.as_mut().poll(&mut task_context).is_pending());
+    assert!(process.interaction_lock().try_lock_owned().is_err());
+
+    {
+        let mut output = process.output_handles().output_buffer.lock().await;
+        output.push_chunk(b"write-owned-output");
+    }
+    process.output_handles().output_notify.notify_waiters();
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+
+    let written = tokio::time::timeout(Duration::from_secs(/*secs*/ 2), writing)
+        .await
+        .expect("write_stdin should finish draining the waking output")?;
+    assert_eq!(
+        (
+            written.process_id,
+            String::from_utf8_lossy(&written.raw_output).into_owned()
+        ),
+        (Some(process_id), "write-owned-output".to_string())
+    );
+
+    let waited = tokio::time::timeout(Duration::from_secs(/*secs*/ 1), waiting)
+        .await
+        .expect("wait_process should retain the output wake after the buffer is drained")?;
+    assert_eq!(
+        (
+            waited.wait_reason,
+            waited.process_id,
+            waited.raw_output
+        ),
+        (
+            Some(ProcessWaitReason::Output),
+            Some(process_id),
+            Vec::new()
+        )
+    );
+
+    assert!(session.terminate_background_terminal(process_id).await);
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_process_rejects_a_duplicate_wait_without_consuming_the_wake() -> anyhow::Result<()> {
     let (session, turn) = test_session_and_turn().await;
     let (process_id, _process) =
@@ -462,6 +524,68 @@ async fn wait_process_rejects_a_duplicate_wait_without_consuming_the_wake() -> a
 
     assert_eq!(waited.wait_reason, Some(ProcessWaitReason::Completed));
     assert_eq!(written.process_id, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_stdin_failure_does_not_remove_a_reused_process_id() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, original) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::Accepted).await;
+    let mut writing = Box::pin(write_stdin(
+        &session,
+        &turn,
+        process_id,
+        "accepted input",
+        /*yield_time_ms*/ 250,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(writing.as_mut().poll(&mut task_context).is_pending());
+    assert!(original.interaction_lock().try_lock_owned().is_err());
+
+    let replacement = Arc::new(
+        super::process_tests::remote_process(
+            WriteStatus::Accepted,
+            /*terminate_error*/ None,
+            SandboxType::None,
+        )
+        .await,
+    );
+    session
+        .services
+        .unified_exec_manager
+        .process_store
+        .lock()
+        .await
+        .processes
+        .get_mut(&process_id)
+        .expect("original process should remain stored")
+        .process = Arc::clone(&replacement);
+    original.fail_and_terminate("original process failed".to_string());
+
+    let error = tokio::time::timeout(Duration::from_secs(/*secs*/ 2), writing)
+        .await
+        .expect("write_stdin should surface the original process failure")
+        .expect_err("the original process failure should fail write_stdin");
+    assert!(matches!(
+        error,
+        UnifiedExecError::ProcessFailed { message } if message == "original process failed"
+    ));
+    let stored_process = Arc::clone(
+        &session
+            .services
+            .unified_exec_manager
+            .process_store
+            .lock()
+            .await
+            .processes
+            .get(&process_id)
+            .expect("stale write cleanup must preserve the replacement")
+            .process,
+    );
+    assert!(Arc::ptr_eq(&stored_process, &replacement));
+
+    assert!(session.terminate_background_terminal(process_id).await);
     Ok(())
 }
 

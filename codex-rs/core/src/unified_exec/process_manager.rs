@@ -498,11 +498,13 @@ impl UnifiedExecProcessManager {
     ) {
         let removed = {
             let mut store = self.process_store.lock().await;
-            let process_matches = store
+            // No entry means an unstored short-lived process still owns only
+            // the reservation. A different entry is a reused ID and must stay.
+            let belongs_to_replacement = store
                 .processes
                 .get(&process_id)
-                .is_some_and(|entry| Arc::ptr_eq(&entry.process, expected_process));
-            if !process_matches {
+                .is_some_and(|entry| !Arc::ptr_eq(&entry.process, expected_process));
+            if belongs_to_replacement {
                 return;
             }
             let entry = store.processes.remove(&process_id);
@@ -689,7 +691,8 @@ impl UnifiedExecProcessManager {
                 wall_time,
             )
             .await;
-            self.release_process_id(request.process_id).await;
+            self.release_process_id_if_matches(request.process_id, &process)
+                .await;
             return Err(fail_process_with_message(process.as_ref(), message));
         }
         if let Some(message) = process.failure_message() {
@@ -710,7 +713,8 @@ impl UnifiedExecProcessManager {
                 wall_time,
             )
             .await;
-            self.release_process_id(request.process_id).await;
+            self.release_process_id_if_matches(request.process_id, &process)
+                .await;
             if let Err(message) = finish_result {
                 return Err(fail_process_with_message(process.as_ref(), message));
             }
@@ -787,7 +791,8 @@ impl UnifiedExecProcessManager {
                     wall_time,
                 )
                 .await;
-                self.release_process_id(request.process_id).await;
+                self.release_process_id_if_matches(request.process_id, &process)
+                    .await;
                 return Err(fail_process_with_message(process.as_ref(), message));
             }
             let exit_code = process.exit_code();
@@ -811,7 +816,8 @@ impl UnifiedExecProcessManager {
             )
             .await;
 
-            self.release_process_id(request.process_id).await;
+            self.release_process_id_if_matches(request.process_id, &process)
+                .await;
             process
                 .check_for_sandbox_denial_with_text(&text)
                 .await
@@ -964,7 +970,8 @@ impl UnifiedExecProcessManager {
                             status_after_write = Some(status);
                         } else if matches!(err, UnifiedExecError::ProcessFailed { .. }) {
                             process.terminate();
-                            self.release_process_id(process_id).await;
+                            self.release_process_id_if_matches(process_id, &process)
+                                .await;
                             return Err(err);
                         } else {
                             return Err(err);
@@ -1004,7 +1011,8 @@ impl UnifiedExecProcessManager {
             let message =
                 network_denial_message_for_session(session.as_ref(), network_approval.clone())
                     .await;
-            self.release_process_id(process_id).await;
+            self.release_process_id_if_matches(process_id, &process)
+                .await;
             return Err(fail_process_with_message(process.as_ref(), message));
         }
         if let Some(message) = process.failure_message() {
@@ -1013,7 +1021,8 @@ impl UnifiedExecProcessManager {
                 network_approval.clone(),
             )
             .await;
-            self.release_process_id(process_id).await;
+            self.release_process_id_if_matches(process_id, &process)
+                .await;
             if let Err(message) = finish_result {
                 return Err(fail_process_with_message(process.as_ref(), message));
             }
@@ -1662,6 +1671,16 @@ impl UnifiedExecProcessManager {
                 // process is publishing its terminal event. Do not evict a live
                 // process just because that exited process is briefly locked.
                 return None;
+            }
+
+            let initial_exec_command_active = store
+                .processes
+                .get(&process_id)
+                .is_some_and(|entry| entry.initial_exec_command_active.load(Ordering::Acquire));
+            if initial_exec_command_active {
+                found_locked_exited_process |= candidate_has_exited;
+                meta.retain(|(id, _, _)| *id != process_id);
+                continue;
             }
 
             // Do not prune processes while an interaction, event-driven wait,

@@ -73,7 +73,8 @@ use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::WrapErr;
 use cwd_prompt::CwdPromptAction;
-use daemon_socket::maybe_probe_default_daemon_socket;
+use daemon_socket::DefaultDaemonSocket;
+use daemon_socket::probe_default_daemon_socket;
 pub use session_archive_commands::DeleteConfirmation;
 pub use session_archive_commands::SessionArchiveAction;
 pub use session_archive_commands::SessionArchiveCommandOptions;
@@ -226,6 +227,9 @@ mod updates;
 #[cfg(any(not(debug_assertions), test))]
 mod updates_cache;
 mod version;
+pub use version::CODEX_CLI_VERSION;
+pub use version::CODEX_FORK_BUILD_ID;
+pub use version::CODEX_UPSTREAM_VERSION;
 mod vim_search;
 mod width;
 #[cfg(any(target_os = "windows", test))]

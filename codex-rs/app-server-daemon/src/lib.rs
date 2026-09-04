@@ -6,7 +6,9 @@ use backend::windows::try_lock_file;
 mod client;
 mod managed_install;
 mod remote_control_client;
+mod runtime_identity;
 mod settings;
+mod socket_state;
 mod update_loop;
 
 use std::path::Path;
@@ -25,6 +27,7 @@ use codex_utils_home_dir::find_codex_home;
 use managed_install::managed_codex_bin;
 #[cfg(any(unix, windows))]
 use managed_install::managed_codex_version;
+use runtime_identity::DaemonOwnership;
 use serde::Serialize;
 use settings::DaemonSettings;
 use tokio::time::sleep;
@@ -251,7 +254,21 @@ pub async fn run_pid_update_loop(
     ensure_supported_platform()?;
     #[cfg(windows)]
     backend::windows::ensure_not_elevated()?;
+    if !codex_build_info::CODEX_FORK_BUILD_ID.is_empty() {
+        return Err(anyhow!(
+            "automatic official Codex updates are disabled for maintained fork {}",
+            codex_build_info::CODEX_FORK_BUILD_ID
+        ));
+    }
     update_loop::run(http_client_factory).await
+}
+
+/// Stops the detached official updater without interrupting the app-server daemon.
+pub async fn disable_auto_update() -> Result<()> {
+    ensure_supported_platform()?;
+    #[cfg(windows)]
+    backend::windows::ensure_not_elevated()?;
+    Daemon::from_environment()?.disable_auto_update().await
 }
 
 #[cfg(any(unix, windows))]
@@ -313,10 +330,17 @@ impl Daemon {
     async fn start(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
         if let Ok(info) = client::probe(&self.socket_path).await {
+            let backend = self.running_backend(&settings).await?;
+            let ownership = if backend.is_some() {
+                DaemonOwnership::ManagedExisting
+            } else {
+                DaemonOwnership::Unmanaged
+            };
+            runtime_identity::validate_probe(&info, ownership)?;
             return Ok(self
                 .output(
                     LifecycleStatus::AlreadyRunning,
-                    self.running_backend(&settings).await?,
+                    backend,
                     /*pid*/ None,
                     Some(info.app_server_version),
                 )
@@ -325,6 +349,7 @@ impl Daemon {
 
         if self.running_backend_instance(&settings).await?.is_some() {
             let info = self.wait_until_ready().await?;
+            runtime_identity::validate_probe(&info, DaemonOwnership::ManagedExisting)?;
             return Ok(self
                 .output(
                     LifecycleStatus::AlreadyRunning,
@@ -335,9 +360,10 @@ impl Daemon {
                 .await);
         }
 
-        self.ensure_managed_codex_bin()?;
-        let pid = self.start_managed_backend(&settings).await?;
-        let info = self.wait_until_ready().await?;
+        self.ensure_compatible_managed_codex_bin().await?;
+        let (pid, info) = self
+            .start_managed_backend_and_validate(&settings, &self.managed_codex_bin)
+            .await?;
         Ok(self
             .output(
                 LifecycleStatus::Started,
@@ -358,13 +384,14 @@ impl Daemon {
             ));
         }
 
-        self.ensure_managed_codex_bin()?;
+        self.ensure_compatible_managed_codex_bin().await?;
         if let Some(backend) = self.running_backend_instance(&settings).await? {
             backend.stop().await?;
         }
 
-        let pid = self.start_managed_backend(&settings).await?;
-        let info = self.wait_until_ready().await?;
+        let (pid, info) = self
+            .start_managed_backend_and_validate(&settings, &self.managed_codex_bin)
+            .await?;
         Ok(self
             .output(
                 LifecycleStatus::Restarted,
@@ -389,12 +416,9 @@ impl Daemon {
         let settings = self.load_settings().await?;
         let outcome = if let Some(backend) = self.running_backend_instance(&settings).await? {
             let info = client::probe(&self.socket_path).await.ok();
-            let managed_version = if info.is_some() {
-                Some(managed_codex_version(managed_codex_bin).await?)
-            } else {
-                None
-            };
-            match restart_decision(mode, info.as_ref(), managed_version.as_deref()) {
+            let managed_version = managed_codex_version(managed_codex_bin).await?;
+            runtime_identity::validate_managed_version(managed_codex_bin, &managed_version)?;
+            match restart_decision(mode, info.as_ref(), Some(&managed_version)) {
                 RestartDecision::NotReady => return Ok(RestartIfRunningOutcome::NotReady),
                 RestartDecision::AlreadyCurrent => RestartIfRunningOutcome::AlreadyCurrent,
                 RestartDecision::Restart => {
@@ -402,9 +426,8 @@ impl Daemon {
                     backend::windows::ensure_detached_launch(managed_codex_bin)?;
                     backend.stop().await?;
                     let _ = self
-                        .start_managed_backend_with_bin(&settings, managed_codex_bin)
+                        .start_managed_backend_and_validate(&settings, managed_codex_bin)
                         .await?;
-                    self.wait_until_ready().await?;
                     RestartIfRunningOutcome::Restarted
                 }
             }
@@ -462,9 +485,40 @@ impl Daemon {
             .await)
     }
 
+    async fn disable_auto_update(&self) -> Result<()> {
+        let _operation_lock = self.acquire_operation_lock().await?;
+        self.stop_auto_updater_locked().await
+    }
+
+    async fn stop_auto_updater_locked(&self) -> Result<()> {
+        let settings = self.load_settings().await?;
+        let updater = backend::pid_update_loop_backend(self.backend_paths(&settings));
+        if updater.is_starting_or_running().await? {
+            updater.stop().await?;
+        }
+        Ok(())
+    }
+
     async fn version(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
-        let info = client::probe(&self.socket_path).await?;
+        let info = match client::probe(&self.socket_path).await {
+            Ok(info) => info,
+            Err(probe_error) => {
+                if self.running_backend_instance(&settings).await?.is_some()
+                    || !socket_state::is_confirmed_absent(&self.socket_path).await?
+                {
+                    return Err(probe_error);
+                }
+                return Ok(self
+                    .output(
+                        LifecycleStatus::NotRunning,
+                        /*backend*/ None,
+                        /*pid*/ None,
+                        /*app_server_version*/ None,
+                    )
+                    .await);
+            }
+        };
         Ok(self
             .output(
                 LifecycleStatus::Running,
@@ -569,7 +623,9 @@ impl Daemon {
 
         if settings.remote_control_enabled == remote_control_enabled {
             let info = if backend.is_some() {
-                Some(self.wait_until_ready().await?)
+                let info = self.wait_until_ready().await?;
+                runtime_identity::validate_probe(&info, DaemonOwnership::ManagedExisting)?;
+                Some(info)
             } else {
                 None
             };
@@ -592,15 +648,17 @@ impl Daemon {
         }
 
         if backend.is_some() {
-            self.ensure_managed_codex_bin()?;
+            self.ensure_compatible_managed_codex_bin().await?;
         }
         settings.remote_control_enabled = remote_control_enabled;
         settings.save(&self.settings_file).await?;
 
         let app_server_version = if let Some(backend) = backend {
             backend.stop().await?;
-            let _ = self.start_managed_backend(&settings).await?;
-            Some(self.wait_until_ready().await?.app_server_version)
+            let (_, info) = self
+                .start_managed_backend_and_validate(&settings, &self.managed_codex_bin)
+                .await?;
+            Some(info.app_server_version)
         } else {
             None
         };
@@ -614,7 +672,7 @@ impl Daemon {
     }
 
     async fn bootstrap_locked(&self, options: BootstrapOptions) -> Result<BootstrapOutput> {
-        self.ensure_managed_codex_bin()?;
+        self.ensure_compatible_managed_codex_bin().await?;
 
         let settings = DaemonSettings {
             remote_control_enabled: options.remote_control_enabled,
@@ -632,25 +690,20 @@ impl Daemon {
             backend.stop().await?;
         }
 
-        let backend = backend::pid_backend(self.backend_paths(&settings));
-        backend.start().await?;
-        let updater = backend::pid_update_loop_backend(self.backend_paths(&settings));
-        if updater.is_starting_or_running().await? {
-            updater.stop().await?;
-        }
-        updater.start().await?;
-
-        let info = self.wait_until_ready().await?;
+        self.stop_auto_updater_locked().await?;
+        let (_, info) = self
+            .start_managed_backend_and_validate(&settings, &self.managed_codex_bin)
+            .await?;
         let managed_codex_version = self.managed_codex_version_best_effort().await;
         Ok(BootstrapOutput {
             status: BootstrapStatus::Bootstrapped,
             backend: BackendKind::Pid,
-            auto_update_enabled: true,
+            auto_update_enabled: false,
             remote_control_enabled: settings.remote_control_enabled,
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
             socket_path: self.socket_path.clone(),
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_version: codex_build_info::CODEX_CLI_VERSION.to_string(),
             app_server_version: info.app_server_version,
         })
     }
@@ -673,24 +726,41 @@ impl Daemon {
         Ok(None)
     }
 
-    async fn start_managed_backend(&self, settings: &DaemonSettings) -> Result<Option<u32>> {
-        self.start_managed_backend_with_bin(settings, &self.managed_codex_bin)
-            .await
-    }
-
-    async fn start_managed_backend_with_bin(
+    async fn start_managed_backend_and_validate(
         &self,
         settings: &DaemonSettings,
         managed_codex_bin: &Path,
-    ) -> Result<Option<u32>> {
+    ) -> Result<(Option<u32>, client::ProbeInfo)> {
         let backend =
             backend::pid_backend(self.backend_paths_with_bin(settings, managed_codex_bin));
-        backend.start().await
+        let pid = backend.start().await?;
+        let info = self.wait_until_ready().await?;
+        let ownership = if pid.is_some() {
+            DaemonOwnership::StartedByCurrentInvocation
+        } else {
+            DaemonOwnership::ManagedExisting
+        };
+        if let Err(error) = runtime_identity::validate_probe(&info, ownership) {
+            if pid.is_some() {
+                backend.stop().await?;
+            }
+            return Err(error);
+        }
+        Ok((pid, info))
     }
 
     async fn is_bootstrapped(&self, settings: &DaemonSettings) -> Result<bool> {
+        if tokio::fs::try_exists(&self.settings_file).await? {
+            return Ok(true);
+        }
         let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
         updater.is_starting_or_running().await
+    }
+
+    async fn ensure_compatible_managed_codex_bin(&self) -> Result<()> {
+        self.ensure_managed_codex_bin()?;
+        let managed_version = managed_codex_version(&self.managed_codex_bin).await?;
+        runtime_identity::validate_managed_version(&self.managed_codex_bin, &managed_version)
     }
 
     fn ensure_managed_codex_bin(&self) -> Result<()> {
@@ -805,7 +875,7 @@ impl Daemon {
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
             socket_path: self.socket_path.clone(),
-            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            cli_version: Some(codex_build_info::CODEX_CLI_VERSION.to_string()),
             app_server_version,
         }
     }
@@ -822,7 +892,7 @@ impl Daemon {
             backend,
             remote_control_enabled,
             socket_path: self.socket_path.clone(),
-            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            cli_version: codex_build_info::CODEX_CLI_VERSION.to_string(),
             app_server_version,
         }
     }
@@ -891,8 +961,25 @@ fn try_lock_file(_file: &tokio::fs::File) -> Result<bool> {
 
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
+    #[cfg(unix)]
+    use std::path::PathBuf;
+
+    #[cfg(unix)]
+    use anyhow::Context;
+    #[cfg(unix)]
+    use anyhow::Result;
+    #[cfg(unix)]
+    use futures::SinkExt;
+    #[cfg(unix)]
+    use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
+    #[cfg(unix)]
+    use tokio::net::UnixListener;
+    #[cfg(unix)]
+    use tokio_tungstenite::accept_async;
+    #[cfg(unix)]
+    use tokio_tungstenite::tungstenite::Message;
 
     use super::BackendKind;
     use super::BootstrapOutput;
@@ -910,11 +997,175 @@ mod tests {
     use super::should_reexec_updater;
     use crate::client::ProbeInfo;
 
+    #[cfg(unix)]
+    async fn serve_probe(
+        listener: UnixListener,
+        codex_home: PathBuf,
+        version: String,
+    ) -> Result<()> {
+        let (stream, _) = listener.accept().await?;
+        let mut websocket = accept_async(stream).await?;
+        let Message::Text(payload) = websocket
+            .next()
+            .await
+            .transpose()?
+            .context("missing initialize request")?
+        else {
+            anyhow::bail!("expected text initialize request");
+        };
+        let request: codex_app_server_protocol::JSONRPCRequest = serde_json::from_str(&payload)?;
+        let response = serde_json::json!({
+            "id": request.id,
+            "result": {
+                "userAgent": format!("codex_app_server/{version} (test)"),
+                "codexHome": codex_home,
+                "platformFamily": "unix",
+                "platformOs": "linux",
+            },
+        });
+        websocket
+            .send(Message::Text(response.to_string().into()))
+            .await?;
+        websocket
+            .next()
+            .await
+            .transpose()?
+            .context("missing initialized notification")?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn test_daemon(temp_dir: &TempDir, socket_path: PathBuf) -> Daemon {
+        Daemon {
+            socket_path,
+            pid_file: temp_dir.path().join("app-server.pid"),
+            update_pid_file: temp_dir.path().join("app-server-updater.pid"),
+            operation_lock_file: temp_dir.path().join("daemon.lock"),
+            settings_file: temp_dir.path().join("settings.json"),
+            managed_codex_bin: temp_dir.path().join("missing-codex"),
+        }
+    }
+
     #[test]
     fn remote_control_status_uses_camel_case_json() {
         assert_eq!(
             serde_json::to_string(&RemoteControlStatus::AlreadyEnabled).expect("serialize"),
             "\"alreadyEnabled\""
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_reuses_daemon_with_matching_runtime_identity() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        let server = tokio::spawn(serve_probe(
+            listener,
+            temp_dir.path().to_path_buf(),
+            codex_build_info::CODEX_CLI_VERSION.to_string(),
+        ));
+        let daemon = test_daemon(&temp_dir, socket_path.clone());
+
+        assert_eq!(
+            daemon.start().await?,
+            LifecycleOutput {
+                status: LifecycleStatus::AlreadyRunning,
+                backend: None,
+                pid: None,
+                managed_codex_path: temp_dir.path().join("missing-codex"),
+                managed_codex_version: None,
+                socket_path,
+                cli_version: Some(codex_build_info::CODEX_CLI_VERSION.to_string()),
+                app_server_version: Some(codex_build_info::CODEX_CLI_VERSION.to_string()),
+            }
+        );
+        server.await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_preserves_incompatible_daemon_and_reports_recovery() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        let server = tokio::spawn(serve_probe(
+            listener,
+            temp_dir.path().to_path_buf(),
+            "0.151.0".to_string(),
+        ));
+        let daemon = test_daemon(&temp_dir, socket_path);
+
+        let Err(err) = daemon.start().await else {
+            anyhow::bail!("incompatible daemon should be rejected");
+        };
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "app-server version 0.151.0 does not match this Codex runtime {}\n\n\
+                 The incompatible daemon was not reused. Finish daemon-backed jobs, then stop \
+                 the process that owns the local app-server socket.",
+                codex_build_info::CODEX_CLI_VERSION,
+            )
+        );
+        server.await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_treats_stale_socket_as_not_running() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        drop(listener);
+        let daemon = test_daemon(&temp_dir, socket_path.clone());
+
+        assert_eq!(
+            daemon.version().await?,
+            LifecycleOutput {
+                status: LifecycleStatus::NotRunning,
+                backend: None,
+                pid: None,
+                managed_codex_path: temp_dir.path().join("missing-codex"),
+                managed_codex_version: None,
+                socket_path,
+                cli_version: Some(codex_build_info::CODEX_CLI_VERSION.to_string()),
+                app_server_version: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_does_not_treat_regular_file_as_stale_socket() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        std::fs::write(&socket_path, "not a socket")?;
+        let daemon = test_daemon(&temp_dir, socket_path);
+
+        assert!(daemon.version().await.is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn maintained_fork_refuses_official_update_loop() {
+        let http_client_factory = codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        );
+
+        let error = super::run_pid_update_loop(http_client_factory)
+            .await
+            .expect_err("maintained fork must not start the official update loop");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "automatic official Codex updates are disabled for maintained fork {}",
+                codex_build_info::CODEX_FORK_BUILD_ID
+            )
         );
     }
 

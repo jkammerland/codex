@@ -574,9 +574,7 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn('normalize_release_lock "$build"', mac_script)
         self.assertIn("agents --help", mac_script)
         self.assertIn("agents --help", windows_script)
-        release_versions = (
-            f"0\\.0\\.0|{re.escape(self.release.upstream_version)}"
-        )
+        release_versions = f"0\\.0\\.0|{re.escape(self.release.upstream_version)}"
         self.assertIn(release_versions, mac_script)
         self.assertIn("refs/remotes/fleet/", mac_script)
         self.assertIn("rustup which --toolchain", mac_script)

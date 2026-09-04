@@ -253,7 +253,7 @@ impl TurnMetadataState {
         );
         metadata.insert(
             CODEX_VERSION_KEY.to_string(),
-            Value::String(env!("CARGO_PKG_VERSION").to_string()),
+            Value::String(codex_build_info::CODEX_CLI_VERSION.to_string()),
         );
         match context.reasoning_effort {
             Some(reasoning_effort) => {

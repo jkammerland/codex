@@ -15,8 +15,10 @@ mod prepare_install;
 pub use prepare_install::InstallRequest;
 pub use prepare_install::update_from_cli;
 mod remote_control_client;
+mod runtime_identity;
 mod settings;
 pub mod telemetry;
+mod socket_state;
 mod thread_recovery;
 mod update_loop;
 
@@ -37,6 +39,7 @@ use codex_utils_home_dir::find_codex_home;
 use managed_install::managed_codex_bin;
 #[cfg(any(unix, windows))]
 use managed_install::managed_codex_version;
+use runtime_identity::DaemonOwnership;
 use serde::Serialize;
 use settings::DaemonSettings;
 use settings::MAX_SHUTDOWN_GRACE_SECONDS;
@@ -280,6 +283,12 @@ pub async fn run_pid_update_loop(
     ensure_supported_platform()?;
     #[cfg(windows)]
     backend::windows::ensure_not_elevated()?;
+    if !codex_build_info::CODEX_FORK_BUILD_ID.is_empty() && restore_release.is_none() {
+        return Err(anyhow!(
+            "automatic official Codex updates are disabled for maintained fork {}",
+            codex_build_info::CODEX_FORK_BUILD_ID
+        ));
+    }
     update_loop::run(http_client_factory, restore_release).await
 }
 
@@ -290,6 +299,14 @@ pub async fn update(
     #[cfg(windows)]
     backend::windows::ensure_not_elevated()?;
     update_loop::request_manual_update(&Daemon::from_environment()?, http_client_factory).await
+}
+
+/// Stops the detached official updater without interrupting the app-server daemon.
+pub async fn disable_auto_update() -> Result<()> {
+    ensure_supported_platform()?;
+    #[cfg(windows)]
+    backend::windows::ensure_not_elevated()?;
+    Daemon::from_environment()?.disable_auto_update().await
 }
 
 #[cfg(any(unix, windows))]
@@ -429,7 +446,7 @@ impl Daemon {
             }
             prepare_install::prepare(self, &settings).await?;
             managed.managed_codex_bin = self.current_managed_codex_bin()?;
-            managed.ensure_managed_codex_bin()?;
+            managed.ensure_compatible_managed_codex_bin().await?;
             // Only a fresh launch may replace these settings. Keep them for restarts
             // and updates, without changing the user's config or a running daemon.
             if settings.feature_overrides != *feature_overrides {
@@ -437,20 +454,20 @@ impl Daemon {
                 settings.save(&self.settings_file).await?;
             }
             let pid = managed.start_managed_backend(&settings).await?;
+            let info = self.wait_until_ready().await?;
             (
                 LifecycleStatus::Started,
                 Some(BackendKind::Pid),
                 pid,
-                self.wait_until_ready().await?,
+                info,
             )
         };
-        if info.app_server_version != codex_build_info::CODEX_CLI_VERSION {
-            return Err(anyhow!(
-                "running app-server version {} does not match this Codex runtime {}. The existing daemon was left running; finish active work before restarting it.",
-                info.app_server_version,
-                codex_build_info::CODEX_CLI_VERSION,
-            ));
-        }
+        let ownership = if backend.is_some() {
+            DaemonOwnership::ManagedExisting
+        } else {
+            DaemonOwnership::Unmanaged
+        };
+        runtime_identity::validate_probe(&info, ownership)?;
         if backend.is_some()
             && let Err(err) = managed.ensure_managed_updater(&settings).await
         {
@@ -480,7 +497,7 @@ impl Daemon {
                 .await?;
         }
 
-        managed.ensure_managed_codex_bin()?;
+        managed.ensure_compatible_managed_codex_bin().await?;
         if let Some(backend) = self.running_backend_instance(&settings).await? {
             if let Err(err) = thread_recovery::discard_pending(self) {
                 eprintln!("warning: failed to clear stale daemon recovery before restart: {err}");
@@ -569,9 +586,8 @@ impl Daemon {
                         .stop_with_grace(settings.shutdown_grace_seconds)
                         .await?;
                     let _ = self
-                        .start_managed_backend_with_bin(&settings, managed_codex_bin)
+                        .start_managed_backend_and_validate(&settings, managed_codex_bin)
                         .await?;
-                    self.wait_until_ready().await?;
                     RestartIfRunningOutcome::Restarted
                 }
             }
@@ -627,9 +643,40 @@ impl Daemon {
             .await)
     }
 
+    async fn disable_auto_update(&self) -> Result<()> {
+        let _operation_lock = self.acquire_operation_lock().await?;
+        self.stop_auto_updater_locked().await
+    }
+
+    async fn stop_auto_updater_locked(&self) -> Result<()> {
+        let settings = self.load_settings().await?;
+        let updater = backend::pid_update_loop_backend(self.backend_paths(&settings));
+        if updater.is_starting_or_running().await? {
+            updater.stop().await?;
+        }
+        Ok(())
+    }
+
     async fn version(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
-        let info = client::probe(&self.socket_path).await?;
+        let info = match client::probe(&self.socket_path).await {
+            Ok(info) => info,
+            Err(probe_error) => {
+                if self.running_backend_instance(&settings).await?.is_some()
+                    || !socket_state::is_confirmed_absent(&self.socket_path).await?
+                {
+                    return Err(probe_error);
+                }
+                return Ok(self
+                    .output(
+                        LifecycleStatus::NotRunning,
+                        /*backend*/ None,
+                        /*pid*/ None,
+                        /*app_server_version*/ None,
+                    )
+                    .await);
+            }
+        };
         Ok(self
             .output(
                 LifecycleStatus::Running,
@@ -737,7 +784,9 @@ impl Daemon {
 
         if settings.remote_control_enabled == remote_control_enabled {
             let info = if backend.is_some() {
-                Some(self.wait_until_ready().await?)
+                let info = self.wait_until_ready().await?;
+                runtime_identity::validate_probe(&info, DaemonOwnership::ManagedExisting)?;
+                Some(info)
             } else {
                 None
             };
@@ -760,7 +809,7 @@ impl Daemon {
         }
 
         if backend.is_some() {
-            self.ensure_managed_codex_bin()?;
+            self.ensure_compatible_managed_codex_bin().await?;
         }
         settings.remote_control_enabled = remote_control_enabled;
         settings.save(&self.settings_file).await?;
@@ -774,8 +823,9 @@ impl Daemon {
             backend
                 .stop_with_grace(settings.shutdown_grace_seconds)
                 .await?;
-            let _ = self.start_managed_backend(&settings).await?;
-            let info = self.wait_until_ready().await?;
+            let (_, info) = self
+                .start_managed_backend_and_validate(&settings, &self.managed_codex_bin)
+                .await?;
             if let Err(err) = self.ensure_managed_updater(&settings).await {
                 eprintln!(
                     "warning: failed to ensure managed updater after remote-control change: {err:#}"
@@ -807,7 +857,7 @@ impl Daemon {
         prepare_install::prepare(self, &settings).await?;
         let mut managed = self.clone();
         managed.managed_codex_bin = self.current_managed_codex_bin()?;
-        managed.ensure_managed_codex_bin()?;
+        managed.ensure_compatible_managed_codex_bin().await?;
         settings.save(&self.settings_file).await?;
 
         backend::pid_update_loop_backend(self.backend_paths(&settings))
@@ -858,24 +908,32 @@ impl Daemon {
         Ok(None)
     }
 
-    async fn start_managed_backend(&self, settings: &DaemonSettings) -> Result<Option<u32>> {
-        self.start_managed_backend_with_bin(settings, &self.managed_codex_bin)
-            .await
-    }
-
-    async fn start_managed_backend_with_bin(
+    async fn start_managed_backend_and_validate(
         &self,
         settings: &DaemonSettings,
         managed_codex_bin: &Path,
-    ) -> Result<Option<u32>> {
+    ) -> Result<(Option<u32>, client::ProbeInfo)> {
         let backend =
             backend::pid_backend(self.backend_paths_with_bin(settings, managed_codex_bin));
-        backend.start().await
+        let pid = backend.start().await?;
+        let info = self.wait_until_ready().await?;
+        let ownership = if pid.is_some() {
+            DaemonOwnership::StartedByCurrentInvocation
+        } else {
+            DaemonOwnership::ManagedExisting
+        };
+        if let Err(error) = runtime_identity::validate_probe(&info, ownership) {
+            if pid.is_some() {
+                backend.stop().await?;
+            }
+            return Err(error);
+        }
+        Ok((pid, info))
     }
 
     async fn ensure_managed_updater(&self, settings: &DaemonSettings) -> Result<bool> {
         let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
-        if !settings.auto_update_enabled {
+        if !codex_build_info::CODEX_FORK_BUILD_ID.is_empty() || !settings.auto_update_enabled {
             updater.stop().await?;
             return Ok(false);
         }
@@ -954,6 +1012,12 @@ impl Daemon {
         }
         let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
         updater.is_starting_or_running().await
+    }
+
+    async fn ensure_compatible_managed_codex_bin(&self) -> Result<()> {
+        self.ensure_managed_codex_bin()?;
+        let managed_version = managed_codex_version(&self.managed_codex_bin).await?;
+        runtime_identity::validate_managed_version(&self.managed_codex_bin, &managed_version)
     }
 
     fn ensure_managed_codex_bin(&self) -> Result<()> {
@@ -1144,16 +1208,24 @@ fn try_lock_file(_file: &tokio::fs::File) -> Result<bool> {
 
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
+    #[cfg(unix)]
     use std::path::PathBuf;
 
+    #[cfg(unix)]
     use anyhow::Context;
+    #[cfg(unix)]
     use anyhow::Result;
+    #[cfg(unix)]
     use futures::SinkExt;
+    #[cfg(unix)]
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
+    #[cfg(unix)]
     use tokio::net::UnixListener;
+    #[cfg(unix)]
     use tokio_tungstenite::accept_async;
+    #[cfg(unix)]
     use tokio_tungstenite::tungstenite::Message;
 
     use super::BackendKind;
@@ -1171,6 +1243,7 @@ mod tests {
     #[cfg(unix)]
     use crate::settings::DaemonSettings;
 
+    #[cfg(unix)]
     async fn serve_probe(
         listener: UnixListener,
         codex_home: PathBuf,
@@ -1207,6 +1280,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn test_daemon(temp_dir: &TempDir, socket_path: PathBuf) -> Daemon {
         Daemon {
             socket_path,
@@ -1226,6 +1300,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn start_reuses_daemon_with_matching_runtime_identity() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1255,6 +1330,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn start_preserves_incompatible_daemon_and_reports_recovery() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1273,14 +1349,70 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "running app-server version 0.151.0 does not match this Codex runtime {}\n\n\
-                 The existing daemon was left running so active work is not interrupted. \
-                 Finish any daemon-backed jobs, then run:\n  codex app-server daemon restart",
+                "app-server version 0.151.0 does not match this Codex runtime {}\n\n\
+                 The incompatible daemon was not reused. Finish daemon-backed jobs, then stop \
+                 the process that owns the local app-server socket.",
                 codex_build_info::CODEX_CLI_VERSION,
             )
         );
         server.await??;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_treats_stale_socket_as_not_running() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        drop(listener);
+        let daemon = test_daemon(&temp_dir, socket_path.clone());
+
+        assert_eq!(
+            daemon.version().await?,
+            LifecycleOutput {
+                status: LifecycleStatus::NotRunning,
+                backend: None,
+                pid: None,
+                managed_codex_path: temp_dir.path().join("missing-codex"),
+                managed_codex_version: None,
+                socket_path,
+                cli_version: Some(codex_build_info::CODEX_CLI_VERSION.to_string()),
+                app_server_version: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_does_not_treat_regular_file_as_stale_socket() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        std::fs::write(&socket_path, "not a socket")?;
+        let daemon = test_daemon(&temp_dir, socket_path);
+
+        assert!(daemon.version().await.is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn maintained_fork_refuses_official_update_loop() {
+        let http_client_factory = codex_http_client::HttpClientFactory::new(
+            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+        );
+
+        let error = super::run_pid_update_loop(http_client_factory)
+            .await
+            .expect_err("maintained fork must not start the official update loop");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "automatic official Codex updates are disabled for maintained fork {}",
+                codex_build_info::CODEX_FORK_BUILD_ID
+            )
+        );
     }
 
     #[test]

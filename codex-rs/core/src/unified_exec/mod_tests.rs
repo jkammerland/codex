@@ -460,11 +460,7 @@ async fn wait_process_returns_after_write_stdin_drains_the_waking_output() -> an
         .await
         .expect("wait_process should retain the output wake after the buffer is drained")?;
     assert_eq!(
-        (
-            waited.wait_reason,
-            waited.process_id,
-            waited.raw_output
-        ),
+        (waited.wait_reason, waited.process_id, waited.raw_output),
         (
             Some(ProcessWaitReason::Output),
             Some(process_id),
@@ -481,10 +477,8 @@ async fn wait_process_rejects_a_duplicate_wait_without_consuming_the_wake() -> a
     let (session, turn) = test_session_and_turn().await;
     let (process_id, _process) =
         store_remote_tty_process_for_test(&session, &turn, WriteStatus::StdinClosed).await;
-    let (_first_activity_tx, mut first_activity_rx) =
-        watch::channel(InputQueueActivity::Mailbox);
-    let (_second_activity_tx, mut second_activity_rx) =
-        watch::channel(InputQueueActivity::Mailbox);
+    let (_first_activity_tx, mut first_activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let (_second_activity_tx, mut second_activity_rx) = watch::channel(InputQueueActivity::Mailbox);
     let mut first_wait = Box::pin(wait_process_for_test(
         &session,
         process_id,

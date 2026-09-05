@@ -2556,10 +2556,11 @@ text((await tools.exec_command({{cmd: "printf 'phase 3'"}})).output);
         .iter()
         .filter(|(tool, _)| tool == "exec_command")
         .filter_map(|(_, ticket)| ticket.clone())
-        .skip_while(|ticket| ticket != &"q".repeat(43))
         .collect::<Vec<_>>();
     nested_tickets.dedup();
-    assert_eq!(nested_tickets, vec!["q".repeat(43), "r".repeat(43)]);
+    // The fork keeps a yielded cell bound to its originating dispatch host;
+    // later wait calls do not replace the nested tools' turn metadata.
+    assert_eq!(nested_tickets, vec!["p".repeat(43)]);
     assert_eq!(
         observed
             .iter()

@@ -4,6 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::TurnInputRequest;
+use codex_protocol::items::TurnItem;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -48,6 +49,7 @@ use std::time::Duration;
 use test_case::test_case;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::accept_async;
@@ -88,6 +90,54 @@ enum ManagedNetworkScenario {
 struct PushedExecServerResult {
     process_read_requests: usize,
     process_start: Value,
+}
+
+#[derive(Debug)]
+struct GatedStartServerResult {
+    process_start: Value,
+    terminate_requests: usize,
+}
+
+#[derive(Debug, Default)]
+struct CommandLifecycleObservation {
+    item_starts: usize,
+    item_completions: usize,
+    legacy_begins: usize,
+    legacy_ends: usize,
+    recoverable_session_visible: bool,
+}
+
+impl CommandLifecycleObservation {
+    fn observe(&mut self, event: &EventMsg, call_id: &str) {
+        let serialized = serde_json::to_string(event).expect("event should serialize");
+        self.recoverable_session_visible |=
+            serialized.contains("Process running with session ID");
+        match event {
+            EventMsg::ItemStarted(event)
+                if matches!(
+                    &event.item,
+                    TurnItem::CommandExecution(item) if item.id == call_id
+                ) =>
+            {
+                self.item_starts += 1;
+            }
+            EventMsg::ItemCompleted(event)
+                if matches!(
+                    &event.item,
+                    TurnItem::CommandExecution(item) if item.id == call_id
+                ) =>
+            {
+                self.item_completions += 1;
+            }
+            EventMsg::ExecCommandBegin(event) if event.call_id == call_id => {
+                self.legacy_begins += 1;
+            }
+            EventMsg::ExecCommandEnd(event) if event.call_id == call_id => {
+                self.legacy_ends += 1;
+            }
+            _ => {}
+        }
+    }
 }
 
 async fn read_exec_server_json(
@@ -180,6 +230,162 @@ async fn respond_environment_info(
         }),
     )
     .await;
+}
+
+async fn serve_gated_process_start(
+    listener: TcpListener,
+    start_received: oneshot::Sender<()>,
+    release_start: oneshot::Receiver<()>,
+    terminate_received: oneshot::Sender<()>,
+    finish: oneshot::Receiver<()>,
+) -> GatedStartServerResult {
+    let mut websocket = accept_initialized_exec_server(listener).await;
+    send_environment_info(&mut websocket, PushedExecScenario::Complete).await;
+
+    let process_start = loop {
+        let request = read_exec_server_json(&mut websocket, STARTUP_TIMEOUT).await;
+        match request["method"].as_str() {
+            Some("process/start") => break request,
+            Some("environment/info") => {
+                respond_environment_info(
+                    &mut websocket,
+                    &request["id"],
+                    PushedExecScenario::Complete,
+                )
+                .await;
+            }
+            Some("fs/getMetadata") | Some("fs/readFile") => {
+                send_exec_server_json(
+                    &mut websocket,
+                    json!({
+                        "id": request["id"],
+                        "error": { "code": -32004, "message": "not found" }
+                    }),
+                )
+                .await;
+            }
+            Some("fs/canonicalize") => {
+                send_exec_server_json(
+                    &mut websocket,
+                    json!({
+                        "id": request["id"],
+                        "result": { "path": request["params"]["path"] }
+                    }),
+                )
+                .await;
+            }
+            Some("fs/walk") => {
+                send_exec_server_json(
+                    &mut websocket,
+                    json!({
+                        "id": request["id"],
+                        "result": { "entries": [], "errors": [], "truncated": false }
+                    }),
+                )
+                .await;
+            }
+            method => panic!("unexpected request before gated process/start: {method:?}"),
+        }
+    };
+    let process_id = process_start["params"]["processId"]
+        .as_str()
+        .expect("process/start should include processId")
+        .to_string();
+    start_received
+        .send(())
+        .expect("test should wait for process/start");
+    release_start
+        .await
+        .expect("test should release process/start");
+    send_exec_server_json(
+        &mut websocket,
+        json!({
+            "id": process_start["id"],
+            "result": { "processId": &process_id }
+        }),
+    )
+    .await;
+
+    let mut finish = finish;
+    let mut terminate_received = Some(terminate_received);
+    let mut terminate_requests = 0;
+    loop {
+        tokio::select! {
+            biased;
+            message = websocket.next() => {
+                let request = match message {
+                    Some(Ok(Message::Text(text))) => {
+                        serde_json::from_str::<Value>(text.as_ref())
+                            .expect("valid JSON-RPC text")
+                    }
+                    Some(Ok(Message::Binary(bytes))) => {
+                        serde_json::from_slice::<Value>(bytes.as_ref())
+                            .expect("valid JSON-RPC bytes")
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        websocket
+                            .send(Message::Pong(payload))
+                            .await
+                            .expect("pong should send");
+                        continue;
+                    }
+                    Some(Ok(Message::Pong(_))) => continue,
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(other)) => panic!("expected JSON-RPC message, got {other:?}"),
+                    Some(Err(err)) => panic!("websocket frame should read: {err}"),
+                };
+                match request["method"].as_str() {
+                    Some("process/terminate") => {
+                        terminate_requests += 1;
+                        send_exec_server_json(
+                            &mut websocket,
+                            json!({
+                                "id": request["id"],
+                                "result": { "running": false }
+                            }),
+                        )
+                        .await;
+                        if let Some(terminate_received) = terminate_received.take() {
+                            let _ = terminate_received.send(());
+                        }
+                    }
+                    Some("process/read") => {
+                        send_exec_server_json(
+                            &mut websocket,
+                            json!({
+                                "id": request["id"],
+                                "result": {
+                                    "chunks": [],
+                                    "nextSeq": 1,
+                                    "exited": false,
+                                    "exitCode": null,
+                                    "closed": false,
+                                    "failure": null,
+                                    "sandboxDenied": false,
+                                }
+                            }),
+                        )
+                        .await;
+                    }
+                    Some("environment/info") => {
+                        respond_environment_info(
+                            &mut websocket,
+                            &request["id"],
+                            PushedExecScenario::Complete,
+                        )
+                        .await;
+                    }
+                    method => panic!("unexpected request after gated process/start: {method:?}"),
+                }
+            }
+            _ = &mut finish => break,
+        }
+    }
+
+    GatedStartServerResult {
+        process_start,
+        terminate_requests,
+    }
 }
 
 async fn serve_exec_with_pushed_events(
@@ -529,19 +735,6 @@ async fn serve_exec_with_pushed_events(
                     }),
                 )
                 .await;
-                if matches!(scenario, PushedExecScenario::ReplayGap) && process_read_requests == 1 {
-                    send_exec_server_json(
-                        &mut websocket,
-                        json!({
-                            "method": "process/closed",
-                            "params": {
-                                "processId": &process_id,
-                                "seq": REPLAY_OUTPUT_EVENT_COUNT + 2,
-                            }
-                        }),
-                    )
-                    .await;
-                }
             }
             Some("process/terminate") => {
                 send_exec_server_json(
@@ -562,10 +755,179 @@ async fn serve_exec_with_pushed_events(
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_pending_remote_start_cleans_child_without_recoverable_session() -> Result<()> {
+    const GATED_CALL_ID: &str = "pending-remote-process-start";
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let exec_server_url = format!("ws://{}", listener.local_addr()?);
+    let (start_received_tx, start_received_rx) = oneshot::channel();
+    let (release_start_tx, release_start_rx) = oneshot::channel();
+    let (terminate_received_tx, terminate_received_rx) = oneshot::channel();
+    let (finish_server_tx, finish_server_rx) = oneshot::channel();
+    let exec_server = tokio::spawn(serve_gated_process_start(
+        listener,
+        start_received_tx,
+        release_start_rx,
+        terminate_received_tx,
+        finish_server_rx,
+    ));
+
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![sse(vec![
+            ev_response_created("resp-pending-start"),
+            ev_function_call(
+                GATED_CALL_ID,
+                "exec_command",
+                &json!({
+                    "cmd": "pwd",
+                    "timeout_ms": 30_000,
+                })
+                .to_string(),
+            ),
+            ev_completed("resp-pending-start"),
+        ])],
+    )
+    .await;
+    let test = expect_startup(
+        test_codex()
+            .with_exec_server_url(exec_server_url)
+            .with_cloud_config_bundle(
+                CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                    r#"
+[features]
+unified_exec = false
+shell_tool = true
+"#,
+                ),
+            )
+            .with_config(|config| config.project_doc_max_bytes = 0)
+            .build(&server),
+    )
+    .await;
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "start a remote command and interrupt it".into(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: test.session_configured.model.clone(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+    timeout(Duration::from_secs(/*secs*/ 5), start_received_rx)
+        .await
+        .context("remote process/start should reach the gated backend")??;
+    let first_request = response_mock.single_request();
+    let request_body = first_request.body_json();
+    let tools = request_body["tools"]
+        .as_array()
+        .context("model request should include tools")?;
+    let exec_command = tools
+        .iter()
+        .find(|tool| tool["name"] == "exec_command")
+        .context("one-shot exec_command should be exposed")?;
+    let exec_properties = exec_command["parameters"]["properties"]
+        .as_object()
+        .context("exec_command should expose object parameters")?;
+    assert!(exec_properties.contains_key("timeout_ms"));
+    assert!(!exec_properties.contains_key("yield_time_ms"));
+    assert!(!exec_properties.contains_key("tty"));
+    assert!(tools.iter().all(|tool| {
+        !matches!(
+            tool["name"].as_str(),
+            Some("wait_process" | "write_stdin")
+        )
+    }));
+    test.codex.submit(Op::Interrupt).await?;
+
+    let mut observation = CommandLifecycleObservation::default();
+    loop {
+        let event = timeout(Duration::from_secs(/*secs*/ 5), test.codex.next_event())
+            .await
+            .context("interrupt should abort while process/start remains gated")??;
+        observation.observe(&event.msg, GATED_CALL_ID);
+        if matches!(&event.msg, EventMsg::TurnAborted(_)) {
+            break;
+        }
+    }
+    assert_eq!(
+        (observation.item_starts, observation.legacy_begins),
+        (0, 0),
+        "no begin lifecycle may be visible before the backend publishes its start"
+    );
+
+    release_start_tx
+        .send(())
+        .expect("gated process/start should still be waiting");
+    timeout(Duration::from_secs(/*secs*/ 5), terminate_received_rx)
+        .await
+        .context("the eventually started remote child should be terminated")??;
+    timeout(
+        Duration::from_secs(/*secs*/ 10),
+        test.codex.shutdown_and_wait(),
+    )
+    .await
+    .context("session shutdown should finish after pending-start cleanup")??;
+
+    loop {
+        let event = timeout(Duration::from_secs(/*secs*/ 5), test.codex.next_event())
+            .await
+            .context("shutdown completion should remain observable")??;
+        let shutdown_complete = matches!(&event.msg, EventMsg::ShutdownComplete);
+        observation.observe(&event.msg, GATED_CALL_ID);
+        if shutdown_complete {
+            break;
+        }
+    }
+
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 100)).await;
+    let _ = finish_server_tx.send(());
+    let exec_server_result = timeout(Duration::from_secs(/*secs*/ 5), exec_server)
+        .await
+        .context("gated fake exec-server should finish")??;
+    assert_eq!(
+        exec_server_result.process_start["params"]["metadata"]["toolCallId"],
+        GATED_CALL_ID
+    );
+    assert_eq!(exec_server_result.terminate_requests, 1);
+    assert_eq!(observation.item_starts, observation.item_completions);
+    assert_eq!(observation.legacy_begins, observation.legacy_ends);
+    assert!(observation.item_starts <= 1);
+    assert!(observation.legacy_begins <= 1);
+    assert!(
+        !observation.recoverable_session_visible,
+        "an interrupted pending launch must not expose a recoverable session id"
+    );
+    assert!(response_mock
+        .requests()
+        .iter()
+        .all(|request| !request.body_contains_text("Process running with session ID")));
+
+    Ok(())
+}
+
 #[test_case(PushedExecScenario::Complete, ManagedNetworkScenario::None, false ; "complete_event_stream")]
 #[test_case(PushedExecScenario::DirectDenied, ManagedNetworkScenario::None, false ; "direct_sandbox_denial")]
 #[test_case(PushedExecScenario::LegacyExit, ManagedNetworkScenario::None, false ; "legacy_exit_metadata")]
-#[test_case(PushedExecScenario::ReplayGap, ManagedNetworkScenario::None, false ; "truncated_event_replay")]
+#[test_case(PushedExecScenario::ReplayGap, ManagedNetworkScenario::None, false ; "truncated_event_replay_exited_without_closed")]
 #[test_case(PushedExecScenario::Complete, ManagedNetworkScenario::Enabled { policy_callbacks: true }, false ; "managed_network_uses_executor_proxy_launch")]
 #[test_case(PushedExecScenario::Complete, ManagedNetworkScenario::Enabled { policy_callbacks: false }, false ; "strict_managed_allowlist_omits_policy_callbacks")]
 #[test_case(PushedExecScenario::Complete, ManagedNetworkScenario::Disabled, false ; "disabled_managed_network_omits_executor_proxy_launch")]

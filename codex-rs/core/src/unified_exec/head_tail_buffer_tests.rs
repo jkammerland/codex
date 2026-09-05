@@ -89,3 +89,30 @@ fn empty_and_tiny_chunks_have_bounded_metadata() {
     assert_eq!(buf.retained_bytes(), 10);
     assert_eq!(buf.omitted_bytes(), 2);
 }
+
+#[test]
+fn replay_after_offset_returns_only_unseen_retained_output() {
+    let mut buf = HeadTailBuffer::<10>::default();
+    buf.push_chunk(b"0123456789ab");
+
+    assert_eq!(
+        buf.to_bytes_after_with_omission_marker(/*offset*/ 3),
+        b"34\n... 2 bytes omitted ...\n789ab"
+    );
+    assert_eq!(
+        buf.to_bytes_after_with_omission_marker(/*offset*/ 8),
+        b"89ab"
+    );
+    assert_eq!(buf.to_bytes_after_with_omission_marker(/*offset*/ 12), b"");
+}
+
+#[test]
+fn replay_after_offset_summarizes_unseen_bytes_already_omitted() {
+    let mut buf = HeadTailBuffer::<10>::default();
+    buf.push_chunk(b"0123456789ab");
+
+    assert_eq!(
+        buf.to_bytes_after_with_omission_marker(/*offset*/ 6),
+        b"\n... 1 bytes omitted ...\n789ab"
+    );
+}

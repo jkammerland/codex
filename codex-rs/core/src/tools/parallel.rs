@@ -76,10 +76,17 @@ impl ToolCallRuntime {
         call: ToolCall,
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
-        let error_call = call.clone();
-        let source = call.direct_source();
-        let future = self.handle_tool_call_with_source(call, source, cancellation_token);
+        let dispatch =
+            crate::tools::code_mode::validate_core_tool_call_id(&call.tool_name, &call.call_id)
+                .map(|()| {
+                    let error_call = call.clone();
+                    let source = call.direct_source();
+                    let future =
+                        self.handle_tool_call_with_source(call, source, cancellation_token);
+                    (error_call, future)
+                });
         async move {
+            let (error_call, future) = dispatch.map_err(CodexErr::Fatal)?;
             match future.await {
                 Ok(response) => Ok(response.into_response()),
                 Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
@@ -364,6 +371,7 @@ mod tests {
     use crate::tools::router::ToolRouter;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_extension_api::ToolCallOutcome;
+    use codex_protocol::error::CodexErrorDetails;
     use codex_protocol::models::FunctionCallOutputBody;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::openai_models::ToolMode;
@@ -414,6 +422,47 @@ mod tests {
                 "nested code-mode calls should not create overlapping timing events"
             );
         });
+    }
+
+    #[tokio::test]
+    async fn generic_runtime_rejects_oversized_code_mode_call_ids_without_an_error_output() {
+        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let step_context = StepContext::for_test(Arc::clone(&turn_context));
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::default(),
+            Vec::new(),
+            ToolMode::CodeMode,
+            BTreeMap::new(),
+            /*tool_namespaces_info*/ None,
+            &[],
+        ));
+        let step_context = step_context.with_tool_router_for_test(router);
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let runtime = ToolCallRuntime::new(session, step_context, tracker);
+        let call = ToolCall {
+            tool_name: codex_tools::ToolName::plain(crate::tools::code_mode::PUBLIC_TOOL_NAME),
+            call_id: "x".repeat(codex_code_mode::grpc::MAX_IDENTIFIER_BYTES + 1),
+            payload: ToolPayload::Custom {
+                input: "text('unreachable');".to_string(),
+            },
+            encrypted_function_args: None,
+        };
+
+        let error = runtime
+            .handle_tool_call(call, CancellationToken::new())
+            .await
+            .expect_err("oversized code-mode call ID should fail before dispatch");
+        assert!(matches!(
+            error.details(),
+            CodexErrorDetails::Fatal(message)
+                if message == &format!(
+                    "code-mode tool call ID is {} bytes; maximum is {} bytes",
+                    codex_code_mode::grpc::MAX_IDENTIFIER_BYTES + 1,
+                    codex_code_mode::grpc::MAX_IDENTIFIER_BYTES,
+                )
+        ));
     }
 
     #[tokio::test]

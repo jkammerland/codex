@@ -1,6 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use codex_code_mode_protocol::CodeModeSessionProvider;
 use pretty_assertions::assert_eq;
@@ -9,6 +10,7 @@ use super::ProcessOwnedCodeModeSession;
 use super::ProcessOwnedCodeModeSessionProvider;
 use super::connection::ConnectionError;
 use crate::NoopCodeModeSessionDelegate;
+use crate::generation_cell_id::stale_cell_outcome;
 
 #[test]
 fn provider_reuses_its_live_process_host() {
@@ -53,6 +55,60 @@ fn missing_host_error_preserves_utf8_boundaries_when_truncating_the_path() {
     assert!(displayed_path.starts_with("..."));
     assert!(displayed_path.ends_with(executable));
     assert!(displayed_path.len() <= 512);
+}
+
+#[test]
+fn stale_generation_cell_becomes_a_terminal_failed_outcome() {
+    let cell_id = codex_code_mode_protocol::CellId::new("first-generation-cell".to_string());
+    let current_cell_id = crate::generation_cell_id::encode_public_cell_id(
+        /*generation*/ 2,
+        "current-generation-cell",
+    );
+
+    assert_eq!(
+        stale_cell_outcome(/*generation*/ 2, &cell_id),
+        Some(codex_code_mode_protocol::WaitOutcome::MissingCell(
+            codex_code_mode_protocol::RuntimeResponse::Result {
+                cell_id: cell_id.clone(),
+                content_items: Vec::new(),
+                error_text: Some("cell belongs to a stale code-mode host generation".to_string(),),
+                code_mode_host_duration: None,
+            }
+        ))
+    );
+    assert_eq!(stale_cell_outcome(/*generation*/ 1, &cell_id), None);
+    assert_eq!(stale_cell_outcome(/*generation*/ 2, &current_cell_id), None);
+}
+
+#[test]
+fn resumed_process_session_cannot_alias_a_reused_host_cell_id() {
+    let previous = ProcessOwnedCodeModeSession::new();
+    let resumed = ProcessOwnedCodeModeSession::new();
+    let previous_generation = previous.inner.next_generation.load(Ordering::Relaxed);
+    let resumed_generation = resumed.inner.next_generation.load(Ordering::Relaxed);
+    assert!(previous_generation > 1);
+    assert!(resumed_generation > 1);
+    assert_ne!(previous_generation, resumed_generation);
+
+    let previous_handle =
+        crate::generation_cell_id::encode_public_cell_id(previous_generation, "reused-host-cell");
+    let resumed_handle =
+        crate::generation_cell_id::encode_public_cell_id(resumed_generation, "reused-host-cell");
+
+    assert_ne!(previous_handle, resumed_handle);
+    assert!(stale_cell_outcome(resumed_generation, &previous_handle).is_some());
+    assert_eq!(
+        stale_cell_outcome(resumed_generation, &resumed_handle),
+        None
+    );
+    assert!(
+        stale_cell_outcome(
+            resumed_generation,
+            &codex_code_mode_protocol::CellId::new("reused-host-cell".to_string()),
+        )
+        .is_some(),
+        "legacy raw handles must be terminal after rollout resume"
+    );
 }
 
 #[tokio::test]

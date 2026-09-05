@@ -6,7 +6,12 @@ use tokio::io::AsyncWriteExt;
 use super::EncodedFrame;
 use super::FramedReader;
 use super::FramedWriter;
+use super::HostResponse;
+use super::HostToClient;
 use super::MAX_FRAME_BYTES;
+use super::RequestId;
+use super::WireCellId;
+use super::WireResult;
 
 #[test]
 fn complete_frame_round_trips_without_a_byte_stream() {
@@ -38,6 +43,30 @@ fn complete_frame_rejects_truncated_and_trailing_payloads() {
     let trailing_error = EncodedFrame::decode_framed::<serde_json::Value>(&trailing)
         .expect_err("frame with trailing bytes should fail");
     assert_eq!(trailing_error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn complete_frame_preserves_v1_cell_ids_without_new_semantic_limits() {
+    let oversized = "🦀".repeat(crate::grpc::MAX_IDENTIFIER_BYTES / "🦀".len() + 1);
+    for cell_id in [String::new(), oversized] {
+        let message = HostToClient::Response {
+            id: RequestId::new(/*value*/ 1),
+            result: WireResult::Ok {
+                value: HostResponse::ExecutionStarted {
+                    cell_id: WireCellId::new(cell_id),
+                },
+            },
+        };
+        let bytes = EncodedFrame::encode(&message)
+            .expect("encode protocol V1 host response")
+            .into_framed_bytes();
+
+        assert_eq!(
+            EncodedFrame::decode_framed::<HostToClient>(&bytes)
+                .expect("decode protocol V1 host response"),
+            message,
+        );
+    }
 }
 
 #[tokio::test]

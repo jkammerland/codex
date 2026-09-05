@@ -22,6 +22,8 @@ use super::GrpcCodeModeSessionProvider;
 use super::SHUTDOWN_ERROR;
 use super::generation;
 use super::generation::GenerationDelegate;
+use crate::generation_cell_id::initial_session_generation;
+use crate::generation_cell_id::stale_cell_outcome;
 use crate::remote_session::ShutdownResultReceiver;
 use crate::remote_session::wait_for_watch;
 
@@ -59,7 +61,7 @@ impl ReconnectableSession {
                 limits,
                 binding: Mutex::new(None),
                 opening_permit: Semaphore::new(/*permits*/ 1),
-                next_generation: AtomicU64::new(1),
+                next_generation: AtomicU64::new(initial_session_generation()),
                 shutdown_requested: CancellationToken::new(),
                 shutdown_result: Mutex::new(None),
             }),
@@ -86,6 +88,9 @@ impl CodeModeSession for ReconnectableSession {
     fn wait<'a>(&'a self, request: WaitRequest) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
         Box::pin(async move {
             let binding = self.inner.get_or_open_binding().await?;
+            if let Some(outcome) = stale_cell_outcome(binding.generation, &request.cell_id) {
+                return Ok(outcome);
+            }
             let request = WaitRequest {
                 cell_id: generation::remote_cell_id(binding.generation, &request.cell_id)?,
                 yield_time_ms: request.yield_time_ms,
@@ -98,6 +103,9 @@ impl CodeModeSession for ReconnectableSession {
     fn terminate<'a>(&'a self, cell_id: CellId) -> CodeModeSessionResultFuture<'a, WaitOutcome> {
         Box::pin(async move {
             let binding = self.inner.get_or_open_binding().await?;
+            if let Some(outcome) = stale_cell_outcome(binding.generation, &cell_id) {
+                return Ok(outcome);
+            }
             let cell_id = generation::remote_cell_id(binding.generation, &cell_id)?;
             let outcome = binding.session.terminate(cell_id).await?;
             Ok(generation::public_wait_outcome(binding.generation, outcome))

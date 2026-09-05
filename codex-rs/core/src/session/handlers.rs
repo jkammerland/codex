@@ -51,7 +51,9 @@ use codex_protocol::mcp::RequestId as ProtocolRequestId;
 use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use serde_json::Value;
+use std::future::Future;
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -62,6 +64,27 @@ pub async fn interrupt(sess: &Arc<Session>) {
 
 pub async fn clean_background_terminals(sess: &Arc<Session>) {
     sess.close_unified_exec_processes().await;
+}
+
+#[derive(Default)]
+struct LiveBackgroundTerminalCleanup {
+    task: Option<JoinHandle<()>>,
+}
+
+impl LiveBackgroundTerminalCleanup {
+    fn start(&mut self, cleanup: impl Future<Output = ()> + Send + 'static) {
+        if self.task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        self.task = Some(tokio::spawn(cleanup));
+    }
+
+    async fn cancel_and_wait(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
@@ -415,7 +438,7 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
     while sess.async_hook_results.try_recv().is_ok() {}
     sess.services
         .unified_exec_manager
-        .terminate_all_processes()
+        .terminate_all_processes_for_session_shutdown()
         .await;
     if let Err(err) = sess.services.code_mode_service.shutdown().await {
         warn!("failed to shutdown code mode session: {err}");
@@ -531,8 +554,29 @@ pub(super) async fn submission_loop(
     config: Arc<Config>,
     rx_sub: Receiver<Submission>,
 ) {
+    submission_loop_with_background_terminal_cleanup(
+        sess,
+        config,
+        rx_sub,
+        |cleanup_session| async move {
+            clean_background_terminals(&cleanup_session).await;
+        },
+    )
+    .await;
+}
+
+async fn submission_loop_with_background_terminal_cleanup<Cleanup, CleanupFuture>(
+    sess: Arc<Session>,
+    config: Arc<Config>,
+    rx_sub: Receiver<Submission>,
+    start_background_terminal_cleanup: Cleanup,
+) where
+    Cleanup: Fn(Arc<Session>) -> CleanupFuture,
+    CleanupFuture: Future<Output = ()> + Send + 'static,
+{
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
+    let mut live_background_terminal_cleanup = LiveBackgroundTerminalCleanup::default();
     while let Ok(sub) = rx_sub.recv().await {
         debug!(?sub, "Submission");
         let dispatch_span = submission_dispatch_span(&sub);
@@ -543,7 +587,8 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::CleanBackgroundTerminals => {
-                    clean_background_terminals(&sess).await;
+                    live_background_terminal_cleanup
+                        .start(start_background_terminal_cleanup(Arc::clone(&sess)));
                     false
                 }
                 Op::RealtimeConversationStart(params) => {
@@ -607,6 +652,7 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::SuspendTurnAndShutdown { reply } => {
+                    live_background_terminal_cleanup.cancel_and_wait().await;
                     let result =
                         super::turn_suspension::suspend_turn_and_shutdown(&sess, sub.id.clone())
                             .await;
@@ -702,7 +748,10 @@ pub(super) async fn submission_loop(
                         .await;
                     false
                 }
-                Op::Shutdown => shutdown(&sess, sub.id.clone()).await,
+                Op::Shutdown => {
+                    live_background_terminal_cleanup.cancel_and_wait().await;
+                    shutdown(&sess, sub.id.clone()).await
+                }
                 Op::Review { review_request } => {
                     review(&sess, &config, sub.id.clone(), review_request).await;
                     false
@@ -721,6 +770,7 @@ pub(super) async fn submission_loop(
             break;
         }
     }
+    live_background_terminal_cleanup.cancel_and_wait().await;
     // If the submission loop exits because the channel closed without an
     // explicit shutdown op, still run session teardown.
     if !shutdown_received {
@@ -734,6 +784,10 @@ pub(super) async fn submission_loop(
     }
     debug!("Agent loop exited");
 }
+
+#[cfg(test)]
+#[path = "handlers_tests.rs"]
+mod tests;
 
 async fn approve_guardian_denied_action(sess: &Arc<Session>, event: GuardianAssessmentEvent) {
     if event.status != GuardianAssessmentStatus::Denied {

@@ -2,6 +2,7 @@ use rand::Rng;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -13,6 +14,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::oneshot::Completion;
+use super::pending_launch::ManagerTaskHandle;
+use super::pending_launch::PendingLaunch;
+use super::pending_launch::PendingLaunchGuard;
+use super::pending_launch_supervisor::PendingLaunchResources;
+use super::pending_launch_supervisor::spawn_pending_launch_supervisor;
 
 use crate::codex_thread::BackgroundTerminalInfo;
 use crate::exec_env::CODEX_PERMISSION_PROFILE_ENV_VAR;
@@ -24,7 +30,6 @@ use crate::exec_env::inject_permission_profile_env;
 use crate::exec_env::inject_session_env;
 use crate::exec_policy::ExecApprovalRequest;
 use crate::guardian::GuardianReviewContext;
-use crate::plugins::metrics::finish_and_track_measurements;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::ExecRequest;
 use crate::sandboxing::ExecServerEnvConfig;
@@ -44,32 +49,32 @@ use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::unified_exec::ExecCommandRequest;
+use crate::unified_exec::LaunchProcessOwnershipGuard;
 use crate::unified_exec::MAX_UNIFIED_EXEC_PROCESSES;
 use crate::unified_exec::MAX_YIELD_TIME_MS;
 use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::unified_exec::MIN_YIELD_TIME_MS;
 use crate::unified_exec::ProcessEntry;
+use crate::unified_exec::ProcessIdLease;
 use crate::unified_exec::ProcessStore;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecInteractionEvent;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::WriteStdinRequest;
-use crate::unified_exec::async_watcher::emit_exec_end_for_unified_exec;
+#[cfg(test)]
 use crate::unified_exec::async_watcher::emit_failed_exec_end_for_unified_exec;
-use crate::unified_exec::async_watcher::spawn_exit_watcher;
 use crate::unified_exec::async_watcher::start_streaming_output;
 use crate::unified_exec::clamp_yield_time;
 use crate::unified_exec::generate_chunk_id;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use crate::unified_exec::process::OutputHandles;
+use crate::unified_exec::process::ProcessOperationLease;
 use crate::unified_exec::process::SpawnLifecycleHandle;
 use crate::unified_exec::process::UnifiedExecProcess;
 use crate::unified_exec::shell_snapshot::shell_snapshot_request;
-use crate::unified_exec::take_plugin_metrics_sidecar;
 use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
 use codex_core_plugins::PluginCommandAttribution;
-use codex_core_plugins::PluginMetricsSidecar;
 use codex_core_plugins::strip_output_env;
 use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkProxy;
@@ -102,7 +107,16 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
 const NETWORK_ACCESS_DENIED_MESSAGE: &str =
     "Network access was denied by the Codex sandbox network proxy.";
 const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
+const UNIFIED_EXEC_SHUTDOWN_CLEANUP_GRACE: Duration = Duration::from_secs(5);
+const UNIFIED_EXEC_SHUTDOWN_CLEANUP_FAILURE: &str =
+    "unified exec process did not finish within the session shutdown cleanup grace";
 const INTERRUPT: &str = "\u{3}";
+
+#[derive(Clone, Copy)]
+enum ProcessCleanupScope {
+    Live,
+    SessionShutdown,
+}
 
 /// Test-only override for deterministic unified exec process IDs.
 ///
@@ -270,20 +284,6 @@ struct PreparedProcessHandles {
 
 struct InitialExecCommandGuard {
     active: Option<Arc<AtomicBool>>,
-    metrics_sidecar: Option<PluginMetricsSidecar>,
-}
-
-impl InitialExecCommandGuard {
-    async fn finish_plugin_metrics(&mut self, context: &UnifiedExecContext, exit_code: i32) {
-        finish_and_track_measurements(
-            self.metrics_sidecar.take(),
-            exit_code,
-            &context.session,
-            &context.step_context.turn,
-            &context.call_id,
-        )
-        .await;
-    }
 }
 
 impl Drop for InitialExecCommandGuard {
@@ -292,6 +292,16 @@ impl Drop for InitialExecCommandGuard {
             active.store(false, Ordering::Release);
         }
     }
+}
+
+struct PreparedPendingLaunch {
+    request: ExecCommandRequest,
+    process: Arc<UnifiedExecProcess>,
+    permissions: super::TerminalPermissions,
+    deferred_network_approval: Option<DeferredNetworkApproval>,
+    started_at: Instant,
+    plugin_attribution: Option<PluginCommandAttribution>,
+    pending_launch_guard: PendingLaunchGuard,
 }
 
 async fn unregister_network_approval_for_entry(entry: &ProcessEntry) {
@@ -317,7 +327,7 @@ async fn finish_network_approval_after_process_exit_for_entry(
     .await
 }
 
-async fn finish_deferred_network_approval_for_session(
+pub(super) async fn finish_deferred_network_approval_for_session(
     session: Option<&Arc<crate::session::session::Session>>,
     deferred: Option<DeferredNetworkApproval>,
 ) -> Result<(), String> {
@@ -386,6 +396,15 @@ fn fail_process_with_message(process: &UnifiedExecProcess, message: String) -> U
     UnifiedExecError::process_failed(process.failure_message().unwrap_or(message))
 }
 
+async fn fail_process_after_message_resolution(
+    process: &UnifiedExecProcess,
+    resolve_message: impl Future<Output = String>,
+) -> UnifiedExecError {
+    let message = resolve_message.await;
+    fail_process_with_message(process, message)
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn emit_failed_initial_exec_end_if_unstored(
     process_started_alive: bool,
@@ -408,7 +427,7 @@ async fn emit_failed_initial_exec_end_if_unstored(
         context.call_id.clone(),
         request.command.clone(),
         cwd,
-        Some(request.process_id.to_string()),
+        Some(request.process_id_lease.process_id().to_string()),
         plugin_attribution,
         transcript,
         fallback_output,
@@ -422,10 +441,11 @@ fn terminate_process_on_network_denial(
     process: Arc<UnifiedExecProcess>,
     session: std::sync::Weak<crate::session::session::Session>,
     deferred: DeferredNetworkApproval,
-) -> tokio::task::JoinHandle<()> {
+    pending_launch: &Arc<PendingLaunch>,
+) -> ManagerTaskHandle {
     let network_cancelled = deferred.cancellation_token();
     let process_exited = process.cancellation_token();
-    tokio::spawn(async move {
+    pending_launch.spawn_manager_task(async move {
         let denied = tokio::select! {
             _ = network_cancelled.cancelled() => true,
             _ = process_exited.cancelled() => {
@@ -436,8 +456,11 @@ fn terminate_process_on_network_denial(
             return;
         }
         let session = session.upgrade();
-        let message = network_denial_message_for_session(session.as_ref(), Some(deferred)).await;
-        process.fail_and_terminate(message);
+        let _ = fail_process_after_message_resolution(
+            process.as_ref(),
+            network_denial_message_for_session(session.as_ref(), Some(deferred)),
+        )
+        .await;
     })
 }
 
@@ -450,72 +473,198 @@ impl UnifiedExecProcessManager {
             .collect()
     }
 
-    pub(crate) async fn allocate_process_id(&self) -> i32 {
+    pub(crate) async fn allocate_process_id(&self) -> ProcessIdLease {
         loop {
             let mut store = self.process_store.lock().await;
 
             let process_id = if should_use_deterministic_process_ids() {
-                // test or deterministic mode
-                store
-                    .reserved_process_ids
-                    .iter()
-                    .copied()
-                    .max()
-                    .map(|m| std::cmp::max(m, 999) + 1)
-                    .unwrap_or(1000)
+                // Test or deterministic mode. Keep a monotonic cursor so safely
+                // releasing reservation tokens does not make IDs repeat.
+                let process_id = store.next_deterministic_process_id;
+                store.next_deterministic_process_id = process_id.checked_add(1).unwrap_or(1000);
+                process_id
             } else {
                 // production mode → random
                 rand::rng().random_range(1_000..100_000)
             };
 
-            if store.reserved_process_ids.contains(&process_id) {
+            if store.reserved_process_ids.contains_key(&process_id)
+                || store.processes.contains_key(&process_id)
+            {
                 continue;
             }
 
-            store.reserved_process_ids.insert(process_id);
-            return process_id;
+            let process_id_lease =
+                ProcessIdLease::new_reserved(process_id, &store.reserved_process_ids);
+            store
+                .reserved_process_ids
+                .insert(process_id, process_id_lease.clone());
+            return process_id_lease;
         }
     }
 
-    pub(crate) async fn release_process_id(&self, process_id: i32) {
+    pub(crate) async fn release_process_id(&self, process_id_lease: &ProcessIdLease) {
         let removed = {
             let mut store = self.process_store.lock().await;
-            let entry = store.processes.remove(&process_id);
-            if !should_use_deterministic_process_ids() {
-                store.reserved_process_ids.remove(&process_id);
-            }
-            entry
+            store.remove(process_id_lease)
         };
         if let Some(entry) = removed {
             unregister_network_approval_for_entry(&entry).await;
         }
     }
 
-    async fn release_process_id_if_matches(
+    pub(super) async fn release_process_reservation(&self, process_id_lease: &ProcessIdLease) {
+        self.process_store
+            .lock()
+            .await
+            .release_reservation(process_id_lease);
+    }
+
+    async fn remove_process_if_matches(&self, expected_process: &Arc<UnifiedExecProcess>) {
+        let Some(process_id_lease) = expected_process.process_id_lease() else {
+            return;
+        };
+        self.process_store
+            .lock()
+            .await
+            .remove_if_process_matches(process_id_lease, expected_process);
+    }
+
+    async fn acquire_process_operation(
         &self,
         process_id: i32,
-        expected_process: &Arc<UnifiedExecProcess>,
-    ) {
-        let removed = {
-            let mut store = self.process_store.lock().await;
-            // No entry means an unstored short-lived process still owns only
-            // the reservation. A different entry is a reused ID and must stay.
-            let belongs_to_replacement = store
+    ) -> Result<(Arc<UnifiedExecProcess>, ProcessOperationLease), UnifiedExecError> {
+        let store = self.process_store.lock().await;
+        let process = Arc::clone(
+            &store
                 .processes
                 .get(&process_id)
-                .is_some_and(|entry| !Arc::ptr_eq(&entry.process, expected_process));
-            if belongs_to_replacement {
-                return;
-            }
-            let entry = store.processes.remove(&process_id);
-            if !should_use_deterministic_process_ids() {
-                store.reserved_process_ids.remove(&process_id);
-            }
-            entry
-        };
-        if let Some(entry) = removed {
-            unregister_network_approval_for_entry(&entry).await;
+                .ok_or(UnifiedExecError::UnknownProcessId { process_id })?
+                .process,
+        );
+        // Acquire while the store is still locked. Pruning uses the same store
+        // lock before checking this lease, closing the lookup-to-operation-lock
+        // eviction window for both wait_process and write_stdin.
+        let operation_lease = process.acquire_operation_lease();
+        Ok((process, operation_lease))
+    }
+
+    async fn begin_pending_launch(
+        &self,
+        process_id_lease: &ProcessIdLease,
+    ) -> Result<PendingLaunchGuard, UnifiedExecError> {
+        let store = self.process_store.lock().await;
+        if !store.reservation_matches(process_id_lease) {
+            return Err(UnifiedExecError::UnknownProcessId {
+                process_id: process_id_lease.process_id(),
+            });
         }
+        process_id_lease
+            .pending_launch()
+            .begin()
+            .map_err(|_| UnifiedExecError::UnknownProcessId {
+                process_id: process_id_lease.process_id(),
+            })
+    }
+
+    async fn prepare_pending_launch(
+        mut request: ExecCommandRequest,
+        context: UnifiedExecContext,
+        cwd: PathUri,
+        plugin_attribution: Option<PluginCommandAttribution>,
+        pending_launch_guard: PendingLaunchGuard,
+    ) -> Result<PreparedPendingLaunch, UnifiedExecError> {
+        let manager = &context.session.services.unified_exec_manager;
+        let process_id = request.process_id_lease.process_id();
+        let process = manager
+            .open_session_with_sandbox(&request, cwd.clone(), &context)
+            .await;
+        let (attempt, deferred_network_approval) = match process {
+            Ok(result) => result,
+            Err(error) => {
+                manager.release_process_id(&request.process_id_lease).await;
+                return Err(error);
+            }
+        };
+        let UnifiedExecAttempt {
+            process,
+            metrics_sidecar,
+            permissions,
+        } = attempt;
+        let process = Arc::new(process);
+        process.attach_process_id_lease(request.process_id_lease.clone());
+        let mut network_denial_monitor = deferred_network_approval.as_ref().map(|deferred| {
+            terminate_process_on_network_denial(
+                Arc::clone(&process),
+                Arc::downgrade(&context.session),
+                deferred.clone(),
+                request.process_id_lease.pending_launch(),
+            )
+        });
+        let transcript = process.output_transcript();
+        let started_at = Instant::now();
+        start_streaming_output(
+            &process,
+            &context,
+            Arc::clone(request.process_id_lease.pending_launch()),
+        )
+        .await;
+        let plugin_metrics_sidecar =
+            metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+        let pending_decision = match pending_launch_guard.launch().publish() {
+            Ok(pending_decision) => pending_decision,
+            Err(_) => {
+                if let Some(network_denial_monitor) = network_denial_monitor.take() {
+                    network_denial_monitor.cancel_and_wait().await;
+                }
+                if !process.has_exited()
+                    && let Err(error) = process.terminate_confirmed().await
+                {
+                    process.mark_termination_failure(error.to_string());
+                }
+                let _ = finish_deferred_network_approval_for_session(
+                    Some(&context.session),
+                    deferred_network_approval,
+                )
+                .await;
+                manager.release_process_id(&request.process_id_lease).await;
+                return Err(UnifiedExecError::UnknownProcessId { process_id });
+            }
+        };
+        spawn_pending_launch_supervisor(
+            request.process_id_lease.clone(),
+            pending_decision,
+            PendingLaunchResources {
+                process: Arc::clone(&process),
+                session: Arc::downgrade(&context.session),
+                turn: Arc::clone(&context.step_context.turn),
+                call_id: context.call_id.clone(),
+                command: request.command.clone(),
+                cwd: cwd.clone(),
+                process_id,
+                plugin_attribution: plugin_attribution.clone(),
+                transcript: Arc::clone(&transcript),
+                started_at,
+                network_approval: deferred_network_approval.clone(),
+                network_denial_monitor,
+                plugin_metrics_sidecar: plugin_metrics_sidecar.clone(),
+            },
+        );
+        // From this point onward the supervisor plus PendingLaunchGuard own
+        // cancellation cleanup. The allocation guard is only for the earlier
+        // windows where dropping the originating future otherwise leaked the
+        // reservation.
+        request.process_id_lease.disarm_auto_release();
+
+        Ok(PreparedPendingLaunch {
+            request,
+            process,
+            permissions,
+            deferred_network_approval,
+            started_at,
+            plugin_attribution,
+            pending_launch_guard,
+        })
     }
 
     pub(crate) async fn exec_command(
@@ -534,41 +683,12 @@ impl UnifiedExecProcessManager {
         mut completion: Option<&mut Completion<'_>>,
     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
         let cwd = request.cwd.clone();
-        let process = self
-            .open_session_with_sandbox(&request, cwd.clone(), context)
-            .await;
-
-        let (attempt, mut deferred_network_approval) = match process {
-            Ok((attempt, deferred_network_approval)) => (attempt, deferred_network_approval),
-            Err(err) => {
-                self.release_process_id(request.process_id).await;
-                return Err(err);
-            }
-        };
-        let UnifiedExecAttempt {
-            process,
-            metrics_sidecar,
-            permissions,
-        } = attempt;
-        let process = Arc::new(process);
-        if let Some(completion) = completion.as_ref() {
-            let _ = completion.process.set(Arc::clone(&process));
-        }
-        let network_denial_monitor = deferred_network_approval.as_ref().map(|deferred| {
-            terminate_process_on_network_denial(
-                Arc::clone(&process),
-                Arc::downgrade(&context.session),
-                deferred.clone(),
-            )
-        });
-
-        let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
-        let event_ctx = ToolEventCtx::new(
-            context.session.as_ref(),
-            context.step_context.turn.as_ref(),
-            &context.call_id,
-            /*turn_diff_tracker*/ None,
-        );
+        let process_id = request.process_id_lease.process_id();
+        let process_id_lease = request.process_id_lease.clone();
+        let pending_launch_guard = self.begin_pending_launch(&request.process_id_lease).await?;
+        // Resolve attribution before spawning. Backend start and publication
+        // then run in a manager-owned task, so cancelling this tool future
+        // cannot abandon a start that has not returned its process handle yet.
         let plugin_attribution = if request.turn_environment.environment.is_remote() {
             let file_system = request.turn_environment.environment.get_filesystem();
             context
@@ -588,50 +708,110 @@ impl UnifiedExecProcessManager {
                     .plugin_attribution_for_command(&request.command, &cwd)
             })
         };
+        let launch_context = UnifiedExecContext::new(
+            Arc::clone(&context.session),
+            Arc::clone(&context.step_context),
+            context.cancellation_token.clone(),
+            context.call_id.clone(),
+        );
+        let launch_cwd = cwd.clone();
+        let launch_rx = pending_launch_guard.spawn_manager_owned(move |pending_launch_guard| {
+            Self::prepare_pending_launch(
+                request,
+                launch_context,
+                launch_cwd,
+                plugin_attribution,
+                pending_launch_guard,
+            )
+        });
+        let prepared = match launch_rx.await {
+            Ok(result) => result?,
+            Err(_) => {
+                self.release_process_id(&process_id_lease).await;
+                return Err(UnifiedExecError::process_failed(
+                    "manager-owned process launch ended without a result".to_string(),
+                ));
+            }
+        };
+        let PreparedPendingLaunch {
+            request,
+            process,
+            permissions,
+            deferred_network_approval,
+            started_at: start,
+            plugin_attribution,
+            mut pending_launch_guard,
+        } = prepared;
+        if let Some(completion) = completion.as_ref() {
+            let _ = completion.process.set(Arc::clone(&process));
+        }
+
+        let begin_session = Arc::clone(&context.session);
+        let begin_turn = Arc::clone(&context.step_context.turn);
+        let begin_call_id = context.call_id.clone();
         let emitter = ToolEmitter::unified_exec(
             &request.command,
             cwd.clone(),
             ExecCommandSource::UnifiedExecStartup,
-            Some(request.process_id.to_string()),
+            Some(process_id.to_string()),
             plugin_attribution.clone(),
         );
-        emitter.emit(event_ctx, ToolEventStage::Begin).await;
+        let begin_rx = pending_launch_guard.spawn_manager_owned_begin(async move {
+            let event_ctx = ToolEventCtx::new(
+                begin_session.as_ref(),
+                begin_turn.as_ref(),
+                &begin_call_id,
+                /*turn_diff_tracker*/ None,
+            );
+            emitter.emit(event_ctx, ToolEventStage::Begin).await;
+        });
+        let begin_result = match begin_rx {
+            Ok(begin_rx) => begin_rx.await,
+            Err(_) => {
+                request.process_id_lease.pending_launch().wait().await;
+                return Err(UnifiedExecError::UnknownProcessId { process_id });
+            }
+        };
+        match begin_result {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => {
+                request.process_id_lease.pending_launch().wait().await;
+                return Err(UnifiedExecError::process_failed(
+                    "manager-owned process start event ended without committing".to_string(),
+                ));
+            }
+        }
 
-        start_streaming_output(&process, context, Arc::clone(&transcript));
-        let start = Instant::now();
         // Persist live sessions before the initial yield wait so interrupting the
         // turn cannot drop the last Arc and terminate the background process.
         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
-        let mut initial_exec_command_guard = if process_started_alive {
+        if !process_started_alive {
+            pending_launch_guard
+                .watch_process()
+                .map_err(|_| UnifiedExecError::UnknownProcessId { process_id })?;
+        }
+        let _initial_exec_command_guard = if process_started_alive {
             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
             self.store_process(
                 Arc::clone(&process),
                 context,
-                &request.command,
                 request.hook_command.clone(),
                 cwd.clone(),
                 request.turn_environment.selection.environment_id.clone(),
                 permissions,
-                plugin_attribution.clone(),
                 start,
-                request.process_id,
+                request.process_id_lease.clone(),
                 request.tty,
                 deferred_network_approval.clone(),
-                network_denial_monitor,
-                metrics_sidecar,
-                Arc::clone(&transcript),
                 Arc::clone(&initial_exec_command_active),
+                &mut pending_launch_guard,
             )
-            .await;
+            .await?;
             InitialExecCommandGuard {
                 active: Some(initial_exec_command_active),
-                metrics_sidecar: None,
             }
         } else {
-            InitialExecCommandGuard {
-                active: None,
-                metrics_sidecar,
-            }
+            InitialExecCommandGuard { active: None }
         };
 
         let yield_time_ms = clamp_yield_time(request.yield_time_ms);
@@ -674,53 +854,33 @@ impl UnifiedExecProcessManager {
             .as_ref()
             .is_some_and(DeferredNetworkApproval::is_cancelled)
         {
-            let message = network_denial_message_for_session(
-                Some(&context.session),
-                deferred_network_approval.take(),
+            let error = fail_process_after_message_resolution(
+                process.as_ref(),
+                network_denial_message_for_session(
+                    Some(&context.session),
+                    deferred_network_approval.clone(),
+                ),
             )
             .await;
-            emit_failed_initial_exec_end_if_unstored(
-                process_started_alive,
-                context,
-                &request,
-                cwd.clone(),
-                plugin_attribution.clone(),
-                Arc::clone(&transcript),
-                text.clone(),
-                message.clone(),
-                wall_time,
-            )
-            .await;
-            self.release_process_id_if_matches(request.process_id, &process)
-                .await;
-            return Err(fail_process_with_message(process.as_ref(), message));
+            self.remove_process_if_matches(&process).await;
+            if !process_started_alive {
+                let cleanup = request.process_id_lease.pending_launch().wait().await;
+                if let Some(message) = cleanup.network_approval_error {
+                    return Err(UnifiedExecError::process_failed(message));
+                }
+            }
+            return Err(error);
         }
         if let Some(message) = process.failure_message() {
-            let finish_result = finish_deferred_network_approval_for_session(
-                Some(&context.session),
-                deferred_network_approval.take(),
-            )
-            .await;
-            emit_failed_initial_exec_end_if_unstored(
-                process_started_alive,
-                context,
-                &request,
-                cwd.clone(),
-                plugin_attribution.clone(),
-                Arc::clone(&transcript),
-                text.clone(),
-                message.clone(),
-                wall_time,
-            )
-            .await;
-            self.release_process_id_if_matches(request.process_id, &process)
-                .await;
-            if let Err(message) = finish_result {
-                return Err(fail_process_with_message(process.as_ref(), message));
+            self.remove_process_if_matches(&process).await;
+            if !process_started_alive {
+                let cleanup = request.process_id_lease.pending_launch().wait().await;
+                if let Some(message) = cleanup.network_approval_error {
+                    return Err(fail_process_with_message(process.as_ref(), message));
+                }
             }
             return Err(UnifiedExecError::process_failed(message));
         }
-        let process_id = request.process_id;
         let (response_process_id, exit_code) = if process_started_alive {
             match self.refresh_process_state(process_id, &process).await {
                 ProcessStatus::Alive {
@@ -729,14 +889,12 @@ impl UnifiedExecProcessManager {
                     ..
                 } => (Some(process_id), exit_code),
                 ProcessStatus::Exited { exit_code, entry } => {
-                    if let Err(message) =
-                        finish_deferred_network_approval_after_process_exit_for_session(
-                            Some(&context.session),
-                            deferred_network_approval.take(),
-                        )
-                        .await
-                    {
+                    let cleanup = entry.process_id_lease.pending_launch().wait().await;
+                    if let Some(message) = cleanup.network_approval_error {
                         return Err(fail_process_with_message(entry.process.as_ref(), message));
+                    }
+                    if let Some(message) = entry.process.failure_message() {
+                        return Err(UnifiedExecError::process_failed(message));
                     }
                     if !completion
                         .as_ref()
@@ -752,18 +910,6 @@ impl UnifiedExecProcessManager {
                                 )
                             })?;
                     }
-                    let metrics_sidecar = entry
-                        .plugin_metrics_sidecar
-                        .as_ref()
-                        .and_then(take_plugin_metrics_sidecar);
-                    finish_and_track_measurements(
-                        metrics_sidecar,
-                        exit_code.unwrap_or(-1),
-                        &context.session,
-                        &context.step_context.turn,
-                        &context.call_id,
-                    )
-                    .await;
                     (None, exit_code)
                 }
                 ProcessStatus::Unknown => {
@@ -771,53 +917,17 @@ impl UnifiedExecProcessManager {
                 }
             }
         } else {
-            // Short-lived command: emit the completed command item immediately
-            // using the same helper as the background watcher.
-            let finish_result = finish_deferred_network_approval_after_process_exit_for_session(
-                Some(&context.session),
-                deferred_network_approval.take(),
-            )
-            .await;
-            if let Err(message) = finish_result {
-                emit_failed_initial_exec_end_if_unstored(
-                    process_started_alive,
-                    context,
-                    &request,
-                    cwd.clone(),
-                    plugin_attribution.clone(),
-                    Arc::clone(&transcript),
-                    text.clone(),
-                    message.clone(),
-                    wall_time,
-                )
-                .await;
-                self.release_process_id_if_matches(request.process_id, &process)
-                    .await;
+            // The manager-owned watcher performs all terminal side effects,
+            // including network cleanup, metrics, lifecycle events, and final
+            // reservation release. Origin cancellation cannot split them.
+            let cleanup = request.process_id_lease.pending_launch().wait().await;
+            if let Some(message) = cleanup.network_approval_error {
                 return Err(fail_process_with_message(process.as_ref(), message));
             }
+            if let Some(message) = process.failure_message() {
+                return Err(UnifiedExecError::process_failed(message));
+            }
             let exit_code = process.exit_code();
-            let exit = exit_code.unwrap_or(-1);
-            initial_exec_command_guard
-                .finish_plugin_metrics(context, exit)
-                .await;
-            emit_exec_end_for_unified_exec(
-                Arc::clone(&context.session),
-                Arc::clone(&context.step_context.turn),
-                context.call_id.clone(),
-                request.command.clone(),
-                cwd.clone(),
-                Some(process_id.to_string()),
-                plugin_attribution.clone(),
-                Arc::clone(&transcript),
-                text.clone(),
-                exit,
-                wall_time,
-                process.timed_out(),
-            )
-            .await;
-
-            self.release_process_id_if_matches(request.process_id, &process)
-                .await;
             process
                 .check_for_sandbox_denial_with_text(&text)
                 .await
@@ -860,14 +970,7 @@ impl UnifiedExecProcessManager {
         // Different terminal sessions can be polled concurrently, but reads and
         // writes against one terminal must not overlap because they share a
         // draining output buffer and process lifecycle.
-        let locked_process = {
-            let store = self.process_store.lock().await;
-            let entry = store
-                .processes
-                .get(&process_id)
-                .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
-            Arc::clone(&entry.process)
-        };
+        let (locked_process, _operation_lease) = self.acquire_process_operation(process_id).await?;
         let _interaction_guard = locked_process.interaction_lock().lock_owned().await;
         // A queued write must observe strict review enabled while it was waiting.
         let strict_auto_review = context
@@ -970,8 +1073,7 @@ impl UnifiedExecProcessManager {
                             status_after_write = Some(status);
                         } else if matches!(err, UnifiedExecError::ProcessFailed { .. }) {
                             process.terminate();
-                            self.release_process_id_if_matches(process_id, &process)
-                                .await;
+                            self.remove_process_if_matches(&process).await;
                             return Err(err);
                         } else {
                             return Err(err);
@@ -1011,8 +1113,7 @@ impl UnifiedExecProcessManager {
             let message =
                 network_denial_message_for_session(session.as_ref(), network_approval.clone())
                     .await;
-            self.release_process_id_if_matches(process_id, &process)
-                .await;
+            self.remove_process_if_matches(&process).await;
             return Err(fail_process_with_message(process.as_ref(), message));
         }
         if let Some(message) = process.failure_message() {
@@ -1021,8 +1122,7 @@ impl UnifiedExecProcessManager {
                 network_approval.clone(),
             )
             .await;
-            self.release_process_id_if_matches(process_id, &process)
-                .await;
+            self.remove_process_if_matches(&process).await;
             if let Err(message) = finish_result {
                 return Err(fail_process_with_message(process.as_ref(), message));
             }
@@ -1114,9 +1214,11 @@ impl UnifiedExecProcessManager {
 
         let exit_code = entry.process.exit_code();
         let process_id = entry.process_id;
+        let process_id_lease = entry.process_id_lease.clone();
 
         if entry.process.has_exited() {
-            let Some(entry) = store.remove(process_id) else {
+            let Some(entry) = store.remove_if_process_matches(&process_id_lease, expected_process)
+            else {
                 return ProcessStatus::Unknown;
             };
             ProcessStatus::Exited {
@@ -1171,26 +1273,24 @@ impl UnifiedExecProcessManager {
         &self,
         process: Arc<UnifiedExecProcess>,
         context: &UnifiedExecContext,
-        command: &[String],
         hook_command: String,
         cwd: PathUri,
         environment_id: String,
         permissions: super::TerminalPermissions,
-        plugin_attribution: Option<PluginCommandAttribution>,
         started_at: Instant,
-        process_id: i32,
+        process_id_lease: ProcessIdLease,
         tty: bool,
         network_approval: Option<DeferredNetworkApproval>,
-        network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
-        metrics_sidecar: Option<PluginMetricsSidecar>,
-        transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
         initial_exec_command_active: Arc<AtomicBool>,
-    ) {
-        let plugin_metrics_sidecar =
-            metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+        pending_launch_guard: &mut PendingLaunchGuard,
+    ) -> Result<(), UnifiedExecError> {
+        let process_id = process_id_lease.process_id();
+        let attached_allocation_matches = process
+            .process_id_lease()
+            .is_some_and(|attached| attached.same_allocation(&process_id_lease));
         let entry = ProcessEntry {
             process: Arc::clone(&process),
-            plugin_metrics_sidecar: plugin_metrics_sidecar.clone(),
+            process_id_lease: process_id_lease.clone(),
             call_id: context.call_id.clone(),
             process_id,
             cwd: cwd.clone(),
@@ -1203,33 +1303,57 @@ impl UnifiedExecProcessManager {
             session: Arc::downgrade(&context.session),
             last_used: started_at,
         };
-        let pruned_entry = {
+        let admission = if attached_allocation_matches {
             let mut store = self.process_store.lock().await;
-            let pruned_entry = Self::prune_processes_if_needed(&mut store);
-            store.processes.insert(process_id, entry);
-            pruned_entry
+            if !store.reservation_matches(&entry.process_id_lease)
+                || store.processes.contains_key(&process_id)
+            {
+                Err(entry)
+            } else {
+                let pruned_entry = Self::prune_processes_if_needed(&mut store);
+                match store.insert(entry) {
+                    Ok(()) => match pending_launch_guard.watch_process() {
+                        Ok(()) => Ok(pruned_entry),
+                        Err(_) => {
+                            let Some(rejected_entry) =
+                                store.remove_if_process_matches(&process_id_lease, &process)
+                            else {
+                                unreachable!(
+                                    "newly stored process should still match its allocation"
+                                );
+                            };
+                            Err(rejected_entry)
+                        }
+                    },
+                    Err(entry) => Err(*entry),
+                }
+            }
+        } else {
+            Err(entry)
         };
-        // prune_processes_if_needed runs while holding process_store; do async
-        // network-approval cleanup only after dropping that lock.
+        let pruned_entry = match admission {
+            Ok(pruned_entry) => pruned_entry,
+            Err(rejected_entry) => {
+                drop(rejected_entry);
+                let store_error = UnifiedExecError::UnknownProcessId { process_id };
+                pending_launch_guard.launch().request_cleanup();
+                let cleanup = pending_launch_guard.launch().wait().await;
+                if let Some(message) = cleanup.termination_error {
+                    return Err(UnifiedExecError::process_failed(message));
+                }
+                if let Some(message) = cleanup.network_approval_error {
+                    return Err(UnifiedExecError::process_failed(message));
+                }
+                return Err(store_error);
+            }
+        };
+        // The pending-launch supervisor owns approval cleanup, terminal events,
+        // metrics, and the retained reservation. Trigger termination without an
+        // await so cancellation cannot strand the entry after it is pruned.
         if let Some(pruned_entry) = pruned_entry {
-            unregister_network_approval_for_entry(&pruned_entry).await;
             pruned_entry.process.terminate();
         }
-
-        spawn_exit_watcher(
-            Arc::clone(&process),
-            Arc::clone(&context.session),
-            Arc::clone(&context.step_context.turn),
-            context.call_id.clone(),
-            command.to_vec(),
-            cwd,
-            process_id,
-            plugin_attribution,
-            transcript,
-            started_at,
-            network_denial_monitor,
-            plugin_metrics_sidecar,
-        );
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1309,6 +1433,16 @@ impl UnifiedExecProcessManager {
                 ));
             }
 
+            // Capture launch ownership before awaiting the backend. Session
+            // shutdown may clear the reservation registry while start is in
+            // flight, but a returned process must still attach to the exact
+            // pending launch before any fallible post-start validation.
+            let process_id_lease = self
+                .launch_process_ownership
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&process_id)
+                .cloned();
             let backend = environment.get_exec_backend();
             let params = exec_server_params_for_request(
                 process_id,
@@ -1327,7 +1461,16 @@ impl UnifiedExecProcessManager {
             }
             .map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
             spawn_lifecycle.after_spawn();
-            return UnifiedExecProcess::from_exec_server_started(started).await;
+            return match process_id_lease {
+                Some(process_id_lease) => {
+                    UnifiedExecProcess::from_exec_server_started_for_pending_launch(
+                        started,
+                        process_id_lease,
+                    )
+                    .await
+                }
+                None => UnifiedExecProcess::from_exec_server_started(started).await,
+            };
         }
 
         // TODO(anp): Keep PathUri through the local PTY/process launch boundary.
@@ -1409,6 +1552,23 @@ impl UnifiedExecProcessManager {
         cwd: PathUri,
         context: &UnifiedExecContext,
     ) -> Result<(UnifiedExecAttempt, Option<DeferredNetworkApproval>), UnifiedExecError> {
+        let replaced_ownership = self
+            .launch_process_ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                request.process_id_lease.process_id(),
+                request.process_id_lease.clone(),
+            );
+        debug_assert!(
+            replaced_ownership
+                .as_ref()
+                .is_none_or(|lease| { lease.same_allocation(&request.process_id_lease) })
+        );
+        let _launch_process_ownership = LaunchProcessOwnershipGuard {
+            ownership: &self.launch_process_ownership,
+            process_id_lease: request.process_id_lease.clone(),
+        };
         let turn = &context.step_context.turn;
         let shell_environment_policy = request.turn_environment.shell_environment_policy();
         let local_policy_env = create_env(shell_environment_policy, /*thread_id*/ None);
@@ -1473,7 +1633,7 @@ impl UnifiedExecProcessManager {
             command: request.command.clone(),
             shell_type: request.shell_type,
             hook_command: request.hook_command.clone(),
-            process_id: request.process_id,
+            process_id: request.process_id_lease.process_id(),
             cwd,
             sandbox_cwd: request.sandbox_cwd.clone(),
             turn_environment: request.turn_environment.clone(),
@@ -1528,6 +1688,7 @@ impl UnifiedExecProcessManager {
 
         let OutputHandles {
             output_buffer,
+            transcript: _,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -1683,6 +1844,15 @@ impl UnifiedExecProcessManager {
                 continue;
             }
 
+            if candidate_process
+                .as_ref()
+                .is_some_and(|process| process.has_active_operation())
+            {
+                found_locked_exited_process |= candidate_has_exited;
+                meta.retain(|(id, _, _)| *id != process_id);
+                continue;
+            }
+
             // Do not prune processes while an interaction, event-driven wait,
             // or terminal event publication is active for them.
             if let Some(candidate_process) = candidate_process.as_ref() {
@@ -1691,7 +1861,13 @@ impl UnifiedExecProcessManager {
                 if let Ok(_interaction_guard) = interaction_lock.try_lock_owned()
                     && let Ok(_wait_process_guard) = wait_process_lock.try_lock_owned()
                 {
-                    return store.remove(process_id);
+                    let process_id_lease = store
+                        .processes
+                        .get(&process_id)
+                        .map(|entry| entry.process_id_lease.clone());
+                    return process_id_lease.as_ref().and_then(|process_id_lease| {
+                        store.remove_if_process_matches(process_id_lease, candidate_process)
+                    });
                 }
             }
             found_locked_exited_process |= candidate_has_exited
@@ -1732,20 +1908,149 @@ impl UnifiedExecProcessManager {
     }
 
     pub(crate) async fn terminate_all_processes(&self) {
-        let entries: Vec<ProcessEntry> = {
-            let mut processes = self.process_store.lock().await;
-            let entries: Vec<ProcessEntry> = processes
+        self.terminate_all_processes_for_scope(ProcessCleanupScope::Live)
+            .await;
+    }
+
+    pub(crate) async fn terminate_all_processes_for_session_shutdown(&self) {
+        self.terminate_all_processes_for_scope(ProcessCleanupScope::SessionShutdown)
+            .await;
+    }
+
+    async fn terminate_all_processes_for_scope(&self, cleanup_scope: ProcessCleanupScope) {
+        let (entries, pending_launches): (Vec<ProcessEntry>, Vec<ProcessIdLease>) = {
+            let mut store = self.process_store.lock().await;
+            let mut seen_pending_launches = HashSet::new();
+            let reserved_process_ids = store.reserved_process_ids.snapshot();
+            let pending_launches = reserved_process_ids
+                .iter()
+                .chain(
+                    store
+                        .processes
+                        .values()
+                        .map(|entry| &entry.process_id_lease),
+                )
+                .filter_map(|process_id_lease| {
+                    let pending_launch = process_id_lease.pending_launch();
+                    if seen_pending_launches.insert(Arc::as_ptr(pending_launch)) {
+                        Some(process_id_lease.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            for process_id_lease in &pending_launches {
+                process_id_lease.pending_launch().request_cleanup();
+            }
+            let process_id_leases: Vec<ProcessIdLease> = store
                 .processes
-                .drain()
-                .map(|(_, entry)| entry)
+                .values()
+                .map(|entry| entry.process_id_lease.clone())
                 .collect();
-            processes.reserved_process_ids.clear();
-            entries
+            let mut entries = Vec::with_capacity(process_id_leases.len());
+            for process_id_lease in &process_id_leases {
+                let process_id = process_id_lease.process_id();
+                let entry_matches = store
+                    .processes
+                    .get(&process_id)
+                    .is_some_and(|entry| entry.process_id_lease.same_allocation(process_id_lease));
+                if entry_matches && let Some(entry) = store.processes.remove(&process_id) {
+                    entries.push(entry);
+                }
+            }
+            if matches!(cleanup_scope, ProcessCleanupScope::SessionShutdown) {
+                // Session shutdown invalidates pre-store allocations too. A
+                // spawn finishing afterward must fail its identity-checked
+                // store rather than resurrecting a terminal after shutdown.
+                store.reserved_process_ids.clear();
+            }
+            (entries, pending_launches)
         };
 
-        for entry in entries {
-            unregister_network_approval_for_entry(&entry).await;
-            entry.process.terminate();
+        let cleanup = async {
+            let stored_process_cleanup =
+                futures::future::join_all(entries.iter().map(|entry| async {
+                    if !entry.process.has_exited()
+                        && let Err(error) = entry.process.terminate_confirmed().await
+                    {
+                        entry.process.mark_termination_failure(error.to_string());
+                    }
+                }));
+            let pending_launch_cleanup = futures::future::join_all(
+                pending_launches
+                    .iter()
+                    .map(|process_id_lease| process_id_lease.pending_launch().wait()),
+            );
+            let network_approval_cleanup =
+                futures::future::join_all(entries.iter().map(|entry| async {
+                    let session = entry.session.upgrade();
+                    let _ = finish_deferred_network_approval_for_session(
+                        session.as_ref(),
+                        entry.network_approval.clone(),
+                    )
+                    .await;
+                }));
+            tokio::join!(
+                stored_process_cleanup,
+                pending_launch_cleanup,
+                network_approval_cleanup
+            );
+        };
+
+        match cleanup_scope {
+            ProcessCleanupScope::Live => {
+                cleanup.await;
+                let mut store = self.process_store.lock().await;
+                for process_id_lease in &pending_launches {
+                    store.release_reservation(process_id_lease);
+                }
+            }
+            ProcessCleanupScope::SessionShutdown => {
+                if tokio::time::timeout(UNIFIED_EXEC_SHUTDOWN_CLEANUP_GRACE, cleanup)
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+
+                let unfinished_processes = entries
+                    .iter()
+                    .filter(|entry| !entry.process.has_exited())
+                    .collect::<Vec<_>>();
+                let unfinished_process_ids = unfinished_processes
+                    .iter()
+                    .map(|entry| entry.process_id)
+                    .collect::<Vec<_>>();
+                futures::future::join_all(entries.iter().map(|entry| {
+                    entry
+                        .process
+                        .force_shutdown_cleanup(UNIFIED_EXEC_SHUTDOWN_CLEANUP_FAILURE)
+                }))
+                .await;
+                let unfinished_pending_launch_ids = pending_launches
+                    .iter()
+                    .filter(|process_id_lease| !process_id_lease.pending_launch().is_complete())
+                    .map(ProcessIdLease::process_id)
+                    .collect::<Vec<_>>();
+                tracing::warn!(
+                    shutdown_cleanup_grace_ms = UNIFIED_EXEC_SHUTDOWN_CLEANUP_GRACE.as_millis() as u64,
+                    unfinished_process_count = unfinished_process_ids.len(),
+                    unfinished_process_ids = ?unfinished_process_ids,
+                    unfinished_pending_launch_count = unfinished_pending_launch_ids.len(),
+                    unfinished_pending_launch_ids = ?unfinished_pending_launch_ids,
+                    "unified exec session shutdown cleanup grace elapsed"
+                );
+                let outcome = super::pending_launch::PendingLaunchOutcome {
+                    termination_error: Some(UNIFIED_EXEC_SHUTDOWN_CLEANUP_FAILURE.to_string()),
+                    network_approval_error: None,
+                };
+                futures::future::join_all(pending_launches.iter().map(|process_id_lease| {
+                    process_id_lease
+                        .pending_launch()
+                        .force_shutdown(outcome.clone())
+                }))
+                .await;
+            }
         }
     }
 
@@ -1769,12 +2074,16 @@ impl UnifiedExecProcessManager {
     }
 
     pub(crate) async fn terminate_process(&self, process_id: i32) -> bool {
-        let (process, already_exited) = {
+        let (process, process_id_lease, already_exited) = {
             let store = self.process_store.lock().await;
             let Some(entry) = store.processes.get(&process_id) else {
                 return false;
             };
-            (Arc::clone(&entry.process), entry.process.has_exited())
+            (
+                Arc::clone(&entry.process),
+                entry.process_id_lease.clone(),
+                entry.process.has_exited(),
+            )
         };
 
         if !already_exited && process.terminate_confirmed().await.is_err() {
@@ -1792,7 +2101,7 @@ impl UnifiedExecProcessManager {
             if entry.initial_exec_command_active.load(Ordering::Acquire) {
                 return true;
             }
-            let Some(entry) = store.remove(process_id) else {
+            let Some(entry) = store.remove_if_process_matches(&process_id_lease, &process) else {
                 return false;
             };
             entry

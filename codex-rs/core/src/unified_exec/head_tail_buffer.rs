@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 /// dropping the middle once it exceeds the configured maximum. The buffer is
 /// symmetric meaning 50% of the capacity is allocated to the head and 50% is
 /// allocated to the tail.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
 pub(crate) struct HeadTailBuffer<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES> {
     head: Vec<u8>,
@@ -120,6 +120,36 @@ impl<const MAX_BYTES: usize> HeadTailBuffer<MAX_BYTES> {
         out.extend_from_slice(marker.as_bytes());
         out.push(b'\n');
         out.extend(self.tail.iter().copied());
+        out
+    }
+
+    /// Return output observed after `offset`, summarizing any portion that has
+    /// already fallen out of the retained middle with an omission marker.
+    ///
+    /// The offset is measured against the original byte stream, not the
+    /// retained representation. This lets a lagged streaming consumer resume
+    /// without replaying the stable head or duplicating the retained tail.
+    pub(crate) fn to_bytes_after_with_omission_marker(&self, offset: usize) -> Vec<u8> {
+        let total_bytes = self.total_bytes();
+        let offset = offset.min(total_bytes);
+        let tail_start = total_bytes.saturating_sub(self.tail.len());
+        let mut out = Vec::new();
+
+        if offset < self.head.len() {
+            out.extend_from_slice(&self.head[offset..]);
+        }
+
+        let unavailable_start = offset.max(self.head.len());
+        let unavailable_bytes = tail_start.saturating_sub(unavailable_start);
+        if unavailable_bytes > 0 {
+            let marker = format_output_omission_marker(unavailable_bytes);
+            out.push(b'\n');
+            out.extend_from_slice(marker.as_bytes());
+            out.push(b'\n');
+        }
+
+        let retained_tail_offset = offset.saturating_sub(tail_start).min(self.tail.len());
+        out.extend(self.tail.iter().skip(retained_tail_offset).copied());
         out
     }
 

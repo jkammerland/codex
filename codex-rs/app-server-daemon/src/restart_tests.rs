@@ -133,7 +133,9 @@ async fn incompatible_managed_version_is_rejected_before_live_daemon_is_stopped(
 
     assert!(remained_running, "validation stopped the live daemon");
     assert_eq!(
-        restart_result.expect_err("incompatible managed binary must be rejected").to_string(),
+        restart_result
+            .expect_err("incompatible managed binary must be rejected")
+            .to_string(),
         format!(
             "managed Codex executable {} reports version incompatible-test-version, but this runtime is {}\n\n\
              The running daemon was left untouched. Install the matching maintained fork before retrying.",

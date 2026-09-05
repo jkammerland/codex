@@ -270,14 +270,19 @@ impl ExecCommandHandler {
                 )));
             }
         }
-        let process_id = manager.allocate_process_id().await;
-        let resolved_command = get_command(
+        let process_id_lease = manager.allocate_process_id().await;
+        let resolved_command = match get_command(
             &args,
             shell,
             &shell_mode,
             turn_environment.config().allow_login_shell,
-        )
-        .map_err(FunctionCallError::RespondToModel)?;
+        ) {
+            Ok(resolved_command) => resolved_command,
+            Err(err) => {
+                manager.release_process_id(&process_id_lease).await;
+                return Err(FunctionCallError::RespondToModel(err));
+            }
+        };
         let command = resolved_command.command;
         let shell_type = resolved_command.shell_type;
         let ExecCommandArgs {
@@ -309,7 +314,7 @@ impl ExecCommandHandler {
         let Some(permission_context) =
             file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd)
         else {
-            manager.release_process_id(process_id).await;
+            manager.release_process_id(&process_id_lease).await;
             return Err(FunctionCallError::RespondToModel(
                 "selected environment sandbox context is missing cwd".to_string(),
             ));
@@ -335,7 +340,7 @@ impl ExecCommandHandler {
             && !effective_additional_permissions.permissions_preapproved
             && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
         {
-            manager.release_process_id(process_id).await;
+            manager.release_process_id(&process_id_lease).await;
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
             )));
@@ -361,7 +366,7 @@ impl ExecCommandHandler {
         ) {
             Ok(normalized) => normalized,
             Err(err) => {
-                manager.release_process_id(process_id).await;
+                manager.release_process_id(&process_id_lease).await;
                 return Err(FunctionCallError::RespondToModel(err));
             }
         };
@@ -382,10 +387,10 @@ impl ExecCommandHandler {
         // Keep the reservation when interception returns `Ok(None)`: the normal command below
         // still needs this process ID.
         if intercepted_patch.is_err() {
-            manager.release_process_id(process_id).await;
+            manager.release_process_id(&process_id_lease).await;
         }
         if let Some(output) = intercepted_patch? {
-            manager.release_process_id(process_id).await;
+            manager.release_process_id(&process_id_lease).await;
             return Ok(boxed_tool_output(ExecCommandToolOutput {
                 event_call_id: String::new(),
                 chunk_id: String::new(),
@@ -407,7 +412,7 @@ impl ExecCommandHandler {
             command,
             shell_type,
             hook_command: hook_command.clone(),
-            process_id,
+            process_id_lease,
             yield_time_ms,
             max_output_tokens,
             cwd,

@@ -102,7 +102,8 @@ async fn exec_command_with_tty(
     tty: bool,
 ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
     let manager = &session.services.unified_exec_manager;
-    let process_id = manager.allocate_process_id().await;
+    let process_id_lease = manager.allocate_process_id().await;
+    let process_id = process_id_lease.process_id();
     #[allow(deprecated)]
     let cwd = workdir
         .as_ref()
@@ -128,6 +129,7 @@ async fn exec_command_with_tty(
             )
             .await?,
     );
+    process.attach_process_id_lease(process_id_lease.clone());
     let context = UnifiedExecContext::new(
         Arc::clone(session),
         crate::session::step_context::StepContext::for_test(Arc::clone(turn)),
@@ -139,7 +141,7 @@ async fn exec_command_with_tty(
     if process_started_alive {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
-            plugin_metrics_sidecar: None,
+            process_id_lease: process_id_lease.clone(),
             call_id: context.call_id.clone(),
             process_id,
             cwd: cwd.clone().into(),
@@ -159,12 +161,7 @@ async fn exec_command_with_tty(
             session: Arc::downgrade(session),
             last_used: started_at,
         };
-        manager
-            .process_store
-            .lock()
-            .await
-            .processes
-            .insert(process_id, entry);
+        assert!(manager.process_store.lock().await.insert(entry).is_ok());
     }
 
     let deadline = started_at + Duration::from_millis(yield_time_ms);
@@ -186,7 +183,7 @@ async fn exec_command_with_tty(
     let response_process_id = if process_started_alive && !has_exited {
         Some(process_id)
     } else {
-        manager.release_process_id(process_id).await;
+        manager.release_process_id(&process_id_lease).await;
         None
     };
     if response_process_id.is_some()
@@ -243,7 +240,8 @@ async fn store_remote_tty_process_for_test(
     write_status: WriteStatus,
 ) -> (i32, Arc<UnifiedExecProcess>) {
     let manager = &session.services.unified_exec_manager;
-    let process_id = manager.allocate_process_id().await;
+    let process_id_lease = manager.allocate_process_id().await;
+    let process_id = process_id_lease.process_id();
     let process = Arc::new(
         super::process_tests::remote_process(
             write_status,
@@ -252,33 +250,32 @@ async fn store_remote_tty_process_for_test(
         )
         .await,
     );
+    process.attach_process_id_lease(process_id_lease.clone());
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
-    manager.process_store.lock().await.processes.insert(
+    let entry = ProcessEntry {
+        process: Arc::clone(&process),
+        process_id_lease,
+        call_id: "remote-test".to_string(),
         process_id,
-        ProcessEntry {
-            process: Arc::clone(&process),
-            plugin_metrics_sidecar: None,
-            call_id: "remote-test".to_string(),
-            process_id,
-            cwd: cwd.into(),
-            initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            hook_command: "remote test process".to_string(),
-            tty: true,
-            environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
-            permissions: TerminalPermissions::for_launch(
-                turn.environments.primary().expect("turn environment"),
-                turn,
-                TerminalSandboxSource::Native,
-                SandboxPermissions::UseDefault,
-                /*additional_permissions*/ None,
-                /*internal_permissions*/ None,
-            ),
-            network_approval: None,
-            session: Arc::downgrade(session),
-            last_used: Instant::now(),
-        },
-    );
+        cwd: cwd.into(),
+        initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        hook_command: "remote test process".to_string(),
+        tty: true,
+        environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+        permissions: TerminalPermissions::for_launch(
+            turn.environments.primary().expect("turn environment"),
+            turn,
+            TerminalSandboxSource::Native,
+            SandboxPermissions::UseDefault,
+            /*additional_permissions*/ None,
+            /*internal_permissions*/ None,
+        ),
+        network_approval: None,
+        session: Arc::downgrade(session),
+        last_used: Instant::now(),
+    };
+    assert!(manager.process_store.lock().await.insert(entry).is_ok());
     (process_id, process)
 }
 
@@ -377,6 +374,235 @@ async fn wait_process_wakes_for_process_failure() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_exec_failure_removes_the_stored_process() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::AskForApproval;
+
+    let (session, turn, _events) =
+        crate::session::tests::make_session_and_context_with_auth_and_config_and_rx(
+            codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            Vec::new(),
+            |config| {
+                config.permissions.approval_policy =
+                    crate::config::Constrained::allow_only(AskForApproval::Never);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("unrestricted test profile should be allowed");
+            },
+        )
+        .await;
+    *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
+    let manager = &session.services.unified_exec_manager;
+    let process_id_lease = manager.allocate_process_id().await;
+    let process_id = process_id_lease.process_id();
+    let turn_environment = turn
+        .environments
+        .primary()
+        .cloned()
+        .expect("primary environment");
+    let cwd = turn_environment.cwd().clone();
+    let request = ExecCommandRequest {
+        // Avoid the login-shell snapshot path: this test is about the process
+        // lifecycle after a native child has already been stored.
+        command: vec!["sleep".to_string(), "60".to_string()],
+        shell_type: ShellType::Sh,
+        hook_command: "sleep 60".to_string(),
+        process_id_lease: process_id_lease.clone(),
+        yield_time_ms: 30_000,
+        max_output_tokens: None,
+        cwd: cwd.clone(),
+        sandbox_cwd: cwd,
+        turn_environment,
+        shell_mode: UnifiedExecShellMode::Direct,
+        network: None,
+        tty: false,
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        additional_permissions: None,
+        additional_permissions_preapproved: false,
+        justification: None,
+        prefix_rule: None,
+    };
+    let context = UnifiedExecContext::new(
+        Arc::clone(&session),
+        crate::session::step_context::StepContext::for_test(Arc::clone(&turn)),
+        tokio_util::sync::CancellationToken::new(),
+        "initial-failure".to_string(),
+    );
+    let published_process = std::sync::OnceLock::new();
+    let mut completion = oneshot::Completion {
+        timeout: Duration::from_secs(30),
+        timed_out: false,
+        process: &published_process,
+    };
+    let mut execution =
+        Box::pin(manager.exec_command_inner(request, &context, Some(&mut completion)));
+    let process = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut execution => {
+                panic!("exec command completed before publishing its process: {result:?}");
+            }
+            process = std::future::poll_fn(|task_context| match published_process.get() {
+                Some(process) => std::task::Poll::Ready(Arc::clone(process)),
+                None => {
+                    task_context.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            }) => process,
+        }
+    })
+    .await
+    .expect("initial process should be published");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut execution => {
+                    panic!("exec command completed before storing its process: {result:?}");
+                }
+                () = tokio::task::yield_now() => {}
+            }
+            let stored = manager
+                .process_store
+                .lock()
+                .await
+                .processes
+                .get(&process_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.process, &process));
+            if stored {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("initially live process should be stored");
+
+    process.fail_and_terminate("failure during initial yield".to_string());
+    let error = tokio::time::timeout(Duration::from_secs(5), &mut execution)
+        .await
+        .expect("initial failure should terminate the tool call")
+        .expect_err("initial process failure should be reported");
+    assert!(matches!(
+        error,
+        UnifiedExecError::ProcessFailed { message } if message == "failure during initial yield"
+    ));
+    process_id_lease.pending_launch().wait().await;
+
+    assert!(
+        manager
+            .retain_existing_process_ids(vec![process_id])
+            .await
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_oneshot_caller_cancels_manager_owned_execution() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::AskForApproval;
+
+    let (session, turn, _events) =
+        crate::session::tests::make_session_and_context_with_auth_and_config_and_rx(
+            codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            Vec::new(),
+            |config| {
+                config.permissions.approval_policy =
+                    crate::config::Constrained::allow_only(AskForApproval::Never);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("unrestricted test profile should be allowed");
+            },
+        )
+        .await;
+    *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
+    let manager = &session.services.unified_exec_manager;
+    let process_id_lease = manager.allocate_process_id().await;
+    let process_id = process_id_lease.process_id();
+    let pending_launch = Arc::clone(process_id_lease.pending_launch());
+    let turn_environment = turn
+        .environments
+        .primary()
+        .cloned()
+        .expect("primary environment");
+    let cwd = turn_environment.cwd().clone();
+    let request = ExecCommandRequest {
+        command: vec!["sleep".to_string(), "60".to_string()],
+        shell_type: ShellType::Sh,
+        hook_command: "sleep 60".to_string(),
+        process_id_lease,
+        yield_time_ms: 30_000,
+        max_output_tokens: None,
+        cwd: cwd.clone(),
+        sandbox_cwd: cwd,
+        turn_environment,
+        shell_mode: UnifiedExecShellMode::Direct,
+        network: None,
+        tty: false,
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        additional_permissions: None,
+        additional_permissions_preapproved: false,
+        justification: None,
+        prefix_rule: None,
+    };
+    let parent_cancellation = tokio_util::sync::CancellationToken::new();
+    let context = UnifiedExecContext::new(
+        Arc::clone(&session),
+        crate::session::step_context::StepContext::for_test(Arc::clone(&turn)),
+        parent_cancellation.clone(),
+        "dropped-oneshot".to_string(),
+    );
+    let caller = tokio::spawn(async move {
+        UnifiedExecProcessManager::exec_command_to_completion(
+            request,
+            &context,
+            Duration::from_secs(60),
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(
+                !caller.is_finished(),
+                "one-shot should still be collecting the long-running process"
+            );
+            if manager
+                .process_store
+                .lock()
+                .await
+                .processes
+                .contains_key(&process_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("one-shot process should be stored");
+
+    caller.abort();
+    assert!(
+        caller
+            .await
+            .expect_err("caller task should be aborted")
+            .is_cancelled()
+    );
+    tokio::time::timeout(Duration::from_secs(5), pending_launch.wait())
+        .await
+        .expect("caller drop should cancel and finish manager-owned execution");
+
+    assert!(!parent_cancellation.is_cancelled());
+    let store = manager.process_store.lock().await;
+    assert!(store.processes.is_empty());
+    assert!(store.reserved_process_ids.is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn wait_process_allows_write_stdin_to_wake_the_same_session() -> anyhow::Result<()> {
     let (session, turn) = test_session_and_turn().await;
@@ -460,11 +686,7 @@ async fn wait_process_returns_after_write_stdin_drains_the_waking_output() -> an
         .await
         .expect("wait_process should retain the output wake after the buffer is drained")?;
     assert_eq!(
-        (
-            waited.wait_reason,
-            waited.process_id,
-            waited.raw_output
-        ),
+        (waited.wait_reason, waited.process_id, waited.raw_output),
         (
             Some(ProcessWaitReason::Output),
             Some(process_id),
@@ -477,14 +699,145 @@ async fn wait_process_returns_after_write_stdin_drains_the_waking_output() -> an
 }
 
 #[tokio::test]
+async fn wait_process_captures_exit_during_immediate_output_collection() -> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, process) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::Accepted).await;
+    let (activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let mut waiting = Box::pin(wait_process_for_test(
+        &session,
+        process_id,
+        &mut activity_rx,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+
+    let interaction_guard = process.interaction_lock().lock_owned().await;
+    activity_tx.send_replace(InputQueueActivity::Steer);
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+
+    let output_handles = process.output_handles().clone();
+    let output_buffer = Arc::clone(&output_handles.output_buffer);
+    let output_guard = output_buffer.lock().await;
+    drop(interaction_guard);
+    // Advance past the post-lock exit recheck and stop inside the immediate
+    // output drain. The exit below therefore occurs after that recheck.
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+    process.signal_exit(Some(0));
+    let trailing_output = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        output_handles
+            .output_buffer
+            .lock()
+            .await
+            .push_chunk(b"trailing-output");
+        output_handles.output_notify.notify_waiters();
+    });
+    drop(output_guard);
+
+    let waited = tokio::time::timeout(Duration::from_secs(/*secs*/ 2), waiting)
+        .await
+        .expect("wait_process should finish after the process exits")?;
+    trailing_output.await?;
+    assert_eq!(
+        (
+            waited.wait_reason,
+            waited.process_id,
+            String::from_utf8_lossy(&waited.raw_output).into_owned()
+        ),
+        (
+            Some(ProcessWaitReason::Completed),
+            None,
+            "trailing-output".to_string()
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_process_reports_failure_arriving_during_trailing_output_grace() -> anyhow::Result<()>
+{
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, process) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::Accepted).await;
+    process.signal_exit(Some(0));
+
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let mut waiting = Box::pin(wait_process_for_test(
+        &session,
+        process_id,
+        &mut activity_rx,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+
+    process.fail_and_terminate("failure reported after exit".to_string());
+    let error = tokio::time::timeout(Duration::from_secs(/*secs*/ 1), waiting)
+        .await
+        .expect("wait_process should finish after the trailing-output grace")
+        .expect_err("late process failure should replace successful completion");
+    assert!(matches!(
+        error,
+        UnifiedExecError::ProcessFailed { message }
+            if message == "failure reported after exit"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_process_holds_a_pruning_lease_while_acquiring_the_interaction_lock()
+-> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, process) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::Accepted).await;
+    let interaction_guard = process.interaction_lock().lock_owned().await;
+    let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let mut waiting = Box::pin(wait_process_for_test(
+        &session,
+        process_id,
+        &mut activity_rx,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+
+    assert!(waiting.as_mut().poll(&mut task_context).is_pending());
+    assert!(process.has_active_operation());
+
+    drop(waiting);
+    assert!(!process.has_active_operation());
+    drop(interaction_guard);
+    assert!(session.terminate_background_terminal(process_id).await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_stdin_holds_a_pruning_lease_while_acquiring_the_interaction_lock()
+-> anyhow::Result<()> {
+    let (session, turn) = test_session_and_turn().await;
+    let (process_id, process) =
+        store_remote_tty_process_for_test(&session, &turn, WriteStatus::Accepted).await;
+    let interaction_guard = process.interaction_lock().lock_owned().await;
+    let mut writing = Box::pin(write_stdin(
+        &session, &turn, process_id, "input", /*yield_time_ms*/ 250,
+    ));
+    let mut task_context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+
+    assert!(writing.as_mut().poll(&mut task_context).is_pending());
+    assert!(process.has_active_operation());
+
+    drop(writing);
+    assert!(!process.has_active_operation());
+    drop(interaction_guard);
+    assert!(session.terminate_background_terminal(process_id).await);
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_process_rejects_a_duplicate_wait_without_consuming_the_wake() -> anyhow::Result<()> {
     let (session, turn) = test_session_and_turn().await;
     let (process_id, _process) =
         store_remote_tty_process_for_test(&session, &turn, WriteStatus::StdinClosed).await;
-    let (_first_activity_tx, mut first_activity_rx) =
-        watch::channel(InputQueueActivity::Mailbox);
-    let (_second_activity_tx, mut second_activity_rx) =
-        watch::channel(InputQueueActivity::Mailbox);
+    let (_first_activity_tx, mut first_activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+    let (_second_activity_tx, mut second_activity_rx) = watch::channel(InputQueueActivity::Mailbox);
     let mut first_wait = Box::pin(wait_process_for_test(
         &session,
         process_id,
@@ -1030,7 +1383,8 @@ async fn reusing_completed_process_returns_unknown_process() -> anyhow::Result<(
 async fn terminating_initial_exec_command_rechecks_initial_response_state() -> anyhow::Result<()> {
     let (session, turn) = test_session_and_turn().await;
     let manager = &session.services.unified_exec_manager;
-    let process_id = manager.allocate_process_id().await;
+    let process_id_lease = manager.allocate_process_id().await;
+    let process_id = process_id_lease.process_id();
     let (terminate_started_tx, mut terminate_started_rx) = watch::channel(false);
     let allow_terminate = Arc::new(Notify::new());
     let process = blocking_terminate_unified_process(
@@ -1039,13 +1393,14 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
         Arc::clone(&allow_terminate),
     )
     .await?;
+    process.attach_process_id_lease(process_id_lease.clone());
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
     manager.process_store.lock().await.processes.insert(
         process_id,
         ProcessEntry {
             process,
-            plugin_metrics_sidecar: None,
+            process_id_lease,
             call_id: "call".to_string(),
             process_id,
             cwd: cwd.into(),
@@ -1112,7 +1467,8 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
 async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Result<()> {
     let (session, turn) = test_session_and_turn().await;
     let manager = &session.services.unified_exec_manager;
-    let process_id = manager.allocate_process_id().await;
+    let process_id_lease = manager.allocate_process_id().await;
+    let process_id = process_id_lease.process_id();
     let (terminate_started_tx, _terminate_started_rx) = watch::channel(false);
     let allow_terminate = Arc::new(Notify::new());
     let process = blocking_terminate_unified_process(
@@ -1121,6 +1477,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
         Arc::clone(&allow_terminate),
     )
     .await?;
+    process.attach_process_id_lease(process_id_lease.clone());
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
     let last_used = Instant::now() - Duration::from_secs(1);
@@ -1128,7 +1485,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
         process_id,
         ProcessEntry {
             process: Arc::clone(&process),
-            plugin_metrics_sidecar: None,
+            process_id_lease: process_id_lease.clone(),
             call_id: "call".to_string(),
             process_id,
             cwd: cwd.into(),
@@ -1178,7 +1535,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
     .await
     .expect("poll should clone process handles");
 
-    manager.release_process_id(process_id).await;
+    manager.release_process_id(&process_id_lease).await;
     allow_terminate.notify_one();
     process.terminate_confirmed().await?;
 

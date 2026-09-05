@@ -1,13 +1,23 @@
+mod cell_admission;
+mod cell_validation;
+mod deferred_inputs;
 mod delegate;
 mod execute_handler;
 pub(crate) mod execute_spec;
 mod live_exec_sessions;
 mod response_adapter;
+mod result;
 mod telemetry;
+mod trace_lifecycle;
 mod wait_handler;
 pub(crate) mod wait_spec;
 
+#[cfg(test)]
+#[path = "cell_id_tests.rs"]
+mod cell_id_tests;
+
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -38,19 +48,24 @@ use crate::tools::context::ToolPayload;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolCall;
 use crate::tools::router::ToolCallSource;
-use crate::unified_exec::resolve_max_tokens;
 use codex_protocol::openai_models::ToolMode;
 use codex_tools::ToolName;
-use codex_utils_audio::estimate_audio_token_count;
-use codex_utils_output_truncation::TruncationPolicy;
-use codex_utils_output_truncation::formatted_truncate_text_content_items_with_policy;
-use codex_utils_output_truncation::truncate_function_output_items_with_policy;
 
+use deferred_inputs::AdmittedCellInputBatch;
+use deferred_inputs::DeferredCellInput;
+use deferred_inputs::DeferredCellInputRegistry;
 use delegate::CodeModeDispatchBroker;
 use delegate::CodeModeDispatchWorker;
 pub(crate) use execute_handler::CodeModeExecuteHandler;
 use live_exec_sessions::LiveExecSessionRegistry;
 use response_adapter::into_function_call_output_content_items;
+use result::CodeModeOutputKind;
+use result::CodeModeResultEnvelope;
+pub(crate) use result::bound_prepared_code_mode_output;
+use result::finalize_code_mode_result;
+use result::host_failure_status;
+use result::script_status;
+use trace_lifecycle::CellTraceProvenance;
 pub(crate) use wait_handler::CodeModeWaitHandler;
 
 pub(crate) const PUBLIC_TOOL_NAME: &str = codex_code_mode::PUBLIC_TOOL_NAME;
@@ -60,6 +75,13 @@ pub(crate) const DEFAULT_WAIT_YIELD_TIME_MS: u64 = codex_code_mode::DEFAULT_WAIT
 /// Returns true for the code-mode `exec` tool in the default namespace.
 pub(crate) fn is_exec_tool_name(tool_name: &ToolName) -> bool {
     tool_name.is_default_namespace() && tool_name.name == PUBLIC_TOOL_NAME
+}
+
+pub(crate) fn validate_core_tool_call_id(
+    tool_name: &ToolName,
+    call_id: &str,
+) -> Result<(), String> {
+    cell_validation::validate_core_tool_call_id(tool_name, call_id)
 }
 
 #[derive(Clone)]
@@ -73,10 +95,18 @@ pub(crate) struct CodeModeService {
     session_provider: Arc<dyn CodeModeSessionProvider>,
     availability: Result<(), String>,
     dispatch_broker: Arc<CodeModeDispatchBroker>,
+    deferred_cell_inputs: Arc<DeferredCellInputRegistry>,
     live_exec_sessions: LiveExecSessionRegistry,
+    trace_provenance: Mutex<CellTraceProvenance>,
     default_exec_yield_time_ms: u64,
     shutdown_token: CancellationToken,
     unavailable_warning_emitted: AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+enum ObservationFailureDisposition {
+    Recoverable,
+    Terminal,
 }
 
 impl CodeModeService {
@@ -85,14 +115,20 @@ impl CodeModeService {
         config: &CodeModeConfig,
         executed_tool_calls: Option<Arc<ExecutedToolCallRecorder>>,
     ) -> Self {
-        let dispatch_broker = Arc::new(CodeModeDispatchBroker::new(executed_tool_calls));
+        let deferred_cell_inputs = Arc::new(DeferredCellInputRegistry::default());
+        let dispatch_broker = Arc::new(CodeModeDispatchBroker::with_deferred_cell_inputs(
+            executed_tool_calls,
+            Arc::clone(&deferred_cell_inputs),
+        ));
         let availability = session_provider.availability();
         Self {
             session: OnceCell::new(),
             session_provider,
             availability,
             dispatch_broker,
+            deferred_cell_inputs,
             live_exec_sessions: LiveExecSessionRegistry::default(),
+            trace_provenance: Mutex::new(CellTraceProvenance::default()),
             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
             shutdown_token: CancellationToken::new(),
             unavailable_warning_emitted: AtomicBool::new(false),
@@ -130,21 +166,68 @@ impl CodeModeService {
         request
             .yield_time_ms
             .get_or_insert(self.default_exec_yield_time_ms);
-        self.session().await?.execute(request).await
+        let admission = self.dispatch_broker.begin_cell_admission()?;
+        let session = self.session().await?;
+        let started = session.execute(request).await?;
+        if let Err(error) = cell_validation::validate_host_cell_id(&started.cell_id) {
+            terminate_rejected_host_cell(session.as_ref(), &started.cell_id).await;
+            return Err(error);
+        }
+        if let Err(error) = self.dispatch_broker.admit_cell(admission, &started.cell_id) {
+            terminate_rejected_host_cell(session.as_ref(), &started.cell_id).await;
+            return Err(error);
+        }
+        let cell_id = started.cell_id.clone();
+        let expected_cell_id = cell_id.clone();
+        let dispatch_broker = Arc::clone(&self.dispatch_broker);
+        let cleanup_session = Arc::clone(&session);
+        Ok(codex_code_mode::StartedCell::from_future(
+            cell_id.clone(),
+            async move {
+                let response = started.initial_response().await?;
+                if let Err(error) = cell_validation::validate_runtime_response_for_cell(
+                    &expected_cell_id,
+                    &response,
+                ) {
+                    terminate_rejected_host_cell(cleanup_session.as_ref(), &cell_id).await;
+                    dispatch_broker.close_cell(&cell_id);
+                    return Err(error);
+                }
+                Ok(response)
+            },
+        ))
     }
 
     pub(crate) async fn wait(
         &self,
         request: codex_code_mode::WaitRequest,
     ) -> Result<codex_code_mode::WaitOutcome, String> {
-        self.session().await?.wait(request).await
+        let expected_cell_id = request.cell_id.clone();
+        let session = self.session().await?;
+        let outcome = session.wait(request).await?;
+        if let Err(error) =
+            cell_validation::validate_wait_outcome_for_cell(&expected_cell_id, &outcome)
+        {
+            terminate_rejected_host_cell(session.as_ref(), &expected_cell_id).await;
+            self.dispatch_broker.close_cell(&expected_cell_id);
+            return Err(error);
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn terminate(
         &self,
         cell_id: CellId,
     ) -> Result<codex_code_mode::WaitOutcome, String> {
-        self.session().await?.terminate(cell_id).await
+        let expected_cell_id = cell_id.clone();
+        let outcome = self.session().await?.terminate(cell_id).await?;
+        if let Err(error) =
+            cell_validation::validate_wait_outcome_for_cell(&expected_cell_id, &outcome)
+        {
+            self.dispatch_broker.close_cell(&expected_cell_id);
+            return Err(error);
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn interrupt_active_cells(&self) {
@@ -167,6 +250,11 @@ impl CodeModeService {
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
         self.shutdown_token.cancel();
         self.dispatch_broker.shutdown();
+        self.deferred_cell_inputs.clear();
+        self.trace_provenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         // Join any initialization already in progress without initializing an unused service.
         match self
             .session
@@ -202,6 +290,20 @@ impl CodeModeService {
         self.dispatch_broker.close_cell(cell_id);
     }
 
+    pub(crate) fn record_cell_trace_started(&self, cell_id: &CellId) {
+        self.trace_provenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_started(cell_id);
+    }
+
+    pub(crate) fn claim_cell_trace_end(&self, cell_id: &CellId) -> bool {
+        self.trace_provenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .claim_end(cell_id)
+    }
+
     fn observe_nested_exec_result(
         &self,
         cell_id: &CellId,
@@ -221,6 +323,76 @@ impl CodeModeService {
 
     fn live_exec_sessions_for_cell(&self, cell_id: &CellId) -> Vec<i32> {
         self.live_exec_sessions.sessions_for_cell(cell_id)
+    }
+
+    pub(crate) fn admit_cell_notification(
+        &self,
+        session: &Session,
+        turn: &TurnContext,
+        cell_id: &CellId,
+        call_id: String,
+        text: String,
+    ) -> Option<AdmittedCellInputBatch> {
+        let input = prepare_deferred_cell_input(
+            session,
+            turn,
+            DeferredCellInput::notification(call_id, text),
+        )?;
+        self.deferred_cell_inputs
+            .admit_inputs(cell_id, std::iter::once(input))
+    }
+
+    pub(crate) fn admit_cell_hook_contexts(
+        &self,
+        session: &Session,
+        turn: &TurnContext,
+        cell_id: &CellId,
+        contexts: Vec<String>,
+    ) -> Option<AdmittedCellInputBatch> {
+        let inputs = contexts.into_iter().filter_map(|text| {
+            prepare_deferred_cell_input(session, turn, DeferredCellInput::hook_context(text))
+        });
+        self.deferred_cell_inputs.admit_inputs(cell_id, inputs)
+    }
+
+    pub(crate) fn defer_admitted_cell_inputs(&self, batch: AdmittedCellInputBatch) {
+        self.deferred_cell_inputs.defer_admitted(batch);
+    }
+
+    pub(crate) fn acknowledge_sampled_cell_inputs(
+        &self,
+        input: &[codex_protocol::models::ResponseItem],
+        turn_id: &str,
+    ) {
+        self.deferred_cell_inputs
+            .acknowledge_model_sample(input, turn_id);
+    }
+
+    fn subscribe_deferred_cell_input_activity(
+        &self,
+        cell_id: &CellId,
+    ) -> (tokio::sync::watch::Receiver<u64>, bool) {
+        let activity_rx = self.deferred_cell_inputs.subscribe_activity();
+        let pending = self.deferred_cell_inputs.has_pending_for_cell(cell_id);
+        (activity_rx, pending)
+    }
+
+    fn has_deferred_cell_inputs(&self, cell_id: &CellId) -> bool {
+        self.deferred_cell_inputs.has_pending_for_cell(cell_id)
+    }
+
+    async fn inject_deferred_inputs_for_cell(&self, exec: &ExecContext, cell_id: &CellId) {
+        let Some(batch) = self.deferred_cell_inputs.take_admitted(cell_id) else {
+            return;
+        };
+        if exec
+            .session
+            .inject_if_running_for_turn(&exec.turn.sub_id, batch.response_items())
+            .await
+            .is_err()
+        {
+            self.deferred_cell_inputs.restore(batch);
+        }
     }
 
     pub(crate) fn start_turn_worker(
@@ -273,13 +445,50 @@ impl CodeModeService {
     }
 }
 
-pub(super) async fn handle_runtime_response(
+fn prepare_deferred_cell_input(
+    session: &Session,
+    turn: &TurnContext,
+    input: DeferredCellInput,
+) -> Option<DeferredCellInput> {
+    let response_item = input.response_item();
+    let (prepared, _) =
+        session.prepare_conversation_items_for_history(turn, std::slice::from_ref(&response_item));
+    let [prepared] = prepared.as_ref() else {
+        tracing::warn!("history preparation changed the deferred code-mode input item count");
+        return None;
+    };
+    input.with_prepared_response_item(prepared.clone())
+}
+
+async fn terminate_rejected_host_cell(session: &dyn CodeModeSession, cell_id: &CellId) {
+    if let Err(error) = session.terminate(cell_id.clone()).await {
+        tracing::warn!(
+            %cell_id,
+            %error,
+            "failed to terminate rejected code-mode cell"
+        );
+    }
+}
+
+async fn handle_runtime_response(
     exec: &ExecContext,
     response: RuntimeResponse,
     max_output_tokens: Option<usize>,
     wall_time: Duration,
+    call_id: &str,
+    output_kind: CodeModeOutputKind,
 ) -> Result<FunctionToolOutput, String> {
-    let script_status = format_script_status(&response);
+    let script_status = script_status(&response)?;
+    let cell_id = match &response {
+        RuntimeResponse::Yielded { cell_id, .. }
+        | RuntimeResponse::Terminated { cell_id, .. }
+        | RuntimeResponse::Result { cell_id, .. } => cell_id,
+    };
+    exec.session
+        .services
+        .code_mode_service
+        .inject_deferred_inputs_for_cell(exec, cell_id)
+        .await;
     let observed_live_exec_sessions = match &response {
         RuntimeResponse::Yielded { .. } => Vec::new(),
         RuntimeResponse::Terminated { cell_id, .. } | RuntimeResponse::Result { cell_id, .. } => {
@@ -293,23 +502,38 @@ pub(super) async fn handle_runtime_response(
         .session
         .services
         .unified_exec_manager
-        .retain_live_process_ids(observed_live_exec_sessions)
+        .retain_existing_process_ids(observed_live_exec_sessions)
         .await;
 
     match response {
         RuntimeResponse::Yielded { content_items, .. } => {
             let mut content_items = into_function_call_output_content_items(content_items);
             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
-            prepend_script_status(&mut content_items, &script_status, wall_time);
+            let response_envelope =
+                CodeModeResultEnvelope::new(call_id, exec.turn.sub_id.as_str(), output_kind, true);
+            content_items = finalize_code_mode_result(
+                content_items,
+                max_output_tokens,
+                &script_status,
+                wall_time,
+                &live_exec_sessions,
+                &response_envelope,
+            );
             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
         }
         RuntimeResponse::Terminated { content_items, .. } => {
             let mut content_items = into_function_call_output_content_items(content_items);
             sanitize_runtime_image_detail(exec.turn.as_ref(), &mut content_items);
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
-            append_live_exec_sessions(&mut content_items, &live_exec_sessions);
-            prepend_script_status(&mut content_items, &script_status, wall_time);
+            let response_envelope =
+                CodeModeResultEnvelope::new(call_id, exec.turn.sub_id.as_str(), output_kind, true);
+            content_items = finalize_code_mode_result(
+                content_items,
+                max_output_tokens,
+                &script_status,
+                wall_time,
+                &live_exec_sessions,
+                &response_envelope,
+            );
             Ok(FunctionToolOutput::from_content(content_items, Some(true)))
         }
         RuntimeResponse::Result {
@@ -325,9 +549,20 @@ pub(super) async fn handle_runtime_response(
                     text: format!("Script error:\n{error_text}"),
                 });
             }
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
-            append_live_exec_sessions(&mut content_items, &live_exec_sessions);
-            prepend_script_status(&mut content_items, &script_status, wall_time);
+            let response_envelope = CodeModeResultEnvelope::new(
+                call_id,
+                exec.turn.sub_id.as_str(),
+                output_kind,
+                success,
+            );
+            content_items = finalize_code_mode_result(
+                content_items,
+                max_output_tokens,
+                &script_status,
+                wall_time,
+                &live_exec_sessions,
+                &response_envelope,
+            );
             Ok(FunctionToolOutput::from_content(
                 content_items,
                 Some(success),
@@ -336,73 +571,103 @@ pub(super) async fn handle_runtime_response(
     }
 }
 
-fn append_live_exec_sessions(
-    content_items: &mut Vec<FunctionCallOutputContentItem>,
-    session_ids: &[i32],
-) {
-    if session_ids.is_empty() {
-        return;
-    }
-
-    let sessions = session_ids
-        .iter()
-        .map(|session_id| serde_json::json!({ "session_id": session_id }))
-        .collect::<Vec<_>>();
-    let metadata = serde_json::json!({ "live_sessions": sessions });
-    content_items.push(FunctionCallOutputContentItem::InputText {
-        text: format!(
-            "\nLive nested exec sessions remain recoverable:\n{metadata}\n\
-             Continue them with wait_process or write_stdin using the original session_id."
-        ),
-    });
+async fn handle_runtime_failure(
+    exec: &ExecContext,
+    cell_id: &CellId,
+    error: String,
+    max_output_tokens: Option<usize>,
+    wall_time: Duration,
+    call_id: &str,
+    output_kind: CodeModeOutputKind,
+) -> FunctionToolOutput {
+    let failure_disposition = if exec
+        .session
+        .services
+        .code_mode_service
+        .dispatch_broker
+        .cell_is_active(cell_id)
+    {
+        ObservationFailureDisposition::Recoverable
+    } else {
+        ObservationFailureDisposition::Terminal
+    };
+    let status = match failure_disposition {
+        ObservationFailureDisposition::Recoverable => script_status(&RuntimeResponse::Yielded {
+            cell_id: cell_id.clone(),
+            content_items: Vec::new(),
+            reason: codex_code_mode::YieldReason::Requested,
+            code_mode_host_duration: None,
+        })
+        .unwrap_or_else(|_| host_failure_status()),
+        ObservationFailureDisposition::Terminal => {
+            let terminal_response = RuntimeResponse::Result {
+                cell_id: cell_id.clone(),
+                content_items: Vec::new(),
+                error_text: Some(error.clone()),
+                code_mode_host_duration: None,
+            };
+            let trace_end_claimed = exec
+                .session
+                .services
+                .code_mode_service
+                .claim_cell_trace_end(cell_id);
+            if trace_end_claimed {
+                exec.session
+                    .services
+                    .rollout_thread_trace
+                    .code_cell_trace_context(exec.turn.sub_id.as_str(), cell_id.as_str())
+                    .record_ended(&terminal_response);
+            }
+            exec.session
+                .services
+                .code_mode_service
+                .finish_cell_dispatch(cell_id);
+            if trace_end_claimed {
+                exec.session
+                    .services
+                    .analytics_events_client
+                    .track_code_mode_tool_call(codex_analytics::CodeModeToolCallFact::CellClosed {
+                        thread_id: exec.session.thread_id.to_string(),
+                        turn_id: exec.turn.sub_id.clone(),
+                        cell_id: cell_id.to_string(),
+                    });
+            }
+            host_failure_status()
+        }
+    };
+    exec.session
+        .services
+        .code_mode_service
+        .inject_deferred_inputs_for_cell(exec, cell_id)
+        .await;
+    let observed_live_exec_sessions = exec
+        .session
+        .services
+        .code_mode_service
+        .live_exec_sessions_for_cell(cell_id);
+    let live_exec_sessions = exec
+        .session
+        .services
+        .unified_exec_manager
+        .retain_existing_process_ids(observed_live_exec_sessions)
+        .await;
+    let response_envelope =
+        CodeModeResultEnvelope::new(call_id, exec.turn.sub_id.as_str(), output_kind, false);
+    let content_items = finalize_code_mode_result(
+        vec![FunctionCallOutputContentItem::InputText {
+            text: format!("Code-mode host error:\n{error}"),
+        }],
+        max_output_tokens,
+        &status,
+        wall_time,
+        &live_exec_sessions,
+        &response_envelope,
+    );
+    FunctionToolOutput::from_content(content_items, Some(false))
 }
 
 fn sanitize_runtime_image_detail(turn: &TurnContext, items: &mut [FunctionCallOutputContentItem]) {
     sanitize_image_detail_items(can_request_original_image_detail(turn.model_info()), items);
-}
-
-fn format_script_status(response: &RuntimeResponse) -> String {
-    match response {
-        RuntimeResponse::Yielded { cell_id, .. } => {
-            format!("Script running with cell ID {cell_id}")
-        }
-        RuntimeResponse::Terminated { .. } => "Script terminated".to_string(),
-        RuntimeResponse::Result { error_text, .. } => {
-            if error_text.is_none() {
-                "Script completed".to_string()
-            } else {
-                "Script failed".to_string()
-            }
-        }
-    }
-}
-
-fn prepend_script_status(
-    content_items: &mut Vec<FunctionCallOutputContentItem>,
-    status: &str,
-    wall_time: Duration,
-) {
-    let wall_time_seconds = ((wall_time.as_secs_f32()) * 10.0).round() / 10.0;
-    let header = format!("{status}\nWall time {wall_time_seconds:.1} seconds\nOutput:\n");
-    content_items.insert(0, FunctionCallOutputContentItem::InputText { text: header });
-}
-
-fn truncate_code_mode_result(
-    items: Vec<FunctionCallOutputContentItem>,
-    max_output_tokens: Option<usize>,
-) -> Vec<FunctionCallOutputContentItem> {
-    let max_output_tokens = resolve_max_tokens(max_output_tokens);
-    let policy = TruncationPolicy::Tokens(max_output_tokens);
-    if items
-        .iter()
-        .all(|item| matches!(item, FunctionCallOutputContentItem::InputText { .. }))
-    {
-        let (truncated_items, _) =
-            formatted_truncate_text_content_items_with_policy(&items, policy);
-        return truncated_items;
-    }
-
-    truncate_function_output_items_with_policy(&items, policy, estimate_audio_token_count)
 }
 
 // Submit synchronously so the recorder sees the call before the cell's dispatch gate closes.
@@ -528,7 +793,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::build_nested_tool_payload;
-    use super::truncate_code_mode_result;
     use crate::session::step_context::StepContext;
     use crate::session::tests::make_session_and_context;
     use crate::tools::context::ToolPayload;
@@ -536,7 +800,6 @@ mod tests {
     use crate::tools::router::ToolRouter;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_code_mode::CodeModeToolKind;
-    use codex_protocol::models::FunctionCallOutputContentItem;
     use codex_protocol::openai_models::ToolMode;
     use codex_tools::ToolName;
     use serde_json::json;
@@ -602,38 +865,5 @@ mod tests {
             }
             other => panic!("expected freeform payload, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn truncated_text_output_starts_with_warning() {
-        let items = vec![FunctionCallOutputContentItem::InputText {
-            text: "0123456789012345678901234567890123456789".to_string(),
-        }];
-
-        assert_eq!(
-            truncate_code_mode_result(items, Some(5)),
-            vec![FunctionCallOutputContentItem::InputText {
-                text: concat!(
-                    "Warning: truncated output (original token count: 10)\n",
-                    "Total output lines: 1\n\n",
-                    "0123456789…5 tokens truncated…0123456789"
-                )
-                .to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn over_budget_audio_output_is_omitted() {
-        let items = vec![FunctionCallOutputContentItem::InputAudio {
-            audio_url: format!("data:audio/wav;base64,{}", "A".repeat(100)),
-        }];
-
-        assert_eq!(
-            truncate_code_mode_result(items, Some(5)),
-            vec![FunctionCallOutputContentItem::InputText {
-                text: "[omitted 1 audio items ...]".to_string(),
-            }]
-        );
     }
 }

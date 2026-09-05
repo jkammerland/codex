@@ -27,6 +27,8 @@ use self::connection::ConnectionError;
 use self::connection::RemoteSession;
 use self::connection::SessionCleanup;
 use crate::NoopCodeModeSessionDelegate;
+use crate::generation_cell_id::initial_session_generation;
+use crate::generation_cell_id::stale_cell_outcome;
 
 mod connection;
 
@@ -259,7 +261,7 @@ impl ProcessOwnedCodeModeSession {
                 delegate,
                 limits,
                 state: StdMutex::new(SessionState::New),
-                next_generation: AtomicU64::new(1),
+                next_generation: AtomicU64::new(initial_session_generation()),
                 shutdown_requested: AtomicBool::new(false),
                 shutdown_result: StdMutex::new(None),
                 retired_cleanups: StdMutex::new(Vec::new()),
@@ -278,11 +280,17 @@ impl ProcessOwnedCodeModeSession {
 
     pub async fn wait(&self, request: WaitRequest) -> Result<WaitOutcome, String> {
         let binding = self.connection().await?;
+        if let Some(outcome) = stale_cell_outcome(binding.remote.generation, &request.cell_id) {
+            return Ok(outcome);
+        }
         binding.connection.wait(binding.remote, request).await
     }
 
     pub async fn terminate(&self, cell_id: CellId) -> Result<WaitOutcome, String> {
         let binding = self.connection().await?;
+        if let Some(outcome) = stale_cell_outcome(binding.remote.generation, &cell_id) {
+            return Ok(outcome);
+        }
         binding.connection.terminate(binding.remote, cell_id).await
     }
 

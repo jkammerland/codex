@@ -187,6 +187,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
     tool_use_id: String,
     tool_name: &HookToolName,
     tool_input: &Value,
+    code_mode_cell_id: Option<&codex_code_mode::CellId>,
 ) -> PreToolUseHookResult {
     let request = PreToolUseRequest {
         session_id: sess.session_id().into(),
@@ -214,7 +215,8 @@ pub(crate) async fn run_pre_tool_use_hooks(
         updated_input,
     } = hooks.run_pre_tool_use(request).await;
     emit_hook_completed_events(sess, turn_context, hook_events).await;
-    record_tool_additional_contexts(sess, turn_context, additional_contexts).await;
+    record_tool_additional_contexts(sess, turn_context, additional_contexts, code_mode_cell_id)
+        .await;
 
     if !should_block {
         return PreToolUseHookResult::Continue { updated_input };
@@ -845,15 +847,35 @@ pub(crate) async fn record_tool_additional_contexts(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     additional_contexts: Vec<String>,
+    code_mode_cell_id: Option<&codex_code_mode::CellId>,
 ) {
-    let developer_messages = additional_context_messages(additional_contexts);
-    if developer_messages.is_empty() {
+    if let Some(cell_id) = code_mode_cell_id {
+        let Some(batch) = sess.services.code_mode_service.admit_cell_hook_contexts(
+            sess.as_ref(),
+            turn_context.as_ref(),
+            cell_id,
+            additional_contexts,
+        ) else {
+            return;
+        };
+        if sess
+            .record_conversation_items_if_running_for_turn(turn_context, batch.response_items())
+            .await
+            .is_err()
+        {
+            sess.services
+                .code_mode_service
+                .defer_admitted_cell_inputs(batch);
+        }
         return;
     }
 
-    let _ = sess
-        .record_conversation_items_if_running_for_turn(turn_context, developer_messages)
-        .await;
+    let developer_messages = additional_context_messages(additional_contexts);
+    if !developer_messages.is_empty() {
+        let _ = sess
+            .record_conversation_items_if_running_for_turn(turn_context, developer_messages)
+            .await;
+    }
 }
 
 fn additional_context_messages(additional_contexts: Vec<String>) -> Vec<ResponseItem> {

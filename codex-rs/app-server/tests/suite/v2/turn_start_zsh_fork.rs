@@ -14,13 +14,16 @@ use app_test_support::create_escalated_command_execution_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
-use codex_app_server_protocol::CommandAction;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ServerRequestResolvedNotification;
+use codex_app_server_protocol::ThreadArchiveParams;
+use codex_app_server_protocol::ThreadArchiveResponse;
+use codex_app_server_protocol::ThreadArchivedNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -427,7 +430,8 @@ async fn turn_start_shell_zsh_fork_exec_approval_cancel_v2() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2() -> Result<()> {
+async fn turn_start_shell_zsh_fork_late_subcommand_cancel_does_not_restart_parent_v2(
+) -> Result<()> {
     // TODO(anp): Remove after zsh-fork fixtures can run in the selected remote environment.
     skip_if_remote!(
         Ok(()),
@@ -442,35 +446,37 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
     std::fs::create_dir(&workspace)?;
 
     let Some(zsh_path) = find_test_zsh_path()? else {
-        eprintln!("skipping zsh fork subcommand decline test: no zsh executable found");
+        eprintln!("skipping zsh fork subcommand cancel test: no zsh executable found");
         return Ok(());
     };
     if !supports_exec_wrapper_intercept(&zsh_path) {
         eprintln!(
-            "skipping zsh fork subcommand decline test: zsh does not support EXEC_WRAPPER intercepts ({})",
+            "skipping zsh fork subcommand cancel test: zsh does not support EXEC_WRAPPER intercepts ({})",
             zsh_path.display()
         );
         return Ok(());
     }
     eprintln!("using zsh path for zsh-fork test: {}", zsh_path.display());
-    let first_file = workspace.join("first.txt");
-    let second_file = workspace.join("second.txt");
-    std::fs::write(&first_file, "one")?;
-    std::fs::write(&second_file, "two")?;
+    let release_marker_path = workspace.join("release-late-subcommand");
+    let target_file = workspace.join("keep-after-cancel.txt");
+    std::fs::write(&target_file, "keep")?;
+    let release_marker = release_marker_path
+        .to_string_lossy()
+        .replace('\'', r#"'\''"#);
+    let target_file_escaped = target_file.to_string_lossy().replace('\'', r#"'\''"#);
     let shell_command = format!(
-        "/bin/rm {} && /bin/rm {}",
-        first_file.display(),
-        second_file.display()
+        "while [[ ! -f '{release_marker}' ]]; do :; done; /bin/rm '{target_file_escaped}'"
     );
+    let call_id = "call-zsh-fork-late-subcommand-cancel";
     let tool_call_arguments = serde_json::to_string(&serde_json::json!({
         "cmd": shell_command,
         "workdir": serde_json::Value::Null,
-        "yield_time_ms": 20000
+        "yield_time_ms": 100
     }))?;
     let response = responses::sse(vec![
         responses::ev_response_created("resp-1"),
         responses::ev_function_call(
-            "call-zsh-fork-subcommand-decline",
+            call_id,
             "exec_command",
             &tool_call_arguments,
         ),
@@ -480,10 +486,9 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
         responses::ev_response_created("resp-2"),
         responses::ev_completed("resp-2"),
     ]);
-    // Linux CI has occasionally issued a second `/responses` POST after the
-    // subcommand-decline flow. This test is about approval/decline behavior in
-    // the zsh fork, not exact model request count, so allow an extra request
-    // and return a harmless no-op response if it arrives.
+    // The parent intentionally yields while its builtin loop is still running.
+    // The second response lets the turn finish before the loop releases the
+    // intercepted subcommand.
     let server =
         create_mock_responses_server_sequence_unchecked(vec![response, no_op_response]).await;
     create_config_toml(
@@ -513,7 +518,7 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
             thread_id: thread.id.clone(),
             client_user_message_id: None,
             input: vec![V2UserInput::Text {
-                text: "remove both files".to_string(),
+                text: "remove the file after the release marker appears".to_string(),
                 text_elements: Vec::new(),
             }],
             cwd: Some(workspace.clone()),
@@ -521,7 +526,7 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
             // This test is about execve-intercept approval propagation, not
             // workspace sandboxing. Using full access avoids macOS sandbox
             // setup failures that can terminate the parent shell before the
-            // second subcommand approval is observed.
+            // delayed subcommand approval is observed.
             sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
             model: Some("mock-model".to_string()),
             effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
@@ -532,94 +537,116 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
     let TurnStartResponse { turn } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_id)).await??;
 
-    let mut approved_subcommand_strings = Vec::new();
-    let mut approved_subcommand_ids = Vec::new();
-    let mut saw_parent_approval = false;
-    let target_decisions = [
-        CommandExecutionApprovalDecision::Accept,
-        CommandExecutionApprovalDecision::Cancel,
-    ];
-    let mut target_decision_index = 0;
-    let first_file_str = first_file.to_string_lossy().into_owned();
-    let second_file_str = second_file.to_string_lossy().into_owned();
-    let parent_shell_hint = format!("&& {}", &first_file_str);
-    while target_decision_index < target_decisions.len() || !saw_parent_approval {
-        let server_req = timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_request_message(),
-        )
-        .await??;
-        let ServerRequest::CommandExecutionRequestApproval { request_id, params } = server_req
-        else {
-            panic!("expected CommandExecutionRequestApproval request");
-        };
-        assert_eq!(params.item_id, "call-zsh-fork-subcommand-decline");
-        assert_eq!(params.thread_id, thread.id);
-        let approval_command = params
-            .command
-            .as_deref()
-            .expect("approval command should be present");
-        let has_first_file = approval_command.contains(&first_file_str);
-        let has_second_file = approval_command.contains(&second_file_str);
-        let mentions_rm_binary =
-            approval_command.contains("/bin/rm ") || approval_command.contains("/usr/bin/rm ");
-        let has_rm_action = params.command_actions.as_ref().is_some_and(|actions| {
-            actions.iter().any(|action| match action {
-                CommandAction::Read { name, .. } => name == "rm",
-                CommandAction::Unknown { command } => command.contains("rm"),
-                _ => false,
-            })
-        });
-        let is_target_subcommand =
-            (has_first_file != has_second_file) && (has_rm_action || mentions_rm_binary);
-
-        if is_target_subcommand {
-            approved_subcommand_ids.push(
-                params
-                    .approval_id
-                    .clone()
-                    .expect("approval_id must be present for zsh subcommand approvals"),
-            );
-            approved_subcommand_strings.push(approval_command.to_string());
-        }
-        let is_parent_approval = approval_command
-            .contains(&command_packaged_zsh_path(&codex_home).display().to_string())
-            && (approval_command.contains(&shell_command)
-                || (has_first_file && has_second_file)
-                || approval_command.contains(&parent_shell_hint));
-        let decision = if is_target_subcommand {
-            let decision = target_decisions[target_decision_index].clone();
-            target_decision_index += 1;
-            decision
-        } else if is_parent_approval {
-            assert!(
-                !saw_parent_approval,
-                "unexpected extra non-target approval: {approval_command}"
-            );
-            saw_parent_approval = true;
-            CommandExecutionApprovalDecision::Accept
-        } else {
-            // Login shells may run startup helpers (for example path_helper on macOS)
-            // before the parent shell command or target subcommands are reached.
-            CommandExecutionApprovalDecision::Accept
-        };
-        mcp.send_response(
-            request_id,
-            serde_json::to_value(CommandExecutionRequestApprovalResponse { decision })?,
-        )
-        .await?;
-    }
-
+    let server_req = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
+    let ServerRequest::CommandExecutionRequestApproval { request_id, params } = server_req else {
+        panic!("expected parent CommandExecutionRequestApproval request");
+    };
+    assert_eq!(params.item_id, call_id);
+    assert_eq!(params.thread_id, thread.id);
+    assert_eq!(params.approval_id, None);
+    let approval_command = params
+        .command
+        .as_deref()
+        .expect("parent approval command should be present");
     assert!(
-        saw_parent_approval,
-        "expected parent shell approval request"
+        approval_command.contains(&command_packaged_zsh_path(&codex_home).display().to_string())
     );
-    assert_eq!(approved_subcommand_ids.len(), 2);
-    assert_ne!(approved_subcommand_ids[0], approved_subcommand_ids[1]);
-    assert_eq!(approved_subcommand_strings.len(), 2);
-    assert!(approved_subcommand_strings[0].contains(&first_file.display().to_string()));
-    assert!(approved_subcommand_strings[1].contains(&second_file.display().to_string()));
-    let parent_completed_command_execution = timeout(DEFAULT_READ_TIMEOUT, async {
+    assert!(approval_command.contains("release-late-subcommand"));
+    assert!(approval_command.contains("keep-after-cancel.txt"));
+    mcp.send_response(
+        request_id,
+        serde_json::to_value(CommandExecutionRequestApprovalResponse {
+            decision: CommandExecutionApprovalDecision::Accept,
+        })?,
+    )
+    .await?;
+
+    let parent_started_metadata = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let started_notif = mcp
+                .read_stream_until_notification_message("item/started")
+                .await?;
+            let started: ItemStartedNotification =
+                serde_json::from_value(started_notif.params.expect("item/started params"))?;
+            if let ThreadItem::CommandExecution {
+                id,
+                command,
+                cwd,
+                command_actions,
+                ..
+            } = started.item
+                && id == call_id
+            {
+                return Ok::<_, anyhow::Error>((command, cwd, command_actions));
+            }
+        }
+    })
+    .await??;
+    let completed_notif = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let completed: TurnCompletedNotification = serde_json::from_value(
+        completed_notif
+            .params
+            .expect("turn/completed params must be present"),
+    )?;
+    assert_eq!(completed.thread_id, thread.id);
+    assert_eq!(completed.turn.id, turn.id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    mcp.clear_message_buffer();
+
+    std::fs::write(&release_marker_path, "release")?;
+    let server_req = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
+    let ServerRequest::CommandExecutionRequestApproval { request_id, params } = server_req else {
+        panic!("expected late subcommand CommandExecutionRequestApproval request");
+    };
+    assert_eq!(params.item_id, call_id);
+    assert_eq!(params.thread_id, thread.id);
+    assert_eq!(params.turn_id, turn.id);
+    assert!(
+        params.approval_id.is_some(),
+        "the intercepted subcommand must have its own approval id"
+    );
+    assert!(
+        !mcp.pending_notification_methods()
+            .iter()
+            .any(|method| method == "item/started"),
+        "the late subcommand approval must not restart the yielded parent"
+    );
+    let approval_command = params
+        .command
+        .as_deref()
+        .expect("subcommand approval command should be present");
+    assert!(approval_command.contains("/rm "));
+    assert!(approval_command.contains(target_file.to_string_lossy().as_ref()));
+    let resolved_request_id = request_id.clone();
+    mcp.send_response(
+        request_id,
+        serde_json::to_value(CommandExecutionRequestApprovalResponse {
+            decision: CommandExecutionApprovalDecision::Cancel,
+        })?,
+    )
+    .await?;
+
+    let resolved: ServerRequestResolvedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("serverRequest/resolved"),
+    )
+    .await??;
+    assert_eq!(resolved.thread_id, thread.id);
+    assert_eq!(resolved.request_id, resolved_request_id);
+
+    let parent_completion = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let completed_notif = mcp
                 .read_stream_until_notification_message("item/completed")
@@ -631,89 +658,62 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
                     .expect("item/completed params"),
             )?;
             if let ThreadItem::CommandExecution { id, .. } = &completed.item
-                && id == "call-zsh-fork-subcommand-decline"
+                && id == call_id
             {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+                return Ok::<ItemCompletedNotification, anyhow::Error>(completed);
             }
         }
     })
-    .await;
+    .await??;
+    assert_eq!(parent_completion.thread_id, thread.id);
+    assert_eq!(parent_completion.turn_id, turn.id);
+    let ThreadItem::CommandExecution {
+        id,
+        command,
+        cwd,
+        command_actions,
+        status,
+        ..
+    } = parent_completion.item
+    else {
+        unreachable!("loop ensures we break on parent command execution item");
+    };
+    assert_eq!(id, call_id);
+    assert!(
+        matches!(
+            status,
+            CommandExecutionStatus::Declined | CommandExecutionStatus::Failed
+        ),
+        "the cancelled late subcommand must terminate the parent command"
+    );
+    assert_eq!(
+        (command, cwd, command_actions),
+        parent_started_metadata,
+        "the late approval must complete the original parent metadata"
+    );
 
-    match parent_completed_command_execution {
-        Ok(Ok(parent_completed_command_execution)) => {
-            let ThreadItem::CommandExecution {
-                id,
-                status,
-                aggregated_output,
-                ..
-            } = parent_completed_command_execution
-            else {
-                unreachable!("loop ensures we break on parent command execution item");
-            };
-            assert_eq!(id, "call-zsh-fork-subcommand-decline");
-            assert_eq!(status, CommandExecutionStatus::Declined);
-            if let Some(output) = aggregated_output.as_deref() {
-                assert!(
-                    output == "exec command rejected by user"
-                        || output.contains("sandbox denied exec error"),
-                    "unexpected aggregated output: {output}"
-                );
-            }
-
-            match timeout(
-                DEFAULT_READ_TIMEOUT,
-                mcp.read_stream_until_notification_message("turn/completed"),
-            )
-            .await
-            {
-                Ok(Ok(completed_notif)) => {
-                    let completed: TurnCompletedNotification = serde_json::from_value(
-                        completed_notif
-                            .params
-                            .expect("turn/completed params must be present"),
-                    )?;
-                    assert_eq!(completed.thread_id, thread.id);
-                    assert_eq!(completed.turn.id, turn.id);
-                    assert!(matches!(
-                        completed.turn.status,
-                        TurnStatus::Interrupted | TurnStatus::Completed
-                    ));
-                }
-                Ok(Err(error)) => return Err(error),
-                Err(_) => {
-                    mcp.interrupt_turn_and_wait_for_aborted(
-                        thread.id.clone(),
-                        turn.id.clone(),
-                        DEFAULT_READ_TIMEOUT,
-                    )
-                    .await?;
-                }
-            }
-        }
-        Ok(Err(error)) => return Err(error),
-        Err(_) => {
-            // Some zsh builds abort the turn immediately after the rejected
-            // subcommand without emitting a parent `item/completed`, and Linux
-            // sandbox failures can also complete the turn before the parent
-            // completion item is observed.
-            let completed_notif = timeout(
-                DEFAULT_READ_TIMEOUT,
-                mcp.read_stream_until_notification_message("turn/completed"),
-            )
-            .await??;
-            let completed: TurnCompletedNotification = serde_json::from_value(
-                completed_notif
-                    .params
-                    .expect("turn/completed params must be present"),
-            )?;
-            assert_eq!(completed.thread_id, thread.id);
-            assert_eq!(completed.turn.id, turn.id);
-            assert!(matches!(
-                completed.turn.status,
-                TurnStatus::Interrupted | TurnStatus::Completed
-            ));
-        }
-    }
+    // Archiving is cleanup-only and happens after the late-cancel lifecycle
+    // assertions. It also provides a real thread-shutdown barrier before the
+    // final exactly-once check.
+    let archive_id = mcp
+        .send_thread_archive_request(ThreadArchiveParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let _: ThreadArchiveResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(archive_id)).await??;
+    let archived: ThreadArchivedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("thread/archived")).await??;
+    assert_eq!(archived.thread_id, thread.id);
+    assert!(target_file.exists(), "the cancelled rm must not run");
+    assert_eq!(
+        mcp.pending_notification_methods()
+            .into_iter()
+            .filter(|method| method == "item/started" || method == "item/completed")
+            .count(),
+        0,
+        "the late approval must not restart or recomplete the yielded parent"
+    );
 
     Ok(())
 }

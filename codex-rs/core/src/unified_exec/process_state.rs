@@ -7,21 +7,15 @@ pub(crate) struct ProcessState {
 }
 
 impl ProcessState {
-    pub(crate) fn exited(&self, exit_code: Option<i32>) -> Self {
-        Self {
-            has_exited: true,
-            exit_code,
-            failure_message: self.failure_message.clone(),
-            sandbox_denied: self.sandbox_denied,
-        }
+    pub(crate) fn mark_exited(&mut self, exit_code: Option<i32>) {
+        self.has_exited = true;
+        self.exit_code = exit_code;
     }
 
-    pub(crate) fn failed(&self, message: String) -> Self {
-        Self {
-            has_exited: true,
-            exit_code: self.exit_code,
-            failure_message: Some(message),
-            sandbox_denied: self.sandbox_denied,
+    pub(crate) fn fail_if_absent(&mut self, message: String) {
+        if self.failure_message.is_none() {
+            self.has_exited = true;
+            self.failure_message = Some(message);
         }
     }
 }

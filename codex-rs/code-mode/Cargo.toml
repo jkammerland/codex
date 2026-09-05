@@ -33,3 +33,4 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tonic = { workspace = true, features = ["router", "transport"] }

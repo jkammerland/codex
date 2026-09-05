@@ -9,7 +9,11 @@ use tokio::time::Sleep;
 
 use super::SharedPluginMetricsSidecar;
 use super::UnifiedExecContext;
+use super::pending_launch::ManagerTaskHandle;
+use super::pending_launch::PendingLaunch;
+use super::pending_launch::PendingLaunchEventVisibility;
 use super::process::OutputHandles;
+use super::process::PublishedOutputChunk;
 use super::process::UnifiedExecProcess;
 use super::take_plugin_metrics_sidecar;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
@@ -45,23 +49,46 @@ struct Emitter {
     session: Arc<Session>,
     turn: Arc<TurnContext>,
     call_id: String,
+    #[cfg(test)]
+    emit_barrier: Option<EmitBarrier>,
+}
+
+#[cfg(test)]
+struct EmitBarrier {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 struct Buffer<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_DELTA_MAX_BYTES> {
     pending: Vec<u8>,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
+    deferred: HeadTailBuffer,
+    event_visibility: PendingLaunchEventVisibility,
     emitter: Emitter,
 }
 
-/// Spawn a background task that continuously reads from the PTY, appends to the
-/// shared transcript, and emits ExecCommandOutputDelta events on UTF‑8
-/// boundaries.
-pub(crate) fn start_streaming_output(
+/// Spawn a background task that continuously reads from the PTY and appends to
+/// the shared transcript. Output deltas are bounded and withheld until the
+/// manager confirms that the canonical Begin event has committed.
+pub(crate) async fn start_streaming_output(
     process: &UnifiedExecProcess,
     context: &UnifiedExecContext,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
+    pending_launch: Arc<PendingLaunch>,
 ) {
-    let mut receiver = process.output_receiver();
+    let mut event_visibility = pending_launch.subscribe_event_visibility();
+    // Authoritative transcript publication and broadcast happen under the same
+    // lock. Subscribe while holding it and seed replay from everything
+    // published earlier, closing the fast-exit gap without replaying a byte
+    // twice.
+    let transcript = process.output_transcript();
+    let (buffered_output, mut observed_bytes, mut receiver) = {
+        let buffered_output = transcript.lock().await;
+        let receiver = process.output_receiver();
+        (
+            buffered_output.clone(),
+            buffered_output.total_bytes(),
+            receiver,
+        )
+    };
     let output_drained = process.output_drained_notify();
     let exit_token = process.cancellation_token();
     let OutputHandles {
@@ -75,16 +102,20 @@ pub(crate) fn start_streaming_output(
         session: Arc::clone(&context.session),
         turn: Arc::clone(&context.step_context.turn),
         call_id: context.call_id.clone(),
+        #[cfg(test)]
+        emit_barrier: None,
     };
 
-    tokio::spawn(async move {
+    pending_launch.spawn_manager_task(async move {
         use tokio::sync::broadcast::error::RecvError;
 
         let mut output: Buffer = Buffer {
             pending: Vec::new(),
-            transcript,
+            deferred: HeadTailBuffer::default(),
+            event_visibility: *event_visibility.borrow_and_update(),
             emitter,
         };
+        output.replay_buffered(buffered_output).await;
 
         let mut grace_sleep: Option<Pin<Box<Sleep>>> = None;
         let output_closed_notified = output_closed_notify.notified();
@@ -118,10 +149,22 @@ pub(crate) fn start_streaming_output(
                     output_closed_notified.set(output_closed_notify.notified());
                 }
 
+                changed = event_visibility.changed(), if output.events_pending() => {
+                    let visibility = if changed.is_ok() {
+                        *event_visibility.borrow_and_update()
+                    } else {
+                        PendingLaunchEventVisibility::Suppress
+                    };
+                    output.set_event_visibility(visibility).await;
+                }
+
                 received = receiver.recv() => {
                     let chunk = match received {
                         Ok(chunk) => chunk,
                         Err(RecvError::Lagged(_)) => {
+                            output
+                                .reconcile_authoritative(&transcript, &mut observed_bytes)
+                                .await;
                             continue;
                         },
                         Err(RecvError::Closed) => {
@@ -130,7 +173,9 @@ pub(crate) fn start_streaming_output(
                         }
                     };
 
-                    output.push(chunk).await;
+                    output
+                        .push_published(chunk, &transcript, &mut observed_bytes)
+                        .await;
                 }
             }
         }
@@ -150,10 +195,30 @@ pub(crate) fn start_streaming_output(
                     ) => break,
                 };
 
-                output.push(chunk).await;
+                output
+                    .push_published(chunk, &transcript, &mut observed_bytes)
+                    .await;
             }
         }
 
+        // A producer can outpace the bounded fan-out while replay publication
+        // is awaiting the event sink. Reconcile from the producer-owned capped
+        // transcript before declaring output drained.
+        output
+            .reconcile_authoritative(&transcript, &mut observed_bytes)
+            .await;
+
+        while output.events_pending() {
+            let visibility = if event_visibility.changed().await.is_ok() {
+                *event_visibility.borrow_and_update()
+            } else {
+                PendingLaunchEventVisibility::Suppress
+            };
+            output.set_event_visibility(visibility).await;
+        }
+        output
+            .reconcile_authoritative(&transcript, &mut observed_bytes)
+            .await;
         output.finish().await;
         output_drained.notify_one();
     });
@@ -173,9 +238,9 @@ pub(crate) fn spawn_exit_watcher(
     plugin_attribution: Option<PluginCommandAttribution>,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     started_at: Instant,
-    network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+    network_denial_monitor: Option<ManagerTaskHandle>,
     plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
-) {
+) -> tokio::task::JoinHandle<()> {
     let exit_token = process.cancellation_token();
     let output_drained = process.output_drained_notify();
     let interaction_lock = process.interaction_lock();
@@ -187,7 +252,7 @@ pub(crate) fn spawn_exit_watcher(
         // window after process exit. Do not classify the terminal event until
         // that monitor has settled, even when output closes immediately.
         if let Some(network_denial_monitor) = network_denial_monitor {
-            let _ = network_denial_monitor.await;
+            network_denial_monitor.wait().await;
         }
         let _interaction_guard = interaction_lock.lock_owned().await;
 
@@ -238,24 +303,121 @@ pub(crate) fn spawn_exit_watcher(
             )
             .await;
         }
-    });
+    })
 }
 
 impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
-    async fn push(&mut self, mut bytes: Vec<u8>) {
+    fn events_pending(&self) -> bool {
+        self.event_visibility == PendingLaunchEventVisibility::Pending
+    }
+
+    async fn set_event_visibility(&mut self, visibility: PendingLaunchEventVisibility) {
+        if !self.events_pending() {
+            return;
+        }
+        self.event_visibility = visibility;
+        match visibility {
+            PendingLaunchEventVisibility::Pending => {}
+            PendingLaunchEventVisibility::Suppress => {
+                self.deferred = HeadTailBuffer::default();
+            }
+            PendingLaunchEventVisibility::Emit => {
+                let deferred = std::mem::take(&mut self.deferred);
+                self.push_visible(deferred.to_bytes_with_omission_marker())
+                    .await;
+            }
+        }
+    }
+
+    async fn replay_buffered(&mut self, buffered_output: HeadTailBuffer) {
+        match self.event_visibility {
+            PendingLaunchEventVisibility::Pending => self.deferred = buffered_output,
+            PendingLaunchEventVisibility::Suppress => {}
+            PendingLaunchEventVisibility::Emit => {
+                self.push_visible(buffered_output.to_bytes_with_omission_marker())
+                    .await;
+            }
+        }
+    }
+
+    async fn reconcile_authoritative(
+        &mut self,
+        transcript: &Arc<Mutex<HeadTailBuffer>>,
+        observed_bytes: &mut usize,
+    ) {
+        let (total_bytes, deferred_replay, visible_replay) = {
+            let authoritative = transcript.lock().await;
+            let total_bytes = authoritative.total_bytes();
+            let (deferred_replay, visible_replay) = match self.event_visibility {
+                PendingLaunchEventVisibility::Pending => (Some(authoritative.clone()), None),
+                PendingLaunchEventVisibility::Suppress => (None, None),
+                PendingLaunchEventVisibility::Emit => (
+                    None,
+                    Some(authoritative.to_bytes_after_with_omission_marker(*observed_bytes)),
+                ),
+            };
+            (total_bytes, deferred_replay, visible_replay)
+        };
+        if total_bytes <= *observed_bytes {
+            return;
+        }
+
+        match self.event_visibility {
+            PendingLaunchEventVisibility::Pending => {
+                // No output has been made visible yet, so replacing the
+                // deferred summary is both exact and duplicate-free.
+                self.deferred = deferred_replay.unwrap_or_default();
+            }
+            PendingLaunchEventVisibility::Suppress => {}
+            PendingLaunchEventVisibility::Emit => {
+                self.push_visible(visible_replay.unwrap_or_default()).await;
+            }
+        }
+        *observed_bytes = total_bytes;
+    }
+
+    async fn push_published(
+        &mut self,
+        chunk: PublishedOutputChunk,
+        transcript: &Arc<Mutex<HeadTailBuffer>>,
+        observed_bytes: &mut usize,
+    ) {
+        let end_offset = chunk.end_offset();
+        if end_offset <= *observed_bytes {
+            return;
+        }
+        if chunk.offset > *observed_bytes {
+            self.reconcile_authoritative(transcript, observed_bytes)
+                .await;
+            if end_offset <= *observed_bytes {
+                return;
+            }
+        }
+
+        let skip = (*observed_bytes).saturating_sub(chunk.offset);
+        let bytes = chunk.bytes.get(skip..).unwrap_or_default().to_vec();
+        self.push(bytes).await;
+        *observed_bytes = end_offset;
+    }
+
+    async fn push(&mut self, bytes: Vec<u8>) {
         const {
             assert!(
                 MAX_BYTES >= char::MAX.len_utf8(),
                 "a frame must fit one UTF-8 scalar"
             )
         };
-        let Self {
-            pending,
-            transcript,
-            emitter,
-        } = self;
+        match self.event_visibility {
+            PendingLaunchEventVisibility::Pending => self.deferred.push_chunk(&bytes),
+            PendingLaunchEventVisibility::Suppress => {}
+            PendingLaunchEventVisibility::Emit => self.push_visible(bytes).await,
+        }
+    }
 
-        transcript.lock().await.push_chunk(&bytes);
+    async fn push_visible(&mut self, mut bytes: Vec<u8>) {
+        let Self {
+            pending, emitter, ..
+        } = self;
 
         // Reuse a producer chunk when it fits, retaining only an incomplete
         // UTF-8 suffix for the next push.
@@ -290,25 +452,35 @@ impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
     async fn finish(self) {
         let Self {
             pending,
-            transcript: _,
+            deferred: _,
+            event_visibility,
             mut emitter,
         } = self;
         debug_assert!(
             pending.len() < char::MAX.len_utf8(),
             "only an incomplete UTF-8 scalar can remain"
         );
-        emitter.emit(|| pending).await;
+        if event_visibility == PendingLaunchEventVisibility::Emit {
+            emitter.emit(|| pending).await;
+        }
     }
 }
 
 impl Emitter {
     /// Build a frame only while quota remains. Returns whether a nonempty frame was sent.
     async fn emit(&mut self, make_chunk: impl FnOnce() -> Vec<u8>) -> bool {
+        #[cfg(test)]
+        if let Some(emit_barrier) = self.emit_barrier.take() {
+            emit_barrier.entered.notify_one();
+            emit_barrier.release.notified().await;
+        }
         let Self {
             remaining_deltas,
             session,
             turn,
             call_id,
+            #[cfg(test)]
+                emit_barrier: _,
         } = self;
         let Some(remaining) = remaining_deltas.checked_sub(1) else {
             return false;

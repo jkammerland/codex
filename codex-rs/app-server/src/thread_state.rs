@@ -1,5 +1,6 @@
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
+use codex_app_server_protocol::CommandAction;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadHistoryBuilder;
@@ -32,6 +33,15 @@ use tokio::sync::watch;
 use tracing::error;
 
 type PendingInterruptQueue = Vec<ConnectionRequestId>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CommandExecutionItemMetadata {
+    pub(crate) plugin_id: Option<String>,
+    pub(crate) script_path: Option<String>,
+    pub(crate) command: String,
+    pub(crate) cwd: LegacyAppPathString,
+    pub(crate) command_actions: Vec<CommandAction>,
+}
 
 pub(crate) struct PendingThreadResumeRequest {
     pub(crate) request_id: ConnectionRequestId,
@@ -87,7 +97,6 @@ pub(crate) enum ThreadListenerCommand {
 #[derive(Default, Clone)]
 pub(crate) struct TurnSummary {
     pub(crate) started_at: Option<i64>,
-    pub(crate) command_execution_started: HashSet<String>,
     pub(crate) last_error: Option<TurnError>,
     pub(crate) last_agent_message: Option<ThreadItem>,
 }
@@ -97,6 +106,11 @@ pub(crate) struct ThreadState {
     pub(crate) pending_interrupts: PendingInterruptQueue,
     pub(crate) pending_rollbacks: Option<ConnectionRequestId>,
     pub(crate) turn_summary: TurnSummary,
+    pub(crate) command_execution_started: HashMap<(String, String), CommandExecutionItemMetadata>,
+    // Keep each callback claim until its ordered canonical completion consumes it. Eviction would
+    // make a late canonical event visible as a second completion; thread teardown drops any entry
+    // whose underlying command never produces that terminal event.
+    callback_completion_tombstones: HashSet<(String, String)>,
     pub(crate) last_terminal_turn_id: Option<String>,
     /// Lets an internal runtime replacement wait until the old listener has processed Core's
     /// `ShutdownComplete` event before that listener is superseded.
@@ -109,6 +123,22 @@ pub(crate) struct ThreadState {
     current_turn_history: ThreadHistoryBuilder,
     listener_thread: Option<Weak<CodexThread>>,
     watch_registration: WatchRegistration,
+}
+
+impl ThreadState {
+    pub(crate) fn record_callback_command_completion(&mut self, turn_id: String, item_id: String) {
+        self.callback_completion_tombstones
+            .insert((turn_id, item_id));
+    }
+
+    pub(crate) fn take_callback_command_completion(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+    ) -> bool {
+        self.callback_completion_tombstones
+            .remove(&(turn_id.to_string(), item_id.to_string()))
+    }
 }
 
 impl ThreadState {
@@ -261,6 +291,16 @@ mod tests {
         ];
 
         assert_eq!(results, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn callback_completion_tombstones_are_turn_scoped_and_single_use() {
+        let mut state = ThreadState::default();
+        state.record_callback_command_completion("turn-a".to_string(), "reused".to_string());
+
+        assert!(!state.take_callback_command_completion("turn-b", "reused"));
+        assert!(state.take_callback_command_completion("turn-a", "reused"));
+        assert!(!state.take_callback_command_completion("turn-a", "reused"));
     }
 
     fn thread_settings(model: &str) -> ThreadSettings {

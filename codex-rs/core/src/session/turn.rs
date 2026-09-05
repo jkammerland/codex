@@ -1452,12 +1452,86 @@ async fn run_sampling_request(
                 .for_prompt(&step_context.settings.model_info.input_modalities)
         };
         let mut prompt_input = prompt_input;
-        if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
-            && executed_tool_calls
-                .attach_pending_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output)
+        if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref() {
+            executed_tool_calls
+                .attach_pending_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output);
+        }
+        if prompt_input
+            .iter()
+            .any(|item| item.executed_tool_call_metadata().is_some())
         {
             codex_protocol::models::bound_executed_tool_calls_for_prompt(&mut prompt_input);
         }
+        let max_item_token_bound =
+            i64::try_from(crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS).unwrap_or(i64::MAX);
+        let mut prompt_tool_output_truncations = Vec::new();
+        prompt_input.retain_mut(|item| {
+            let original_body = match &*item {
+                ResponseItem::FunctionCallOutput { output, .. }
+                | ResponseItem::CustomToolCallOutput { output, .. } => Some(output.body.clone()),
+                _ => None,
+            };
+            let keep = if crate::context_manager::item_token_upper_bound(item)
+                <= max_item_token_bound
+            {
+                true
+            } else if crate::tools::code_mode::bound_prepared_code_mode_output(
+                item,
+                crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS,
+            ) {
+                true
+            } else {
+                match crate::tools::context::cap_prepared_tool_output(
+                    item,
+                    crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS,
+                ) {
+                    crate::tools::context::PreparedToolOutputCap::Fits => true,
+                    crate::tools::context::PreparedToolOutputCap::NotToolOutput => true,
+                    crate::tools::context::PreparedToolOutputCap::EnvelopeTooLarge => {
+                        // Late attempted-tool metadata is useful but cannot displace the tool
+                        // correlation envelope. Retry without it before rejecting a pathological
+                        // envelope that cannot fit even with an empty visible body.
+                        item.clear_executed_tool_calls();
+                        if matches!(
+                            crate::tools::context::cap_prepared_tool_output(
+                                item,
+                                crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS,
+                            ),
+                            crate::tools::context::PreparedToolOutputCap::Fits
+                        ) {
+                            true
+                        } else {
+                            tracing::warn!(
+                                item_id = ?item.id(),
+                                "omitting tool output whose correlation envelope exceeds the model-context item cap"
+                            );
+                            false
+                        }
+                    }
+                }
+            };
+            if keep
+                && let Some(original_body) = original_body
+                && let Some(item_id) = item.id()
+            {
+                let projected_body = match &*item {
+                    ResponseItem::FunctionCallOutput { output, .. }
+                    | ResponseItem::CustomToolCallOutput { output, .. } => Some(&output.body),
+                    _ => None,
+                };
+                if let Some(projected_body) = projected_body
+                    && projected_body != &original_body
+                {
+                    prompt_tool_output_truncations.push((
+                        item_id.clone(),
+                        projected_body.clone(),
+                    ));
+                }
+            }
+            keep
+        });
+        sess.record_prompt_tool_output_truncations(&prompt_tool_output_truncations)
+            .await;
         let prompt = build_prompt(
             prompt_input,
             step_context.as_ref(),
@@ -2306,6 +2380,7 @@ async fn try_run_sampling_request(
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
         .await??;
+    let mut sampled_input_acknowledged = false;
     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
@@ -2372,6 +2447,13 @@ async fn try_run_sampling_request(
                 ));
             }
         };
+
+        if !sampled_input_acknowledged {
+            sess.services
+                .code_mode_service
+                .acknowledge_sampled_cell_inputs(&prompt.input, &turn_context.sub_id);
+            sampled_input_acknowledged = true;
+        }
 
         sess.services
             .session_telemetry

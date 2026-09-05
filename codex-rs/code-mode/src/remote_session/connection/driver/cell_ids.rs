@@ -10,11 +10,7 @@ use codex_code_mode_protocol::host::WireWaitRequest;
 use super::RemoteSession;
 
 pub(super) fn public_cell_id(generation: u64, cell_id: &WireCellId) -> CellId {
-    if generation == 1 {
-        CellId::new(cell_id.as_str().to_string())
-    } else {
-        CellId::new(format!("g{generation}:{}", cell_id.as_str()))
-    }
+    crate::generation_cell_id::encode_public_cell_id(generation, cell_id.as_str())
 }
 
 pub(super) fn public_cell_id_from_protocol(generation: u64, cell_id: &CellId) -> CellId {
@@ -25,21 +21,9 @@ pub(super) fn remote_cell_id(
     session: &RemoteSession,
     cell_id: &CellId,
 ) -> Result<WireCellId, String> {
-    if session.generation == 1 {
-        if cell_id.as_str().starts_with('g') && cell_id.as_str().contains(':') {
-            return Err(format!(
-                "cell {cell_id} belongs to a stale code-mode host generation"
-            ));
-        }
-        return Ok(WireCellId::new(cell_id.as_str()));
-    }
-    let prefix = format!("g{}:", session.generation);
-    let Some(remote_id) = cell_id.as_str().strip_prefix(&prefix) else {
-        return Err(format!(
-            "cell {cell_id} belongs to a stale code-mode host generation"
-        ));
-    };
-    Ok(WireCellId::new(remote_id))
+    crate::generation_cell_id::decode_public_cell_id(session.generation, cell_id)
+        .map(WireCellId::new)
+        .map_err(|_| format!("cell {cell_id} belongs to a stale code-mode host generation"))
 }
 
 pub(super) fn remote_wait_request(
@@ -117,3 +101,7 @@ pub(super) fn wait_outcome_cell_id(outcome: &WireWaitOutcome) -> &WireCellId {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cell_ids_tests.rs"]
+mod tests;

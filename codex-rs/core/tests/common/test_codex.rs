@@ -336,6 +336,7 @@ pub struct TestCodexBuilder {
     supports_openai_form_elicitation: bool,
     external_time_provider: Option<Arc<dyn TimeProvider>>,
     code_mode_host_program: Option<PathBuf>,
+    code_mode_session_provider: Option<Arc<dyn codex_code_mode::CodeModeSessionProvider>>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
 }
@@ -456,6 +457,14 @@ impl TestCodexBuilder {
 
     pub fn with_code_mode_host_program(mut self, host_program: PathBuf) -> Self {
         self.code_mode_host_program = Some(host_program);
+        self
+    }
+
+    pub fn with_code_mode_session_provider(
+        mut self,
+        provider: Arc<dyn codex_code_mode::CodeModeSessionProvider>,
+    ) -> Self {
+        self.code_mode_session_provider = Some(provider);
         self
     }
 
@@ -712,7 +721,9 @@ impl TestCodexBuilder {
             .code_mode_host_program
             .take()
             .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
-        let thread_manager = if config.features.enabled(Feature::CodeModeHost)
+        let thread_manager = if let Some(provider) = self.code_mode_session_provider.take() {
+            thread_manager.with_code_mode_session_provider(provider)
+        } else if config.features.enabled(Feature::CodeModeHost)
             && let Some(code_mode_host_program) = code_mode_host_program
         {
             codex_core::test_support::with_code_mode_host_program(
@@ -1359,6 +1370,7 @@ pub fn test_codex() -> TestCodexBuilder {
         supports_openai_form_elicitation: false,
         external_time_provider: None,
         code_mode_host_program: None,
+        code_mode_session_provider: None,
         history_mode: None,
         models_manager: None,
     }

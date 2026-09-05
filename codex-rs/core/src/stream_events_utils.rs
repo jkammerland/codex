@@ -298,6 +298,14 @@ pub(crate) async fn handle_output_item_done(
     match ToolRouter::build_tool_call(item.clone()) {
         // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
         Ok(Some(call)) => {
+            if let Err(error) =
+                crate::tools::code_mode::validate_core_tool_call_id(&call.tool_name, &call.call_id)
+            {
+                ctx.sess
+                    .send_raw_response_items(ctx.turn_context.as_ref(), std::slice::from_ref(&item))
+                    .await;
+                return Err(CodexErr::Fatal(error));
+            }
             ctx.sess
                 .input_queue
                 .accept_mailbox_delivery_for_current_turn(

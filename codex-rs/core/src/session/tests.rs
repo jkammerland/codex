@@ -91,7 +91,9 @@ use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
+use codex_tools::ToolOutput;
 use codex_tools::ToolSpec;
+use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_path_uri::PathUri;
 use std::collections::BTreeMap;
 use tracing::Span;
@@ -105,6 +107,8 @@ use crate::tasks::SessionTaskResult;
 use crate::tasks::UserShellCommandMode;
 use crate::tasks::execute_user_shell_command;
 use crate::tools::ToolRouter;
+use crate::tools::context::ExecCommandToolOutput;
+use crate::tools::context::ProcessWaitReason;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::ExecCommandHandler;
@@ -2293,6 +2297,194 @@ async fn record_conversation_items_stamps_missing_turn_id_and_preserves_existing
     expected_fresh_item.set_create_time_if_missing(fresh_create_time);
     let expected_items = vec![expected_fresh_item, existing_item];
     assert_eq!(recorded_items, expected_items);
+}
+
+#[tokio::test]
+async fn history_preparation_preserves_already_stamped_tool_output_metadata() {
+    let (session, turn_context) = make_session_and_context().await;
+    let response_item = ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "prepared-code-mode-input".to_string(),
+        name: Some("exec".to_string()),
+        output: FunctionCallOutputPayload::from_text("deferred input".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let (prepared_once, _) = session.prepare_conversation_items_for_history(
+        &turn_context,
+        std::slice::from_ref(&response_item),
+    );
+    let prepared_once = prepared_once.into_owned();
+    let (prepared_twice, _) =
+        session.prepare_conversation_items_for_history(&turn_context, &prepared_once);
+
+    assert_eq!(prepared_twice.as_ref(), prepared_once.as_slice());
+}
+
+#[tokio::test]
+async fn canonical_wait_output_remains_complete_while_its_model_copy_is_bounded() {
+    let (mut session, turn_context, rx) = make_session_and_context_with_rx().await;
+    let rollout_path =
+        attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    let call_id = format!("wait-{}", "c".repeat(/*n*/ 1_024));
+    let response_item = ResponseItem::from(
+        ExecCommandToolOutput {
+            event_call_id: call_id.clone(),
+            chunk_id: "wait-chunk".to_string(),
+            wall_time: Duration::from_secs(/*secs*/ 5),
+            raw_output: vec![b'x'; TruncationPolicy::Tokens(/*tokens*/ 20_000).byte_budget()],
+            truncation_policy: TruncationPolicy::Tokens(/*tokens*/ 20_000),
+            max_output_tokens: Some(/*max_output_tokens*/ 20_000),
+            process_id: Some(/*process_id*/ 42),
+            exit_code: None,
+            wait_reason: Some(ProcessWaitReason::Output),
+            original_token_count: Some(/*original_token_count*/ 20_000),
+            output_omitted_bytes: None,
+            hook_command: None,
+        }
+        .to_response_item(
+            &call_id,
+            &ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+        ),
+    );
+    let max_item_tokens =
+        i64::try_from(crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS).unwrap_or(i64::MAX);
+    let (uncapped_prepared, _) = session.prepare_conversation_items_for_history(
+        &turn_context,
+        std::slice::from_ref(&response_item),
+    );
+    let [uncapped_prepared] = uncapped_prepared.as_ref() else {
+        panic!("history preparation should retain one canonical wait output");
+    };
+    assert!(
+        crate::context_manager::item_token_upper_bound(uncapped_prepared) > max_item_tokens,
+        "the fixture must exercise envelope-aware retruncation"
+    );
+    let uncapped_prepared = uncapped_prepared.clone();
+
+    session
+        .record_conversation_items(&turn_context, std::slice::from_ref(&uncapped_prepared))
+        .await;
+    let raw = rx.recv().await.expect("raw response item event");
+    let EventMsg::RawResponseItem(raw) = raw.msg else {
+        panic!("recording a wait output should emit its canonical raw item");
+    };
+    let canonical = raw.item;
+    assert_eq!(canonical, uncapped_prepared);
+
+    session.flush_rollout().await.expect("rollout should flush");
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let persisted = resumed.history.iter().find_map(|item| match item {
+        RolloutItem::ResponseItem(envelope) if envelope.item.id() == canonical.id() => {
+            Some(&envelope.item)
+        }
+        _ => None,
+    });
+    let mut expected_persisted = canonical.clone();
+    if let ResponseItem::FunctionCallOutput { output, .. } = &mut expected_persisted {
+        // The rollout codec omits a successful default and reconstructs it as `None`.
+        output.success = None;
+    }
+    assert_eq!(persisted, Some(&expected_persisted));
+
+    let (resumed_session, resumed_turn_context) = make_session_and_context().await;
+    resumed_session
+        .record_initial_history(InitialHistory::Resumed(resumed))
+        .await;
+    let resumed_history = resumed_session.clone_history().await;
+    let resumed_canonical = resumed_history
+        .raw_items()
+        .find(|item| item.id() == canonical.id())
+        .expect("resumed history should retain the canonical wait output");
+    assert_eq!(resumed_canonical, &expected_persisted);
+
+    let mut model_item = expected_persisted.clone();
+    assert_eq!(
+        crate::tools::context::cap_prepared_tool_output(
+            &mut model_item,
+            crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        crate::tools::context::PreparedToolOutputCap::Fits
+    );
+    assert!(crate::context_manager::item_token_upper_bound(&model_item) <= max_item_tokens);
+    let model_body = match &model_item {
+        ResponseItem::FunctionCallOutput { output, .. } => output.body.clone(),
+        _ => panic!("wait_process should remain a function call output"),
+    };
+    resumed_session
+        .record_prompt_tool_output_truncations(&[(
+            canonical.id().expect("prepared item ID").clone(),
+            model_body,
+        )])
+        .await;
+    let model_history = resumed_session.clone_history().await;
+    let still_canonical = model_history
+        .raw_items()
+        .find(|item| item.id() == canonical.id())
+        .expect("raw model history should retain the canonical wait output");
+    assert_eq!(still_canonical, &expected_persisted);
+    let projected = model_history
+        .for_prompt(&resumed_turn_context.model_info().input_modalities)
+        .into_iter()
+        .find(|item| item.id() == canonical.id())
+        .expect("the model prompt should use the bounded wait-output projection");
+    assert_eq!(projected, model_item);
+
+    assert!(canonical.id().is_some_and(|id| !id.is_empty()));
+    assert_eq!(canonical.turn_id(), Some(turn_context.sub_id.as_str()));
+    let ResponseItem::FunctionCallOutput {
+        call_id: prepared_call_id,
+        output,
+        ..
+    } = &canonical
+    else {
+        panic!("wait_process should remain a function call output");
+    };
+    assert_eq!(prepared_call_id.as_deref(), Some(call_id.as_str()));
+    assert_eq!(output.success, Some(true));
+    assert!(
+        output
+            .body
+            .to_text()
+            .is_some_and(|text| text.contains("session ID 42"))
+    );
+}
+
+#[tokio::test]
+async fn history_preparation_preserves_a_tool_output_with_an_oversized_envelope() {
+    let (session, turn_context) = make_session_and_context().await;
+    let response_item = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some("c".repeat(TruncationPolicy::Tokens(/*tokens*/ 20_000).byte_budget())),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text(String::new()),
+            success: Some(false),
+        },
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let (prepared, _) = session.prepare_conversation_items_for_history(
+        &turn_context,
+        std::slice::from_ref(&response_item),
+    );
+
+    let [prepared] = prepared.as_ref() else {
+        panic!("canonical preparation must not drop an oversized model envelope");
+    };
+    assert!(matches!(
+        prepared,
+        ResponseItem::FunctionCallOutput { call_id: Some(call_id), .. }
+            if call_id.len() == TruncationPolicy::Tokens(/*tokens*/ 20_000).byte_budget()
+    ));
 }
 
 #[tokio::test]

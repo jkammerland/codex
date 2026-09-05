@@ -98,6 +98,9 @@ impl codex_code_mode::CodeModeSession for MissingCellCodeModeSession {
         cell_id: codex_code_mode::CellId,
     ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
         Box::pin(async move {
+            if cell_id.as_str() == "unknown-error" {
+                return Err("exec cell unknown-error not found".to_string());
+            }
             Ok(codex_code_mode::WaitOutcome::MissingCell(
                 codex_code_mode::RuntimeResponse::Result {
                     code_mode_host_duration: None,
@@ -319,6 +322,98 @@ async fn missing_code_mode_wait_traces_only_the_wait_tool_call() -> anyhow::Resu
             .raw_result_payload_id
             .is_some()
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_code_mode_wait_error_does_not_end_an_unstarted_cell_trace() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let (mut session, turn) = make_session_and_context().await;
+    session.services.code_mode_service = CodeModeService::new(
+        Arc::new(MissingCellCodeModeSessionProvider),
+        &turn.config.code_mode,
+        session.services.executed_tool_calls.clone(),
+    );
+    attach_test_trace(&mut session, &turn, temp.path())?;
+
+    let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler));
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let mut invocation = test_invocation(
+        session,
+        turn,
+        "wait-error-call",
+        WAIT_TOOL_NAME,
+        ToolCallSource::Direct,
+        r#"{"cell_id":"unknown-error","terminate":true}"#,
+    );
+    invocation.tool_name = invocation.tool_name.with_default_namespace();
+
+    registry
+        .dispatch_any_with_terminal_outcome(invocation, /*terminal_outcome_reached*/ None)
+        .await?;
+
+    let replayed = codex_rollout_trace::replay_bundle(single_bundle_dir(temp.path())?)?;
+    assert_eq!(replayed.code_cells.len(), 0);
+    assert_eq!(
+        replayed.tool_calls["wait-error-call"].execution.status,
+        ExecutionStatus::Failed,
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_wait_after_async_close_ends_a_started_trace_exactly_once() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let (mut session, turn) = make_session_and_context().await;
+    session.services.code_mode_service = CodeModeService::new(
+        Arc::new(MissingCellCodeModeSessionProvider),
+        &turn.config.code_mode,
+        session.services.executed_tool_calls.clone(),
+    );
+    attach_test_trace(&mut session, &turn, temp.path())?;
+    let cell_id = codex_code_mode::CellId::new("closed-cell".to_string());
+    session.services.rollout_thread_trace.start_code_cell_trace(
+        turn.sub_id.as_str(),
+        cell_id.as_str(),
+        "exec-call",
+        "yield_control();",
+    );
+    session
+        .services
+        .code_mode_service
+        .record_cell_trace_started(&cell_id);
+    session
+        .services
+        .code_mode_service
+        .finish_cell_dispatch(&cell_id);
+
+    let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler));
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    for call_id in ["wait-call-1", "wait-call-2"] {
+        let mut invocation = test_invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            call_id,
+            WAIT_TOOL_NAME,
+            ToolCallSource::Direct,
+            r#"{"cell_id":"closed-cell","terminate":true}"#,
+        );
+        invocation.tool_name = invocation.tool_name.with_default_namespace();
+        registry
+            .dispatch_any_with_terminal_outcome(invocation, /*terminal_outcome_reached*/ None)
+            .await?;
+    }
+
+    let event_log = fs::read_to_string(single_bundle_dir(temp.path())?.join("trace.jsonl"))?;
+    assert_eq!(
+        event_log.matches(r#""type":"code_cell_started""#).count(),
+        1
+    );
+    assert_eq!(event_log.matches(r#""type":"code_cell_ended""#).count(), 1);
 
     Ok(())
 }

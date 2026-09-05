@@ -1135,6 +1135,24 @@ fn estimate_token_count_with_base_instructions_uses_provided_text() {
 }
 
 #[test]
+fn serialized_item_bytes_are_a_conservative_bound_for_token_dense_text() {
+    for text in [
+        "!@#$%^&*()[]{};:,./<>?|\\\"'~".repeat(/*n*/ 500),
+        "🦀⚙️界e\u{301}".repeat(/*n*/ 500),
+    ] {
+        let item = custom_tool_call_output("token-dense", &text);
+        let serialized_bytes = serde_json::to_vec(&item)
+            .expect("token-dense response item should serialize")
+            .len();
+        assert_eq!(
+            item_token_upper_bound(&item),
+            i64::try_from(serialized_bytes).expect("test item should fit i64")
+        );
+        assert!(item_token_upper_bound(&item) >= estimate_item_token_count(&item));
+    }
+}
+
+#[test]
 fn remove_first_item_removes_matching_output_for_function_call() {
     let items = vec![
         ResponseItem::FunctionCall {

@@ -47,30 +47,15 @@ impl CodeModeSessionDelegate for GenerationDelegate {
 }
 
 fn public_cell_id(generation: u64, cell_id: &CellId) -> CellId {
-    if generation == 1 {
-        cell_id.clone()
-    } else {
-        CellId::new(format!("g{generation}:{cell_id}"))
-    }
+    crate::generation_cell_id::encode_public_cell_id(generation, cell_id.as_str())
 }
 
 pub(super) fn remote_cell_id(generation: u64, cell_id: &CellId) -> Result<CellId, String> {
-    if generation == 1 {
-        return Ok(cell_id.clone());
-    }
-
-    let prefix = format!("g{generation}:");
-    cell_id
-        .as_str()
-        .strip_prefix(&prefix)
+    crate::generation_cell_id::decode_public_cell_id(generation, cell_id)
         .map(|cell_id| CellId::new(cell_id.to_string()))
-        .ok_or_else(|| "cell belongs to a stale code-mode host generation".to_string())
 }
 
 pub(super) fn public_started_cell(generation: u64, started: StartedCell) -> StartedCell {
-    if generation == 1 {
-        return started;
-    }
     let cell_id = public_cell_id(generation, &started.cell_id);
     StartedCell::from_future(cell_id, async move {
         started

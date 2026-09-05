@@ -336,6 +336,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -3871,7 +3872,11 @@ impl Session {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
-    async fn send_raw_response_items(&self, turn_context: &TurnContext, items: &[ResponseItem]) {
+    pub(crate) async fn send_raw_response_items(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItem],
+    ) {
         for item in items {
             self.send_event(
                 turn_context,
@@ -4155,6 +4160,16 @@ impl Session {
     pub(crate) async fn clone_history(&self) -> ContextManager {
         let state = self.state.lock().await;
         state.clone_history()
+    }
+
+    pub(crate) async fn record_prompt_tool_output_truncations(
+        &self,
+        truncations: &[(ResponseItemId, FunctionCallOutputBody)],
+    ) {
+        let mut state = self.state.lock().await;
+        state
+            .history
+            .record_prompt_tool_output_truncations(truncations);
     }
 
     pub(crate) async fn conversation_history_snapshot(

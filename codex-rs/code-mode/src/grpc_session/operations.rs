@@ -34,6 +34,11 @@ struct ExecutionOwnership {
     armed: bool,
 }
 
+enum InitialObservationError {
+    Transport(String),
+    Protocol(String),
+}
+
 impl Drop for ExecutionOwnership {
     fn drop(&mut self) {
         if !self.armed {
@@ -183,10 +188,10 @@ impl SessionInner {
             }
             let response = response_rx
                 .await
-                .map_err(|_| "exec runtime ended unexpectedly".to_string())??;
+                .map_err(|_| "exec runtime ended unexpectedly".to_string())?;
             claim.armed = false;
             drop(claim);
-            Ok(response)
+            response
         });
         if started_tx.send(Ok(started)).is_err() {
             return;
@@ -213,12 +218,17 @@ impl SessionInner {
             ) => match outcome {
                 Ok(Some(grpc::ExecuteEvent {
                     event: Some(grpc::execute_event::Event::Outcome(outcome)),
-                })) => conversion::runtime_response(outcome),
+                })) => conversion::runtime_response(outcome)
+                    .map_err(InitialObservationError::Protocol),
                 Ok(Some(_)) => {
-                    Err("gRPC code-mode execution returned an unexpected event".to_string())
+                    Err(InitialObservationError::Protocol(
+                        "gRPC code-mode execution returned an unexpected event".to_string(),
+                    ))
                 }
-                Ok(None) => Err("gRPC code-mode execution omitted its initial outcome".to_string()),
-                Err(error) => Err(error),
+                Ok(None) => Err(InitialObservationError::Protocol(
+                    "gRPC code-mode execution omitted its initial outcome".to_string(),
+                )),
+                Err(error) => Err(InitialObservationError::Transport(error)),
             },
         };
         let outcome = match outcome {
@@ -238,7 +248,11 @@ impl SessionInner {
                 }
                 Ok(response)
             }
-            Err(error) => Err(error),
+            Err(InitialObservationError::Transport(error)) => Err(error),
+            Err(InitialObservationError::Protocol(error)) => {
+                self.fail(error.clone());
+                Err(error)
+            }
         };
         let _ = response_tx.send(outcome);
     }
@@ -301,7 +315,11 @@ impl SessionInner {
         let response = deadline::request(self, "wait", runtime_timeout, client.wait(request)).await;
         cancellation.disarm();
         self.prune_wait_slots();
-        let outcome = conversion::wait_outcome(response?.into_inner())?;
+        let response = response?.into_inner();
+        let outcome = conversion::wait_outcome(response).map_err(|error| {
+            self.fail(error.clone());
+            error
+        })?;
         self.validate_wait_cell(&expected_cell_id, outcome).await
     }
 
@@ -319,7 +337,10 @@ impl SessionInner {
         )
         .await?
         .into_inner();
-        let outcome = conversion::wait_outcome(response)?;
+        let outcome = conversion::wait_outcome(response).map_err(|error| {
+            self.fail(error.clone());
+            error
+        })?;
         self.validate_wait_cell(&cell_id, outcome).await
     }
 
@@ -331,6 +352,16 @@ impl SessionInner {
         let response = match &outcome {
             WaitOutcome::LiveCell(response) | WaitOutcome::MissingCell(response) => response,
         };
+        if matches!(
+            &outcome,
+            WaitOutcome::MissingCell(RuntimeResponse::Yielded { .. })
+        ) {
+            let error = format!(
+                "gRPC code-mode host returned a yielded outcome for missing cell {expected_cell_id}"
+            );
+            self.fail(error.clone());
+            return Err(error);
+        }
         let actual_cell_id = runtime_response_cell_id(response);
         if actual_cell_id != expected_cell_id {
             let error = format!(

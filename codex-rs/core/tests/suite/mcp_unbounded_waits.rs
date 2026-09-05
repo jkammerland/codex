@@ -449,8 +449,7 @@ async fn model_originated_transport_loss_fails_without_replay_and_reconnects() -
     second_turn.await?;
     let recovered_output = recovered_call_output
         .single_request()
-        .function_call_output(recovered_call_id)
-        .clone();
+        .function_call_output(recovered_call_id);
     assert!(
         recovered_output.to_string().contains("ok"),
         "unexpected reconnected MCP output: {recovered_output:#}"

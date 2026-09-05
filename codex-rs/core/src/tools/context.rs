@@ -39,6 +39,74 @@ where
     Box::new(output)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreparedToolOutputCap {
+    Fits,
+    NotToolOutput,
+    EnvelopeTooLarge,
+}
+
+/// Enforces the model-context ceiling after all durable response metadata has been attached.
+///
+/// Correlation fields, success status, response IDs, and passthrough metadata are part of the
+/// immutable envelope. Only the visible output body is truncated. If that envelope cannot fit on
+/// its own, the caller must reject the item rather than inject an oversized context item.
+pub(crate) fn cap_prepared_tool_output(
+    item: &mut ResponseItem,
+    max_output_tokens: usize,
+) -> PreparedToolOutputCap {
+    let max_output_token_bound = i64::try_from(max_output_tokens).unwrap_or(i64::MAX);
+    if crate::context_manager::item_token_upper_bound(item) <= max_output_token_bound {
+        return PreparedToolOutputCap::Fits;
+    }
+
+    let original_output = match item {
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => output.clone(),
+        _ => return PreparedToolOutputCap::NotToolOutput,
+    };
+    let mut envelope = item.clone();
+    match &mut envelope {
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => {
+            output.body = FunctionCallOutputBody::Text(String::new());
+        }
+        _ => unreachable!("tool output variant was checked before cloning its envelope"),
+    }
+    if crate::context_manager::item_token_upper_bound(&envelope) > max_output_token_bound {
+        return PreparedToolOutputCap::EnvelopeTooLarge;
+    }
+
+    let mut lower_body_budget = 0_usize;
+    let mut upper_body_budget = max_output_tokens;
+    let mut best = envelope;
+    while lower_body_budget <= upper_body_budget {
+        let body_budget = lower_body_budget + (upper_body_budget - lower_body_budget) / 2;
+        let mut candidate = item.clone();
+        let output = match &mut candidate {
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => output,
+            _ => unreachable!("tool output variant was checked before constructing a candidate"),
+        };
+        *output = original_output.clone();
+        truncate_function_output_payload(
+            output,
+            TruncationPolicy::Tokens(body_budget),
+            estimate_audio_token_count,
+        );
+        if crate::context_manager::item_token_upper_bound(&candidate) <= max_output_token_bound {
+            best = candidate;
+            lower_body_budget = body_budget.saturating_add(1);
+        } else if body_budget == 0 {
+            break;
+        } else {
+            upper_body_budget = body_budget - 1;
+        }
+    }
+    *item = best;
+    PreparedToolOutputCap::Fits
+}
+
 pub type SharedTurnDiffTracker = Arc<Mutex<TurnDiffTracker>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -562,9 +630,16 @@ impl ExecCommandToolOutput {
                 (None, None) => "Output:".to_string(),
             };
         }
-        let output_budget = response_policy
-            .byte_budget()
-            .saturating_sub(header.len().saturating_add(/*rhs*/ 1));
+        // A live process handle is recovery metadata, not command output. Keep
+        // it even when the caller requests a zero- or one-byte output budget;
+        // it is still bounded by the global complete-item cap above.
+        let response_byte_budget = if self.process_id.is_some() {
+            response_policy.byte_budget().max(header.len())
+        } else {
+            response_policy.byte_budget()
+        };
+        let output_budget =
+            response_byte_budget.saturating_sub(header.len().saturating_add(/*rhs*/ 1));
         let mut policy = self.model_output_policy();
         let mut output = self.truncated_output_with_policy(policy);
 
@@ -585,8 +660,8 @@ impl ExecCommandToolOutput {
         }
 
         let mut response = format!("{header}\n{output}");
-        if self.wait_reason.is_some() && response.len() > response_policy.byte_budget() {
-            let mut boundary = response_policy.byte_budget();
+        if self.wait_reason.is_some() && response.len() > response_byte_budget {
+            let mut boundary = response_byte_budget;
             while !response.is_char_boundary(boundary) {
                 boundary = boundary.saturating_sub(1);
             }

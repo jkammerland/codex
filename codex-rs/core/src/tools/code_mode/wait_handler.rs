@@ -16,7 +16,9 @@ use codex_tools::ToolSpec;
 use super::DEFAULT_WAIT_YIELD_TIME_MS;
 use super::ExecContext;
 use super::WAIT_TOOL_NAME;
+use super::handle_runtime_failure;
 use super::handle_runtime_response;
+use super::result::CodeModeOutputKind;
 use super::telemetry::CodeModeToolCallGuard;
 use super::wait_spec::create_wait_tool;
 
@@ -36,6 +38,7 @@ struct ExecWaitArgs {
 enum WaitWake {
     Completed(Result<codex_code_mode::WaitOutcome, String>),
     Input(Result<(), tokio::sync::watch::error::RecvError>),
+    DeferredInput(Result<(), tokio::sync::watch::error::RecvError>),
 }
 
 fn default_wait_yield_time_ms() -> u64 {
@@ -100,13 +103,14 @@ impl CodeModeWaitHandler {
                 })?;
                 let exec = ExecContext { session, turn };
                 let started_at = std::time::Instant::now();
-                telemetry.cell_id = Some(args.cell_id.clone());
-                let cell_id = codex_code_mode::CellId::new(args.cell_id);
+                let cell_id = codex_code_mode::CellId::try_new(args.cell_id)
+                    .map_err(FunctionCallError::RespondToModel)?;
+                telemetry.cell_id = Some(cell_id.to_string());
                 let wait_response = if args.terminate {
                     exec.session
                         .services
                         .code_mode_service
-                        .terminate(cell_id)
+                        .terminate(cell_id.clone())
                         .await
                         .map_err(FunctionCallError::RespondToModel)
                 } else {
@@ -120,9 +124,17 @@ impl CodeModeWaitHandler {
                         .input_queue
                         .subscribe_activity(turn_state.as_deref())
                         .await;
+                    let (mut deferred_input_rx, mut pending_deferred_input) = exec
+                        .session
+                        .services
+                        .code_mode_service
+                        .subscribe_deferred_cell_input_activity(&cell_id);
                     let mut yield_time_ms = args.yield_time_ms;
-                    loop {
-                        let (observation, input_wake) = if pending_activity.take().is_some() {
+                    let mut cumulative_code_mode_host_duration = Some(std::time::Duration::ZERO);
+                    let observation = loop {
+                        let has_pending_activity = pending_activity.take().is_some()
+                            || std::mem::take(&mut pending_deferred_input);
+                        let (observation, external_wake) = if has_pending_activity {
                             (
                                 exec.session
                                     .services
@@ -148,6 +160,9 @@ impl CodeModeWaitHandler {
                                     biased;
                                     result = &mut wait => WaitWake::Completed(result),
                                     changed = activity_rx.changed() => WaitWake::Input(changed),
+                                    changed = deferred_input_rx.changed() => {
+                                        WaitWake::DeferredInput(changed)
+                                    }
                                 }
                             };
                             match wake {
@@ -172,12 +187,51 @@ impl CodeModeWaitHandler {
                                     )),
                                     true,
                                 ),
+                                WaitWake::DeferredInput(Ok(())) => {
+                                    if !exec
+                                        .session
+                                        .services
+                                        .code_mode_service
+                                        .has_deferred_cell_inputs(&cell_id)
+                                    {
+                                        continue;
+                                    }
+                                    (
+                                        exec.session
+                                            .services
+                                            .code_mode_service
+                                            .wait(codex_code_mode::WaitRequest {
+                                                cell_id: cell_id.clone(),
+                                                yield_time_ms: 0,
+                                            })
+                                            .await
+                                            .map_err(FunctionCallError::RespondToModel),
+                                        true,
+                                    )
+                                }
+                                WaitWake::DeferredInput(Err(_)) => (
+                                    Err(FunctionCallError::Fatal(
+                                        "code-mode deferred input activity channel closed"
+                                            .to_string(),
+                                    )),
+                                    true,
+                                ),
                             }
                         };
-                        let observation = observation.inspect_err(|_error| {
-                            telemetry.finish(/*success*/ false);
-                        })?;
-                        if !input_wake
+                        let observation = match observation {
+                            Ok(observation) => observation,
+                            Err(error) => break Err(error),
+                        };
+                        cumulative_code_mode_host_duration = match (
+                            cumulative_code_mode_host_duration,
+                            observation.code_mode_host_duration(),
+                        ) {
+                            (Some(cumulative), Some(duration)) => {
+                                Some(cumulative.saturating_add(duration))
+                            }
+                            (Some(_) | None, None) | (None, Some(_)) => None,
+                        };
+                        if !external_wake
                             && matches!(
                                 &observation,
                                 codex_code_mode::WaitOutcome::LiveCell(
@@ -193,24 +247,56 @@ impl CodeModeWaitHandler {
                             continue;
                         }
                         break Ok(observation);
-                    }
-                }
-                .inspect_err(|_error| {
-                    telemetry.finish(/*success*/ false);
-                })?;
-                if let codex_code_mode::WaitOutcome::LiveCell(response) = &wait_response {
-                    let runtime_cell_id = match response {
-                        codex_code_mode::RuntimeResponse::Yielded { cell_id, .. }
-                        | codex_code_mode::RuntimeResponse::Terminated { cell_id, .. }
-                        | codex_code_mode::RuntimeResponse::Result { cell_id, .. } => cell_id,
                     };
-                    telemetry.cell_id = Some(runtime_cell_id.to_string());
-                    if let Some(executed_tool_calls) =
-                        exec.session.services.executed_tool_calls.as_ref()
-                    {
-                        executed_tool_calls.register_cell(runtime_cell_id, &call_id);
+                    observation.map(|observation| match cumulative_code_mode_host_duration {
+                        Some(duration) => observation.with_code_mode_host_duration(duration),
+                        None => observation,
+                    })
+                };
+                let wait_response = match wait_response {
+                    Ok(wait_response) => wait_response,
+                    Err(FunctionCallError::RespondToModel(error)) => {
+                        let output = handle_runtime_failure(
+                            &exec,
+                            &cell_id,
+                            error,
+                            args.max_tokens,
+                            started_at.elapsed(),
+                            &call_id,
+                            CodeModeOutputKind::Wait,
+                        )
+                        .await;
+                        telemetry.finish(/*success*/ false);
+                        return Ok(boxed_tool_output(output));
                     }
-                    if !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. }) {
+                    Err(error) => {
+                        telemetry.finish(/*success*/ false);
+                        return Err(error);
+                    }
+                };
+                let (response, missing_cell) = match &wait_response {
+                    codex_code_mode::WaitOutcome::LiveCell(response) => (response, false),
+                    codex_code_mode::WaitOutcome::MissingCell(response) => (response, true),
+                };
+                let runtime_cell_id = match response {
+                    codex_code_mode::RuntimeResponse::Yielded { cell_id, .. }
+                    | codex_code_mode::RuntimeResponse::Terminated { cell_id, .. }
+                    | codex_code_mode::RuntimeResponse::Result { cell_id, .. } => cell_id,
+                };
+                telemetry.cell_id = Some(runtime_cell_id.to_string());
+                if !missing_cell
+                    && let Some(executed_tool_calls) =
+                        exec.session.services.executed_tool_calls.as_ref()
+                {
+                    executed_tool_calls.register_cell(runtime_cell_id, &call_id);
+                }
+                if !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. }) {
+                    let trace_end_claimed = exec
+                        .session
+                        .services
+                        .code_mode_service
+                        .claim_cell_trace_end(runtime_cell_id);
+                    if trace_end_claimed {
                         exec.session
                             .services
                             .rollout_thread_trace
@@ -219,10 +305,12 @@ impl CodeModeWaitHandler {
                                 runtime_cell_id.as_str(),
                             )
                             .record_ended(response);
-                        exec.session
-                            .services
-                            .code_mode_service
-                            .finish_cell_dispatch(runtime_cell_id);
+                    }
+                    exec.session
+                        .services
+                        .code_mode_service
+                        .finish_cell_dispatch(runtime_cell_id);
+                    if trace_end_claimed {
                         exec.session
                             .services
                             .analytics_events_client
@@ -242,10 +330,17 @@ impl CodeModeWaitHandler {
                 let wall_time = wait_response
                     .code_mode_host_duration()
                     .unwrap_or_else(|| started_at.elapsed());
-                handle_runtime_response(&exec, wait_response.into(), args.max_tokens, wall_time)
-                    .await
-                    .map_err(FunctionCallError::RespondToModel)
-                    .map(boxed_tool_output)
+                handle_runtime_response(
+                    &exec,
+                    wait_response.into(),
+                    args.max_tokens,
+                    wall_time,
+                    &call_id,
+                    CodeModeOutputKind::Wait,
+                )
+                .await
+                .map_err(FunctionCallError::RespondToModel)
+                .map(boxed_tool_output)
             }
             _ => Err(FunctionCallError::RespondToModel(format!(
                 "{WAIT_TOOL_NAME} expects JSON arguments"

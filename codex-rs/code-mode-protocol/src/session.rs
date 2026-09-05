@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::oneshot;
@@ -30,16 +31,48 @@ pub struct CodeModeSessionCellExecutionLimits {
     pub max_heap_size_bytes: Option<usize>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub(crate) const MAX_UNPREFIXED_CELL_ID_BYTES: usize = 256;
+const MAX_GENERATION_PREFIX_BYTES: usize = 1 + 20 + 1;
+
+/// Maximum UTF-8 byte length of a public cell ID.
+///
+/// Host-owned IDs are limited to 256 bytes. Public IDs reserve another 22
+/// bytes for the longest `g{u64}:` generation prefix used after reconnecting.
+pub const MAX_CELL_ID_BYTES: usize = MAX_UNPREFIXED_CELL_ID_BYTES + MAX_GENERATION_PREFIX_BYTES;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct CellId(String);
 
 impl CellId {
+    /// Constructs a cell ID supplied by trusted in-process code.
+    ///
+    /// Inputs crossing a session or serialization boundary should use
+    /// [`Self::try_new`] or call [`Self::validate`] before admission.
     pub fn new(value: String) -> Self {
         Self(value)
     }
 
+    pub fn try_new(value: String) -> Result<Self, String> {
+        validate_cell_id(&value, MAX_CELL_ID_BYTES)?;
+        Ok(Self(value))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_cell_id(self.as_str(), MAX_CELL_ID_BYTES)
+    }
+}
+
+impl<'de> Deserialize<'de> for CellId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::try_new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -53,6 +86,19 @@ impl fmt::Display for CellId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
+}
+
+pub(crate) fn validate_cell_id(value: &str, max_bytes: usize) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("cell ID must not be empty".to_string());
+    }
+    if value.len() > max_bytes {
+        return Err(format!(
+            "cell ID is {} bytes; maximum is {max_bytes} bytes",
+            value.len()
+        ));
+    }
+    Ok(())
 }
 
 pub struct StartedCell {

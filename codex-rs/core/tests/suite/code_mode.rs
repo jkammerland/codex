@@ -58,6 +58,7 @@ use codex_tools::ToolName;
 use codex_tools::ToolOutput;
 use codex_tools::ToolPayload;
 use codex_tools::ToolSpec;
+use codex_utils_output_truncation::approx_token_count;
 use codex_web_search_extension::install as install_web_search_extension;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::AppsTestToolLoading;
@@ -111,12 +112,38 @@ use test_case::test_case;
 use tokio::sync::oneshot;
 use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::Respond;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
+
+struct GatedResponse {
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    response: ResponseTemplate,
+}
+
+impl Respond for GatedResponse {
+    fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+        if let Some(entered) = self
+            .entered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = entered.send(());
+        }
+        self.release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv()
+            .expect("gated response should be released");
+        self.response.clone()
+    }
+}
 
 fn custom_tool_output_items(req: &ResponsesRequest, call_id: &str) -> Vec<Value> {
     match req.custom_tool_call_output(call_id).get("output") {
@@ -1222,7 +1249,7 @@ async fn code_mode_tool_call_completeness_is_private_and_opt_in(
     let code = if oversized {
         r#"
 const args = { barrier: { id: "", participants: 1 } };
-args.barrier.id = "x".repeat(8192 - JSON.stringify(args).length);
+args.barrier.id = "x".repeat(8193 - JSON.stringify(args).length);
 for (let index = 0; index < 4; index++) await tools.test_sync_tool(args);
 text("done");
 yield_control();
@@ -1598,6 +1625,106 @@ text(output.output);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_near_cap_output_preserves_metadata_by_truncating_visible_payload() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let code = r#"// @exec: {"max_output_tokens": 9800}
+const args = { barrier: { id: "", participants: 1 } };
+args.barrier.id = "x".repeat(8192 - JSON.stringify(args).length);
+await tools.test_sync_tool(args);
+text("y".repeat(60000));
+"#;
+    let (test, follow_up) =
+        run_code_mode_turn_with_config(&server, "Return a near-cap result", code, |config| {
+            let _ = config.features.disable(Feature::RemoteCompactionV2);
+            config.tool_output_token_limit = Some(10_000);
+        })
+        .await?;
+
+    let request = follow_up.single_request();
+    let output = request.custom_tool_call_output("call-1");
+    let serialized_output = serde_json::to_string(&output)?;
+    assert!(
+        serialized_output.len() <= 10_000,
+        "fully assembled code-mode item exceeded its 10K conservative token bound: {} bytes",
+        serialized_output.len()
+    );
+
+    let empty_arguments = serde_json::json!({ "barrier": { "id": "", "participants": 1 } });
+    let expected_id_len =
+        8_192_usize.saturating_sub(serde_json::to_string(&empty_arguments)?.len());
+    let expected_calls = serde_json::json!([{
+        "name": "test_sync_tool",
+        "arguments": {
+            "barrier": {
+                "id": "x".repeat(expected_id_len),
+                "participants": 1,
+            },
+        },
+    }]);
+    let metadata = &output["internal_chat_message_metadata_passthrough"];
+    assert_eq!(metadata["cell_id"], Value::String("call-1".to_string()));
+    assert_eq!(metadata["executed_tool_calls"], expected_calls);
+    assert_eq!(metadata["tool_calls_complete"], Value::Bool(true));
+
+    let (visible_output, success) = custom_tool_output_body_and_success(&request, "call-1");
+    assert_ne!(success, Some(false));
+    assert!(
+        visible_output.contains("Warning: truncated output"),
+        "visible payload should absorb the late metadata overhead: {visible_output}"
+    );
+
+    let eviction_code = r#"
+for (let index = 0; index < 4; index++) {
+  const args = { barrier: { id: "", participants: 1 } };
+  const prefix = `${index}:`;
+  args.barrier.id = prefix + "z".repeat(8192 - prefix.length - JSON.stringify(args).length);
+  await tools.test_sync_tool(args);
+}
+text("metadata budget advanced");
+"#;
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-metadata-eviction"),
+            ev_custom_tool_call("call-metadata-eviction", "exec", eviction_code),
+            ev_completed("resp-metadata-eviction"),
+        ]),
+    )
+    .await;
+    let after_eviction = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-metadata-eviction", "done"),
+            ev_completed("resp-metadata-eviction-complete"),
+        ]),
+    )
+    .await;
+    test.submit_turn("advance the attempted-tool metadata budget")
+        .await?;
+
+    let after_eviction = after_eviction.single_request();
+    let replayed_output = after_eviction.custom_tool_call_output("call-1");
+    assert_eq!(
+        replayed_output.get("output"),
+        output.get("output"),
+        "a previously sampled output must not expand after its metadata ages out"
+    );
+    assert!(
+        replayed_output
+            .pointer("/internal_chat_message_metadata_passthrough/executed_tool_calls")
+            .is_none_or(Value::is_null),
+        "the fixture must actually evict the older attempted-tool metadata"
+    );
+    let replayed_serialized = serde_json::to_string(&replayed_output)?;
+    assert!(replayed_serialized.len() <= 10_000);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_does_not_expose_update_plan_by_default() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -1939,7 +2066,7 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
     let items = custom_tool_output_items(&second_mock.single_request(), "call-1");
     let output = text_item(&items, /*index*/ 1);
     assert_regex_match(
-        r"^Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
+        r"(?s)^Warning: truncated output .*Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
         output,
     );
 
@@ -1985,7 +2112,7 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
     // The boolean describes the nested result; the marker below comes from
     // history truncating the value emitted with `text` afterward.
     assert_regex_match(
-        r"(?s)^Variable truncated: True\. Variable: .*…\d+ tokens truncated…A+$",
+        r"(?s)^Warning: truncated output .*Variable truncated: True\. Variable: .*…\d+ tokens truncated…A+$",
         output,
     );
 
@@ -2017,14 +2144,14 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
 "#,
         TOKEN_POLICY_TEST_MODEL,
         |config| {
-            config.tool_output_token_limit = Some(50);
+            config.tool_output_token_limit = Some(100);
         },
     )
     .await?;
 
     let items = custom_tool_output_items(&second_mock.single_request(), "call-1");
     let output = text_item(&items, /*index*/ 1);
-    // The 50-token override must shrink this 50,000-character value far below
+    // The 100-token override must shrink this 50,000-character value far below
     // what the default 10,000-token history cap would retain.
     assert!(
         output.len() < 1_000,
@@ -2032,7 +2159,7 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
         output.len()
     );
     assert_regex_match(
-        r"^Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
+        r"(?s)^Warning: truncated output .*Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
         output,
     );
 
@@ -2069,7 +2196,7 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
     let items = custom_tool_output_items(&second_mock.single_request(), "call-1");
     let output = text_item(&items, /*index*/ 1);
     assert_regex_match(
-        r"^Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
+        r"(?s)^Warning: truncated output .*Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
         output,
     );
 
@@ -2100,14 +2227,14 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
 "#,
         TOKEN_POLICY_TEST_MODEL,
         |config| {
-            config.tool_output_token_limit = Some(50);
+            config.tool_output_token_limit = Some(100);
         },
     )
     .await?;
 
     let items = custom_tool_output_items(&second_mock.single_request(), "call-1");
     let output = text_item(&items, /*index*/ 1);
-    // The 50-token override must shrink this 50,000-character value far below
+    // The 100-token override must shrink this 50,000-character value far below
     // what the default 10,000-token history cap would retain.
     assert!(
         output.len() < 1_000,
@@ -2115,7 +2242,7 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
         output.len()
     );
     assert_regex_match(
-        r"^Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
+        r"(?s)^Warning: truncated output .*Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
         output,
     );
 
@@ -2142,12 +2269,12 @@ text(result.output);
     )
     .await?;
 
+    // The complete serialized outer payload owns this budget. At five tokens,
+    // even the compact best-effort terminal status does not fit once content-item
+    // framing is counted, so both the status and emitted output are omitted.
     assert_eq!(
-        text_item(
-            &custom_tool_output_items(&second_mock.single_request(), "call-1"),
-            /*index*/ 1
-        ),
-        "Warning: truncated output (original token count: 10)\nTotal output lines: 1\n\n0123456789…5 tokens truncated…0123456789"
+        custom_tool_output_items(&second_mock.single_request(), "call-1"),
+        Vec::<Value>::new()
     );
 
     Ok(())
@@ -2244,9 +2371,9 @@ try {
     Ok(())
 }
 
-/// A stalled host wait must return its timeout to the model and reconnect for the next exec.
+/// Quiet observation deadlines stay model-silent until external input wakes the wait.
 #[tokio::test(flavor = "current_thread")]
-async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
+async fn code_mode_wait_quiet_deadlines_are_model_silent() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -2287,12 +2414,12 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     let first_items = custom_tool_output_items(&first_request, "call-1");
     let cell_id = extract_running_cell_id(text_item(&first_items, /*index*/ 0));
 
-    let timeout_completion = responses::mount_function_call_agent_response(
+    let wait_completion = responses::mount_function_call_agent_response(
         &server,
         "call-2",
         &serde_json::to_string(&serde_json::json!({
-            "cell_id": cell_id,
-            "yield_time_ms": 60_000,
+            "cell_id": cell_id.clone(),
+            "yield_time_ms": 1_000,
         }))?,
         "wait",
     )
@@ -2315,27 +2442,32 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     .await;
 
     tokio::time::pause();
-    for _ in 0..130 {
+    for _ in 0..5 {
         tokio::time::advance(Duration::from_secs(1)).await;
-        if timeout_completion
-            .function_call_output_text("call-2")
-            .is_some()
-        {
-            break;
-        }
     }
+    assert!(
+        wait_completion.requests().is_empty(),
+        "quiet observation deadlines must not produce another model request"
+    );
     tokio::time::resume();
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "report the still-running cell".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
 
-    let timeout_output = timeout_completion
+    let wait_output = wait_completion
         .function_call_output_text("call-2")
-        .expect("timed-out wait should be returned to the model");
+        .expect("external input should wake the pending wait");
     assert!(
-        timeout_output.contains("code-mode host timed out waiting for wait response"),
-        "unexpected wait output: {timeout_output}"
+        wait_output.contains(&format!("Script running with cell ID {cell_id}")),
+        "unexpected wait output: {wait_output}"
     );
 
     let reconnect_turn = responses::mount_sse_sequence(
@@ -2358,14 +2490,16 @@ async fn code_mode_wait_timeout_reconnects_on_next_exec() -> Result<()> {
     )
     .await;
 
-    test.submit_turn("run a cell after the timeout").await?;
+    test.submit_turn("run another cell after waking the quiet wait")
+        .await?;
     let reconnect_request = reconnect_turn
         .last_request()
         .expect("replacement exec should be returned to the model");
     let reconnect_items = custom_tool_output_items(&reconnect_request, "call-3");
-    assert_eq!(
+    assert_ne!(
         extract_running_cell_id(text_item(&reconnect_items, /*index*/ 0)),
-        "g2:1"
+        cell_id,
+        "the service should remain available for another cell"
     );
     assert_eq!(text_item(&reconnect_items, /*index*/ 1), "reconnected");
 
@@ -2424,7 +2558,7 @@ text("phase 3");
     assert_regex_match(
         concat!(
             r"(?s)\A",
-            r"Script running with cell ID \d+\nWall time \d+\.\d seconds\nOutput:\n\z"
+            r"Script running with cell ID g\d+:\d+\nWall time \d+\.\d seconds\nOutput:\n\z"
         ),
         text_item(&first_items, /*index*/ 0),
     );
@@ -2465,7 +2599,7 @@ text("phase 3");
     assert_regex_match(
         concat!(
             r"(?s)\A",
-            r"Script running with cell ID \d+\nWall time \d+\.\d seconds\nOutput:\n\z"
+            r"Script running with cell ID g\d+:\d+\nWall time \d+\.\d seconds\nOutput:\n\z"
         ),
         text_item(&second_items, /*index*/ 0),
     );
@@ -2518,7 +2652,6 @@ text("phase 3");
     Ok(())
 }
 
-#[cfg_attr(windows, ignore = "no exec_command on Windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_wait_coalesces_quiet_deadlines_without_resampling() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -2527,16 +2660,24 @@ async fn code_mode_wait_coalesces_quiet_deadlines_without_resampling() -> Result
     let mut builder = test_codex().with_config(|config| {
         let _ = config.features.enable(Feature::CodeMode);
     });
-    let test = builder.build(&server).await?;
-    let completion_gate = test.workspace_path("code-mode-wait-completion.ready");
-    let completion_wait = wait_for_file_source(&completion_gate)?;
-    let code = format!(
-        r#"
+    let test = builder.build_with_auto_env(&server).await?;
+    let gate_command = match core_test_support::test_target_os() {
+        core_test_support::TestTargetOs::Linux | core_test_support::TestTargetOs::MacOs => {
+            "while [ ! -f quiet-wait.release ]; do sleep 0.01; done"
+        }
+        core_test_support::TestTargetOs::Windows => {
+            "while (!(Test-Path -LiteralPath quiet-wait.release)) { Start-Sleep -Milliseconds 10 }"
+        }
+    };
+    let code = format!(r#"
 yield_control();
-{completion_wait}
+let gate = await tools.exec_command({{ cmd: {gate_command:?}, yield_time_ms: 30000 }});
+while (gate.session_id !== undefined) {{
+  gate = await tools.wait_process({{ session_id: gate.session_id }});
+}}
+await new Promise((resolve) => setTimeout(resolve, 5200));
 text("finished after quiet deadlines");
-"#
-    );
+"#);
 
     responses::mount_sse_once(
         &server,
@@ -2604,13 +2745,22 @@ text("finished after quiet deadlines");
     })
     .await;
 
+    // Start the measured quiet period only after this wait's public call event. A timer
+    // started in the first turn can expire before this turn even attaches its observer.
+    test.fs()
+        .write_file(
+            &test.workspace_path_uri("quiet-wait.release")?,
+            b"release".to_vec(),
+            Default::default(),
+            /*sandbox*/ None,
+        )
+        .await?;
     tokio::time::sleep(Duration::from_millis(/*millis*/ 100)).await;
     assert!(
         completion.requests().is_empty(),
         "quiet deadline wakes must not trigger another model request"
     );
 
-    fs::write(&completion_gate, "ready")?;
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
@@ -2625,6 +2775,18 @@ text("finished after quiet deadlines");
             r"Script completed\nWall time \d+\.\d seconds\nOutput:\n\z"
         ),
         text_item(&completion_items, /*index*/ 0),
+    );
+    let wall_time_seconds = text_item(&completion_items, /*index*/ 0)
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Wall time ")
+                .and_then(|line| line.strip_suffix(" seconds"))
+        })
+        .expect("wait output should report wall time")
+        .parse::<f64>()?;
+    assert!(
+        wall_time_seconds >= 5.0,
+        "coalesced wait should account for every internal host observation: {wall_time_seconds}"
     );
     assert_eq!(
         text_item(&completion_items, /*index*/ 1),
@@ -2739,6 +2901,118 @@ async fn code_mode_wait_retires_observer_before_input_wake_observation() -> Resu
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_wait_observes_steer_pending_before_activity_subscription() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        let _ = config.features.enable(Feature::CodeMode);
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-pending-before-exec"),
+            ev_custom_tool_call(
+                "call-pending-before-exec",
+                "exec",
+                "yield_control(); await new Promise(() => {});",
+            ),
+            ev_completed("resp-pending-before-exec"),
+        ]),
+    )
+    .await;
+    let initial_completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-pending-before-waiting", "waiting"),
+            ev_completed("resp-pending-before-waiting"),
+        ]),
+    )
+    .await;
+    test.submit_turn("start another indefinitely quiet cell")
+        .await?;
+    let initial_items = custom_tool_output_items(
+        &initial_completion.single_request(),
+        "call-pending-before-exec",
+    );
+    let cell_id = extract_running_cell_id(text_item(&initial_items, /*index*/ 0));
+
+    let (wait_response_entered_tx, wait_response_entered_rx) = oneshot::channel();
+    let (release_wait_response_tx, release_wait_response_rx) =
+        std::sync::mpsc::sync_channel(/*bound*/ 0);
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(GatedResponse {
+            entered: Mutex::new(Some(wait_response_entered_tx)),
+            release: Mutex::new(release_wait_response_rx),
+            response: responses::sse_response(sse(vec![
+                ev_response_created("resp-pending-before-wait"),
+                responses::ev_function_call(
+                    "call-pending-before-wait",
+                    "wait",
+                    &serde_json::to_string(&serde_json::json!({
+                        "cell_id": cell_id,
+                        "yield_time_ms": 60_000,
+                    }))?,
+                ),
+                ev_completed("resp-pending-before-wait"),
+            ])),
+        })
+        .with_priority(1)
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-pending-before-done", "input received"),
+            ev_completed("resp-pending-before-done"),
+        ]),
+    )
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait for the quiet cell".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(5), wait_response_entered_rx)
+        .await?
+        .expect("wait response barrier should observe the in-flight request");
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "already pending direction".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    release_wait_response_tx
+        .send(())
+        .expect("release gated wait tool response");
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let completion_request = completion.single_request();
+    let output = completion_request
+        .function_call_output_text("call-pending-before-wait")
+        .expect("pending steer should release the code-mode wait");
+    assert!(
+        output.contains("Script running with cell ID"),
+        "unexpected pending-input wake output: {output}"
+    );
+    assert!(
+        completion_request.body_contains_text("already pending direction"),
+        "the already-pending steer should be included in the resumed sample"
+    );
+    Ok(())
+}
+
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_yield_and_termination_are_not_starved_by_runtime_output() -> Result<()> {
@@ -2786,11 +3060,11 @@ for (let index = 0; index < 256; index++) {{
     let first_request = first_completion.single_request();
     let first_items = custom_tool_output_items(&first_request, "call-1");
     assert_eq!(first_items.len(), 1);
+    // The cell ID is mandatory recovery metadata. Under this deliberately small
+    // complete-item budget, it is retained in compact form while the verbose
+    // wall-time envelope and runtime backlog are omitted.
     assert_regex_match(
-        concat!(
-            r"(?s)\A",
-            r"Script running with cell ID \d+\nWall time \d+\.\d seconds\nOutput:\n\z"
-        ),
+        r"\AScript running with cell ID g\d+:\d+\z",
         text_item(&first_items, /*index*/ 0),
     );
     let cell_id = extract_running_cell_id(text_item(&first_items, /*index*/ 0));
@@ -3326,7 +3600,7 @@ text("after terminate");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_wait_returns_error_for_unknown_session() -> Result<()> {
+async fn code_mode_wait_rejects_a_legacy_pre_incarnation_handle() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -3360,7 +3634,8 @@ async fn code_mode_wait_returns_error_for_unknown_session() -> Result<()> {
     )
     .await;
 
-    test.submit_turn("wait on an unknown exec cell").await?;
+    test.submit_turn("wait on a legacy exec cell handle")
+        .await?;
 
     let request = completion.single_request();
     let (_, success) = request
@@ -3369,6 +3644,101 @@ async fn code_mode_wait_returns_error_for_unknown_session() -> Result<()> {
     assert_ne!(success, Some(true));
 
     let items = function_tool_output_items(&request, "call-1");
+    assert_eq!(items.len(), 2);
+    assert_regex_match(
+        concat!(
+            r"(?s)\A",
+            r"Script failed\nWall time \d+\.\d seconds\nOutput:\n\z"
+        ),
+        text_item(&items, /*index*/ 0),
+    );
+    assert_eq!(
+        text_item(&items, /*index*/ 1),
+        "Script error:\ncell belongs to a stale code-mode host generation"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_wait_returns_error_for_unknown_current_session_cell() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex().with_config(move |config| {
+        let _ = config.features.enable(Feature::CodeMode);
+    });
+    let test = builder.build(&server).await?;
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_custom_tool_call(
+                "call-1",
+                "exec",
+                r#"
+yield_control();
+text("finished after exposing the current session namespace");
+"#,
+            ),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let initial_completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-1", "namespace captured"),
+            ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn("start one exec cell").await?;
+
+    let initial_request = initial_completion.single_request();
+    let initial_items = custom_tool_output_items(&initial_request, "call-1");
+    let current_cell_id = extract_running_cell_id(text_item(&initial_items, /*index*/ 0));
+    let (current_namespace, _) = current_cell_id
+        .rsplit_once(':')
+        .expect("incarnated cell handle should contain its host cell ID");
+    let unknown_cell_id = format!("{current_namespace}:999999");
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-3"),
+            responses::ev_function_call(
+                "call-2",
+                "wait",
+                &serde_json::to_string(&serde_json::json!({
+                    "cell_id": unknown_cell_id,
+                    "yield_time_ms": 1_000,
+                }))?,
+            ),
+            ev_completed("resp-3"),
+        ]),
+    )
+    .await;
+    let completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-2", "done"),
+            ev_completed("resp-4"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn("wait on an unknown current-session cell")
+        .await?;
+
+    let request = completion.single_request();
+    let (_, success) = request
+        .function_call_output_content_and_success("call-2")
+        .expect("function tool output should be present");
+    assert_ne!(success, Some(true));
+    let items = function_tool_output_items(&request, "call-2");
     assert_eq!(items.len(), 2);
     assert_regex_match(
         concat!(
@@ -3589,7 +3959,7 @@ text("after yield");
     assert_regex_match(
         concat!(
             r"(?s)\A",
-            r"Script running with cell ID \d+\nWall time \d+\.\d seconds\nOutput:\n\z"
+            r"Script running with cell ID g\d+:\d+\nWall time \d+\.\d seconds\nOutput:\n\z"
         ),
         text_item(&first_items, /*index*/ 0),
     );
@@ -3853,7 +4223,7 @@ async fn code_mode_wait_uses_its_own_max_tokens_budget() -> Result<()> {
 text("phase 1");
 yield_control();
 {completion_wait}
-text("token one token two token three token four token five token six token seven");
+text("token ".repeat(200));
 "#
     );
 
@@ -3894,7 +4264,7 @@ text("token one token two token three token four token five token six token seve
                 &serde_json::to_string(&serde_json::json!({
                     "cell_id": cell_id.clone(),
                     "yield_time_ms": 1_000,
-                    "max_tokens": 6,
+                    "max_tokens": 64,
                 }))?,
             ),
             ev_completed("resp-3"),
@@ -3914,7 +4284,18 @@ text("token one token two token three token four token five token six token seve
 
     let second_request = second_completion.single_request();
     let second_items = function_tool_output_items(&second_request, "call-2");
-    assert_eq!(second_items.len(), 2);
+    assert_eq!(second_items.len(), 1);
+    let mut output_item = second_request.function_call_output("call-2");
+    let output_object = output_item
+        .as_object_mut()
+        .expect("function output should be an object");
+    output_object.remove("id");
+    output_object.remove("internal_chat_message_metadata_passthrough");
+    let serialized_output = serde_json::to_string(&output_item)?;
+    assert!(
+        approx_token_count(&serialized_output) <= 64,
+        "the wait result should cap the complete serialized response item: {serialized_output}"
+    );
     assert_regex_match(
         concat!(
             r"(?s)\A",
@@ -3922,15 +4303,6 @@ text("token one token two token three token four token five token six token seve
         ),
         text_item(&second_items, /*index*/ 0),
     );
-    let expected_pattern = r#"(?sx)
-\A
-Warning:\ truncated\ output\ \(original\ token\ count:\ \d+\)\n
-Total\ output\ lines:\ 1\n
-\n
-.*…\d+\ tokens\ truncated….*
-\z
-"#;
-    assert_regex_match(expected_pattern, text_item(&second_items, /*index*/ 1));
 
     Ok(())
 }
@@ -3967,33 +4339,28 @@ async fn code_mode_notify_injects_additional_exec_tool_output_into_active_contex
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let (_test, second_mock) = run_code_mode_turn(
-        &server,
-        "use exec notify helper",
-        r#"
-notify("code_mode_notify_marker");
+    let code = r#"
+notify("code_mode_notify_marker" + "🦀".repeat(2_200) + "tail");
 text("done");
-"#,
-    )
-    .await?;
+"#;
+    let (_test, second_mock) = run_code_mode_turn(&server, "use exec notify helper", code).await?;
 
     let req = second_mock.single_request();
-    let has_notify_output = req
-        .inputs_of_type("custom_tool_call_output")
+    let notify_items = req.inputs_of_type("custom_tool_call_output");
+    let notify_output = notify_items
         .iter()
-        .any(|item| {
-            item.get("call_id").and_then(serde_json::Value::as_str) == Some("call-1")
-                && item
-                    .get("output")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|text| text.contains("code_mode_notify_marker"))
-                && item.get("name").and_then(serde_json::Value::as_str) == Some("exec")
-        });
-    assert!(
-        has_notify_output,
-        "expected notify marker in custom_tool_call_output item: {:?}",
-        req.input()
-    );
+        .filter_map(|item| item.get("output").and_then(serde_json::Value::as_str))
+        .find(|output| output.starts_with("code_mode_notify_marker"))
+        .unwrap_or_else(|| panic!("expected bounded notification in: {:?}", req.input()));
+    assert!(notify_output.starts_with("code_mode_notify_marker"));
+    assert!(notify_output.len() <= 4 * 1024);
+    assert!(notify_output.ends_with("\n[code-mode input truncated]"));
+    assert!(!notify_output.ends_with("tail"));
+    assert!(notify_items.iter().any(|item| {
+        item.get("output").and_then(serde_json::Value::as_str) == Some(notify_output)
+            && item.get("call_id").and_then(serde_json::Value::as_str) == Some("call-1")
+            && item.get("name").and_then(serde_json::Value::as_str) == Some("exec")
+    }));
 
     Ok(())
 }

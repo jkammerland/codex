@@ -12,13 +12,15 @@ pub(crate) fn create_wait_tool() -> ToolSpec {
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding more output. Defaults to 10000 ms.".to_string(),
+                "Maximum time for one internal observation. Empty deadline expirations are coalesced without returning to the model. Defaults to 10000 ms."
+                    .to_string(),
             )),
         ),
         (
             "max_tokens".to_string(),
             JsonSchema::number(Some(
-                "Output token budget for this wait call. Defaults to 10000 tokens.".to_string(),
+                "Requested output token budget for this wait call, capped at 10000 tokens. Defaults to 10000 tokens."
+                    .to_string(),
             )),
         ),
         (
@@ -32,7 +34,7 @@ pub(crate) fn create_wait_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: codex_code_mode::WAIT_TOOL_NAME.to_string(),
         description: format!(
-            "Waits on a yielded `{}` cell and returns new output or completion.\n{}",
+            "Waits on a yielded `{}` cell and returns new output or completion. Empty deadline expirations are coalesced internally, so the call remains pending until output, cell completion or termination, or new turn input arrives.\n{}",
             codex_code_mode::PUBLIC_TOOL_NAME,
             codex_code_mode::build_wait_tool_description().trim()
         ),
@@ -59,7 +61,7 @@ mod tests {
             ToolSpec::Function(ResponsesApiTool {
                 name: codex_code_mode::WAIT_TOOL_NAME.to_string(),
                 description: format!(
-                    "Waits on a yielded `{}` cell and returns new output or completion.\n{}",
+                    "Waits on a yielded `{}` cell and returns new output or completion. Empty deadline expirations are coalesced internally, so the call remains pending until output, cell completion or termination, or new turn input arrives.\n{}",
                     codex_code_mode::PUBLIC_TOOL_NAME,
                     codex_code_mode::build_wait_tool_description().trim()
                 ),
@@ -76,7 +78,7 @@ mod tests {
                         (
                             "max_tokens".to_string(),
                             JsonSchema::number(Some(
-                                "Output token budget for this wait call. Defaults to 10000 tokens."
+                                "Requested output token budget for this wait call, capped at 10000 tokens. Defaults to 10000 tokens."
                                     .to_string(),
                             )),
                         ),
@@ -90,7 +92,7 @@ mod tests {
                         (
                             "yield_time_ms".to_string(),
                             JsonSchema::number(Some(
-                                "Wait before yielding more output. Defaults to 10000 ms."
+                                "Maximum time for one internal observation. Empty deadline expirations are coalesced without returning to the model. Defaults to 10000 ms."
                                     .to_string(),
                             )),
                         ),

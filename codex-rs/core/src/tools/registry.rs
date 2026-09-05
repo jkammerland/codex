@@ -14,6 +14,7 @@ use crate::memory_usage::shell_script_for_invocation;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
+use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -499,6 +500,12 @@ impl ToolRegistry {
     ) -> Result<AnyToolResult, FunctionCallError> {
         let tool_name = invocation.tool_name.clone();
         let call_id_owned = invocation.call_id.clone();
+        let code_mode_cell_id = match &invocation.source {
+            ToolCallSource::CodeMode { cell_id, .. } => {
+                Some(codex_code_mode::CellId::new(cell_id.clone()))
+            }
+            ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => None,
+        };
         let otel = invocation.turn.session_telemetry.clone();
         // TODO(anp): Reconcile these tags with TurnEnvironment::sandbox_context
         // instead of reporting the thread-wide backend for environment-scoped tools.
@@ -571,6 +578,7 @@ impl ToolRegistry {
                 invocation.call_id.clone(),
                 &pre_tool_use_payload.tool_name,
                 &pre_tool_use_payload.tool_input,
+                code_mode_cell_id.as_ref(),
             )
             .await
             {
@@ -700,6 +708,7 @@ impl ToolRegistry {
                 &invocation.session,
                 &invocation.turn,
                 outcome.additional_contexts.clone(),
+                code_mode_cell_id.as_ref(),
             )
             .await;
         }

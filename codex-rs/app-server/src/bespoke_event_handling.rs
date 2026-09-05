@@ -8,6 +8,7 @@ use crate::request_processors::populate_thread_turns_from_history;
 use crate::request_processors::thread_from_stored_thread;
 use crate::request_processors::thread_settings_from_config_snapshot;
 use crate::server_request_error::is_turn_transition_server_request_error;
+use crate::thread_state::CommandExecutionItemMetadata;
 use crate::thread_state::ThreadState;
 use crate::thread_state::TurnSummary;
 use crate::thread_state::resolve_server_request_on_thread_listener;
@@ -99,7 +100,9 @@ use codex_core::ThreadManager;
 use codex_features::Feature;
 use codex_guardian_v2::StrictReviewReason;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::ExecApprovalKind;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
+use codex_protocol::items::CommandExecutionItem as CoreCommandExecutionItem;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
 use codex_protocol::plan_tool::UpdatePlanArgs;
@@ -137,13 +140,50 @@ enum CommandExecutionApprovalPresentation {
     Command(CommandExecutionCompletionItem),
 }
 
-#[derive(Debug, PartialEq)]
-struct CommandExecutionCompletionItem {
-    plugin_id: Option<String>,
-    script_path: Option<String>,
-    command: String,
-    cwd: LegacyAppPathString,
-    command_actions: Vec<V2ParsedCommand>,
+type CommandExecutionCompletionItem = CommandExecutionItemMetadata;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandExecutionLifecycle {
+    NotManaged,
+    Managed { started_now: bool },
+}
+
+impl CommandExecutionLifecycle {
+    fn should_complete_from_response(
+        self,
+        approval_id: Option<&str>,
+        cancel_requested: bool,
+    ) -> bool {
+        match self {
+            Self::NotManaged => false,
+            Self::Managed { started_now } => {
+                approval_id.is_none() || started_now || cancel_requested
+            }
+        }
+    }
+}
+
+fn approval_response_command_completion_status(
+    lifecycle: CommandExecutionLifecycle,
+    approval_id: Option<&str>,
+    cancel_requested: bool,
+    completion_item: Option<&CommandExecutionCompletionItem>,
+    completion_status: Option<CommandExecutionStatus>,
+) -> Option<CommandExecutionStatus> {
+    completion_status.filter(|_| {
+        completion_item.is_some()
+            && lifecycle.should_complete_from_response(approval_id, cancel_requested)
+    })
+}
+
+fn command_execution_item_for_approval(
+    kind: ExecApprovalKind,
+    completion_item: Option<&CommandExecutionCompletionItem>,
+) -> Option<&CommandExecutionCompletionItem> {
+    match kind {
+        ExecApprovalKind::Command => completion_item,
+        ExecApprovalKind::WriteStdin => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -382,13 +422,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                 | codex_protocol::protocol::GuardianAssessmentStatus::Approved => None,
             };
             if let Some(completion_status) = completion_status
-                && let Some((target_item_id, completion_item)) = pending_command_execution
+                && let Some((target_item_id, _)) = pending_command_execution
             {
                 complete_command_execution_item(
                     &conversation_id,
                     assessment_turn_id,
                     target_item_id,
-                    completion_item,
                     /*process_id*/ None,
                     CommandExecutionSource::Agent,
                     completion_status,
@@ -751,24 +790,42 @@ pub(crate) async fn apply_bespoke_event_handling(
                         Some(completion_item),
                     ),
                 };
-            if approval_id.is_none()
-                && let Some(completion_item) = completion_item.as_ref()
-            {
-                start_command_execution_item(
-                    &conversation_id,
-                    event_turn_id.clone(),
-                    call_id.clone(),
-                    completion_item.plugin_id.clone(),
-                    completion_item.script_path.clone(),
-                    completion_item.command.clone(),
-                    completion_item.cwd.clone(),
-                    completion_item.command_actions.clone(),
-                    CommandExecutionSource::Agent,
-                    &outgoing,
-                    &thread_state,
-                )
-                .await;
-            }
+            let command_execution_lifecycle = match command_execution_item_for_approval(
+                kind,
+                completion_item.as_ref(),
+            ) {
+                Some(completion_item) if approval_id.is_none() => {
+                    CommandExecutionLifecycle::Managed {
+                        started_now: start_command_execution_item(
+                            &conversation_id,
+                            event_turn_id.clone(),
+                            call_id.clone(),
+                            completion_item.plugin_id.clone(),
+                            completion_item.script_path.clone(),
+                            completion_item.command.clone(),
+                            completion_item.cwd.clone(),
+                            completion_item.command_actions.clone(),
+                            CommandExecutionSource::Agent,
+                            &outgoing,
+                            &thread_state,
+                        )
+                        .await,
+                    }
+                }
+                Some(_) => {
+                    let is_active = thread_state
+                        .lock()
+                        .await
+                        .command_execution_started
+                        .contains_key(&(event_turn_id.clone(), call_id.clone()));
+                    if is_active {
+                        CommandExecutionLifecycle::Managed { started_now: false }
+                    } else {
+                        CommandExecutionLifecycle::NotManaged
+                    }
+                }
+                None => CommandExecutionLifecycle::NotManaged,
+            };
             let proposed_execpolicy_amendment_v2 =
                 proposed_execpolicy_amendment.map(V2ExecPolicyAmendment::from);
             let proposed_network_policy_amendments_v2 =
@@ -811,6 +868,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     approval_id,
                     call_id,
                     completion_item,
+                    command_execution_lifecycle,
                     pending_request_id,
                     rx,
                     conversation,
@@ -1084,13 +1142,17 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::ItemStarted(event) => {
             let should_emit = match &event.item {
                 // Approval and guardian flows can emit the command start notification before core
-                // emits the canonical item. Reuse the same set to suppress that duplicate.
-                CoreTurnItem::CommandExecution(item) => thread_state
-                    .lock()
+                // emits the canonical item. Reuse the same map to suppress that duplicate while
+                // retaining the original parent metadata for callback-driven completion.
+                CoreTurnItem::CommandExecution(item) => {
+                    note_started_command_execution_item(
+                        &thread_state,
+                        event.turn_id.clone(),
+                        item.id.clone(),
+                        command_execution_item_metadata_from_core(item),
+                    )
                     .await
-                    .turn_summary
-                    .command_execution_started
-                    .insert(item.id.clone()),
+                }
                 _ => true,
             };
             let dynamic_tool_call_params = match &event.item {
@@ -1126,13 +1188,19 @@ pub(crate) async fn apply_bespoke_event_handling(
             }
         }
         EventMsg::ItemCompleted(event) => {
-            apply_canonical_item_completed_side_effects(
+            let should_emit = apply_canonical_item_completed_side_effects(
                 &thread_manager,
                 &thread_watch_manager,
                 &thread_state,
+                &event.turn_id,
                 &event.item,
             )
             .await;
+            if !should_emit {
+                // A callback response may have completed this command item first. Whichever path
+                // claims the active item owns its sole completion notification.
+                return;
+            }
             let mut notification = item_event_to_server_notification(
                 EventMsg::ItemCompleted(event),
                 &conversation_id.to_string(),
@@ -1423,16 +1491,13 @@ async fn apply_canonical_item_completed_side_effects(
     thread_manager: &Arc<ThreadManager>,
     thread_watch_manager: &ThreadWatchManager,
     thread_state: &Arc<Mutex<ThreadState>>,
+    turn_id: &str,
     item: &CoreTurnItem,
-) {
+) -> bool {
     match item {
         CoreTurnItem::CommandExecution(item) => {
-            thread_state
-                .lock()
+            should_emit_canonical_command_execution_completion(thread_state, turn_id, &item.id)
                 .await
-                .turn_summary
-                .command_execution_started
-                .remove(&item.id);
         }
         CoreTurnItem::SubAgentActivity(activity)
             if activity.kind == SubAgentActivityKind::Interrupted =>
@@ -1443,13 +1508,15 @@ async fn apply_canonical_item_completed_side_effects(
                 activity.agent_thread_id,
             )
             .await;
+            true
         }
         CoreTurnItem::CollabAgentToolCall(item) if item.tool == CoreCollabAgentTool::CloseAgent => {
             for thread_id in &item.receiver_thread_ids {
                 remove_missing_thread_watch(thread_manager, thread_watch_manager, *thread_id).await;
             }
+            true
         }
-        _ => {}
+        _ => true,
     }
 }
 
@@ -1479,13 +1546,19 @@ async fn start_command_execution_item(
     outgoing: &ThreadScopedOutgoingMessageSender,
     thread_state: &Arc<Mutex<ThreadState>>,
 ) -> bool {
-    let first_start = {
-        let mut state = thread_state.lock().await;
-        state
-            .turn_summary
-            .command_execution_started
-            .insert(item_id.clone())
-    };
+    let first_start = note_started_command_execution_item(
+        thread_state,
+        turn_id.clone(),
+        item_id.clone(),
+        CommandExecutionCompletionItem {
+            plugin_id: plugin_id.clone(),
+            script_path: script_path.clone(),
+            command: command.clone(),
+            cwd: cwd.clone(),
+            command_actions: command_actions.clone(),
+        },
+    )
+    .await;
     if first_start {
         let notification = ItemStartedNotification {
             thread_id: conversation_id.to_string(),
@@ -1518,22 +1591,17 @@ async fn complete_command_execution_item(
     conversation_id: &ThreadId,
     turn_id: String,
     item_id: String,
-    completion_item: CommandExecutionCompletionItem,
     process_id: Option<String>,
     source: CommandExecutionSource,
     status: CommandExecutionStatus,
     outgoing: &ThreadScopedOutgoingMessageSender,
     thread_state: &Arc<Mutex<ThreadState>>,
 ) {
-    let should_emit = thread_state
-        .lock()
-        .await
-        .turn_summary
-        .command_execution_started
-        .remove(&item_id);
-    if !should_emit {
+    let Some(completion_item) =
+        claim_callback_command_execution_completion(thread_state, &turn_id, &item_id).await
+    else {
         return;
-    }
+    };
 
     let item = ThreadItem::CommandExecution {
         id: item_id,
@@ -1558,6 +1626,63 @@ async fn complete_command_execution_item(
     outgoing
         .send_server_notification(ServerNotification::ItemCompleted(notification))
         .await;
+}
+
+fn command_execution_item_metadata_from_core(
+    item: &CoreCommandExecutionItem,
+) -> CommandExecutionCompletionItem {
+    let presentation =
+        CommandExecutionPresentation::from_raw(&item.command, &item.parsed_cmd, &item.cwd);
+    CommandExecutionCompletionItem {
+        plugin_id: item.plugin_id.clone(),
+        script_path: item.script_path.clone(),
+        command: presentation.command,
+        cwd: item.cwd.clone().into(),
+        command_actions: presentation.command_actions,
+    }
+}
+
+async fn note_started_command_execution_item(
+    thread_state: &Arc<Mutex<ThreadState>>,
+    turn_id: String,
+    item_id: String,
+    completion_item: CommandExecutionCompletionItem,
+) -> bool {
+    let mut state = thread_state.lock().await;
+    if let std::collections::hash_map::Entry::Vacant(entry) = state
+        .command_execution_started
+        .entry((turn_id, item_id))
+    {
+        entry.insert(completion_item);
+        true
+    } else {
+        false
+    }
+}
+
+async fn claim_callback_command_execution_completion(
+    thread_state: &Arc<Mutex<ThreadState>>,
+    turn_id: &str,
+    item_id: &str,
+) -> Option<CommandExecutionCompletionItem> {
+    let mut state = thread_state.lock().await;
+    let completion_item = state
+        .command_execution_started
+        .remove(&(turn_id.to_string(), item_id.to_string()))?;
+    state.record_callback_command_completion(turn_id.to_string(), item_id.to_string());
+    Some(completion_item)
+}
+
+async fn should_emit_canonical_command_execution_completion(
+    thread_state: &Arc<Mutex<ThreadState>>,
+    turn_id: &str,
+    item_id: &str,
+) -> bool {
+    let mut state = thread_state.lock().await;
+    state
+        .command_execution_started
+        .remove(&(turn_id.to_string(), item_id.to_string()));
+    !state.take_callback_command_completion(turn_id, item_id)
 }
 
 async fn find_and_remove_turn_summary(
@@ -2058,6 +2183,7 @@ async fn on_command_execution_request_approval_response(
     approval_id: Option<String>,
     item_id: String,
     completion_item: Option<CommandExecutionCompletionItem>,
+    command_execution_lifecycle: CommandExecutionLifecycle,
     pending_request_id: RequestId,
     receiver: oneshot::Receiver<ClientRequestResult>,
     conversation: Arc<CodexThread>,
@@ -2068,13 +2194,15 @@ async fn on_command_execution_request_approval_response(
     let response = receiver.await;
     resolve_server_request_on_thread_listener(&thread_state, pending_request_id).await;
     drop(permission_guard);
-    let (decision, completion_status) = match response {
+    let (decision, completion_status, cancel_requested) = match response {
         Ok(Ok(value)) => {
             match serde_json::from_value::<CommandExecutionRequestApprovalResponse>(value) {
                 Ok(response) => match response.decision {
-                    CommandExecutionApprovalDecision::Accept => (ReviewDecision::Approved, None),
+                    CommandExecutionApprovalDecision::Accept => {
+                        (ReviewDecision::Approved, None, false)
+                    }
                     CommandExecutionApprovalDecision::AcceptForSession => {
-                        (ReviewDecision::ApprovedForSession, None)
+                        (ReviewDecision::ApprovedForSession, None, false)
                     }
                     CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
                         execpolicy_amendment,
@@ -2083,6 +2211,7 @@ async fn on_command_execution_request_approval_response(
                             proposed_execpolicy_amendment: execpolicy_amendment.into_core(),
                         },
                         None,
+                        false,
                     ),
                     CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
                         network_policy_amendment,
@@ -2098,15 +2227,18 @@ async fn on_command_execution_request_approval_response(
                                 network_policy_amendment: network_policy_amendment.into_core(),
                             },
                             completion_status,
+                            false,
                         )
                     }
                     CommandExecutionApprovalDecision::Decline => (
                         ReviewDecision::denied("rejected by user"),
                         Some(CommandExecutionStatus::Declined),
+                        false,
                     ),
                     CommandExecutionApprovalDecision::Cancel => (
                         ReviewDecision::Abort,
                         Some(CommandExecutionStatus::Declined),
+                        true,
                     ),
                 },
                 Err(err) => {
@@ -2114,6 +2246,7 @@ async fn on_command_execution_request_approval_response(
                     (
                         ReviewDecision::denied("approval request failed"),
                         Some(CommandExecutionStatus::Failed),
+                        false,
                     )
                 }
             }
@@ -2124,6 +2257,7 @@ async fn on_command_execution_request_approval_response(
             (
                 ReviewDecision::denied("approval request failed"),
                 Some(CommandExecutionStatus::Failed),
+                false,
             )
         }
         Err(err) => {
@@ -2131,34 +2265,22 @@ async fn on_command_execution_request_approval_response(
             (
                 ReviewDecision::denied("approval request failed"),
                 Some(CommandExecutionStatus::Failed),
+                false,
             )
         }
     };
 
-    let suppress_subcommand_completion_item = {
-        // For regular shell/unified_exec approvals, approval_id is null.
-        // For zsh-fork subcommand approvals, approval_id is present and
-        // item_id points to the parent command item.
-        if approval_id.is_some() {
-            let state = thread_state.lock().await;
-            state
-                .turn_summary
-                .command_execution_started
-                .contains(&item_id)
-        } else {
-            false
-        }
-    };
-
-    if let Some(status) = completion_status
-        && !suppress_subcommand_completion_item
-        && let Some(completion_item) = completion_item
-    {
+    if let Some(status) = approval_response_command_completion_status(
+        command_execution_lifecycle,
+        approval_id.as_deref(),
+        cancel_requested,
+        completion_item.as_ref(),
+        completion_status,
+    ) {
         complete_command_execution_item(
             &conversation_id,
             event_turn_id.clone(),
             item_id.clone(),
-            completion_item,
             /*process_id*/ None,
             CommandExecutionSource::Agent,
             status,
@@ -2621,7 +2743,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_execution_started_helper_emits_once() -> Result<()> {
+    async fn command_execution_started_helper_survives_turn_reset_and_emits_once() -> Result<()> {
         let conversation_id = ThreadId::new();
         let thread_state = new_thread_state();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -2678,6 +2800,7 @@ mod tests {
             other => bail!("unexpected message: {other:?}"),
         }
 
+        let _turn_summary = find_and_remove_turn_summary(conversation_id, &thread_state).await;
         let second_start = start_command_execution_item(
             &conversation_id,
             "turn-1".to_string(),
@@ -2698,8 +2821,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_command_execution_item_emits_declined_once_for_pending_command() -> Result<()>
-    {
+    async fn stale_canonical_completion_does_not_claim_reused_item_from_new_turn() -> Result<()> {
         let conversation_id = ThreadId::new();
         let thread_state = new_thread_state();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -2714,27 +2836,28 @@ mod tests {
         );
         let completion_item = command_execution_completion_item("printf hi");
 
-        start_command_execution_item(
-            &conversation_id,
-            "turn-1".to_string(),
-            "cmd-1".to_string(),
-            completion_item.plugin_id.clone(),
-            completion_item.script_path.clone(),
-            completion_item.command.clone(),
-            completion_item.cwd.clone(),
-            completion_item.command_actions.clone(),
-            CommandExecutionSource::Agent,
-            &outgoing,
-            &thread_state,
-        )
-        .await;
+        assert!(
+            start_command_execution_item(
+                &conversation_id,
+                "turn-1".to_string(),
+                "cmd-1".to_string(),
+                completion_item.plugin_id.clone(),
+                completion_item.script_path.clone(),
+                completion_item.command.clone(),
+                completion_item.cwd.clone(),
+                completion_item.command_actions.clone(),
+                CommandExecutionSource::Agent,
+                &outgoing,
+                &thread_state,
+            )
+            .await
+        );
         let _started = recv_broadcast_notification(&mut rx).await?;
 
         complete_command_execution_item(
             &conversation_id,
             "turn-1".to_string(),
             "cmd-1".to_string(),
-            completion_item,
             /*process_id*/ None,
             CommandExecutionSource::Agent,
             CommandExecutionStatus::Declined,
@@ -2746,41 +2869,245 @@ mod tests {
         let completed = recv_broadcast_notification(&mut rx).await?;
         match completed {
             ServerNotification::ItemCompleted(payload) => {
-                let ThreadItem::CommandExecution {
-                    id,
-                    plugin_id,
-                    script_path,
-                    status,
-                    ..
-                } = payload.item
-                else {
-                    bail!("expected command execution completion");
-                };
-                assert_eq!(id, "cmd-1");
-                assert_eq!(plugin_id.as_deref(), Some("sample@openai-curated"));
-                assert_eq!(script_path.as_deref(), Some("scripts/run.py"));
-                assert_eq!(status, CommandExecutionStatus::Declined);
+                assert_eq!(
+                    payload.item,
+                    ThreadItem::CommandExecution {
+                        id: "cmd-1".to_string(),
+                        plugin_id: completion_item.plugin_id,
+                        script_path: completion_item.script_path,
+                        command: completion_item.command,
+                        cwd: completion_item.cwd,
+                        process_id: None,
+                        source: CommandExecutionSource::Agent,
+                        status: CommandExecutionStatus::Declined,
+                        command_actions: completion_item.command_actions,
+                        aggregated_output: None,
+                        exit_code: None,
+                        duration_ms: None,
+                    }
+                );
             }
             other => bail!("unexpected message: {other:?}"),
         }
 
+        let _turn_summary = find_and_remove_turn_summary(conversation_id, &thread_state).await;
+        let reused_completion_item = command_execution_completion_item("printf second");
+        assert!(
+            start_command_execution_item(
+                &conversation_id,
+                "turn-2".to_string(),
+                "cmd-1".to_string(),
+                reused_completion_item.plugin_id.clone(),
+                reused_completion_item.script_path.clone(),
+                reused_completion_item.command.clone(),
+                reused_completion_item.cwd.clone(),
+                reused_completion_item.command_actions.clone(),
+                CommandExecutionSource::Agent,
+                &outgoing,
+                &thread_state,
+            )
+            .await
+        );
+        let _reused_started = recv_broadcast_notification(&mut rx).await?;
+        assert!(
+            !should_emit_canonical_command_execution_completion(&thread_state, "turn-1", "cmd-1")
+                .await,
+            "the callback tombstone must survive turn-summary reset"
+        );
+        let active_reused_item = thread_state
+            .lock()
+            .await
+            .command_execution_started
+            .get(&("turn-2".to_string(), "cmd-1".to_string()))
+            .cloned();
+        assert_eq!(
+            active_reused_item,
+            Some(reused_completion_item.clone()),
+            "the old turn's canonical completion must not steal the reused item"
+        );
+        assert!(
+            should_emit_canonical_command_execution_completion(&thread_state, "turn-1", "cmd-1")
+                .await,
+            "the canonical completion must consume its tombstone"
+        );
+
         complete_command_execution_item(
             &conversation_id,
-            "turn-1".to_string(),
+            "turn-2".to_string(),
             "cmd-1".to_string(),
-            command_execution_completion_item("printf hi"),
             /*process_id*/ None,
             CommandExecutionSource::Agent,
-            CommandExecutionStatus::Declined,
+            CommandExecutionStatus::Completed,
             &outgoing,
             &thread_state,
         )
         .await;
+        let reused_completed = recv_broadcast_notification(&mut rx).await?;
+        match reused_completed {
+            ServerNotification::ItemCompleted(payload) => {
+                let completed_at_ms = payload.completed_at_ms;
+                assert_eq!(
+                    payload,
+                    ItemCompletedNotification {
+                        thread_id: conversation_id.to_string(),
+                        turn_id: "turn-2".to_string(),
+                        completed_at_ms,
+                        item: ThreadItem::CommandExecution {
+                            id: "cmd-1".to_string(),
+                            plugin_id: reused_completion_item.plugin_id,
+                            script_path: reused_completion_item.script_path,
+                            command: reused_completion_item.command,
+                            cwd: reused_completion_item.cwd,
+                            process_id: None,
+                            source: CommandExecutionSource::Agent,
+                            status: CommandExecutionStatus::Completed,
+                            command_actions: reused_completion_item.command_actions,
+                            aggregated_output: None,
+                            exit_code: None,
+                            duration_ms: None,
+                        },
+                    },
+                    "the old turn's canonical completion must not steal the reused item"
+                );
+            }
+            other => bail!("unexpected message: {other:?}"),
+        }
+        assert!(
+            !should_emit_canonical_command_execution_completion(&thread_state, "turn-2", "cmd-1")
+                .await,
+            "the reused turn's callback completion should suppress its canonical duplicate"
+        );
+        assert!(
+            should_emit_canonical_command_execution_completion(&thread_state, "turn-2", "cmd-1")
+                .await,
+            "the reused turn's callback tombstone must be consumed exactly once"
+        );
         assert!(
             rx.try_recv().is_err(),
-            "completion should not emit after the pending item is cleared"
+            "the parent must receive only one completion"
         );
         Ok(())
+    }
+
+    #[test]
+    fn command_approval_response_completion_truth_table() {
+        struct Case {
+            lifecycle: CommandExecutionLifecycle,
+            approval_id: Option<&'static str>,
+            cancel_requested: bool,
+            completion_status: CommandExecutionStatus,
+            expected: Option<CommandExecutionStatus>,
+        }
+
+        let cases = [
+            Case {
+                lifecycle: CommandExecutionLifecycle::Managed { started_now: true },
+                approval_id: None,
+                cancel_requested: false,
+                completion_status: CommandExecutionStatus::Declined,
+                expected: Some(CommandExecutionStatus::Declined),
+            },
+            Case {
+                lifecycle: CommandExecutionLifecycle::Managed { started_now: true },
+                approval_id: Some("callback"),
+                cancel_requested: false,
+                completion_status: CommandExecutionStatus::Failed,
+                expected: Some(CommandExecutionStatus::Failed),
+            },
+            Case {
+                lifecycle: CommandExecutionLifecycle::Managed { started_now: false },
+                approval_id: Some("callback"),
+                cancel_requested: false,
+                completion_status: CommandExecutionStatus::Declined,
+                expected: None,
+            },
+            Case {
+                lifecycle: CommandExecutionLifecycle::Managed { started_now: false },
+                approval_id: Some("callback"),
+                cancel_requested: true,
+                completion_status: CommandExecutionStatus::Declined,
+                expected: Some(CommandExecutionStatus::Declined),
+            },
+            Case {
+                lifecycle: CommandExecutionLifecycle::NotManaged,
+                approval_id: Some("write-stdin-cancel"),
+                cancel_requested: true,
+                completion_status: CommandExecutionStatus::Declined,
+                expected: None,
+            },
+            Case {
+                lifecycle: CommandExecutionLifecycle::NotManaged,
+                approval_id: Some("write-stdin-error"),
+                cancel_requested: false,
+                completion_status: CommandExecutionStatus::Failed,
+                expected: None,
+            },
+        ];
+        let completion_item = command_execution_completion_item("printf hi");
+        assert!(
+            command_execution_item_for_approval(
+                ExecApprovalKind::WriteStdin,
+                Some(&completion_item)
+            )
+            .is_none(),
+            "write_stdin approval must not start a command item"
+        );
+        assert_eq!(
+            command_execution_item_for_approval(ExecApprovalKind::Command, Some(&completion_item)),
+            Some(&completion_item)
+        );
+
+        for case in cases {
+            assert_eq!(
+                approval_response_command_completion_status(
+                    case.lifecycle,
+                    case.approval_id,
+                    case.cancel_requested,
+                    Some(&completion_item),
+                    Some(case.completion_status),
+                ),
+                case.expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_command_completion_without_start_is_emitted() {
+        let thread_state = new_thread_state();
+
+        assert!(
+            should_emit_canonical_command_execution_completion(
+                &thread_state,
+                "turn-1",
+                "missing-start"
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_completions_remain_exactly_once_while_canonical_events_are_delayed() {
+        let thread_state = new_thread_state();
+        // Exercise enough concurrent callback claims to catch bounded eviction schemes.
+        for index in 0..300 {
+            thread_state
+                .lock()
+                .await
+                .record_callback_command_completion("turn-1".to_string(), format!("cmd-{index}"));
+        }
+
+        for index in 0..300 {
+            let item_id = format!("cmd-{index}");
+            assert!(
+                !should_emit_canonical_command_execution_completion(
+                    &thread_state,
+                    "turn-1",
+                    &item_id
+                )
+                .await,
+                "callback completion {item_id} must suppress its canonical duplicate"
+            );
+        }
     }
 
     #[tokio::test]

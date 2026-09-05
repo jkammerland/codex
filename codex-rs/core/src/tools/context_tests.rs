@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::SearchToolCallParams;
 use core_test_support::assert_regex_match;
@@ -43,6 +44,56 @@ fn function_payloads_remain_function_outputs() {
         }
         other => panic!("expected FunctionCallOutput, got {other:?}"),
     }
+}
+
+#[test]
+fn prepared_tool_output_cap_bounds_token_dense_serialized_text() {
+    let mut item = ResponseItem::CustomToolCallOutput {
+        id: Some(ResponseItemId::with_suffix("ctco", "token-dense")),
+        call_id: "call-token-dense".to_string(),
+        name: Some("exec".to_string()),
+        output: FunctionCallOutputPayload::from_text(
+            "!@#$%^&*()🦀⚙️界e\u{301}".repeat(/*n*/ 4_000),
+        ),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    item.set_turn_id_if_missing("turn-token-dense");
+    item.set_create_time_if_missing(serde_json::Number::from(/*n*/ 1_788_454_400));
+    let max_tokens = crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS;
+    assert!(
+        crate::context_manager::item_token_upper_bound(&item)
+            > i64::try_from(max_tokens).expect("test cap should fit i64")
+    );
+
+    assert_eq!(
+        cap_prepared_tool_output(&mut item, max_tokens),
+        PreparedToolOutputCap::Fits
+    );
+    assert!(
+        crate::context_manager::item_token_upper_bound(&item)
+            <= i64::try_from(max_tokens).expect("test cap should fit i64")
+    );
+    assert_eq!(item.id().map(ResponseItemId::as_str), Some("ctco_token-dense"));
+    assert_eq!(item.turn_id(), Some("turn-token-dense"));
+}
+
+#[test]
+fn prepared_tool_output_cap_fails_closed_when_the_envelope_alone_is_oversized() {
+    let mut item = ResponseItem::FunctionCallOutput {
+        id: Some(ResponseItemId::with_suffix("fco", "oversized-envelope")),
+        call_id: Some("!".repeat(crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS)),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload::from_text(String::new()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let original = item.clone();
+
+    assert_eq!(
+        cap_prepared_tool_output(&mut item, crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS),
+        PreparedToolOutputCap::EnvelopeTooLarge
+    );
+    assert_eq!(item, original);
 }
 
 #[test]
@@ -533,6 +584,89 @@ fn wait_process_tool_output_stays_within_the_complete_item_policy(policy: Trunca
     assert!(
         text.contains("session ID 42") || text.contains("session_id=42"),
         "a bounded live wait response lost its recovery handle: {text:?}",
+    );
+}
+
+#[test]
+fn wait_process_tool_output_preserves_the_canonical_requested_policy() {
+    let payload = ToolPayload::Function {
+        arguments: "{}".to_string(),
+    };
+    let response = ExecCommandToolOutput {
+        event_call_id: "call-wait".to_string(),
+        chunk_id: "wait123".to_string(),
+        wall_time: std::time::Duration::from_secs(/*secs*/ 5),
+        raw_output: vec![b'x'; TruncationPolicy::Tokens(/*tokens*/ 20_000).byte_budget()],
+        truncation_policy: TruncationPolicy::Tokens(/*tokens*/ 20_000),
+        max_output_tokens: Some(/*max_output_tokens*/ 20_000),
+        process_id: Some(/*process_id*/ 42),
+        exit_code: None,
+        wait_reason: Some(ProcessWaitReason::Output),
+        original_token_count: Some(/*original_token_count*/ 20_000),
+        output_omitted_bytes: None,
+        hook_command: None,
+    }
+    .to_response_item("call-wait", &payload);
+
+    let ResponseInputItem::FunctionCallOutput { output, .. } = response else {
+        panic!("expected FunctionCallOutput");
+    };
+    let text = output
+        .body
+        .to_text()
+        .expect("wait output should serialize as text");
+
+    assert!(
+        approx_token_count(&text) > crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS,
+        "the canonical wait output was prematurely capped before prompt projection: {} <= {}",
+        approx_token_count(&text),
+        crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS,
+    );
+    assert!(approx_token_count(&text) <= 20_000);
+    assert!(
+        text.contains("session ID 42") || text.contains("session_id=42"),
+        "a hard-capped live wait response lost its recovery handle: {text:?}",
+    );
+}
+
+#[test_case::test_case(TruncationPolicy::Bytes(0); "zero byte policy")]
+#[test_case::test_case(TruncationPolicy::Bytes(1); "one byte policy")]
+#[test_case::test_case(TruncationPolicy::Bytes(23); "multibyte truncation boundary")]
+fn wait_process_tool_output_preserves_live_session_under_tiny_policies(policy: TruncationPolicy) {
+    let payload = ToolPayload::Function {
+        arguments: "{}".to_string(),
+    };
+    let response = ExecCommandToolOutput {
+        event_call_id: "call-wait".to_string(),
+        chunk_id: "wait123".to_string(),
+        wall_time: std::time::Duration::from_secs(/*secs*/ 5),
+        raw_output: "🦀".repeat(/*n*/ 1_000).into_bytes(),
+        truncation_policy: policy,
+        max_output_tokens: Some(/*max_output_tokens*/ 1),
+        process_id: Some(/*process_id*/ 42),
+        exit_code: None,
+        wait_reason: Some(ProcessWaitReason::Output),
+        original_token_count: Some(/*original_token_count*/ 1_000),
+        output_omitted_bytes: None,
+        hook_command: None,
+    }
+    .to_response_item("call-wait", &payload);
+
+    let ResponseInputItem::FunctionCallOutput { output, .. } = response else {
+        panic!("expected FunctionCallOutput");
+    };
+    let text = output
+        .body
+        .to_text()
+        .expect("wait output should serialize as text");
+
+    assert!(
+        text.contains("session ID 42") || text.contains("session_id=42"),
+        "a tiny live wait response lost its recovery handle: {text:?}",
+    );
+    assert!(
+        approx_token_count(&text) <= crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS,
+        "mandatory recovery metadata exceeded the global model-item cap",
     );
 }
 

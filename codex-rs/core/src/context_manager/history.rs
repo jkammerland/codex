@@ -25,6 +25,7 @@ use codex_history::GuardianHistoryCheckpoint;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RetainedContext;
 use codex_history::RetainedContextEvent;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -46,6 +47,8 @@ use codex_utils_output_truncation::approx_bytes_for_tokens;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -57,6 +60,11 @@ pub(crate) struct ContextManager {
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
     items: Arc<Vec<ResponseItemEnvelope>>,
+    /// First-use body projections for the owning model session, keyed only to retained history.
+    ///
+    /// Raw/rollout/review consumers continue to see `items`; only `for_prompt*` applies these
+    /// projections. This keeps the sampled prefix stable without rewriting canonical evidence.
+    prompt_tool_output_bodies: Arc<HashMap<ResponseItemId, FunctionCallOutputBody>>,
     /// Starts at the first compaction; ordinary history snapshots need no second payload copy.
     review_history: Option<TranscriptHistory>,
     /// Host facts independent of the model window; snapshots share immutable state.
@@ -154,6 +162,7 @@ impl ContextManager {
     pub(crate) fn new() -> Self {
         Self {
             items: Arc::new(Vec::new()),
+            prompt_tool_output_bodies: Arc::new(HashMap::new()),
             review_history: None,
             retained_context: Arc::default(),
             history_version: 0,
@@ -339,6 +348,7 @@ impl ContextManager {
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
         self.normalize_history(input_modalities);
+        self.apply_prompt_tool_output_bodies();
         Arc::unwrap_or_clone(self.items)
     }
 
@@ -347,6 +357,62 @@ impl ContextManager {
         &self,
     ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
         self.items.iter().map(|envelope| &envelope.item)
+    }
+
+    /// Makes a first-use prompt truncation sticky for this model session.
+    ///
+    /// Rollout, raw-response, and review items remain canonical. The projection sidecar is pruned
+    /// to IDs still present in the bounded history and prevents an older item from expanding in a
+    /// later request after transient executed-tool metadata has been evicted from its envelope.
+    pub(crate) fn record_prompt_tool_output_truncations(
+        &mut self,
+        truncations: &[(ResponseItemId, FunctionCallOutputBody)],
+    ) {
+        self.prune_prompt_tool_output_bodies();
+        let retained_ids = self
+            .items
+            .iter()
+            .filter_map(|envelope| envelope.item.id().cloned())
+            .collect::<HashSet<_>>();
+        let prompt_tool_output_bodies = Arc::make_mut(&mut self.prompt_tool_output_bodies);
+        for (item_id, body) in truncations {
+            if retained_ids.contains(item_id) {
+                prompt_tool_output_bodies.insert(item_id.clone(), body.clone());
+            }
+        }
+    }
+
+    fn apply_prompt_tool_output_bodies(&mut self) {
+        if self.prompt_tool_output_bodies.is_empty() {
+            return;
+        }
+        for envelope in Arc::make_mut(&mut self.items) {
+            let Some(body) = envelope
+                .item
+                .id()
+                .and_then(|item_id| self.prompt_tool_output_bodies.get(item_id))
+            else {
+                continue;
+            };
+            if let ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } = &mut envelope.item
+            {
+                output.body = body.clone();
+            }
+        }
+    }
+
+    fn prune_prompt_tool_output_bodies(&mut self) {
+        if self.prompt_tool_output_bodies.is_empty() {
+            return;
+        }
+        let retained_ids = self
+            .items
+            .iter()
+            .filter_map(|envelope| envelope.item.id().cloned())
+            .collect::<HashSet<_>>();
+        Arc::make_mut(&mut self.prompt_tool_output_bodies)
+            .retain(|item_id, _| retained_ids.contains(item_id));
     }
 
     /// Returns annotated history items without cloning their response payloads.
@@ -412,6 +478,7 @@ impl ContextManager {
             // running a full normalization pass.
             normalize::remove_corresponding_for(items, &removed.item);
             self.world_state_baseline = None;
+            self.prune_prompt_tool_output_bodies();
         }
     }
 
@@ -430,6 +497,7 @@ impl ContextManager {
             }));
         }
         self.items = Arc::new(items);
+        self.prune_prompt_tool_output_bodies();
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
     }
@@ -447,6 +515,7 @@ impl ContextManager {
             self.review_history = Some(retained);
         }
         self.items = Arc::new(items);
+        self.prune_prompt_tool_output_bodies();
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
     }
@@ -736,6 +805,70 @@ fn estimate_encrypted_function_output_length(encoded_len: usize) -> usize {
 pub(crate) fn estimate_item_token_count(item: &ResponseItem) -> i64 {
     let model_visible_bytes = estimate_response_item_model_visible_bytes(item);
     approx_tokens_from_byte_count_i64(model_visible_bytes)
+}
+
+/// Returns the hard-cap accounting value for a serialized model input item.
+///
+/// A text tokenizer cannot produce more tokens than there are UTF-8 bytes in the serialized JSON
+/// text sent to the model. Valid inline image/audio items are excluded from that textual bound;
+/// their established modality estimates remain enforced by [`estimate_item_token_count`]. Taking
+/// the stricter of those independent checks provides a conservative hard ceiling for the textual
+/// portion, including token-dense Unicode and punctuation, without claiming that the existing
+/// image/audio estimates are tokenizer upper bounds. Serialization failure is fail-closed.
+pub(crate) fn item_token_upper_bound(item: &ResponseItem) -> i64 {
+    let mut text_only_item = item.clone();
+    strip_boundable_modalities(&mut text_only_item);
+    let Ok(serialized_text_bytes) = serialized_json_bytes(&text_only_item) else {
+        return i64::MAX;
+    };
+    i64::try_from(serialized_text_bytes)
+        .unwrap_or(i64::MAX)
+        .max(estimate_item_token_count(item))
+}
+
+/// Removes validated inline modalities whose token cost is accounted for separately.
+///
+/// Invalid or opaque payloads remain in the serialized-text copy so the byte ceiling fails closed.
+/// Image and audio costs remain covered by the ordinary whole-item estimate; only the remaining
+/// serialized text has the one-token-per-UTF-8-byte hard bound.
+fn strip_boundable_modalities(item: &mut ResponseItem) {
+    match item {
+        ResponseItem::Message { content, .. } => content.retain(|content_item| match content_item {
+            ContentItem::InputImage { image_url, .. } => !is_boundable_image(image_url),
+            ContentItem::InputAudio { audio_url } => {
+                !is_boundable_audio(audio_url)
+            }
+            ContentItem::InputText { .. } | ContentItem::OutputText { .. } => true,
+        }),
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => {
+            if let FunctionCallOutputBody::ContentItems(content_items) = &mut output.body {
+                content_items.retain(|content_item| match content_item {
+                    FunctionCallOutputContentItem::InputImage { image_url, .. } => {
+                        !is_boundable_image(image_url)
+                    }
+                    FunctionCallOutputContentItem::InputAudio { audio_url } => {
+                        !is_boundable_audio(audio_url)
+                    }
+                    FunctionCallOutputContentItem::InputText { .. }
+                    | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_boundable_image(image_url: &str) -> bool {
+    estimate_original_image_bytes(image_url).is_some()
+}
+
+fn is_boundable_audio(audio_url: &str) -> bool {
+    if parse_base64_audio_data_url(audio_url).is_none() {
+        return false;
+    }
+    let estimated_tokens = estimate_audio_token_count(audio_url);
+    estimated_tokens < approx_token_count(audio_url)
 }
 
 /// Approximate model-visible byte cost for one image input.

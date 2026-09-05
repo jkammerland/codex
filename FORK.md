@@ -5,17 +5,18 @@ from upstream releases.
 
 ## Identity
 
-- Status: unreleased maintenance branch rebuilt from `jkammerland.mcp.18`.
+- Release: `jkammerland.mcp.19`, rebuilt from the deployed `.mcp.18` baseline.
 - Upstream base: `rust-v0.154.0-alpha.4`.
-- User-visible suffix: `+jkammerland.mcp.18`
+- User-visible suffix: `+jkammerland.mcp.19`
 - Personal Git remote: `fork`
 
 The startup header, `codex --version`, app-server handshake, daemon lifecycle,
 and app-server client metadata share the suffix. Wire schemas remain compatible
 with the upstream Cargo workspace version.
 
-The suffix and fleet manifest remain the deployed `.mcp.18` release metadata, not authorization
-to install this branch. A new release identity and manifest must be prepared before deployment.
+The maintainer approved native release builds and fleet deployment on 2026-09-05 with the
+documented shell-snapshot test timeout still unresolved. Build and activation evidence are
+recorded per host; this approval does not expand the production patch scope.
 
 ## Maintenance scope
 
@@ -50,9 +51,9 @@ object ID:
 
 1. The reviewed source commit contains the versioned implementation and
    installer marker.
-2. `fleet/jkammerland.mcp.18-source` points exactly at that source commit.
+2. `fleet/jkammerland.mcp.19-source` points exactly at that source commit.
 3. A direct descendant pins that source commit and ref in
-   `fleet/release.json`; `release/jkammerland.mcp.18` points at the descendant.
+   `fleet/release.json`; `release/jkammerland.mcp.19` points at the descendant.
 
 The fleet controller verifies the immutable source ref, native build receipts,
 binary hashes, CLI identity, executable pair, and compatible MCP-server commit

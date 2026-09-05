@@ -246,7 +246,7 @@ text(JSON.stringify(result));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_that_finishes_after_projection_is_not_reported_as_live() -> Result<()> {
+async fn session_that_finishes_after_projection_remains_recoverable_until_consumed() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX sleep command fixture");
     skip_if_no_network!(Ok(()));
 
@@ -263,6 +263,20 @@ text(projected.output);
     let completion = run_code_cell(&server, &test, 1, source).await?;
     let output = code_cell_output(&completion.single_request(), "call-live-session-1");
 
-    assert_eq!(recoverable_session_ids(&output), Vec::<i32>::new());
+    let session_ids = recoverable_session_ids(&output);
+    assert_eq!(
+        session_ids.len(),
+        1,
+        "unexpected code cell output: {output}"
+    );
+    let source = format!(
+        "text(await tools.wait_process({{ session_id: {} }}));",
+        session_ids[0]
+    );
+    let completion = run_code_cell(&server, &test, 2, &source).await?;
+    let recovered = code_cell_output(&completion.single_request(), "call-live-session-2");
+    assert!(recovered.contains("completed"), "{recovered}");
+    assert!(recovered.contains("\"exit_code\":0"), "{recovered}");
+    assert_eq!(recoverable_session_ids(&recovered), Vec::<i32>::new());
     Ok(())
 }

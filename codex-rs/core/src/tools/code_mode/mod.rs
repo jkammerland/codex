@@ -298,7 +298,7 @@ pub(super) async fn handle_runtime_response(
         .session
         .services
         .unified_exec_manager
-        .retain_live_process_ids(observed_live_exec_sessions)
+        .retain_existing_process_ids(observed_live_exec_sessions)
         .await;
 
     match response {

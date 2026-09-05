@@ -11,6 +11,7 @@ use crate::WaitOutcome;
 use crate::WaitRequest;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_code_mode_protocol::YieldReason;
 use pretty_assertions::assert_eq;
 
 const SHORT_AUDIO_OMISSION_TEXT: &str =
@@ -127,6 +128,7 @@ async fn audio_helper_bounds_wav_data_and_preserves_outputs_after_yield() {
         response,
         RuntimeResponse::Yielded {
             code_mode_host_duration: None,
+            reason: YieldReason::Requested,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "before".to_string(),

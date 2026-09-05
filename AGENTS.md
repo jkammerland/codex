@@ -1,3 +1,21 @@
+# Personal fork maintenance scope
+
+Maintainer override: this fork minimizes polling and preserves durable MCP/code-mode waits.
+This scope takes precedence over the general upstream review guidance below.
+
+- Preserve unbounded configured MCP waits, quiet-wait coalescing, original process handles,
+  and event-driven wakeups. Keep explicit interruption, shutdown, and genuine transport loss.
+- Do not add fork-wide context caps, history rewriting, input/admission quotas, elapsed-time
+  deadlines, automatic replay, or unrelated safety hardening. Preserve upstream behavior and
+  explicit user-selected output budgets; the context-size guidance below does not authorize
+  adding another enforcement layer.
+- Require a concrete relevant failure before carrying a new fix. Check upstream overlap first;
+  distinguish a failing test fixture from a product defect. Use focused regression tests for
+  this maintenance pass, with broader/native release qualification kept separate.
+- Do not expand a release fix into lifecycle, fleet, or daemon redesign, or refactor merely to
+  satisfy the general module/change-size targets below. Park unrelated findings separately.
+- Do not deploy, replace local installations, or push branches without a separate request.
+
 # Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:

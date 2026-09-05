@@ -5,14 +5,25 @@ from upstream releases.
 
 ## Identity
 
-- Release: `jkammerland.mcp.18`
-- Upstream base: `d58a64e690508a752c6a5a466ea752808849b7e2` (`rust-v0.154.0-alpha.3`)
+- Status: unreleased maintenance branch rebuilt from `jkammerland.mcp.18`.
+- Upstream base: `rust-v0.154.0-alpha.4`.
 - User-visible suffix: `+jkammerland.mcp.18`
 - Personal Git remote: `fork`
 
 The startup header, `codex --version`, app-server handshake, daemon lifecycle,
 and app-server client metadata share the suffix. Wire schemas remain compatible
 with the upstream Cargo workspace version.
+
+The suffix and fleet manifest remain the deployed `.mcp.18` release metadata, not authorization
+to install this branch. A new release identity and manifest must be prepared before deployment.
+
+## Maintenance scope
+
+Only demonstrated waiting/recovery fixes belong in this candidate. New blanket context caps,
+history projections, admission quotas, and the abandoned fleet/lifecycle hardening rewrite are
+not carried forward. Upstream limits and explicit user-selected output budgets are unchanged.
+The abandoned source is preserved on `archive/mcp19-hardening-20260905`; the original worktree
+also remains untouched.
 
 ## Maintained behavior
 
@@ -48,6 +59,24 @@ binary hashes, CLI identity, executable pair, and compatible MCP-server commit
 before reporting a host healthy. Nothing is pushed automatically.
 
 ## Validation
+
+Maintenance candidate, 2026-09-05 (Linux only):
+
+- Before carrying the stdin fix, the focused baseline run passed 17 tests and reproduced
+  the active-wait/stdin deadlock. After that fix, the stdin test passed; the two added
+  drained-output/reused-handle tests reproduced their failures before their fixes.
+- The final focused run covered MCP, code-mode protocol/client/runtime, and core
+  unified-exec/code-mode integration: 730 of 731 tests passed. The shell-environment
+  snapshot test timed out, including on an isolated rerun; it had passed in the preceding
+  run. This remains unresolved, not classified as an upstream defect or waived for release.
+- A stale code-mode caller and upstream/fork test-contract mismatches were adapted:
+  explicit yield reason, originating-turn ticket ownership, and recovery of completed but
+  unconsumed process output. Companion test binaries were rebuilt from this worktree.
+- The Bazel dependency-lock refresh passed without lockfile changes. Full-workspace and
+  native Mac/Windows release qualification have not been run for this candidate.
+- Scoped Clippy fixes and repository formatting passed. The final mechanical changes were
+  removal of a redundant test-result clone and formatting; tests were not rerun afterward,
+  following the repository workflow.
 
 Release identity and fleet-controller tests are rerun before source and manifest
 commits are cut. The pinned candidate is then built and validated independently

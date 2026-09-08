@@ -164,6 +164,18 @@ See `codex-rs/tui/styles.md`.
 
 ## Tests
 
+### Temporary test directory cleanup
+
+- After running chat-widget tests, clean up the `chatwidget-tests-*` directories created
+  by your run once the test processes have exited, including after failed runs. Preserve
+  any artifacts needed to diagnose failures before deleting them.
+- `codex-rs/tui/src/chatwidget/tests/helpers.rs::test_config()` calls `TempDir::keep()`,
+  so these temporary Codex homes (including SQLite databases) are not removed automatically.
+  They can accumulate substantially, especially when `/tmp` is RAM-backed.
+- Prefer a dedicated temporary parent for each test run (set `TMPDIR` for the test command
+  on Unix) so cleanup can target that run. Do not blanket-delete shared `/tmp` matches
+  while other agents may be testing; remove only directories owned by your completed run.
+
 ### Test module organization
 
 - When adding a new test module, define its contents in a separate sibling file rather than inline in the implementation file.

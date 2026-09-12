@@ -1,12 +1,13 @@
 # Maintained MCP lifecycle fork
 
-## Unreleased main rebase candidate (2026-09-12)
+## Staging mcp.20 from main (2026-09-12)
 
 Branch: `rebase/minimal-main-20260912`.
 Pinned upstream: `c4017a87aacc7558002b7cb510025e967c1d765e`.
-Development identity: `0.0.0+jkammerland.mcp.20-dev` (upstream main uses `0.0.0`).
-This is not a release or an approved installation. The fleet manifest and installer below
-still describe deployed `.mcp.19`; do not use them to install this candidate.
+Release identity: `0.0.0+jkammerland.mcp.20` (upstream main uses `0.0.0`).
+Native Linux/Mac builds and qualification are approved; activation is not. The release
+manifest describes desired staged state, not installed state. Windows is deferred and its
+deployment paths/server identity must be reconciled when it becomes available.
 
 The rebase adopts upstream per-execution delegates and originating `StepContext` instead of
 the former fork dispatcher implementation. A smaller adaptation keeps dispatch alive between
@@ -32,19 +33,20 @@ not rerun after these final mechanical checks. One non-fatal Clippy warning rema
 eight-argument code-mode-host `drive_cell` function. Evidence is retained in the controller's
 `20260912-main-rebase-validation.json` fleet ledger and its sibling artifact directories.
 
-No full-workspace suite, new 1,200-second live wait, release build, or native Mac/Windows
-qualification was run for this candidate. Linux/Mac activation still requires operator approval.
-Windows is unavailable and has not been contacted. Existing installations are unchanged.
-The historical release details below describe `.mcp.19`, not this candidate.
+No full-workspace suite or native Windows qualification was run. Linux/Mac native release
+builds, Mac qualification and one live wait exceeding 1,200 seconds are the staging work now
+authorized; results are not claimed until their evidence is complete. Activation still requires
+operator approval. Windows is unavailable and has not been contacted. Existing installations
+are unchanged. Staging evidence is recorded in the controller fleet ledger.
 
 This branch carries user-local Codex lifecycle behavior maintained separately
 from upstream releases.
 
 ## Identity
 
-- Release: `jkammerland.mcp.19`, rebuilt from the deployed `.mcp.18` baseline.
-- Upstream base: `rust-v0.154.0-alpha.4`.
-- User-visible suffix: `+jkammerland.mcp.19`
+- Release: `jkammerland.mcp.20`, rebased from `.mcp.19` onto the pinned main above.
+- Upstream base: pinned `main`, not an official release tag.
+- User-visible suffix: `+jkammerland.mcp.20`
 - Personal Git remote: `fork`
 
 The startup header, `codex --version`, app-server handshake, daemon lifecycle,
@@ -88,9 +90,9 @@ object ID:
 
 1. The reviewed source commit contains the versioned implementation and
    installer marker.
-2. `fleet/jkammerland.mcp.19-source` points exactly at that source commit.
+2. `fleet/jkammerland.mcp.20-source` points exactly at that source commit.
 3. A direct descendant pins that source commit and ref in
-   `fleet/release.json`; `release/jkammerland.mcp.19` points at the descendant.
+   `fleet/release.json`; `release/jkammerland.mcp.20` points at the descendant.
 
 The fleet controller verifies the immutable source ref, native build receipts,
 binary hashes, CLI identity, executable pair, and compatible MCP-server commit

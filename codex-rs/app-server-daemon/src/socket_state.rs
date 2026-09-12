@@ -8,6 +8,9 @@ pub(crate) async fn is_confirmed_absent(socket_path: &Path) -> Result<bool> {
     match codex_uds::UnixStream::connect(socket_path).await {
         Ok(_stream) => Ok(false),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+        // macOS reports ENOTSOCK when a non-socket occupies the path.
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ENOTSOCK) => Ok(false),
         Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
             codex_uds::is_stale_socket_path(socket_path)
                 .await

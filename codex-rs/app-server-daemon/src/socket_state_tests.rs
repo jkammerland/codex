@@ -38,5 +38,6 @@ async fn regular_file_is_not_accepted_as_stale_socket() -> anyhow::Result<()> {
     std::fs::write(&socket_path, "not a socket")?;
 
     assert!(!is_confirmed_absent(&socket_path).await?);
+    assert_eq!(std::fs::read_to_string(&socket_path)?, "not a socket");
     Ok(())
 }

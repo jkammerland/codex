@@ -34,17 +34,25 @@ eight-argument code-mode-host `drive_cell` function. Evidence is retained in the
 `20260912-main-rebase-validation.json` fleet ledger and its sibling artifact directories.
 
 No full-workspace suite or native Windows qualification was run. Linux/Mac native release
-builds, Mac qualification and one live wait exceeding 1,200 seconds are the staging work now
-authorized; results are not claimed until their evidence is complete. Activation still requires
-operator approval. Windows is unavailable and has not been contacted. Existing installations
-are unchanged. Staging evidence is recorded in the controller fleet ledger.
+builds and isolated daemon IPC probes passed. Mac's 16 selected core integration and 12 core
+unit tests passed. Activation still requires operator approval. Windows is unavailable and
+has not been contacted. Existing installations remain on `.mcp.19`. Staging evidence is
+recorded in the controller fleet ledger.
 
 Native Mac qualification exposed a fork socket-path portability regression: connecting to a
 regular file returns `ENOTSOCK` instead of Linux's `ConnectionRefused`. The narrow correction
 returns "not confirmed absent" and preserves the file; other errors are unchanged. The
 daemon suite then passed all 60 tests on both native Mac and Linux. The existing regression
 also checks that the file contents are preserved. `just fmt` passed with no further changes.
-The source pin has been refreshed for rebuilt staging; the long-wait proof is still pending.
+The source pin has been refreshed for rebuilt staging. The final Linux release binary passed
+one real nested MCP wait against the deployed compatible server: 1,261,134 ms total, including
+1,230,123 ms in one outer code-mode wait after the initial exec yield. Exactly one MCP wait
+was issued, with no intermediate caller inference during the outer wait and no replay.
+The isolated mock provider observed three caller requests (initial exec, initial yield to
+outer wait, terminal response) and one worker request; worker completion preceded the final
+caller response. A prior harness assertion incorrectly classified the initial exec yield as
+an MCP return; that setup failure is not evidence of cancellation. The Mac IPC probe likewise
+needed a shorter temporary home to fit its native socket-path limit, without a product change.
 
 This branch carries user-local Codex lifecycle behavior maintained separately
 from upstream releases.
@@ -81,7 +89,8 @@ also remains untouched.
 3. Unified exec waits are event-driven and preserve bounded terminal output.
 4. Code mode retains recoverable live exec-session metadata independently of
    JavaScript result projection.
-5. Code-mode deadline yields do not wake the model for quiet nested work.
+5. Quiet deadline yields during code-mode wait do not wake the model; the initial exec can
+   still yield a live cell handle before that wait begins.
 6. Yielded cells remain bound to their originating dispatch host, turn
    environment, notifications, and hook context.
 7. Explicit interruption, shutdown, and real transport failure retain distinct

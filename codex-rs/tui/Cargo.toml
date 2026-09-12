@@ -22,7 +22,6 @@ doctest = false
 workspace = true
 
 [dependencies]
-codex-build-info = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true, default-features = false, features = ["http1", "tokio"] }
 base64 = { workspace = true }

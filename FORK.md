@@ -1,5 +1,42 @@
 # Maintained MCP lifecycle fork
 
+## Unreleased main rebase candidate (2026-09-12)
+
+Branch: `rebase/minimal-main-20260912`.
+Pinned upstream: `c4017a87aacc7558002b7cb510025e967c1d765e`.
+Development identity: `0.0.0+jkammerland.mcp.20-dev` (upstream main uses `0.0.0`).
+This is not a release or an approved installation. The fleet manifest and installer below
+still describe deployed `.mcp.19`; do not use them to install this candidate.
+
+The rebase adopts upstream per-execution delegates and originating `StepContext` instead of
+the former fork dispatcher implementation. A smaller adaptation keeps dispatch alive between
+turns and retains each cell's original execution runtime/diff tracker until cell closure.
+Unbounded MCP timeout mapping, quiet wait coalescing, and recoverable exec handles remain.
+Notifications retain upstream originating output metadata but still reject delivery into an
+unrelated newer turn, preserving the fork's existing isolation behavior.
+
+Focused Linux qualification passed: affected crates and their test code compile; 549 supporting
+crate tests, 16 selected core integration tests, and 12 selected core unit tests pass after
+rebase-specific fixture corrections. This includes paused-time direct/nested MCP waits beyond
+one day, quiet wait coalescing, idle dispatch, original-step ownership, process-handle recovery,
+stdin/wait races, and rejection of an incompatible daemon replacement before stopping it.
+
+An initial apparent integration pass was excluded: the offload environment supplied a zero-valued
+network-disabled marker, but the existing test helper skips based on its presence. Verified
+loopback-capable test subprocesses were rerun without that erroneous marker; sandbox source and
+global settings were not changed. Notification coverage also accounts for logged delivery errors
+and multi-item wait outputs, rather than expecting rejected notifications to fail the cell.
+
+Scoped `just fix`, `just bazel-lock-update` (no lockfile delta), and `just fmt` passed. Tests were
+not rerun after these final mechanical checks. One non-fatal Clippy warning remains for the
+eight-argument code-mode-host `drive_cell` function. Evidence is retained in the controller's
+`20260912-main-rebase-validation.json` fleet ledger and its sibling artifact directories.
+
+No full-workspace suite, new 1,200-second live wait, release build, or native Mac/Windows
+qualification was run for this candidate. Linux/Mac activation still requires operator approval.
+Windows is unavailable and has not been contacted. Existing installations are unchanged.
+The historical release details below describe `.mcp.19`, not this candidate.
+
 This branch carries user-local Codex lifecycle behavior maintained separately
 from upstream releases.
 

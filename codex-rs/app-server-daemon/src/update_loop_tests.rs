@@ -347,19 +347,12 @@ async fn manual_update_restarts_managed_daemon_with_automatic_updates_disabled()
                 .await
                 .expect("initialize request")
                 .expect("frame");
-            let version = if std::fs::read_to_string(
-                codex_home.join("packages/standalone/auto-update-version"),
-            )
-            .expect("selected release")
-            .starts_with("1.1.0")
-            {
-                "1.1.0"
-            } else {
-                "1.0.0"
-            };
             websocket.send(tokio_tungstenite::tungstenite::Message::Text(
                 serde_json::json!({"id": 1, "result": {
-                    "userAgent": format!("codex_app_server_daemon/{version}"),
+                    "userAgent": format!(
+                        "codex_app_server_daemon/{}",
+                        codex_build_info::CODEX_CLI_VERSION
+                    ),
                     "codexHome": codex_home, "platformFamily": "unix", "platformOs": std::env::consts::OS,
                 }}).to_string().into(),
             )).await.expect("initialize response");
@@ -387,10 +380,11 @@ async fn manual_update_restarts_managed_daemon_with_automatic_updates_disabled()
     let ready = home.path().join("installer-ready");
     let proceed = home.path().join("installer-proceed");
     let script = format!(
-        "#!/bin/sh\n# CODEX_INSTALL_IF_LATEST\ntest \"$CODEX_INSTALL_IF_LATEST\" = 1 || exit 4\nif [ \"$CODEX_UPDATE_FROM_RELEASE\" = '{next}' ]; then exit 0; fi\ntest \"$CODEX_UPDATE_FROM_RELEASE\" = '{release}' || exit 5\ntouch '{ready}'\nwhile [ ! -e '{proceed}' ]; do sleep .05; done\nmkdir -p '{root}/releases/{next}/bin'\nprintf '#!/bin/sh\\nif [ \"$1\" = --version ]; then echo codex 1.1.0; else exec sleep 30; fi\\n' > '{root}/releases/{next}/bin/codex'\nchmod +x '{root}/releases/{next}/bin/codex'\nln -sfn 'releases/{next}' '{root}/current'\nprintf '{next}' > '{root}/auto-update-version'\n",
+        "#!/bin/sh\n# CODEX_INSTALL_IF_LATEST\ntest \"$CODEX_INSTALL_IF_LATEST\" = 1 || exit 4\nif [ \"$CODEX_UPDATE_FROM_RELEASE\" = '{next}' ]; then exit 0; fi\ntest \"$CODEX_UPDATE_FROM_RELEASE\" = '{release}' || exit 5\ntouch '{ready}'\nwhile [ ! -e '{proceed}' ]; do sleep .05; done\nmkdir -p '{root}/releases/{next}/bin'\nprintf '#!/bin/sh\\nif [ \"$1\" = --version ]; then echo codex {codex_version}; else exec sleep 30; fi\\n' > '{root}/releases/{next}/bin/codex'\nchmod +x '{root}/releases/{next}/bin/codex'\nln -sfn 'releases/{next}' '{root}/current'\nprintf '{next}' > '{root}/auto-update-version'\n",
         root = standalone.display(),
         ready = ready.display(),
         proceed = proceed.display(),
+        codex_version = codex_build_info::CODEX_CLI_VERSION,
     );
     let http = FakeInstallerHttp::new(InstallerResponse::Success(script.into_bytes()));
     let updater_daemon = std::sync::Arc::clone(&daemon);
@@ -432,8 +426,14 @@ async fn manual_update_restarts_managed_daemon_with_automatic_updates_disabled()
         .expect("first request task")
         .expect("manual update");
     assert_eq!(output.status, UpdateStatus::Updated);
-    assert_eq!(output.installed_version.as_deref(), Some("1.1.0"));
-    assert_eq!(output.running_version.as_deref(), Some("1.1.0"));
+    assert_eq!(
+        output.installed_version.as_deref(),
+        Some(codex_build_info::CODEX_CLI_VERSION)
+    );
+    assert_eq!(
+        output.running_version.as_deref(),
+        Some(codex_build_info::CODEX_CLI_VERSION)
+    );
     assert_eq!(
         output.managed_codex_path,
         standalone.join("current/bin/codex")

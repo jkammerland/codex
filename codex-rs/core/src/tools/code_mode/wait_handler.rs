@@ -261,6 +261,7 @@ impl CodeModeWaitHandler {
                     .code_mode_host_duration()
                     .unwrap_or_else(|| started_at.elapsed());
                 handle_runtime_response(
+                    &exec,
                     &step_context.settings.model_info,
                     wait_response.into(),
                     args.max_tokens,

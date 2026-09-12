@@ -117,7 +117,8 @@ impl Session {
         if !is_originating_turn_active {
             return Err(input);
         }
-        self.record_conversation_items(turn_context, &input).await;
+        self.record_conversation_items(turn_context, turn_context.model_info(), &input)
+            .await;
         Ok(())
     }
 

@@ -122,7 +122,6 @@ async fn detached_code_mode_callback_keeps_thread_id_on_dispatch_span() -> anyho
         /*executed_tool_calls*/ Default::default(),
     ));
     let cell_id = CellId::new("audit-cell".to_string());
-    broker.mark_cell_ready_for_dispatch(&cell_id, /*originating_item_id*/ None);
     let records = DispatchRecords::default();
     let subscriber = tracing_subscriber::registry().with(DispatchCapture(Arc::clone(&records)));
     let _untraced = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
@@ -136,6 +135,7 @@ async fn detached_code_mode_callback_keeps_thread_id_on_dispatch_span() -> anyho
         step,
         Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
     );
+    broker.mark_cell_ready_for_dispatch(&cell_id, /*originating_item_id*/ None);
     // Process-owned code-mode callbacks run on a fresh task without a turn span.
     let result = tokio::spawn(async move {
         delegate
@@ -232,4 +232,29 @@ async fn dropped_tool_callbacks_release_the_origin_before_dispatch() {
         response.unwrap(),
         Err("code mode nested tool call cancelled".to_string()),
     );
+}
+
+#[tokio::test]
+async fn live_cell_retains_its_host_after_turn_worker_is_dropped() {
+    let (session, turn) = make_session_and_context().await;
+    let broker = CodeModeDispatchBroker::new(session.thread_id, Default::default());
+    let worker = broker.start_turn_worker(
+        Arc::new(session),
+        StepContext::for_test(Arc::new(turn)),
+        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
+    );
+    let host = Arc::downgrade(&worker._host);
+    let cell_id = CellId::new("retained-cell".to_string());
+    broker.mark_cell_ready_for_dispatch(&cell_id, /*originating_item_id*/ None);
+    drop(worker);
+    assert!(
+        host.upgrade().is_some(),
+        "the live cell owns its original runtime"
+    );
+    broker.close_cell(&cell_id);
+    assert!(
+        host.upgrade().is_none(),
+        "closing the cell releases its runtime"
+    );
+    broker.shutdown_dispatcher();
 }

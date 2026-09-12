@@ -389,12 +389,7 @@ impl Daemon {
             let (pid, info) = self
                 .start_managed_backend_and_validate(&settings, &self.managed_codex_bin)
                 .await?;
-            (
-                LifecycleStatus::Started,
-                Some(BackendKind::Pid),
-                pid,
-                info,
-            )
+            (LifecycleStatus::Started, Some(BackendKind::Pid), pid, info)
         };
         let ownership = if backend.is_some() {
             DaemonOwnership::ManagedExisting
@@ -468,11 +463,8 @@ impl Daemon {
         let settings = self.load_settings().await?;
         let outcome = if let Some(backend) = self.running_backend_instance(&settings).await? {
             let info = client::probe(&self.socket_path).await.ok();
-            let managed_version = if info.is_some() {
-                Some(managed_codex_version(managed_codex_bin).await?)
-            } else {
-                None
-            };
+            let managed_version = managed_codex_version(managed_codex_bin).await?;
+            runtime_identity::validate_managed_version(managed_codex_bin, &managed_version)?;
             // The installer can retarget `current` while the updater waits for
             // this lock or probes the running server. Never restart from a
             // release that is no longer the selected latest-channel binary.
@@ -497,7 +489,7 @@ impl Daemon {
             } else {
                 mode
             };
-            match restart_decision(mode, info.as_ref(), managed_version.as_deref()) {
+            match restart_decision(mode, info.as_ref(), Some(&managed_version)) {
                 RestartDecision::NotReady => return Ok(RestartIfRunningOutcome::NotReady),
                 RestartDecision::AlreadyCurrent => RestartIfRunningOutcome::AlreadyCurrent,
                 RestartDecision::Restart => {
@@ -1285,6 +1277,49 @@ mod tests {
             )
         );
         server.await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn try_restart_rejects_mismatched_replacement_before_stopping_daemon() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new()?;
+        let socket_path = temp_dir.path().join("app-server-control.sock");
+        let running_codex = temp_dir.path().join("running-codex");
+        let replacement_codex = temp_dir.path().join("replacement-codex");
+        for (path, version) in [
+            (&running_codex, codex_build_info::CODEX_CLI_VERSION),
+            (&replacement_codex, "0.151.0"),
+        ] {
+            std::fs::write(
+                path,
+                format!(
+                    "#!/bin/sh\ncase \"$*\" in\n  *--version*) printf 'codex {version}\\n' ;;\n  *--help*) exit 1 ;;\n  *) exec sleep 30 ;;\nesac\n"
+                ),
+            )?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let mut daemon = test_daemon(&temp_dir, socket_path);
+        daemon.managed_codex_bin = running_codex;
+        let settings = DaemonSettings::default();
+        let backend = crate::backend::pid_backend(daemon.backend_paths(&settings));
+        backend.start().await?;
+
+        let result = daemon
+            .try_restart_if_running(RestartMode::Always, &replacement_codex)
+            .await;
+        let backend_is_running = backend.is_starting_or_running().await;
+        backend.stop().await?;
+
+        let error =
+            result.expect_err("mismatched replacement must be rejected before daemon restart");
+        assert!(error.to_string().contains("reports version 0.151.0"));
+        assert!(
+            backend_is_running?,
+            "mismatched replacement must not stop the existing daemon"
+        );
         Ok(())
     }
 

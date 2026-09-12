@@ -175,6 +175,7 @@ impl CodeModeService {
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
         self.shutdown_token.cancel();
+        self.dispatch_broker.shutdown_dispatcher();
         // Join any initialization already in progress without initializing an unused service.
         match self
             .session

@@ -39,6 +39,13 @@ authorized; results are not claimed until their evidence is complete. Activation
 operator approval. Windows is unavailable and has not been contacted. Existing installations
 are unchanged. Staging evidence is recorded in the controller fleet ledger.
 
+Native Mac qualification exposed a fork socket-path portability regression: connecting to a
+regular file returns `ENOTSOCK` instead of Linux's `ConnectionRefused`. The narrow correction
+returns "not confirmed absent" and preserves the file; other errors are unchanged. The
+daemon suite then passed all 60 tests on both native Mac and Linux. The existing regression
+also checks that the file contents are preserved. `just fmt` passed with no further changes.
+The source pin has been refreshed for rebuilt staging; the long-wait proof is still pending.
+
 This branch carries user-local Codex lifecycle behavior maintained separately
 from upstream releases.
 

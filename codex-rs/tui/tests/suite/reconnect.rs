@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;
     // macOS's default temporary directory leaves too little room for the control socket path.
-    let codex_home = tempfile::tempdir_in("/tmp")?;
+    let codex_home = tempfile::tempdir()?;
     write_test_config(codex_home.path(), &repo_root)?;
     let socket = codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
     std::fs::create_dir_all(socket.parent().unwrap())?;
@@ -29,6 +29,9 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let server = tokio::spawn(async move {
         let mut methods = Vec::new();
         let mut restore_rx = Some(restore_rx);
+        let mut reconnecting = false;
+        let mut reconnect_attempts = 0;
+        let mut success_notified = false;
         let id = "00000000-0000-0000-0000-000000000001";
         let thread = json!({
             "id": id, "sessionId": id, "preview": "", "ephemeral": false,
@@ -36,7 +39,13 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             "status": {"type": "active", "activeFlags": []}, "cwd": server_cwd,
             "cliVersion": "0.0.0", "source": "cli", "turns": [{"id": "running", "items": [], "status": "inProgress", "error": null}]
         });
-        for connection in 0..4 {
+        for _connection in 0..6 {
+            let reconnect_attempt = if reconnecting {
+                reconnect_attempts += 1;
+                reconnect_attempts
+            } else {
+                0
+            };
             let mut socket = loop {
                 let (stream, _) = listener.accept().await?;
                 // Startup probes the default daemon socket before opening its WebSocket.
@@ -46,23 +55,30 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             };
             loop {
                 let frame = tokio::select! {
-                    _ = &mut disconnect_rx, if connection == 1 => {
+                    _ = &mut disconnect_rx, if !reconnecting => {
+                        reconnecting = true;
                         socket.close(/*msg*/ None).await?;
                         break;
                     }
                     frame = socket.next() => frame,
                 };
                 let Some(Ok(Message::Text(text))) = frame else {
+                    if success_notified {
+                        return Ok(methods);
+                    }
                     break;
                 };
                 let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
                     continue;
                 };
                 methods.push(request.method.clone());
-                if connection == 2 && request.method == "initialize" {
-                    restore_rx.take().unwrap().await?;
+                if reconnect_attempt == 1
+                    && request.method == "initialize"
+                    && let Some(restore_rx) = restore_rx.take()
+                {
+                    restore_rx.await?;
                 }
-                if connection == 2 && request.method == "thread/resume" {
+                if reconnect_attempt == 1 && request.method == "thread/resume" {
                     socket
                         .send(Message::Text(
                             json!({"id": request.id, "error": {
@@ -90,7 +106,13 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     "account/read" => {
                         json!({"account": {"type": "apiKey"}, "requiresOpenaiAuth": false})
                     }
-                    "model/list" => json!({"data": [], "nextCursor": null}),
+                    "model/list" => json!({"data": [{
+                        "id": "gpt-5.6-terra", "model": "gpt-5.6-terra",
+                        "displayName": "GPT-5.6 Terra", "description": "",
+                        "hidden": false, "isDefault": true,
+                        "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": ""}],
+                        "defaultReasoningEffort": "medium"
+                    }], "nextCursor": null}),
                     "config/read" => {
                         json!({"config": {"model": "gpt-5.6-terra", "model_provider": "openai", "projects": {
                         server_cwd.to_string_lossy(): {"trust_level": "trusted"}
@@ -125,7 +147,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                             .into(),
                     ))
                     .await?;
-                if connection == 3 && request.method == "thread/resume" {
+                if reconnect_attempt >= 2 && request.method == "thread/resume" {
                     // Keep the recovered turn running: its output must appear without waiting
                     // for turn/completed or rebuilding the transcript.
                     socket
@@ -140,6 +162,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                             .into(),
                         ))
                         .await?;
+                    success_notified = true;
                 }
             }
         }
@@ -150,7 +173,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let mut disconnect_tx = Some(disconnect_tx);
     let mut restore_tx = Some(restore_tx);
     for expected in [
-        "gpt-5.6-terra",
+        "GPT-5.6 Terra",
         "preserved-draft",
         "Reconnecting",
         "preserved-draft!",
@@ -166,7 +189,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             terminal.screen_contents()
         );
         match expected {
-            "gpt-5.6-terra" => terminal.write_input(b"preserved-draft")?,
+            "GPT-5.6 Terra" => terminal.write_input(b"preserved-draft")?,
             "preserved-draft" => {
                 disconnect_tx.take().unwrap().send(()).unwrap();
             }

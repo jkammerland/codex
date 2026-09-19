@@ -1034,7 +1034,17 @@ async fn run_ratatui_app(
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
     let workload_identity_selected = is_workload_identity_selected();
-    color_eyre::install()?;
+    match color_eyre::install() {
+        Ok(()) => {}
+        Err(error)
+            if error
+                .to_string()
+                .contains("hook has already been installed") =>
+        {
+            // CLI recovery may retry run_main after rebuilding local state in the same process.
+        }
+        Err(error) => return Err(error),
+    }
 
     tooltips::announcement::prewarm(initial_config.http_client_factory());
 

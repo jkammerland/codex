@@ -8,7 +8,6 @@ use anyhow::ensure;
 use codex_app_server_protocol::JSONRPCMessage;
 use futures::SinkExt;
 use futures::StreamExt;
-use pretty_assertions::assert_eq;
 use serde_json::json;
 use tokio::net::UnixListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -17,8 +16,14 @@ use tokio_tungstenite::tungstenite::Message;
 async fn incompatible_daemon_falls_back_for_default_and_explicit_features() -> Result<()> {
     for scenario in ["default", "explicit", "host policy"] {
         let cwd = codex_utils_cargo_bin::repo_root()?;
-        let home = tempfile::tempdir_in("/tmp")?;
+        let home = tempfile::tempdir()?;
         write_test_config(home.path(), &cwd)?;
+        let config_path = home.path().join("config.toml");
+        let config = std::fs::read_to_string(&config_path)?;
+        std::fs::write(
+            config_path,
+            format!("features.daemon_auto_start = true\n{config}"),
+        )?;
         if scenario == "host policy" {
             let path = home.path().join("config.toml");
             let contents = std::fs::read_to_string(&path)?;
@@ -33,31 +38,41 @@ async fn incompatible_daemon_falls_back_for_default_and_explicit_features() -> R
         std::fs::create_dir_all(socket.parent().unwrap())?;
         let listener = UnixListener::bind(socket.as_path())?;
         let server = tokio::spawn(async move {
-            let mut socket = loop {
+            let mut feature_list_seen = false;
+            loop {
                 let (stream, _) = listener.accept().await?;
-                if let Ok(socket) = tokio_tungstenite::accept_async(stream).await {
-                    break socket;
-                }
-            };
-            while let Some(Ok(Message::Text(text))) = socket.next().await {
-                let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
+                let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
                     continue;
                 };
-                let response = if request.method == "initialize" {
-                    json!({"id": request.id, "result": {"userAgent": "daemon-test/0.0.0"}})
-                } else {
-                    assert_eq!(request.method, "experimentalFeature/list");
-                    json!({"id": request.id, "result": {"data": [{
-                        "name": "api_key_model_discovery", "stage": "underDevelopment",
-                        "displayName": null, "description": null, "announcement": null,
-                        "enabled": scenario == "default", "defaultEnabled": false,
-                    }], "nextCursor": null}})
-                };
-                socket
-                    .send(Message::Text(response.to_string().into()))
-                    .await?;
+                while let Some(Ok(Message::Text(text))) = socket.next().await {
+                    let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
+                        continue;
+                    };
+                    let response = match request.method.as_str() {
+                        "initialize" => json!({"id": request.id, "result": {
+                            "userAgent": format!("daemon-test/{}", codex_tui::CODEX_CLI_VERSION),
+                            "codexHome": "/fake/codex-home",
+                            "platformFamily": std::env::consts::FAMILY,
+                            "platformOs": std::env::consts::OS,
+                        }}),
+                        "experimentalFeature/list" => {
+                            feature_list_seen = true;
+                            json!({"id": request.id, "result": {"data": [{
+                                "name": "api_key_model_discovery", "stage": "underDevelopment",
+                                "displayName": null, "description": null, "announcement": null,
+                                "enabled": scenario == "default", "defaultEnabled": false,
+                            }], "nextCursor": null}})
+                        }
+                        method => anyhow::bail!("unexpected daemon request {method}"),
+                    };
+                    socket
+                        .send(Message::Text(response.to_string().into()))
+                        .await?;
+                }
+                if feature_list_seen {
+                    return Ok::<_, anyhow::Error>(());
+                }
             }
-            Ok::<_, anyhow::Error>(())
         });
         let args = if scenario == "explicit" {
             vec!["-c", "features.api_key_model_discovery=true"]
@@ -66,7 +81,7 @@ async fn incompatible_daemon_falls_back_for_default_and_explicit_features() -> R
         };
         let mut terminal = PtyCodex::start(&cwd, home, &args)?;
         terminal.wait_for_startup()?;
-        terminal.wait_for_screen("startup issue")?;
+        terminal.wait_for_screen("GPT-5.6-Terra")?;
         terminal.write_input(b"\x14")?;
         let (snapshot, warning_end) = match scenario {
             "default" => (

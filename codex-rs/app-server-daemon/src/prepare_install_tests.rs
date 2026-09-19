@@ -3,6 +3,7 @@
 use super::InstallMode;
 use super::prepare_from_package;
 use super::validate_package;
+use crate::managed_install;
 use crate::settings::DaemonSettings;
 use pretty_assertions::assert_eq;
 use std::os::unix::fs::PermissionsExt;
@@ -91,6 +92,52 @@ async fn seeds_full_package() {
         selected.file_name().expect("name").to_string_lossy()
     );
     assert!(validate_package(&selected).is_ok());
+}
+
+#[tokio::test]
+async fn maintained_fork_rewrites_official_package_version_in_staged_copy() {
+    let temp = tempfile::TempDir::new().expect("temp");
+    let home = temp.path().join("home");
+    let source = temp.path().join("official-package");
+    let bin = package(&source, "0.156.0");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\necho 'codex {}'\n",
+            codex_build_info::CODEX_CLI_VERSION
+        ),
+    )
+    .expect("fork executable");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+        .expect("fork executable permission");
+
+    prepare_from_package(
+        &daemon(&home),
+        &DaemonSettings::default(),
+        InstallMode::Missing,
+        Some(&source),
+        &bin,
+        |_| Ok(true),
+    )
+    .await
+    .expect("stage maintained fork package");
+
+    let selected = std::fs::canonicalize(home.join("packages/app-server-daemon/current"))
+        .expect("selected package");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(selected.join("codex-package.json")).unwrap())
+            .unwrap();
+    assert_eq!(metadata["version"], codex_build_info::CODEX_CLI_VERSION);
+    assert_eq!(
+        managed_install::managed_codex_version(&selected.join("bin/codex"))
+            .await
+            .unwrap(),
+        codex_build_info::CODEX_CLI_VERSION
+    );
+    assert_ne!(
+        std::fs::read_to_string(source.join("codex-package.json")).unwrap(),
+        serde_json::to_string(&metadata).unwrap()
+    );
 }
 
 #[tokio::test]

@@ -13,6 +13,7 @@ use codex_install_context::InstallContext;
 use crate::Daemon;
 use crate::install_lock::acquire_install_lock;
 use crate::managed_install;
+use crate::runtime_identity::DaemonOwnership;
 use crate::settings::DaemonSettings;
 
 /// The complete CLI package offered for a daemon installation.
@@ -26,13 +27,29 @@ pub struct InstallRequest {
 
 /// Prepare a missing package while the caller holds the daemon operation lock.
 pub(super) async fn prepare(daemon: &Daemon, settings: &DaemonSettings) -> Result<()> {
-    let source = InstallContext::current().package_layout.as_ref();
+    let package_layout = InstallContext::current().package_layout.as_ref();
+    let raw_package =
+        if package_layout.is_none() && !codex_build_info::CODEX_FORK_BUILD_ID.is_empty() {
+            Some(materialize_raw_fork_package(
+                daemon
+                    .settings_file
+                    .parent()
+                    .and_then(Path::parent)
+                    .context("daemon settings path has no Codex home")?,
+                &std::env::current_exe()?,
+            )?)
+        } else {
+            None
+        };
+    let source = package_layout
+        .map(|layout| layout.package_dir.as_path())
+        .or_else(|| raw_package.as_ref().map(tempfile::TempDir::path));
     // Keep package replacement state out of the CLI dispatcher's async stack frame.
     Box::pin(prepare_from_package(
         daemon,
         settings,
         InstallMode::Missing,
-        source.map(|layout| layout.package_dir.as_path()),
+        source,
         &std::env::current_exe()?,
         |_| Ok(true),
     ))
@@ -50,12 +67,28 @@ pub async fn update_from_cli(
     crate::backend::windows::ensure_not_elevated()?;
     let daemon = Daemon::from_environment()?;
     let settings = daemon.load_settings().await?;
-    let source = InstallContext::current().package_layout.as_ref();
+    let package_layout = InstallContext::current().package_layout.as_ref();
+    let raw_package =
+        if package_layout.is_none() && !codex_build_info::CODEX_FORK_BUILD_ID.is_empty() {
+            Some(materialize_raw_fork_package(
+                daemon
+                    .settings_file
+                    .parent()
+                    .and_then(Path::parent)
+                    .context("daemon settings path has no Codex home")?,
+                &std::env::current_exe()?,
+            )?)
+        } else {
+            None
+        };
+    let source = package_layout
+        .map(|layout| layout.package_dir.as_path())
+        .or_else(|| raw_package.as_ref().map(tempfile::TempDir::path));
     if !Box::pin(prepare_from_package(
         &daemon,
         &settings,
         InstallMode::Replace,
-        source.map(|layout| layout.package_dir.as_path()),
+        source,
         &std::env::current_exe()?,
         confirm,
     ))
@@ -80,6 +113,81 @@ pub async fn update_from_cli(
 enum InstallMode {
     Missing,
     Replace,
+}
+
+fn materialize_raw_fork_package(temp_root: &Path, running_exe: &Path) -> Result<tempfile::TempDir> {
+    let package = tempfile::TempDir::new_in(temp_root)?;
+    for directory in ["bin", "codex-path", "codex-resources"] {
+        std::fs::create_dir_all(package.path().join(directory))?;
+    }
+    let context = InstallContext::current();
+    let entrypoint = if cfg!(windows) {
+        "bin/codex.exe"
+    } else {
+        "bin/codex"
+    };
+    let code_mode_host = if cfg!(windows) {
+        "bin/codex-code-mode-host.exe"
+    } else {
+        "bin/codex-code-mode-host"
+    };
+    copy_package_executable(running_exe, &package.path().join(entrypoint))?;
+    copy_package_executable(
+        &context.code_mode_host_program(),
+        &package.path().join(code_mode_host),
+    )?;
+    let rg = context.rg_command();
+    let rg = if rg.is_file() {
+        rg
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|directory| directory.join(&rg))
+            .find(|path| path.is_file())
+            .context("maintained fork raw package is missing rg")?
+    };
+    copy_package_executable(
+        &rg,
+        &package.path().join(if cfg!(windows) {
+            "codex-path/rg.exe"
+        } else {
+            "codex-path/rg"
+        }),
+    )?;
+    if cfg!(target_os = "linux") {
+        let bwrap = [Path::new("/usr/bin/bwrap"), Path::new("/bin/bwrap")]
+            .into_iter()
+            .find(|path| path.is_file())
+            .context("maintained fork raw package requires bwrap")?;
+        copy_package_executable(bwrap, &package.path().join("codex-resources/bwrap"))?;
+    }
+    std::fs::write(
+        package.path().join("codex-package.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "layoutVersion": 1,
+            "version": codex_build_info::CODEX_CLI_VERSION,
+            "target": platform_target()?,
+            "variant": "codex",
+            "entrypoint": entrypoint,
+            "resourcesDir": "codex-resources",
+            "pathDir": "codex-path"
+        }))?,
+    )?;
+    Ok(package)
+}
+
+fn copy_package_executable(source: &Path, destination: &Path) -> Result<()> {
+    anyhow::ensure!(
+        source.is_file(),
+        "maintained fork raw package is missing {}",
+        source.display()
+    );
+    std::fs::copy(source, destination)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
 }
 
 async fn prepare_from_package(
@@ -131,6 +239,10 @@ async fn prepare_from_package(
         backend.is_some() || crate::client::probe(&daemon.socket_path).await.is_err(),
         "app server is running but is not managed by codex app-server daemon"
     );
+    if backend.is_some() {
+        let info = crate::client::probe(&daemon.socket_path).await?;
+        crate::runtime_identity::validate_probe(&info, DaemonOwnership::ManagedExisting)?;
+    }
     let selected = managed_install::managed_codex_bin(home);
     let previous_release = previous_root.join("current").canonicalize().ok();
     if mode == InstallMode::Missing {
@@ -226,26 +338,40 @@ async fn prepare_from_package(
     let stage = tempfile::Builder::new()
         .prefix(".staging.")
         .tempdir_in(&releases)?;
-    let digest = package_tree(source, Some(stage.path()))?;
+    let source_digest = package_tree(source, /*destination*/ None)?;
+    package_tree(source, Some(stage.path()))?;
     validate_package(stage.path())?;
     let staged_exe = if cfg!(target_os = "macos") && stage.path().join("CodexCLI.app").is_dir() {
         stage.path().join("CodexCLI.app/Contents/MacOS/codex")
     } else {
         stage.path().join(entrypoint)
     };
+    let binary_version =
+        managed_install::managed_codex_version(&stage.path().join(entrypoint)).await?;
+    let fork_compatibility = !codex_build_info::CODEX_FORK_BUILD_ID.is_empty()
+        && binary_version == codex_build_info::CODEX_CLI_VERSION;
     anyhow::ensure!(
-        package_tree(source, /*destination*/ None)? == digest
-            && std::fs::read(stage.path().join("codex-package.json"))? == manifest_bytes
+        !stable || version == binary_version || fork_compatibility,
+        "the CLI package version does not match its executable"
+    );
+    if fork_compatibility {
+        let mut staged_metadata: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+        staged_metadata["version"] = serde_json::Value::String(binary_version.clone());
+        std::fs::write(
+            stage.path().join("codex-package.json"),
+            serde_json::to_vec(&staged_metadata)?,
+        )?;
+    }
+    let digest = package_tree(stage.path(), /*destination*/ None)?;
+    anyhow::ensure!(
+        package_tree(source, /*destination*/ None)? == source_digest
+            && (fork_compatibility
+                || std::fs::read(stage.path().join("codex-package.json"))? == manifest_bytes)
             && managed_install::executable_identity(&staged_exe).await? == running_identity,
         "the CLI package changed while preparing the daemon or differs from the running executable"
     );
-    let binary_version =
-        managed_install::managed_codex_version(&stage.path().join(entrypoint)).await?;
-    anyhow::ensure!(
-        !stable || version == binary_version,
-        "the CLI package version does not match its executable"
-    );
-    let name = if stable && mode == InstallMode::Missing {
+    let package_is_stable = stable && !fork_compatibility;
+    let name = if package_is_stable && mode == InstallMode::Missing {
         format!("{version}-{target}")
     } else {
         format!("local-{digest}-{target}")
@@ -267,7 +393,7 @@ async fn prepare_from_package(
     let standalone = home.join("packages/standalone");
     let canonical_source = source.canonicalize()?;
     let follows_latest = mode == InstallMode::Missing
-        && stable
+        && package_is_stable
         && (standalone.join("current").canonicalize().ok().as_deref()
             != Some(canonical_source.as_path())
             || std::fs::read_to_string(standalone.join("auto-update-version"))
@@ -351,12 +477,11 @@ async fn prepare_from_package(
             ..daemon.clone()
         };
         selected
-            .start_managed_backend(settings)
+            .start_managed_backend_and_validate(settings, &selected.managed_codex_bin)
             .await
             .context(
                 "daemon package selected but could not start; retry with `codex app-server daemon start`",
             )?;
-        selected.wait_until_ready().await?;
     }
     Ok(true)
 }

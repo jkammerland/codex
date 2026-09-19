@@ -185,7 +185,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
             for connection in 0..(2 + usize::from(previous_thread.is_some())) {
                 let (stream, _) = listener.accept().await?;
                 let socket = tokio_tungstenite::accept_async(stream).await?;
-                methods.extend(serve_reconnect_requests(socket, |request| std::future::ready({
+                methods.extend(serve_reconnect_requests(socket, CODEX_CLI_VERSION, |request| std::future::ready({
                     match request.method.as_str() {
                         "thread/loaded/list" if connection == 0 => None,
                         "thread/resume" if connection == 1 && previous_thread.is_some() => None,

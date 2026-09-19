@@ -1,152 +1,114 @@
 # Maintained MCP lifecycle fork
 
-## Staging mcp.20 from main (2026-09-12)
+## MCP.21 alpha.8 candidate (2026-09-20)
 
-Branch: `rebase/minimal-main-20260912`.
-Pinned upstream: `c4017a87aacc7558002b7cb510025e967c1d765e`.
-Release identity: `0.0.0+jkammerland.mcp.20` (upstream main uses `0.0.0`).
-Native Linux/Mac builds and qualification are approved; activation is not. The release
-manifest describes desired staged state, not installed state. Windows is deferred and its
-deployment paths/server identity must be reconciled when it becomes available.
+This candidate is a minimal rebase of the maintained fork onto the annotated
+`rust-v0.156.0-alpha.8` tag object
+`0783e3270fece607ff0f2c4024025a558282581d`, peeled commit
+`da41ff285c7e3f627dfcfef0588a30b3b7d91617`. The candidate CLI identity is
+`codex-cli 0.156.0-alpha.8+jkammerland.mcp.21`; the compatible MCP server pin is
+`f75bfd7cd174ee9cbcf732c966d5e129cc7605f0`, with Rusty V8 `150.4.0`.
 
-The rebase adopts upstream per-execution delegates and originating `StepContext` instead of
-the former fork dispatcher implementation. A smaller adaptation keeps dispatch alive between
-turns and retains each cell's original execution runtime/diff tracker until cell closure.
-Unbounded MCP timeout mapping, quiet wait coalescing, and recoverable exec handles remain.
-Notifications retain upstream originating output metadata but still reject delivery into an
-unrelated newer turn, preserving the fork's existing isolation behavior.
-
-Focused Linux qualification passed: affected crates and their test code compile; 549 supporting
-crate tests, 16 selected core integration tests, and 12 selected core unit tests pass after
-rebase-specific fixture corrections. This includes paused-time direct/nested MCP waits beyond
-one day, quiet wait coalescing, idle dispatch, original-step ownership, process-handle recovery,
-stdin/wait races, and rejection of an incompatible daemon replacement before stopping it.
-
-An initial apparent integration pass was excluded: the offload environment supplied a zero-valued
-network-disabled marker, but the existing test helper skips based on its presence. Verified
-loopback-capable test subprocesses were rerun without that erroneous marker; sandbox source and
-global settings were not changed. Notification coverage also accounts for logged delivery errors
-and multi-item wait outputs, rather than expecting rejected notifications to fail the cell.
-
-Scoped `just fix`, `just bazel-lock-update` (no lockfile delta), and `just fmt` passed. Tests were
-not rerun after these final mechanical checks. One non-fatal Clippy warning remains for the
-eight-argument code-mode-host `drive_cell` function. Evidence is retained in the controller's
-`20260912-main-rebase-validation.json` fleet ledger and its sibling artifact directories.
-
-No full-workspace suite or native Windows qualification was run. Linux/Mac native release
-builds and isolated daemon IPC probes passed. Mac's 16 selected core integration and 12 core
-unit tests passed. Activation still requires operator approval. Windows is unavailable and
-has not been contacted. Existing installations remain on `.mcp.19`. Staging evidence is
-recorded in the controller fleet ledger.
-
-Native Mac qualification exposed a fork socket-path portability regression: connecting to a
-regular file returns `ENOTSOCK` instead of Linux's `ConnectionRefused`. The narrow correction
-returns "not confirmed absent" and preserves the file; other errors are unchanged. The
-daemon suite then passed all 60 tests on both native Mac and Linux. The existing regression
-also checks that the file contents are preserved. `just fmt` passed with no further changes.
-The source pin has been refreshed for rebuilt staging. The final Linux release binary passed
-one real nested MCP wait against the deployed compatible server: 1,261,134 ms total, including
-1,230,123 ms in one outer code-mode wait after the initial exec yield. Exactly one MCP wait
-was issued, with no intermediate caller inference during the outer wait and no replay.
-The isolated mock provider observed three caller requests (initial exec, initial yield to
-outer wait, terminal response) and one worker request; worker completion preceded the final
-caller response. A prior harness assertion incorrectly classified the initial exec yield as
-an MCP return; that setup failure is not evidence of cancellation. The Mac IPC probe likewise
-needed a shorter temporary home to fit its native socket-path limit, without a product change.
-
-This branch carries user-local Codex lifecycle behavior maintained separately
-from upstream releases.
-
-## Identity
-
-- Release: `jkammerland.mcp.20`, rebased from `.mcp.19` onto the pinned main above.
-- Upstream base: pinned `main`, not an official release tag.
-- User-visible suffix: `+jkammerland.mcp.20`
-- Personal Git remote: `fork`
-
-The startup header, `codex --version`, app-server handshake, daemon lifecycle,
-and app-server client metadata share the suffix. Wire schemas remain compatible
-with the upstream Cargo workspace version.
-
-The maintainer approved native release builds and fleet deployment on 2026-09-05 with the
-documented shell-snapshot test timeout still unresolved. Build and activation evidence are
-recorded per host; this approval does not expand the production patch scope.
-
-## Maintenance scope
-
-Only demonstrated waiting/recovery fixes belong in this candidate. New blanket context caps,
-history projections, admission quotas, and the abandoned fleet/lifecycle hardening rewrite are
-not carried forward. Upstream limits and explicit user-selected output budgets are unchanged.
-The abandoned source is preserved on `archive/mcp19-hardening-20260905`; the original worktree
-also remains untouched.
+This is a source and staging handoff only. No release build, installation,
+activation, daemon/session stop, remote write, or native Mac/Windows validation
+was performed here. Activation remains separately unapproved.
 
 ## Maintained behavior
 
-1. `tool_timeout_sec = 0` creates no MCP tool-call deadline while omitted and
-   positive values retain their finite behavior.
-2. Active MCP calls lease their transport; superseding a connection cannot
-   terminate or replay an ambiguous active request.
-3. Unified exec waits are event-driven and preserve bounded terminal output.
-4. Code mode retains recoverable live exec-session metadata independently of
-   JavaScript result projection.
-5. Quiet deadline yields during code-mode wait do not wake the model; the initial exec can
-   still yield a live cell handle before that wait begins.
-6. Yielded cells remain bound to their originating dispatch host, turn
-   environment, notifications, and hook context.
-7. Explicit interruption, shutdown, and real transport failure retain distinct
-   lifecycle behavior.
-8. Shared app-server daemons are reused only when their runtime identity matches
-   the invoking fork; incompatible daemons are left running for explicit,
-   operator-controlled restart after active work finishes.
+The rebase preserves unbounded configured MCP waits, quiet-wait coalescing,
+event-driven process waits, recoverable original exec handles, originating
+code-mode step/runtime/hook/notification ownership, active transport leases,
+explicit interruption/shutdown, genuine transport-loss reporting, and the
+fork-compatible daemon runtime guard. Upstream's separate app-server-daemon
+package layout and complete-package validation remain authoritative.
 
-## Release layout
+Raw two-binary runtime package materialization is intentionally not part of this
+candidate. A fresh bare binary without a complete `codex-package.json` package
+must retain upstream's explicit missing-package error. Future staging must
+produce and select a complete package outside product runtime, with the actual
+`x86_64-unknown-linux-gnu` GNU target; the official Linux package metadata may
+describe musl and cannot be globally relaxed. Future activation must reconcile
+the complete staged daemon package and is not approved by this handoff.
 
-Each fleet release uses two commits because a commit cannot contain its own Git
-object ID:
+## Focused evidence and review disposition
 
-1. The reviewed source commit contains the versioned implementation and
-   installer marker.
-2. `fleet/jkammerland.mcp.20-source` points exactly at that source commit.
-3. A direct descendant pins that source commit and ref in
-   `fleet/release.json`; `release/jkammerland.mcp.20` points at the descendant.
+The final fixture correction makes the complete daemon package test copy Linux
+`bwrap` only on Linux, and makes reconnect fixture server versions explicit:
+remote tests retain `reconnect-test/2.0.0`, while the local-daemon fixture uses
+the candidate CLI identity. The previously reported active-reconnect failure
+was therefore an owned shared-fixture mismatch, not an upstream/environment
+failure. Its exact test now passes without changing remote assertions or
+snapshots.
 
-The fleet controller verifies the immutable source ref, native build receipts,
-binary hashes, CLI identity, executable pair, and compatible MCP-server commit
-before reporting a host healthy. Nothing is pushed automatically.
+Focused evidence from this worktree, with the verified Rusty V8 cache supplied
+through `RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH`:
 
-## Validation
+- TUI fixture correction library selectors: 7 passed, 4,938 skipped;
+  `tui-fixture-correction-lib.log`.
+- Complete daemon package compatibility selector: 1 passed, 20 skipped;
+  `tui-fixture-correction-daemon.log`.
+- Earlier focused matrix evidence retained from this candidate includes 7
+  live-session/dispatch-liveness tests passed, 4,567 skipped, and 23 MCP
+  refresh/reconciliation/interrupt/shutdown tests passed, 223 skipped.
+- Fleet Python fixture suite: exactly 11 passed, 1 skipped, 12 total.
+- The V8 archive checksum is
+  `a35c75d1f26e6a983885a45b33490a4ebe54f05050568b32b89cfb421b30b583`; the
+  source binding checksum is
+  `7727826ae479bdb645e807239fb12d1f8e2e23de7a6cf16f5ee592690d1d8506`.
 
-Maintenance candidate, 2026-09-05 (Linux only):
+Historical broad rerun evidence is not release qualification: the prior core
+rerun recorded 4,548 tests and 18 failures in
+`test-codex-core-rerun2.log`; `test-codex-core.log` was a compile failure, not
+test evidence. An earlier TUI run recorded 47 failures. The active-reconnect
+fixture failure is resolved above; other historical failures remain explicitly
+unclassified and were not fixed or waived here.
 
-- Before carrying the stdin fix, the focused baseline run passed 17 tests and reproduced
-  the active-wait/stdin deadlock. After that fix, the stdin test passed; the two added
-  drained-output/reused-handle tests reproduced their failures before their fixes.
-- The final focused run covered MCP, code-mode protocol/client/runtime, and core
-  unified-exec/code-mode integration: 730 of 731 tests passed. The shell-environment
-  snapshot test timed out, including on an isolated rerun; it had passed in the preceding
-  run. This remains unresolved, not classified as an upstream defect or waived for release.
-- A stale code-mode caller and upstream/fork test-contract mismatches were adapted:
-  explicit yield reason, originating-turn ticket ownership, and recovery of completed but
-  unconsumed process output. Companion test binaries were rebuilt from this worktree.
-- The Bazel dependency-lock refresh passed without lockfile changes. Full-workspace and
-  native Mac/Windows release qualification have not been run for this candidate.
-- Scoped Clippy fixes and repository formatting passed. The final mechanical changes were
-  removal of a redundant test-result clone and formatting; tests were not rerun afterward,
-  following the repository workflow.
+The focused checks did not run the full workspace suite. Scoped formatting and
+lint checks are required at the final checkpoint; dependency files were not
+changed, so no additional Bazel lock refresh is required.
 
-Release identity and fleet-controller tests are rerun before source and manifest
-commits are cut. The pinned candidate is then built and validated independently
-on Linux, native Apple Silicon macOS, and Windows before activation.
+## Fleet metadata and deferred hosts
 
-## Local installation
+The manifest describes desired candidate staging, not installed state. Fresh
+Mac source/build roots are:
 
-From the manifest commit in a clean checkout:
-
-```sh
-./scripts/install-user-fork.sh
-codex --version
+```text
+/Users/ai-dev/repos/codex-mcp-fork-release-source-mcp21-alpha8
+/Users/ai-dev/repos/codex-mcp-fork-build-mcp21-alpha8-20260920
 ```
 
-The installer verifies the manifest and reviewed source ancestry, builds both
-native executables, verifies the fork suffix and `codex agents` support, and
-atomically activates the pair with rollback protection.
+The existing Mac installed CLI and paired-host paths remain unchanged. The
+verified Windows worker is `WIN11-offload`, with source/build roots
+`C:\codex-worker\repos\codex-mcp-fork-release-source-mcp21-alpha8` and
+`C:\codex-worker\repos\codex-mcp-fork-build-mcp21-alpha8-20260920`, and server
+root `C:\Users\codex-worker\repos\codex-mcp-server`. Its observed installed
+pair is under
+`C:\Users\codex-worker\.codex\releases\jkammerland.mcp.20\`; Windows is
+deferred because OAuth is revoked and Rust was not found. No host was contacted
+and these observations are not a native validation or installed-state claim.
+
+The recommended future Linux staged package root is:
+
+```text
+/home/ai-dev1/.codex/fleet-staging/jkammerland.mcp.21/linux-x86_64-gnu/package
+```
+
+That root must contain a verified complete package before any future activation
+review. This candidate does not provision it.
+
+## Source and manifest refs
+
+The reviewed source ref is `fleet/jkammerland.mcp.21-source`. A direct
+descendant manifest ref, `release/jkammerland.mcp.21`, pins the exact source
+commit and the compatible MCP server commit. The source and manifest commits
+are local only; nothing is pushed automatically.
+
+## Scope
+
+Only demonstrated waiting, recovery, daemon compatibility, packaging-fixture,
+and release-identity adaptations belong in this candidate. No blanket context
+caps, polling, elapsed-time cancellation, admission quotas, replay, lifecycle
+rewrite, controller architecture, or production raw materializer is included.
+
+Installed binaries remain untouched. Any future activation requires a separate
+reviewed complete-package staging receipt and explicit activation approval.

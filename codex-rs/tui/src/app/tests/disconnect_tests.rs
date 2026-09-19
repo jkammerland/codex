@@ -26,10 +26,14 @@ async fn lost_mutation_reply_preserves_work_without_resubmitting() -> Result<()>
     };
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
-        serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| {
-            assert_eq!(request.method, "turn/start");
-            std::future::ready(None)
-        })
+        serve_reconnect_requests(
+            tokio_tungstenite::accept_async(stream).await?,
+            "2.0.0",
+            |request| {
+                assert_eq!(request.method, "turn/start");
+                std::future::ready(None)
+            },
+        )
         .await
     });
     let mut session = AppServerSession::new(
@@ -284,6 +288,7 @@ async fn remote_disconnect_retires_voice_before_reconnecting() -> Result<()> {
 // Common framing/bootstrap for both transports. Returning None deliberately loses a reply.
 pub(super) async fn serve_reconnect_requests<S, F>(
     mut socket: tokio_tungstenite::WebSocketStream<S>,
+    server_version: &str,
     mut respond: impl FnMut(JSONRPCRequest) -> F,
 ) -> Result<Vec<String>>
 where
@@ -300,10 +305,7 @@ where
         let request_id = request.id.clone();
         let response = match request.method.as_str() {
             "initialize" => Some(json!({"result": {
-                "userAgent": format!(
-                    "reconnect-test/{}",
-                    crate::version::CODEX_CLI_VERSION
-                )
+                "userAgent": format!("reconnect-test/{server_version}")
             }})),
             "account/read" => {
                 Some(json!({"result": {"account": null, "requiresOpenaiAuth": false}}))
@@ -338,10 +340,14 @@ async fn lost_initial_thread_reply_keeps_startup_draft_offline() -> Result<()> {
             .restore_user_message_to_composer("startup draft".into());
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
-            serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| {
-                assert_eq!(request.method, "thread/start");
-                std::future::ready(None)
-            })
+            serve_reconnect_requests(
+                tokio_tungstenite::accept_async(stream).await?,
+                "2.0.0",
+                |request| {
+                    assert_eq!(request.method, "thread/start");
+                    std::future::ready(None)
+                },
+            )
             .await
         });
         let mut session = AppServerSession::new(

@@ -1,6 +1,7 @@
 //! Drives automatic reconnect through the real binary and terminal event loop.
 
 use super::focus_palette::PtyCodex;
+use super::focus_palette::test_codex_home;
 use super::focus_palette::write_test_config;
 use anyhow::Result;
 use anyhow::ensure;
@@ -17,8 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;
-    // macOS's default temporary directory leaves too little room for the control socket path.
-    let codex_home = tempfile::tempdir()?;
+    let codex_home = test_codex_home()?;
     write_test_config(codex_home.path(), &repo_root)?;
     let socket = codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
     std::fs::create_dir_all(socket.parent().unwrap())?;

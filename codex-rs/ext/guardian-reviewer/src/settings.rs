@@ -31,10 +31,17 @@ pub struct ReviewerConfig<C>(pub fn(&C) -> anyhow::Result<C>);
 /// The host still applies feature flags and sandbox restrictions to these tools.
 pub fn reviewer_allowed_tools() -> AllowedTools {
     AllowedTools(
-        ["exec_command", "write_stdin", "view_image", "exec", "wait"]
-            .into_iter()
-            .map(ToolName::plain)
-            .collect(),
+        [
+            "exec_command",
+            "wait_process",
+            "write_stdin",
+            "view_image",
+            "exec",
+            "wait",
+        ]
+        .into_iter()
+        .map(ToolName::plain)
+        .collect(),
     )
 }
 

@@ -14,8 +14,8 @@ pub use prepare_install::update_from_cli;
 mod remote_control_client;
 mod runtime_identity;
 mod settings;
-pub mod telemetry;
 mod socket_state;
+pub mod telemetry;
 mod thread_recovery;
 mod update_loop;
 
@@ -436,14 +436,10 @@ impl Daemon {
                 settings.feature_overrides = feature_overrides.clone();
                 settings.save(&self.settings_file).await?;
             }
-            let pid = managed.start_managed_backend(&settings).await?;
-            let info = self.wait_until_ready().await?;
-            (
-                LifecycleStatus::Started,
-                Some(BackendKind::Pid),
-                pid,
-                info,
-            )
+            let (pid, info) = managed
+                .start_managed_backend_and_validate(&settings, &managed.managed_codex_bin)
+                .await?;
+            (LifecycleStatus::Started, Some(BackendKind::Pid), pid, info)
         };
         let ownership = if backend.is_some() {
             DaemonOwnership::ManagedExisting
@@ -489,8 +485,9 @@ impl Daemon {
                 .await?;
         }
 
-        let pid = managed.start_managed_backend(&settings).await?;
-        let info = self.wait_until_ready().await?;
+        let (pid, info) = managed
+            .start_managed_backend_and_validate(&settings, &managed.managed_codex_bin)
+            .await?;
         if let Err(err) = managed.ensure_managed_updater(&settings).await {
             eprintln!(
                 "warning: failed to ensure managed updater after app-server restart: {err:#}"
@@ -905,6 +902,12 @@ impl Daemon {
         Ok((pid, info))
     }
 
+    async fn start_managed_backend(&self, settings: &DaemonSettings) -> Result<Option<u32>> {
+        backend::pid_backend(self.backend_paths(settings))
+            .start()
+            .await
+    }
+
     async fn ensure_managed_updater(&self, settings: &DaemonSettings) -> Result<bool> {
         let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
         if !codex_build_info::CODEX_FORK_BUILD_ID.is_empty() || !settings.auto_update_enabled {
@@ -1182,6 +1185,8 @@ fn try_lock_file(_file: &tokio::fs::File) -> Result<bool> {
 
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
+    use std::collections::BTreeMap;
+
     #[cfg(unix)]
     use std::path::PathBuf;
 
@@ -1288,7 +1293,7 @@ mod tests {
         let daemon = test_daemon(&temp_dir, socket_path.clone());
 
         assert_eq!(
-            daemon.start().await?,
+            daemon.start(&BTreeMap::new()).await?,
             LifecycleOutput {
                 status: LifecycleStatus::AlreadyRunning,
                 backend: None,
@@ -1317,7 +1322,7 @@ mod tests {
         ));
         let daemon = test_daemon(&temp_dir, socket_path);
 
-        let Err(err) = daemon.start().await else {
+        let Err(err) = daemon.start(&BTreeMap::new()).await else {
             anyhow::bail!("incompatible daemon should be rejected");
         };
         assert_eq!(
@@ -1420,7 +1425,7 @@ mod tests {
             codex_http_client::OutboundProxyPolicy::ReqwestDefault,
         );
 
-        let error = super::run_pid_update_loop(http_client_factory)
+        let error = super::run_pid_update_loop(http_client_factory, None)
             .await
             .expect_err("maintained fork must not start the official update loop");
         assert_eq!(

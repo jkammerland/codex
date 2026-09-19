@@ -272,7 +272,9 @@ async fn store_remote_tty_process_for_test(
             tty: true,
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             permissions: TerminalPermissions::for_launch(
-                turn.environments.primary().expect("turn environment"),
+                turn.initial_environments
+                    .primary()
+                    .expect("turn environment"),
                 turn,
                 TerminalSandboxSource::Native,
                 SandboxPermissions::UseDefault,

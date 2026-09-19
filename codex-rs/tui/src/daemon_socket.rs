@@ -130,6 +130,7 @@ pub(crate) async fn probe_default_daemon_socket(codex_home: &Path) -> DefaultDae
         endpoint: RemoteAppServerEndpoint::UnixSocket {
             socket_path: socket_path.clone(),
         },
+        allow_embedded_fallback: false,
     };
     match crate::app_server_connection::connect(&target).await {
         Ok(app_server) => {

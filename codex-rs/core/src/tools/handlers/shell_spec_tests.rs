@@ -92,9 +92,9 @@ fn exec_command_tool_matches_expected_spec() {
                 Some(vec!["cmd".to_string()]),
                 Some(false.into())
             ),
-            output_schema: Some(unified_exec_output_schema(
-                UnifiedExecOutputSchemaKind::Command
-            )),
+            output_schema: Some(
+                unified_exec_output_schema(UnifiedExecOutputSchemaKind::Command).into()
+            ),
         })
     );
 }
@@ -160,7 +160,7 @@ fn write_stdin_tool_matches_expected_spec() {
             ),
             output_schema: Some(unified_exec_output_schema(
                 UnifiedExecOutputSchemaKind::Command
-            )),
+            ).into()),
         })
     );
 }
@@ -185,7 +185,7 @@ fn wait_process_tool_matches_expected_no_timeout_spec() {
         panic!("wait_process should define an output schema");
     };
     assert_eq!(
-        output_schema.pointer("/properties/reason/enum"),
+        output_schema.to_value().pointer("/properties/reason/enum"),
         Some(&serde_json::json!(["completed", "output", "input"]))
     );
 }

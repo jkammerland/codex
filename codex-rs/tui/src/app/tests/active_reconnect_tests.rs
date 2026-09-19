@@ -120,7 +120,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             let mut methods = Vec::new();
             for attempt in 0..2 {
                 let (stream, _) = listener.accept().await?;
-                methods.extend(serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| std::future::ready(match request.method.as_str() {
+                methods.extend(serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, "2.0.0", |request| std::future::ready(match request.method.as_str() {
                     "thread/resume" if attempt == 0 => Some(json!({"error": {"code": resume_error_code, "message":
                         if resume_error_code == -32600 {
                             format!("thread {id} is closing; retry thread/resume after the thread is closed")
@@ -494,7 +494,7 @@ async fn reconnect_reconciles_offscreen_pending_profile_before_restoring_permiss
     };
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
-        serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| {
+        serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, "2.0.0", |request| {
             let id = request.params.as_ref().and_then(|params| params["threadId"].as_str());
             let thread = |id: ThreadId| json!({
                 "id": id, "sessionId": id, "preview": "task", "ephemeral": false,
@@ -644,6 +644,7 @@ async fn reconnect_allows_slow_hydration_but_bounds_a_stalled_server() -> Result
             let (stream, _) = listener.accept().await?;
             serve_reconnect_requests(
                 tokio_tungstenite::accept_async(stream).await?,
+                "2.0.0",
                 move |request| async move {
                     assert_eq!(request.method, "thread/resume");
                     tokio::time::pause();

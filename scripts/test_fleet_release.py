@@ -45,10 +45,13 @@ class FleetReleaseTest(unittest.TestCase):
         )
 
     def test_checked_in_manifest_is_valid(self) -> None:
-        self.assertEqual(self.release.marker, "+jkammerland.mcp.20")
-        self.assertEqual(self.release.fork_ref, "fleet/jkammerland.mcp.20-source")
-        self.assertEqual(self.release.cli_version, "codex-cli 0.0.0+jkammerland.mcp.20")
-        self.assertEqual(self.release.upstream_version, "0.0.0")
+        self.assertEqual(self.release.marker, "+jkammerland.mcp.21")
+        self.assertEqual(self.release.fork_ref, "fleet/jkammerland.mcp.21-source")
+        self.assertEqual(
+            self.release.cli_version,
+            "codex-cli 0.156.0-alpha.8+jkammerland.mcp.21",
+        )
+        self.assertEqual(self.release.upstream_version, "0.156.0-alpha.8")
         self.assertEqual(self.release.rusty_v8_version, "150.4.0")
         self.assertEqual([host.name for host in self.hosts], ["mac", "windows"])
         self.assertEqual(
@@ -178,10 +181,10 @@ class FleetReleaseTest(unittest.TestCase):
     ) -> None:
         mac_script = fleet_release.activation_script(self.hosts[0], self.release)
         windows_script = fleet_release.activation_script(self.hosts[1], self.release)
-        self.assertIn(".jkammerland.mcp.20-previous", mac_script)
+        self.assertIn(".jkammerland.mcp.21-previous", mac_script)
         self.assertIn("mv -f", mac_script)
         self.assertIn("ReplaceFile", windows_script)
-        self.assertIn(".jkammerland.mcp.20-previous", windows_script)
+        self.assertIn(".jkammerland.mcp.21-previous", windows_script)
         self.assertIn("Build worktree is not clean at the manifest commit", mac_script)
         self.assertIn("Assert-CleanGit $build", windows_script)
         self.assertIn("agents --help", mac_script)
@@ -576,7 +579,7 @@ class FleetReleaseTest(unittest.TestCase):
         self.assertIn('normalize_release_lock "$build"', mac_script)
         self.assertIn("agents --help", mac_script)
         self.assertIn("agents --help", windows_script)
-        release_versions = f"0\\.0\\.0|{re.escape(self.release.upstream_version)}"
+        release_versions = re.escape(self.release.upstream_version)
         self.assertIn(release_versions, mac_script)
         self.assertIn("refs/remotes/fleet/", mac_script)
         self.assertIn("rustup which --toolchain", mac_script)

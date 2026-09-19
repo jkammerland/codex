@@ -26,17 +26,21 @@ fn install_complete_daemon_package(home: &Path) -> Result<()> {
         .map(|directory| directory.join("rg"))
         .find(|path| path.is_file())
         .context("find rg for complete daemon package fixture")?;
-    let bwrap = [Path::new("/usr/bin/bwrap"), Path::new("/bin/bwrap")]
-        .into_iter()
-        .find(|path| path.is_file())
-        .context("find bwrap for complete daemon package fixture")?
-        .to_path_buf();
-    for (source, relative) in [
-        (&codex, "bin/codex"),
-        (&code_mode_host, "bin/codex-code-mode-host"),
-        (&rg, "codex-path/rg"),
-        (&bwrap, "codex-resources/bwrap"),
-    ] {
+    let mut files = vec![
+        (codex, "bin/codex"),
+        (code_mode_host, "bin/codex-code-mode-host"),
+        (rg, "codex-path/rg"),
+    ];
+    #[cfg(target_os = "linux")]
+    {
+        let bwrap = [Path::new("/usr/bin/bwrap"), Path::new("/bin/bwrap")]
+            .into_iter()
+            .find(|path| path.is_file())
+            .context("find bwrap for complete daemon package fixture")?
+            .to_path_buf();
+        files.push((bwrap, "codex-resources/bwrap"));
+    }
+    for (source, relative) in files {
         std::fs::copy(source, package.join(relative))?;
         std::fs::set_permissions(
             package.join(relative),

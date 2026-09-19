@@ -1,8 +1,8 @@
 mod delegate;
 mod execute_handler;
 pub(crate) mod execute_spec;
-mod output;
 mod live_exec_sessions;
+mod output;
 mod response_adapter;
 mod telemetry;
 mod wait_handler;
@@ -53,8 +53,8 @@ use delegate::CodeModeCellDelegate;
 use delegate::CodeModeDispatchBroker;
 use delegate::CodeModeDispatchWorker;
 pub(crate) use execute_handler::CodeModeExecuteHandler;
-use output::CodeModeToolOutput;
 use live_exec_sessions::LiveExecSessionRegistry;
+use output::CodeModeToolOutput;
 use response_adapter::into_function_call_output_content_items;
 pub(crate) use wait_handler::CodeModeWaitHandler;
 

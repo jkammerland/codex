@@ -495,19 +495,6 @@ impl UnifiedExecProcessManager {
         }
     }
 
-    #[tracing::instrument(
-        name = "unified_exec.exec_command",
-        level = "info",
-        skip_all,
-        fields(
-            conversation.id = %context.session.thread_id,
-            turn_id = trace_id(&context.step_context.turn.sub_id),
-            call_id = trace_id(&context.call_id),
-            unified_exec_process_id = request.process_id,
-            mode = "resumable",
-            outcome = tracing::field::Empty,
-        )
-    )]
     async fn release_process_id_if_matches(
         &self,
         process_id: i32,

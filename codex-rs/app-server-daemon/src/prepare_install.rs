@@ -350,9 +350,12 @@ async fn prepare_from_package(
             managed_codex_bin: root.join("current").join(entrypoint),
             ..daemon.clone()
         };
-        selected.start_managed_backend(settings).await.context(
-            "daemon package selected but could not start; retry with `codex app-server daemon start`",
-        )?;
+        selected
+            .start_managed_backend(settings)
+            .await
+            .context(
+                "daemon package selected but could not start; retry with `codex app-server daemon start`",
+            )?;
         selected.wait_until_ready().await?;
     }
     Ok(true)

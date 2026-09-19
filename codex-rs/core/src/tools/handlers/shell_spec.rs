@@ -109,9 +109,9 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
             Some(vec!["cmd".to_string()]),
             Some(false.into()),
         ),
-        output_schema: Some(unified_exec_output_schema(
-            UnifiedExecOutputSchemaKind::Command,
-        )),
+        output_schema: Some(
+            unified_exec_output_schema(UnifiedExecOutputSchemaKind::Command).into(),
+        ),
     })
 }
 
@@ -155,7 +155,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
         ),
         output_schema: Some(unified_exec_output_schema(
             UnifiedExecOutputSchemaKind::Command,
-        )),
+        ).into()),
     })
 }
 
@@ -187,7 +187,7 @@ pub fn create_wait_process_tool() -> ToolSpec {
         ),
         output_schema: Some(unified_exec_output_schema(
             UnifiedExecOutputSchemaKind::Wait,
-        )),
+        ).into()),
     })
 }
 

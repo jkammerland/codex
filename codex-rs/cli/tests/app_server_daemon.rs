@@ -23,7 +23,12 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn new() -> Result<Self> {
-        let home = tempfile::tempdir()?;
+        // macOS UDS paths need a short per-test root; Linux keeps using the disk-backed TMPDIR.
+        let home = if cfg!(target_os = "macos") {
+            tempfile::tempdir_in("/tmp")?
+        } else {
+            tempfile::tempdir()?
+        };
         let codex = codex_utils_cargo_bin::cargo_bin("codex")?;
         let codex_source = std::fs::canonicalize(&codex)?;
         let target = if cfg!(target_os = "macos") {

@@ -27,23 +27,10 @@ pub struct InstallRequest {
 
 /// Prepare a missing package while the caller holds the daemon operation lock.
 pub(super) async fn prepare(daemon: &Daemon, settings: &DaemonSettings) -> Result<()> {
-    let package_layout = InstallContext::current().package_layout.as_ref();
-    let raw_package =
-        if package_layout.is_none() && !codex_build_info::CODEX_FORK_BUILD_ID.is_empty() {
-            Some(materialize_raw_fork_package(
-                daemon
-                    .settings_file
-                    .parent()
-                    .and_then(Path::parent)
-                    .context("daemon settings path has no Codex home")?,
-                &std::env::current_exe()?,
-            )?)
-        } else {
-            None
-        };
-    let source = package_layout
-        .map(|layout| layout.package_dir.as_path())
-        .or_else(|| raw_package.as_ref().map(tempfile::TempDir::path));
+    let source = InstallContext::current()
+        .package_layout
+        .as_ref()
+        .map(|layout| layout.package_dir.as_path());
     // Keep package replacement state out of the CLI dispatcher's async stack frame.
     Box::pin(prepare_from_package(
         daemon,
@@ -67,23 +54,10 @@ pub async fn update_from_cli(
     crate::backend::windows::ensure_not_elevated()?;
     let daemon = Daemon::from_environment()?;
     let settings = daemon.load_settings().await?;
-    let package_layout = InstallContext::current().package_layout.as_ref();
-    let raw_package =
-        if package_layout.is_none() && !codex_build_info::CODEX_FORK_BUILD_ID.is_empty() {
-            Some(materialize_raw_fork_package(
-                daemon
-                    .settings_file
-                    .parent()
-                    .and_then(Path::parent)
-                    .context("daemon settings path has no Codex home")?,
-                &std::env::current_exe()?,
-            )?)
-        } else {
-            None
-        };
-    let source = package_layout
-        .map(|layout| layout.package_dir.as_path())
-        .or_else(|| raw_package.as_ref().map(tempfile::TempDir::path));
+    let source = InstallContext::current()
+        .package_layout
+        .as_ref()
+        .map(|layout| layout.package_dir.as_path());
     if !Box::pin(prepare_from_package(
         &daemon,
         &settings,
@@ -113,81 +87,6 @@ pub async fn update_from_cli(
 enum InstallMode {
     Missing,
     Replace,
-}
-
-fn materialize_raw_fork_package(temp_root: &Path, running_exe: &Path) -> Result<tempfile::TempDir> {
-    let package = tempfile::TempDir::new_in(temp_root)?;
-    for directory in ["bin", "codex-path", "codex-resources"] {
-        std::fs::create_dir_all(package.path().join(directory))?;
-    }
-    let context = InstallContext::current();
-    let entrypoint = if cfg!(windows) {
-        "bin/codex.exe"
-    } else {
-        "bin/codex"
-    };
-    let code_mode_host = if cfg!(windows) {
-        "bin/codex-code-mode-host.exe"
-    } else {
-        "bin/codex-code-mode-host"
-    };
-    copy_package_executable(running_exe, &package.path().join(entrypoint))?;
-    copy_package_executable(
-        &context.code_mode_host_program(),
-        &package.path().join(code_mode_host),
-    )?;
-    let rg = context.rg_command();
-    let rg = if rg.is_file() {
-        rg
-    } else {
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|directory| directory.join(&rg))
-            .find(|path| path.is_file())
-            .context("maintained fork raw package is missing rg")?
-    };
-    copy_package_executable(
-        &rg,
-        &package.path().join(if cfg!(windows) {
-            "codex-path/rg.exe"
-        } else {
-            "codex-path/rg"
-        }),
-    )?;
-    if cfg!(target_os = "linux") {
-        let bwrap = [Path::new("/usr/bin/bwrap"), Path::new("/bin/bwrap")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .context("maintained fork raw package requires bwrap")?;
-        copy_package_executable(bwrap, &package.path().join("codex-resources/bwrap"))?;
-    }
-    std::fs::write(
-        package.path().join("codex-package.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "layoutVersion": 1,
-            "version": codex_build_info::CODEX_CLI_VERSION,
-            "target": platform_target()?,
-            "variant": "codex",
-            "entrypoint": entrypoint,
-            "resourcesDir": "codex-resources",
-            "pathDir": "codex-path"
-        }))?,
-    )?;
-    Ok(package)
-}
-
-fn copy_package_executable(source: &Path, destination: &Path) -> Result<()> {
-    anyhow::ensure!(
-        source.is_file(),
-        "maintained fork raw package is missing {}",
-        source.display()
-    );
-    std::fs::copy(source, destination)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
-    }
-    Ok(())
 }
 
 async fn prepare_from_package(

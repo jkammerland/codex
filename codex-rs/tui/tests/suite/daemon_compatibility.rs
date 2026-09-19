@@ -1,6 +1,7 @@
 //! Exercises daemon compatibility fallback through real TUI startup.
 
 use super::focus_palette::PtyCodex;
+use super::focus_palette::test_codex_home;
 use super::focus_palette::write_test_config;
 use anyhow::Context;
 use anyhow::Result;
@@ -9,14 +10,71 @@ use codex_app_server_protocol::JSONRPCMessage;
 use futures::SinkExt;
 use futures::StreamExt;
 use serde_json::json;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use tokio::net::UnixListener;
 use tokio_tungstenite::tungstenite::Message;
+
+fn install_complete_daemon_package(home: &Path) -> Result<()> {
+    let package = home.join("packages/app-server-daemon/releases/test");
+    for directory in ["bin", "codex-path", "codex-resources"] {
+        std::fs::create_dir_all(package.join(directory))?;
+    }
+    let codex = codex_utils_cargo_bin::cargo_bin("codex")?;
+    let code_mode_host = codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?;
+    let rg = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join("rg"))
+        .find(|path| path.is_file())
+        .context("find rg for complete daemon package fixture")?;
+    let bwrap = [Path::new("/usr/bin/bwrap"), Path::new("/bin/bwrap")]
+        .into_iter()
+        .find(|path| path.is_file())
+        .context("find bwrap for complete daemon package fixture")?
+        .to_path_buf();
+    for (source, relative) in [
+        (&codex, "bin/codex"),
+        (&code_mode_host, "bin/codex-code-mode-host"),
+        (&rg, "codex-path/rg"),
+        (&bwrap, "codex-resources/bwrap"),
+    ] {
+        std::fs::copy(source, package.join(relative))?;
+        std::fs::set_permissions(
+            package.join(relative),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+    }
+    let target = if cfg!(target_os = "macos") {
+        format!("{}-apple-darwin", std::env::consts::ARCH)
+    } else if cfg!(target_env = "gnu") {
+        format!("{}-unknown-linux-gnu", std::env::consts::ARCH)
+    } else {
+        format!("{}-unknown-linux-musl", std::env::consts::ARCH)
+    };
+    std::fs::write(
+        package.join("codex-package.json"),
+        serde_json::to_vec(&json!({
+            "layoutVersion": 1,
+            "version": codex_tui::CODEX_CLI_VERSION,
+            "target": target,
+            "variant": "codex",
+            "entrypoint": "bin/codex",
+            "resourcesDir": "codex-resources",
+            "pathDir": "codex-path",
+        }))?,
+    )?;
+    std::os::unix::fs::symlink(
+        "releases/test",
+        home.join("packages/app-server-daemon/current"),
+    )?;
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn incompatible_daemon_falls_back_for_default_and_explicit_features() -> Result<()> {
     for scenario in ["default", "explicit", "host policy"] {
         let cwd = codex_utils_cargo_bin::repo_root()?;
-        let home = tempfile::tempdir()?;
+        let home = test_codex_home()?;
+        install_complete_daemon_package(home.path())?;
         write_test_config(home.path(), &cwd)?;
         let config_path = home.path().join("config.toml");
         let config = std::fs::read_to_string(&config_path)?;

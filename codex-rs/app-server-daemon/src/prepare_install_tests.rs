@@ -5,10 +5,16 @@ use super::prepare_from_package;
 use super::validate_package;
 use crate::managed_install;
 use crate::settings::DaemonSettings;
+use anyhow::Context;
+use futures::SinkExt;
+use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+use tokio::net::UnixListener;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
 
 fn daemon(home: &std::path::Path) -> crate::Daemon {
     let state = home.join("app-server-daemon");
@@ -21,6 +27,41 @@ fn daemon(home: &std::path::Path) -> crate::Daemon {
         settings_file: state.join("settings.json"),
         managed_codex_bin: crate::managed_install::managed_codex_bin(home),
     }
+}
+
+async fn serve_probe(listener: UnixListener, version: &str) -> anyhow::Result<()> {
+    let (stream, _) = listener.accept().await?;
+    let mut websocket = accept_async(stream).await?;
+    let Message::Text(payload) = websocket
+        .next()
+        .await
+        .transpose()?
+        .context("missing initialize request")?
+    else {
+        anyhow::bail!("expected text initialize request");
+    };
+    let request: codex_app_server_protocol::JSONRPCRequest = serde_json::from_str(&payload)?;
+    websocket
+        .send(Message::Text(
+            serde_json::json!({
+                "id": request.id,
+                "result": {
+                    "userAgent": format!("codex_app_server/{version} (test)"),
+                    "codexHome": "/isolated/codex-home",
+                    "platformFamily": "unix",
+                    "platformOs": "linux",
+                },
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    websocket
+        .next()
+        .await
+        .transpose()?
+        .context("missing initialized notification")?;
+    Ok(())
 }
 
 fn package(root: &Path, version: &str) -> PathBuf {
@@ -110,6 +151,7 @@ async fn maintained_fork_rewrites_official_package_version_in_staged_copy() {
     .expect("fork executable");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
         .expect("fork executable permission");
+    let original_manifest = std::fs::read(source.join("codex-package.json")).unwrap();
 
     prepare_from_package(
         &daemon(&home),
@@ -134,10 +176,69 @@ async fn maintained_fork_rewrites_official_package_version_in_staged_copy() {
             .unwrap(),
         codex_build_info::CODEX_CLI_VERSION
     );
-    assert_ne!(
-        std::fs::read_to_string(source.join("codex-package.json")).unwrap(),
-        serde_json::to_string(&metadata).unwrap()
+    assert_eq!(
+        std::fs::read(source.join("codex-package.json")).unwrap(),
+        original_manifest
     );
+}
+
+#[tokio::test]
+async fn replacement_preserves_incompatible_managed_runtime() {
+    let temp = tempfile::TempDir::new().expect("temp");
+    let home = temp.path().join("home");
+    let state = home.join("app-server-daemon");
+    std::fs::create_dir_all(&state).expect("state");
+    let selected = home.join("packages/app-server-daemon/current");
+    let running_exe = selected.join("bin/codex");
+    std::fs::create_dir_all(running_exe.parent().unwrap()).expect("selected package");
+    std::fs::write(
+        &running_exe,
+        br##"#!/bin/sh
+case "$*" in
+  *--help*) exit 0 ;;
+  *) exec sleep 30 ;;
+esac
+"##,
+    )
+    .expect("running daemon executable");
+    std::fs::set_permissions(&running_exe, std::fs::Permissions::from_mode(0o755))
+        .expect("running executable permission");
+    let socket_path = state.join("app-server.sock");
+    let listener = UnixListener::bind(&socket_path).expect("socket");
+    let server = tokio::spawn(serve_probe(listener, "0.151.0"));
+    let mut daemon = daemon(&home);
+    daemon.managed_codex_bin = running_exe;
+    let settings = DaemonSettings::default();
+    let backend = crate::backend::pid_backend(daemon.backend_paths(&settings));
+    backend.start().await.expect("start isolated backend");
+
+    let source = temp.path().join("replacement");
+    let source_bin = package(&source, "0.156.0");
+    let error = prepare_from_package(
+        &daemon,
+        &settings,
+        InstallMode::Replace,
+        Some(&source),
+        &source_bin,
+        |_| panic!("incompatible runtime must be rejected before confirmation"),
+    )
+    .await
+    .expect_err("incompatible managed runtime must survive replacement attempt");
+    assert!(
+        error
+            .to_string()
+            .contains("The incompatible daemon was not reused"),
+        "unexpected replacement error: {error:#}"
+    );
+    assert!(
+        backend
+            .is_starting_or_running()
+            .await
+            .expect("backend state")
+    );
+    backend.stop().await.expect("stop isolated backend");
+    server.await.expect("probe task join").expect("probe task");
+    assert!(!home.join("packages/app-server-daemon/releases").exists());
 }
 
 #[tokio::test]

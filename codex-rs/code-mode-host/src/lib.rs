@@ -29,8 +29,8 @@ use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SessionId;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
 use codex_code_mode_protocol::host::WAIT_YIELD_REASON_CAPABILITY;
-use codex_code_mode_protocol::host::YIELD_OBSERVATION_CAPABILITY;
 use codex_code_mode_protocol::host::WireWaitOutcome;
+use codex_code_mode_protocol::host::YIELD_OBSERVATION_CAPABILITY;
 use codex_code_mode_runtime::InProcessCodeModeSession;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -261,8 +261,12 @@ async fn negotiate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 
     let wait_yield_reason_capability = Capability::new(WAIT_YIELD_REASON_CAPABILITY)?;
-    let wait_yield_reason = client_hello.required_capabilities().contains(&wait_yield_reason_capability)
-        || client_hello.optional_capabilities().contains(&wait_yield_reason_capability);
+    let wait_yield_reason = client_hello
+        .required_capabilities()
+        .contains(&wait_yield_reason_capability)
+        || client_hello
+            .optional_capabilities()
+            .contains(&wait_yield_reason_capability);
     let host_capabilities = CapabilitySet::try_new(
         [
             SESSION_RESOURCE_LIMITS_CAPABILITY,

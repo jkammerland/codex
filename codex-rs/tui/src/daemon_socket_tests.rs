@@ -99,11 +99,16 @@ async fn default_daemon_auto_connect_rejects_regular_file() -> Result<()> {
     )?;
     std::fs::write(socket_path.as_path(), "not a socket")?;
 
+    #[cfg(target_os = "macos")]
+    let reason = std::io::Error::from_raw_os_error(libc::ENOTSOCK).to_string();
+    #[cfg(not(target_os = "macos"))]
+    let reason = "the control path is not a stale socket".to_string();
+
     assert_eq!(
         probe_default_daemon_socket(codex_home.path()).await,
         DefaultDaemonSocket::Unavailable {
             socket_path,
-            reason: "the control path is not a stale socket".to_string(),
+            reason,
         }
     );
     Ok(())

@@ -27,8 +27,10 @@ use codex_code_mode_protocol::host::RequestId;
 use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SessionId;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
+use codex_code_mode_protocol::host::WAIT_YIELD_REASON_CAPABILITY;
 use codex_code_mode_protocol::host::WireExecuteRequest;
 use codex_code_mode_protocol::host::WireResult;
+use codex_code_mode_protocol::host::YIELD_OBSERVATION_CAPABILITY;
 use pretty_assertions::assert_eq;
 use tokio::io::AsyncWrite;
 use tokio::sync::Semaphore;
@@ -293,6 +295,51 @@ async fn session_resource_limits_are_negotiated_when_optional_or_required() {
             Some(HostToClient::HostHello(HostHello::new(
                 ProtocolVersion::V1,
                 resource_limits.clone(),
+            )))
+        );
+
+        drop(writer);
+        drop(reader);
+        host.await.expect("host task").expect("host connection");
+    }
+}
+
+#[tokio::test]
+async fn yield_capabilities_are_negotiated_together_when_optional_or_required() {
+    let capabilities = CapabilitySet::try_new([
+        Capability::new(YIELD_OBSERVATION_CAPABILITY).expect("yield observation capability"),
+        Capability::new(WAIT_YIELD_REASON_CAPABILITY).expect("wait yield reason capability"),
+    ])
+    .expect("yield capabilities");
+
+    for (required, optional) in [
+        (CapabilitySet::empty(), capabilities.clone()),
+        (capabilities.clone(), CapabilitySet::empty()),
+    ] {
+        let (host_stream, client_stream) = tokio::io::duplex(/*max_buf_size*/ 1024);
+        let (host_reader, host_writer) = tokio::io::split(host_stream);
+        let (client_reader, client_writer) = tokio::io::split(client_stream);
+        let host = tokio::spawn(run(host_reader, host_writer));
+        let mut reader = FramedReader::new(client_reader);
+        let mut writer = FramedWriter::new(client_writer);
+
+        writer
+            .write(&ClientToHost::ClientHello(
+                ClientHello::new(
+                    SupportedProtocolVersions::try_new([ProtocolVersion::V1])
+                        .expect("supported versions"),
+                    required,
+                    optional,
+                )
+                .expect("client hello"),
+            ))
+            .await
+            .expect("write hello");
+        assert_eq!(
+            reader.read::<HostToClient>().await.expect("host hello"),
+            Some(HostToClient::HostHello(HostHello::new(
+                ProtocolVersion::V1,
+                capabilities.clone(),
             )))
         );
 

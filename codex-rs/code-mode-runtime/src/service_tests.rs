@@ -87,6 +87,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
 
@@ -116,6 +117,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         })
     );
 

@@ -240,7 +240,7 @@ async fn run_cell<H: CellHost>(
                     &runtime_control_tx,
                 );
             }
-            _ = async {
+            reason = async {
                 tokio::select! {
                     _ = async {
                         if let Some(yield_timer) = yield_timer.as_mut() {
@@ -248,14 +248,14 @@ async fn run_cell<H: CellHost>(
                         } else {
                             std::future::pending::<()>().await;
                         }
-                    } => {}
+                    } => YieldReason::DeadlineElapsed,
                     _ = async {
                         if let Some(yield_signal) = yield_signal.as_ref() {
                             yield_signal.cancelled().await;
                         } else {
                             std::future::pending::<()>().await;
                         }
-                    } => {}
+                    } => YieldReason::Requested,
                 }
             } => {
                 yield_timer = None;
@@ -265,7 +265,7 @@ async fn run_cell<H: CellHost>(
                         observer.take(),
                         CellEvent::Yielded {
                             content_items: std::mem::take(&mut content_items),
-                            reason: YieldReason::DeadlineElapsed,
+                            reason,
                         },
                     ),
                     &mut content_items,

@@ -208,10 +208,16 @@ impl Connection {
         let handshake = async {
             let session_limits_capability = Capability::new(SESSION_RESOURCE_LIMITS_CAPABILITY)
                 .map_err(|error| error.to_string())?;
-            let yield_capability = Capability::new(YIELD_OBSERVATION_CAPABILITY).map_err(|error| error.to_string())?;
-            let wait_yield_reason_capability = Capability::new(WAIT_YIELD_REASON_CAPABILITY).map_err(|error| error.to_string())?;
-            let optional_capabilities = CapabilitySet::try_new([session_limits_capability, yield_capability, wait_yield_reason_capability])
-                    .map_err(|error| error.to_string())?;
+            let yield_capability =
+                Capability::new(YIELD_OBSERVATION_CAPABILITY).map_err(|error| error.to_string())?;
+            let wait_yield_reason_capability =
+                Capability::new(WAIT_YIELD_REASON_CAPABILITY).map_err(|error| error.to_string())?;
+            let optional_capabilities = CapabilitySet::try_new([
+                session_limits_capability,
+                yield_capability,
+                wait_yield_reason_capability,
+            ])
+            .map_err(|error| error.to_string())?;
             let hello = ClientHello::new(
                 SupportedProtocolVersions::try_new([ProtocolVersion::V1])
                     .map_err(|err| err.to_string())?,

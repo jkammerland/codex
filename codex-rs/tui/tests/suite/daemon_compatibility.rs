@@ -26,7 +26,7 @@ fn install_complete_daemon_package(home: &Path) -> Result<()> {
         .map(|directory| directory.join("rg"))
         .find(|path| path.is_file())
         .context("find rg for complete daemon package fixture")?;
-    let mut files = vec![
+    let files = vec![
         (codex, "bin/codex"),
         (code_mode_host, "bin/codex-code-mode-host"),
         (rg, "codex-path/rg"),
@@ -74,7 +74,7 @@ fn install_complete_daemon_package(home: &Path) -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn incompatible_daemon_falls_back_for_default_and_explicit_features() -> Result<()> {
+async fn incompatible_daemon_can_run_embedded_for_default_and_explicit_features() -> Result<()> {
     for scenario in ["default", "explicit", "host policy"] {
         let cwd = codex_utils_cargo_bin::repo_root()?;
         let home = test_codex_home()?;
@@ -84,7 +84,10 @@ async fn incompatible_daemon_falls_back_for_default_and_explicit_features() -> R
         let config = std::fs::read_to_string(&config_path)?;
         std::fs::write(
             config_path,
-            format!("features.daemon_auto_start = true\n{config}"),
+            config.replace(
+                "features.daemon_auto_start = false",
+                "features.daemon_auto_start = true",
+            ),
         )?;
         if scenario == "host policy" {
             let path = home.path().join("config.toml");
@@ -143,28 +146,32 @@ async fn incompatible_daemon_falls_back_for_default_and_explicit_features() -> R
         };
         let mut terminal = PtyCodex::start(&cwd, home, &args)?;
         terminal.wait_for_startup()?;
-        terminal.wait_for_screen("warning")?;
-        terminal.write_input(b"\x14")?;
+        terminal.wait_for_screen(if scenario == "host policy" {
+            "Cannot use the background server"
+        } else {
+            "Background server has incompatible feature settings"
+        })?;
         let (snapshot, warning_end) = match scenario {
             "default" => (
                 "daemon_feature_mismatch",
-                "api_key_model_discovery to be disabled.",
+                "api_key_model_discovery to be disabled",
             ),
             "explicit" => (
                 "daemon_override_mismatch",
-                "api_key_model_discovery to be enabled.",
+                "api_key_model_discovery to be enabled",
             ),
-            "host policy" => ("daemon_host_policy_mismatch", "requires embedded mode."),
+            "host policy" => ("daemon_host_policy_mismatch", "requires embedded mode"),
             _ => unreachable!(),
         };
         terminal.wait_for_screen(warning_end)?;
         let screen = terminal.screen_contents();
         let warning = screen
             .lines()
-            .find(|line| line.contains("Running without the shared background server"))
+            .find(|line| line.contains(warning_end))
             .context("missing warning line")?;
         insta::assert_snapshot!(snapshot, warning);
-        terminal.write_input(b"\x14")?;
+        terminal.write_input(b"1")?;
+        terminal.wait_for_screen("GPT-5.6-Terra")?;
         terminal.write_input(b"/status")?;
         terminal.wait_for_screen("show current session configuration")?;
         terminal.read_output(std::time::Duration::from_millis(/*millis*/ 200))?;

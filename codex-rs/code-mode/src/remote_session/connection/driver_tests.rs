@@ -215,6 +215,7 @@ async fn old_host_does_not_receive_yield_frames() {
                 value: WireRuntimeResponse::Yielded {
                     cell_id: CellId::new("1".to_string()).into(),
                     content_items: Vec::new(),
+                    yield_reason: None,
                     code_mode_host_duration_ns: 1,
                 },
             },
@@ -263,6 +264,7 @@ async fn old_host_does_not_receive_yield_frames() {
                     outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Yielded {
                         cell_id: CellId::new("1".to_string()).into(),
                         content_items: Vec::new(),
+                        yield_reason: None,
                         code_mode_host_duration_ns: 1,
                     }),
                 },

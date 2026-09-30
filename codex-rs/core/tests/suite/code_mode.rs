@@ -1768,7 +1768,7 @@ async fn code_mode_wait_id_stays_known_after_compaction(
                 ev_custom_tool_call(
                     "call-exec",
                     "exec",
-                    r#"await tools.test_sync_tool({}); text("started"); yield_control(); await new Promise(() => {});"#,
+                    r#"await tools.test_sync_tool({}); text("started"); yield_control(); text("pending observation"); await new Promise(() => {});"#,
                 ),
                 ev_completed("resp-start"),
             ]),
@@ -2856,7 +2856,7 @@ async fn code_mode_result_metadata_keeps_prepared_call_binding_across_runtime_re
     });
     let code = format!(
         "const tool = ALL_TOOLS.find(({{ name }}) => name.endsWith(\"{RESULT_METADATA_TOOL}\")); \
-         const pending = tools[tool.name]({arguments}); yield_control(); await pending; \
+         const pending = tools[tool.name]({arguments}); yield_control(); text(\"pending inventory\"); await pending; \
          await tools[tool.name]({arguments}); text(\"done\");"
     );
     let (test, follow_up) =
@@ -2870,7 +2870,7 @@ async fn code_mode_result_metadata_keeps_prepared_call_binding_across_runtime_re
     tokio::time::timeout(Duration::from_secs(10), reached_rx).await??;
 
     // Yield may precede call admission. Drain inventory after the lifecycle gate is reached;
-    // the short wait is only a poll budget while the gate keeps acceptance blocked.
+    // the buffered marker makes the observation visible while acceptance stays blocked.
     let held_wait = responses::mount_function_call_agent_response(
         &server,
         "call-2",
@@ -3004,7 +3004,7 @@ async fn code_mode_late_truncated_result_metadata_survives_waits() -> Result<()>
     let later_arguments = serde_json::json!({ "query": "later" });
     let code = format!(
         "const tool = ALL_TOOLS.find(({{ name }}) => name.endsWith(\"{RESULT_METADATA_TOOL}\")); \
-         const pending = tools[tool.name]({arguments}); yield_control(); await pending; \
+         const pending = tools[tool.name]({arguments}); yield_control(); text(\"pending inventory\"); await pending; \
          await tools[tool.name]({later_arguments}); text(\"accepted\"); \
          yield_control(); await new Promise(() => {{}});"
     );
@@ -3021,7 +3021,7 @@ async fn code_mode_late_truncated_result_metadata_survives_waits() -> Result<()>
         .context("first call did not reach the result gate")??;
 
     // The call may be dispatched after the first yield. Wait while its result is held so
-    // the request has already recorded the truncated call before accepting its metadata.
+    // the buffered marker returns the inventory without relying on a quiet deadline wake.
     let held = responses::mount_function_call_agent_response(
         &server,
         "call-2",

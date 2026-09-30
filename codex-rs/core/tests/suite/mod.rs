@@ -60,9 +60,9 @@ mod code_mode;
 #[cfg(not(target_os = "windows"))]
 mod code_mode_dispatch_liveness;
 mod code_mode_elicitation;
-mod code_mode_model_messages;
 #[cfg(not(target_os = "windows"))]
 mod code_mode_live_exec_sessions;
+mod code_mode_model_messages;
 mod codex_apps_protocol;
 mod codex_delegate;
 mod collaboration_instructions;

@@ -116,6 +116,8 @@ async fn build_fixture(
                     environment_id,
                     enabled: true,
                     required: false,
+                    startup_readiness: Default::default(),
+                    tool_input_schema_max_bytes: None,
                     supports_parallel_tool_calls: false,
                     omit_tools_from: None,
                     disabled_reason: None,

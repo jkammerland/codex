@@ -1291,6 +1291,7 @@ mod tests {
             operation_lock_file: temp_dir.path().join("daemon.lock"),
             settings_file: temp_dir.path().join("settings.json"),
             managed_codex_bin: temp_dir.path().join("missing-codex"),
+            log_diagnostics: false,
         }
     }
 

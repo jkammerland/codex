@@ -155,10 +155,13 @@ impl CodeModeWaitHandler {
                                 exec.session
                                     .services
                                     .code_mode_service
-                                    .wait(codex_code_mode::WaitRequest {
-                                        cell_id: cell_id.clone(),
-                                        yield_time_ms: 0,
-                                    }, step_context.preempt.clone())
+                                    .wait(
+                                        codex_code_mode::WaitRequest {
+                                            cell_id: cell_id.clone(),
+                                            yield_time_ms: 0,
+                                        },
+                                        step_context.preempt.clone(),
+                                    )
                                     .await
                                     .map_err(FunctionCallError::RespondToModel),
                                 true,
@@ -187,10 +190,13 @@ impl CodeModeWaitHandler {
                                     exec.session
                                         .services
                                         .code_mode_service
-                                        .wait(codex_code_mode::WaitRequest {
-                                            cell_id: cell_id.clone(),
-                                            yield_time_ms: 0,
-                                        }, step_context.preempt.clone())
+                                        .wait(
+                                            codex_code_mode::WaitRequest {
+                                                cell_id: cell_id.clone(),
+                                                yield_time_ms: 0,
+                                            },
+                                            step_context.preempt.clone(),
+                                        )
                                         .await
                                         .map_err(FunctionCallError::RespondToModel),
                                     true,
@@ -207,7 +213,10 @@ impl CodeModeWaitHandler {
                             telemetry.finish(/*success*/ false);
                         })?;
                         if !input_wake
-                            && !step_context.preempt.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                            && !step_context
+                                .preempt
+                                .as_ref()
+                                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
                             && matches!(
                                 &observation,
                                 codex_code_mode::WaitOutcome::LiveCell(

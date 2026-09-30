@@ -21,7 +21,10 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let codex_home = test_codex_home()?;
     write_test_config(codex_home.path(), &repo_root)?;
     let config_path = codex_home.path().join("config.toml");
-    let config = std::fs::read_to_string(&config_path)?;
+    let config = std::fs::read_to_string(&config_path)?.replace(
+        "features.daemon_auto_start = false",
+        "features.daemon_auto_start = true",
+    );
     std::fs::write(
         config_path,
         format!("{config}\n[tui]\nstatus_line = [\"thread-id\"]\n"),
@@ -100,7 +103,10 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                 }
                 let result = match request.method.as_str() {
                     "initialize" => json!({
-                        "userAgent": format!("reconnect-pty/{}", codex_tui::CODEX_CLI_VERSION)
+                        "userAgent": format!("reconnect-pty/{}", codex_tui::CODEX_CLI_VERSION),
+                        "codexHome": "/fake/codex-home",
+                        "platformFamily": std::env::consts::FAMILY,
+                        "platformOs": std::env::consts::OS,
                     }),
                     // An older daemon can omit the client's default-disabled features.
                     "experimentalFeature/list" => {
@@ -181,7 +187,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let mut disconnect_tx = Some(disconnect_tx);
     let mut restore_tx = Some(restore_tx);
     for expected in [
-        "GPT-5.6 Terra",
+        id,
         "preserved-draft",
         "Reconnecting",
         "preserved-draft!",
@@ -197,7 +203,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             terminal.screen_contents()
         );
         match expected {
-            "GPT-5.6 Terra" => terminal.write_input(b"preserved-draft")?,
+            expected if expected == id => terminal.write_input(b"preserved-draft")?,
             "preserved-draft" => {
                 disconnect_tx.take().unwrap().send(()).unwrap();
             }

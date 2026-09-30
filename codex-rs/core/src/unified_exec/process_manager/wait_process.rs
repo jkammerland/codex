@@ -48,7 +48,8 @@ impl UnifiedExecProcessManager {
             .await?;
         let start = Instant::now();
         let mut state_rx = process.subscribe_state();
-        let has_buffered_output = tty && output.output_buffer.lock().await.total_bytes() > 0;
+        let has_buffered_output =
+            tty && output.output_buffer.lock().await.pending.total_bytes() > 0;
 
         let initial_wait_reason = if process.has_exited() || process.failure_message().is_some() {
             Some(ProcessWaitReason::Completed)
@@ -98,7 +99,7 @@ impl UnifiedExecProcessManager {
                 if process.has_exited() || process.failure_message().is_some() {
                     break (ProcessWaitReason::Completed, interaction_guard);
                 }
-                if tty && output.output_buffer.lock().await.total_bytes() > 0 {
+                if tty && output.output_buffer.lock().await.pending.total_bytes() > 0 {
                     break (ProcessWaitReason::Output, interaction_guard);
                 }
                 drop(interaction_guard);

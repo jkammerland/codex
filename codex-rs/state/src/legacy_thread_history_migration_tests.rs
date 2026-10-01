@@ -163,6 +163,25 @@ async fn legacy_history_seven_is_relocated_without_replaying_or_losing_rows() {
 }
 
 #[tokio::test]
+async fn legacy_history_repair_can_run_in_a_spawned_task() {
+    let (_cleanup, sqlite, pool) = history_before_seven().await;
+    apply_legacy_seven(&pool, LEGACY_SQL).await;
+    pool.close().await;
+    tokio::spawn(async move {
+        let repaired = sqlite
+            .open_thread_history_db(
+                &runtime_thread_history_migrator(),
+                /*telemetry_override*/ None,
+            )
+            .await
+            .unwrap();
+        repaired.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn unknown_history_seven_is_still_rejected() {
     let (_cleanup, sqlite, pool) = history_before_seven().await;
     apply_legacy_seven(&pool, "SELECT 1;").await;

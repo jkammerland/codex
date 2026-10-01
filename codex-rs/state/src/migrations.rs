@@ -89,7 +89,9 @@ pub(crate) async fn migrate_thread_history(
             .bind(LEGACY_CHECKSUM)
             .execute(&mut *tx)
             .await?;
-            migrator.run(&mut *tx).await?;
+            migrator
+                .run_direct(/*target*/ None, &mut *tx, /*skip*/ false)
+                .await?;
             tx.commit().await?;
             return Ok(());
         }

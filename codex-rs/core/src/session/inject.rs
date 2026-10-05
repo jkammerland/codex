@@ -66,6 +66,63 @@ impl Session {
         Ok(())
     }
 
+    /// Injects input only when the named turn is still the active turn.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub(crate) async fn inject_if_running_for_turn<T: Into<ResponseItemEnvelope>>(
+        &self,
+        sub_id: &str,
+        input: Vec<T>,
+    ) -> Result<(), Vec<T>> {
+        let mut active = self.active_turn.lock().await;
+        match active.as_mut() {
+            Some(active_turn)
+                if active_turn
+                    .task
+                    .as_ref()
+                    .is_some_and(|task| task.turn_context.sub_id == sub_id) =>
+            {
+                self.input_queue
+                    .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+                        active_turn.turn_state.as_ref(),
+                        input
+                            .into_iter()
+                            .map(Into::into)
+                            .map(PendingTurnInput::ResponseItem)
+                            .collect(),
+                    )
+                    .await;
+                Ok(())
+            }
+            Some(_) | None => Err(input),
+        }
+    }
+
+    /// Records input only when its originating turn is still the active turn.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the active turn check and history update must remain atomic"
+    )]
+    pub(crate) async fn record_conversation_items_if_running_for_turn(
+        &self,
+        turn_context: &TurnContext,
+        input: Vec<ResponseItem>,
+    ) -> Result<(), Vec<ResponseItem>> {
+        let active = self.active_turn.lock().await;
+        let is_originating_turn_active = active
+            .as_ref()
+            .and_then(|active_turn| active_turn.task.as_ref())
+            .is_some_and(|task| task.turn_context.sub_id == turn_context.sub_id);
+        if !is_originating_turn_active {
+            return Err(input);
+        }
+        self.record_conversation_items(turn_context, turn_context.model_info(), &input)
+            .await;
+        Ok(())
+    }
+
     /// Preserves trusted client provenance while items wait for an active turn.
     #[expect(
         clippy::await_holding_invalid_type,

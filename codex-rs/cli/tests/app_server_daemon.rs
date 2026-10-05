@@ -23,7 +23,12 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn new() -> Result<Self> {
-        let home = tempfile::Builder::new().tempdir_in("/tmp")?;
+        // macOS UDS paths need a short per-test root; Linux keeps using the disk-backed TMPDIR.
+        let home = if cfg!(target_os = "macos") {
+            tempfile::tempdir_in("/tmp")?
+        } else {
+            tempfile::tempdir()?
+        };
         let codex = codex_utils_cargo_bin::cargo_bin("codex")?;
         let codex_source = std::fs::canonicalize(&codex)?;
         let target = if cfg!(target_os = "macos") {
@@ -637,7 +642,16 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
             assert!(!state.join("app-server-updater.pid").exists());
             None
         }
-        InitialDaemon::Legacy => Some(daemon.pid("app-server-updater.pid")?),
+        InitialDaemon::Legacy => {
+            if codex_build_info::CODEX_FORK_BUILD_ID.is_empty() {
+                Some(daemon.pid("app-server-updater.pid")?)
+            } else {
+                // Maintained forks never re-enable the official updater while
+                // migrating a legacy selection.
+                assert!(!state.join("app-server-updater.pid").exists());
+                None
+            }
+        }
     };
     if action == "start" {
         let initial_current = initial_root.join("current");

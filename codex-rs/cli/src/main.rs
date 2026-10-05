@@ -117,7 +117,7 @@ use codex_terminal_detection::TerminalName;
 #[derive(Debug, Parser)]
 #[clap(
     author,
-    version,
+    version = codex_tui::CODEX_CLI_VERSION,
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
@@ -692,6 +692,10 @@ enum AppServerDaemonSubcommand {
         #[arg(long, hide = true)]
         restore_release: Option<String>,
     },
+
+    /// [internal] Stop the detached official updater without stopping app-server.
+    #[clap(hide = true)]
+    DisableAutoUpdate,
 }
 
 #[derive(Debug, Args)]
@@ -1395,6 +1399,9 @@ async fn cli_main(
                             )
                             .await?;
                         }
+                    }
+                    AppServerDaemonSubcommand::DisableAutoUpdate => {
+                        codex_app_server_daemon::disable_auto_update().await?;
                     }
                 },
                 Some(AppServerSubcommand::Proxy(proxy_cli)) => {
@@ -2341,6 +2348,7 @@ fn app_server_subcommand_name(subcommand: Option<&AppServerSubcommand>) -> &'sta
             AppServerDaemonSubcommand::Stop => "app-server daemon stop",
             AppServerDaemonSubcommand::Version => "app-server daemon version",
             AppServerDaemonSubcommand::PidUpdateLoop { .. } => "app-server daemon pid-update-loop",
+            AppServerDaemonSubcommand::DisableAutoUpdate => "app-server daemon disable-auto-update",
         },
         Some(AppServerSubcommand::Proxy(_)) => "app-server proxy",
         Some(AppServerSubcommand::GenerateTs(_)) => "app-server generate-ts",
@@ -4715,6 +4723,13 @@ mod tests {
             app_server_from_args(["codex", "app-server", "daemon", "version"].as_ref()).subcommand,
             Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
                 subcommand: AppServerDaemonSubcommand::Version
+            }))
+        ));
+        assert!(matches!(
+            app_server_from_args(["codex", "app-server", "daemon", "disable-auto-update"].as_ref())
+                .subcommand,
+            Some(AppServerSubcommand::Daemon(AppServerDaemonCommand {
+                subcommand: AppServerDaemonSubcommand::DisableAutoUpdate
             }))
         ));
     }

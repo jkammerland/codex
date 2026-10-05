@@ -26,11 +26,22 @@ const FOCUS_PROBE_INPUT: &str = "focus-palette-24527";
 mod external_editor;
 #[path = "tui_mode_picker_tests.rs"]
 mod tui_mode_picker;
+pub(super) fn test_codex_home() -> Result<TempDir> {
+    // macOS UDS paths need a short per-test root; Linux keeps using the disk-backed TMPDIR.
+    #[cfg(target_os = "macos")]
+    {
+        tempfile::tempdir_in("/tmp").context("create short macOS Codex home")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tempfile::tempdir().context("create disk-backed Codex home")
+    }
+}
 
 #[test]
 fn focus_gained_with_unanswered_palette_queries_preserves_immediate_input() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;
-    let codex_home = tempfile::tempdir()?;
+    let codex_home = test_codex_home()?;
     write_test_config(codex_home.path(), &repo_root)?;
 
     let mut terminal = PtyCodex::start(&repo_root, codex_home, &["--no-alt-screen"])?;
@@ -60,7 +71,7 @@ async fn interactive_startup_honors_codex_home_symlink_opt_out() -> Result<()> {
     core_test_support::skip_if_sandbox!(Ok(()));
     let workspace = tempfile::tempdir()?;
     let workspace_path = workspace.path().canonicalize()?;
-    let codex_home = tempfile::tempdir()?;
+    let codex_home = test_codex_home()?;
     let target = tempfile::tempdir()?;
     let visualizations = codex_home.path().join("visualizations");
     std::os::unix::fs::symlink(target.path(), &visualizations)?;
@@ -563,7 +574,7 @@ pub(super) fn write_test_config(codex_home: &Path, repo_root: &Path) -> Result<(
 fn no_daemon_skips_startup_and_discovery() -> Result<()> {
     for running in [false, true] {
         let workspace = tempfile::tempdir()?;
-        let home = tempfile::tempdir()?;
+        let home = test_codex_home()?;
         write_test_config(home.path(), workspace.path())?;
         let config = home.path().join("config.toml");
         let contents = std::fs::read_to_string(&config)?;
@@ -611,7 +622,7 @@ fn no_daemon_skips_startup_and_discovery() -> Result<()> {
 #[test]
 fn auto_daemon_start_failure_exits_with_manual_fallback_hint() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let home = tempfile::tempdir()?;
+    let home = test_codex_home()?;
     write_test_config(home.path(), workspace.path())?;
     let config = home.path().join("config.toml");
     let contents = std::fs::read_to_string(&config)?;

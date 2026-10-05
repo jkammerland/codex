@@ -741,7 +741,7 @@ async fn approved_mcp_tool_call_metadata_records_prior_user_input_request(
         .expect("MCP tools/call turn metadata");
     assert_eq!(
         mcp_turn_metadata["codex_version"],
-        env!("CARGO_PKG_VERSION")
+        codex_build_info::CODEX_CLI_VERSION
     );
     assert_eq!(
         (

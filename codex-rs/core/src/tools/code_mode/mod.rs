@@ -1,6 +1,7 @@
 mod delegate;
 mod execute_handler;
 pub(crate) mod execute_spec;
+mod live_exec_sessions;
 mod output;
 mod response_adapter;
 mod telemetry;
@@ -52,6 +53,7 @@ use delegate::CodeModeCellDelegate;
 use delegate::CodeModeDispatchBroker;
 use delegate::CodeModeDispatchWorker;
 pub(crate) use execute_handler::CodeModeExecuteHandler;
+use live_exec_sessions::LiveExecSessionRegistry;
 use output::CodeModeToolOutput;
 use response_adapter::into_function_call_output_content_items;
 pub(crate) use wait_handler::CodeModeWaitHandler;
@@ -76,6 +78,7 @@ pub(crate) struct CodeModeService {
     session_provider: Arc<dyn CodeModeSessionProvider>,
     availability: Result<(), String>,
     dispatch_broker: Arc<CodeModeDispatchBroker>,
+    live_exec_sessions: LiveExecSessionRegistry,
     default_exec_yield_time_ms: u64,
     shutdown_token: CancellationToken,
     unavailable_warning_emitted: AtomicBool,
@@ -95,6 +98,7 @@ impl CodeModeService {
             session_provider,
             availability,
             dispatch_broker,
+            live_exec_sessions: LiveExecSessionRegistry::default(),
             default_exec_yield_time_ms: config.default_exec_yield_time_ms,
             shutdown_token: CancellationToken::new(),
             unavailable_warning_emitted: AtomicBool::new(false),
@@ -178,6 +182,7 @@ impl CodeModeService {
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
         self.shutdown_token.cancel();
+        self.dispatch_broker.shutdown_dispatcher();
         // Join any initialization already in progress without initializing an unused service.
         match self
             .session
@@ -211,6 +216,27 @@ impl CodeModeService {
 
     pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
         self.dispatch_broker.close_cell(cell_id);
+    }
+
+    fn observe_nested_exec_result(
+        &self,
+        cell_id: &CellId,
+        tool_name: &str,
+        is_default_namespace: bool,
+        input_session_id: Option<i32>,
+        result: &JsonValue,
+    ) {
+        self.live_exec_sessions.observe_tool_result(
+            cell_id,
+            tool_name,
+            is_default_namespace,
+            input_session_id,
+            result,
+        );
+    }
+
+    fn live_exec_sessions_for_cell(&self, cell_id: &CellId) -> Vec<i32> {
+        self.live_exec_sessions.sessions_for_cell(cell_id)
     }
 
     pub(crate) fn start_turn_worker(
@@ -258,7 +284,8 @@ impl CodeModeService {
     }
 }
 
-fn handle_runtime_response(
+async fn handle_runtime_response(
+    exec: &ExecContext,
     model_info: &codex_protocol::openai_models::ModelInfo,
     response: RuntimeResponse,
     max_output_tokens: Option<usize>,
@@ -270,6 +297,22 @@ fn handle_runtime_response(
     let host_duration = response
         .code_mode_host_duration()
         .filter(|_| experimental_show_cell_overhead);
+
+    let observed_live_exec_sessions = match &response {
+        RuntimeResponse::Yielded { .. } => Vec::new(),
+        RuntimeResponse::Terminated { cell_id, .. } | RuntimeResponse::Result { cell_id, .. } => {
+            exec.session
+                .services
+                .code_mode_service
+                .live_exec_sessions_for_cell(cell_id)
+        }
+    };
+    let live_exec_sessions = exec
+        .session
+        .services
+        .unified_exec_manager
+        .retain_existing_process_ids(observed_live_exec_sessions)
+        .await;
 
     let (content_items, error_text) = match response {
         RuntimeResponse::Yielded { content_items, .. }
@@ -289,12 +332,34 @@ fn handle_runtime_response(
         });
     }
     content_items = truncate_code_mode_result(content_items, max_output_tokens);
+    append_live_exec_sessions(&mut content_items, &live_exec_sessions);
     CodeModeToolOutput::new(
         FunctionToolOutput::from_content(content_items, Some(success)),
         script_status,
         wall_time,
         host_duration,
     )
+}
+
+fn append_live_exec_sessions(
+    content_items: &mut Vec<FunctionCallOutputContentItem>,
+    session_ids: &[i32],
+) {
+    if session_ids.is_empty() {
+        return;
+    }
+
+    let sessions = session_ids
+        .iter()
+        .map(|session_id| serde_json::json!({ "session_id": session_id }))
+        .collect::<Vec<_>>();
+    let metadata = serde_json::json!({ "live_sessions": sessions });
+    content_items.push(FunctionCallOutputContentItem::InputText {
+        text: format!(
+            "\nLive nested exec sessions remain recoverable:\n{metadata}\n\
+             Continue them with wait_process or write_stdin using the original session_id."
+        ),
+    });
 }
 
 fn format_script_status(response: &RuntimeResponse) -> String {
@@ -350,6 +415,13 @@ fn submit_nested_tool(
         tool_kind,
         input,
     } = invocation;
+    let nested_tool_name = tool_name.name.clone();
+    let is_default_namespace = tool_name.is_default_namespace();
+    let input_session_id = input
+        .as_ref()
+        .and_then(|input| input.get("session_id"))
+        .and_then(JsonValue::as_i64)
+        .and_then(|session_id| i32::try_from(session_id).ok());
     let thread_id = session.thread_id;
     let turn_id = step_context.turn.sub_id.clone();
     let tool_name = tool_name.with_default_namespace();
@@ -409,7 +481,20 @@ fn submit_nested_tool(
         cancellation_token,
         Arc::default(),
     );
-    Ok(async move { Ok(result.await?.code_mode_result()) })
+    Ok(async move {
+        let result = result.await?.code_mode_result();
+        session
+            .services
+            .code_mode_service
+            .observe_nested_exec_result(
+                &cell_id,
+                nested_tool_name.as_str(),
+                is_default_namespace,
+                input_session_id,
+                &result,
+            );
+        Ok(result)
+    })
 }
 
 fn build_nested_tool_payload(

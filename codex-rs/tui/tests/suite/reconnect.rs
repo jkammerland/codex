@@ -24,10 +24,15 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let codex_home = tempfile::tempdir_in("/tmp")?;
     write_test_config(codex_home.path(), &workspace_path)?;
     let config_path = codex_home.path().join("config.toml");
-    let config = std::fs::read_to_string(&config_path)?.replace(
-        "model = \"gpt-5.6-terra\"",
-        "model = \"stale-client-model\"",
-    );
+    let config = std::fs::read_to_string(&config_path)?
+        .replace(
+            "model = \"gpt-5.6-terra\"",
+            "model = \"stale-client-model\"",
+        )
+        .replace(
+            "features.daemon_auto_start = false",
+            "features.daemon_auto_start = true",
+        );
     std::fs::write(
         config_path,
         format!("{config}\n[tui]\nstatus_line = [\"thread-id\"]\n"),
@@ -46,14 +51,22 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
         let mut restore_rx = Some(restore_rx);
         let mut recovered_completed = false;
         let mut submitted_tx = Some(submitted_tx);
+        let mut reconnecting = false;
+        let mut reconnect_attempts = 0;
+        let mut success_notified = false;
         let thread = json!({
             "id": id, "sessionId": id, "preview": "", "ephemeral": false,
             "modelProvider": "openai", "createdAt": 1, "updatedAt": 2,
             "status": {"type": "active", "activeFlags": []}, "cwd": server_cwd,
             "cliVersion": "0.0.0", "source": "cli", "turns": [{"id": "running", "items": [], "status": "inProgress", "error": null}]
         });
-        // The first connection checks daemon compatibility before TUI startup.
-        for connection in -1..7 {
+        for _connection in 0..12 {
+            let reconnect_attempt = if reconnecting {
+                reconnect_attempts += 1;
+                reconnect_attempts
+            } else {
+                0
+            };
             let mut socket = loop {
                 let (stream, _) = listener.accept().await?;
                 // Startup probes the default daemon socket before opening its WebSocket.
@@ -63,7 +76,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             };
             loop {
                 let frame = tokio::select! {
-                    _ = &mut complete_rx, if connection == 6 && !recovered_completed => {
+                    _ = &mut complete_rx, if reconnect_attempt >= 6 && !recovered_completed => {
                         recovered_completed = true;
                         socket.send(Message::Text(json!({
                             "method": "turn/completed", "params": {
@@ -73,24 +86,31 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                         }).to_string().into())).await?;
                         continue;
                     }
-                    _ = &mut disconnect_rx, if connection == 0 => {
+                    _ = &mut disconnect_rx, if !reconnecting => {
+                        reconnecting = true;
                         socket.close(/*msg*/ None).await?;
                         break;
                     }
                     frame = socket.next() => frame,
                 };
                 let Some(Ok(Message::Text(text))) = frame else {
+                    if success_notified {
+                        return Ok(methods);
+                    }
                     break;
                 };
                 let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
                     continue;
                 };
                 methods.push(request.method.clone());
-                if connection == 1 && request.method == "initialize" {
-                    restore_rx.take().unwrap().await?;
+                if reconnect_attempt == 1
+                    && request.method == "initialize"
+                    && let Some(restore_rx) = restore_rx.take()
+                {
+                    restore_rx.await?;
                 }
                 // Keep failing past the original five-attempt limit.
-                if (1..=5).contains(&connection) && request.method == "thread/resume" {
+                if (1..=5).contains(&reconnect_attempt) && request.method == "thread/resume" {
                     socket
                         .send(Message::Text(
                             json!({"id": request.id, "error": {
@@ -104,7 +124,12 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     continue;
                 }
                 let result = match request.method.as_str() {
-                    "initialize" => json!({"userAgent": "reconnect-pty"}),
+                    "initialize" => json!({
+                        "userAgent": format!("reconnect-pty/{}", codex_tui::CODEX_CLI_VERSION),
+                        "codexHome": "/fake/codex-home",
+                        "platformFamily": std::env::consts::FAMILY,
+                        "platformOs": std::env::consts::OS,
+                    }),
                     // An older daemon can omit the client's default-disabled features.
                     "experimentalFeature/list" => {
                         json!({"data": (["api_key_model_discovery", "code_mode_host", "auth_elicitation"].map(|name| json!({
@@ -116,7 +141,13 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                     "account/read" => {
                         json!({"account": {"type": "apiKey"}, "requiresOpenaiAuth": false})
                     }
-                    "model/list" => json!({"data": [], "nextCursor": null}),
+                    "model/list" => json!({"data": [{
+                        "id": "gpt-5.6-terra", "model": "gpt-5.6-terra",
+                        "displayName": "GPT-5.6 Terra", "description": "",
+                        "hidden": false, "isDefault": true,
+                        "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": ""}],
+                        "defaultReasoningEffort": "medium"
+                    }], "nextCursor": null}),
                     "config/read" => {
                         let params = request.params.as_ref().unwrap();
                         assert_eq!(params["cwd"], server_cwd.to_string_lossy().as_ref());
@@ -182,7 +213,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                 if request.method == "turn/start" {
                     submitted_tx.take().unwrap().send(()).unwrap();
                 }
-                if connection == 6 && request.method == "thread/resume" {
+                if reconnect_attempt >= 6 && request.method == "thread/resume" {
                     // Keep the recovered turn running: its output must appear without waiting
                     // for turn/completed or rebuilding the transcript.
                     socket
@@ -197,6 +228,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
                             .into(),
                         ))
                         .await?;
+                    success_notified = true;
                 }
             }
         }
@@ -208,7 +240,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
     let mut disconnect_tx = Some(disconnect_tx);
     let mut restore_tx = Some(restore_tx);
     for expected in [
-        id, // The model label does not establish that the client has attached a thread.
+        id,
         "preserved-draft",
         "Reconnecting",
         "preserved-draft!",
@@ -224,7 +256,7 @@ async fn automatic_reconnect_restores_draft_and_routes_new_notifications() -> Re
             terminal.screen_contents()
         );
         match expected {
-            ready if ready == id => terminal.write_input(b"preserved-draft")?,
+            expected if expected == id => terminal.write_input(b"preserved-draft")?,
             "preserved-draft" => {
                 disconnect_tx.take().unwrap().send(()).unwrap();
             }

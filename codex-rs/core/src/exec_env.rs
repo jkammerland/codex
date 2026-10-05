@@ -45,7 +45,7 @@ pub(crate) fn inject_session_env(env: &mut HashMap<String, String>, session_id: 
     }
     env.insert(
         CODEX_VERSION_ENV_VAR.to_string(),
-        env!("CARGO_PKG_VERSION").to_string(),
+        codex_build_info::CODEX_CLI_VERSION.to_string(),
     );
 }
 

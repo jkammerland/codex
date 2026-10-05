@@ -11735,6 +11735,99 @@ impl SessionTask for NeverEndingTask {
     }
 }
 
+#[tokio::test]
+async fn turn_scoped_injection_rejects_a_different_active_turn() {
+    let (session, originating_turn) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let current_turn = session.new_default_turn().await;
+    session
+        .spawn_task(
+            Arc::clone(&current_turn),
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
+    let current_turn_state = loop {
+        if let Some(turn_state) = session
+            .active_turn
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|active| active.task.as_ref().map(|_| Arc::clone(&active.turn_state)))
+        {
+            break turn_state;
+        }
+        tokio::task::yield_now().await;
+    };
+    let item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "turn-scoped injection".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    assert_eq!(
+        session
+            .inject_if_running_for_turn(&originating_turn.sub_id, vec![item.clone()])
+            .await,
+        Err(vec![item.clone()])
+    );
+    assert_eq!(
+        session
+            .inject_if_running_for_turn(&current_turn.sub_id, vec![item.clone()])
+            .await,
+        Ok(())
+    );
+    assert_eq!(
+        session
+            .input_queue
+            .take_pending_input_for_turn_state(current_turn_state.as_ref())
+            .await,
+        vec![TurnInput::ResponseItem(item.into())]
+    );
+
+    let developer_message = |text: &str| ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let stale_context = developer_message("stale turn context");
+    let current_context = developer_message("current turn context");
+    assert_eq!(
+        session
+            .record_conversation_items_if_running_for_turn(
+                &originating_turn,
+                vec![stale_context.clone()],
+            )
+            .await,
+        Err(vec![stale_context])
+    );
+    assert_eq!(
+        session
+            .record_conversation_items_if_running_for_turn(&current_turn, vec![current_context],)
+            .await,
+        Ok(())
+    );
+    assert_eq!(
+        developer_input_texts(&raw_history_items(
+            &session.state.lock().await.clone_history()
+        )),
+        vec!["current turn context"]
+    );
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
 #[derive(Clone, Copy)]
 struct ExtensionInterruptedTask;
 

@@ -1203,6 +1203,7 @@ async fn remote_overview_startup_hides_disabled_older_server_notice() -> Result<
         let (stream, _) = listener.accept().await?;
         super::disconnect::serve_reconnect_requests(
             tokio_tungstenite::accept_async(stream).await?,
+            "2.0.0",
             |_request| std::future::ready(None),
         )
         .await

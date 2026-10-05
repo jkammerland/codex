@@ -31,10 +31,17 @@ pub struct ReviewerConfig<C>(pub fn(&C) -> anyhow::Result<C>);
 pub fn reviewer_tool_policy() -> ToolPolicy {
     ToolPolicy {
         allowed_tools: Some(
-            ["exec_command", "write_stdin", "view_image", "exec", "wait"]
-                .into_iter()
-                .map(ToolName::plain)
-                .collect(),
+            [
+                "exec_command",
+                "wait_process",
+                "write_stdin",
+                "view_image",
+                "exec",
+                "wait",
+            ]
+            .into_iter()
+            .map(ToolName::plain)
+            .collect(),
         ),
         require_managed_sandbox: true,
         require_unified_exec: true,

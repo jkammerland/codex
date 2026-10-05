@@ -365,7 +365,7 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
     let produce = async {
         for chunk in chunks {
             output_buffer.lock().await.push_chunk(chunk);
-            output_notify.notify_one();
+            output_notify.notify_waiters();
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
                     if output_buffer.lock().await.pending.retained_bytes() == 0 {
@@ -603,7 +603,7 @@ fn pruning_protects_recent_processes_even_if_exited() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing() {
+async fn pruning_preserves_processes_in_use_or_with_active_initial_calls() {
     let (_, turn) = crate::session::tests::make_session_and_context().await;
     let exited_process = Arc::new(
         crate::unified_exec::process_tests::remote_process(
@@ -625,7 +625,7 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
         )
         .await,
     );
-    let _interaction_guard = exited_process.interaction_lock().lock_owned().await;
+    let interaction_guard = exited_process.interaction_lock().lock_owned().await;
     let now = Instant::now();
     let cwd = PathUri::parse("file:///tmp").expect("test cwd should be valid");
     let mut store = ProcessStore::default();
@@ -676,5 +676,39 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
     assert_eq!(
         (pruned.map(|entry| entry.process_id), store.processes.len()),
         (None, MAX_UNIFIED_EXEC_PROCESSES)
+    );
+
+    drop(interaction_guard);
+    let wait_process_guard = exited_process.wait_process_lock().lock_owned().await;
+    let pruned = UnifiedExecProcessManager::prune_processes_if_needed(&mut store);
+
+    assert_eq!(
+        (pruned.map(|entry| entry.process_id), store.processes.len()),
+        (None, MAX_UNIFIED_EXEC_PROCESSES)
+    );
+
+    drop(wait_process_guard);
+    for (process_id, entry) in &mut store.processes {
+        entry.process = Arc::clone(&live_process);
+        entry.last_used = now
+            + Duration::from_millis(
+                u64::try_from(*process_id).expect("positive process id should fit u64"),
+            );
+    }
+    store
+        .processes
+        .get(&1)
+        .expect("oldest process should be stored")
+        .initial_exec_command_active
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let pruned = UnifiedExecProcessManager::prune_processes_if_needed(&mut store);
+
+    assert_eq!(
+        (
+            pruned.map(|entry| entry.process_id),
+            store.processes.contains_key(&1)
+        ),
+        (Some(2), true)
     );
 }

@@ -1140,6 +1140,7 @@ async fn multiple_environments_expose_environment_selectors() {
     .await;
     multiple_environments.assert_visible_contains(&[
         "exec_command",
+        "wait_process",
         "apply_patch",
         "view_image",
         "request_permissions",
@@ -1188,7 +1189,7 @@ async fn environment_tools_follow_the_step_context() {
         &Default::default(),
     ));
 
-    plan.assert_visible_contains(&["exec_command", "apply_patch", "view_image"]);
+    plan.assert_visible_contains(&["exec_command", "wait_process", "apply_patch", "view_image"]);
 }
 
 #[tokio::test]

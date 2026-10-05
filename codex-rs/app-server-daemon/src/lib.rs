@@ -1397,6 +1397,12 @@ mod tests {
 
         let temp_dir = TempDir::new()?;
         let socket_path = temp_dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket_path)?;
+        let server = tokio::spawn(serve_probe(
+            listener,
+            temp_dir.path().to_path_buf(),
+            codex_build_info::CODEX_CLI_VERSION.to_string(),
+        ));
         let running_codex = temp_dir.path().join("running-codex");
         let replacement_codex = temp_dir.path().join("replacement-codex");
         for (path, version) in [
@@ -1430,6 +1436,7 @@ mod tests {
             backend_is_running?,
             "mismatched replacement must not stop the existing daemon"
         );
+        server.await??;
         Ok(())
     }
 

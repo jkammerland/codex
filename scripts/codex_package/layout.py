@@ -9,6 +9,8 @@ from .targets import PackageInputs
 from .targets import PackageVariant
 from .targets import TargetSpec
 from .zsh import ZSH_RESOURCE_PATH
+from .version import read_workspace_version
+from .version import validate_maintained_release_version
 
 
 LAYOUT_VERSION = 1
@@ -38,6 +40,7 @@ def build_package_dir(
     spec: TargetSpec,
     inputs: PackageInputs,
 ) -> None:
+    validate_maintained_release_version(version, read_workspace_version())
     bin_dir = package_dir / "bin"
     resources_dir = package_dir / "codex-resources"
     path_dir = package_dir / "codex-path"

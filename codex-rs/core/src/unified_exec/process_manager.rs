@@ -55,8 +55,8 @@ use crate::unified_exec::ProcessStore;
 use crate::unified_exec::TerminalSession;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
+use crate::unified_exec::UnifiedExecInteractionEvent;
 use crate::unified_exec::UnifiedExecProcessManager;
-use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
 use crate::unified_exec::async_watcher::emit_exec_end_for_unified_exec;
 use crate::unified_exec::async_watcher::emit_failed_exec_end_for_unified_exec;
@@ -450,6 +450,14 @@ fn terminate_process_on_network_denial(
 }
 
 impl UnifiedExecProcessManager {
+    pub(crate) async fn retain_existing_process_ids(&self, process_ids: Vec<i32>) -> Vec<i32> {
+        let store = self.process_store.lock().await;
+        process_ids
+            .into_iter()
+            .filter(|process_id| store.processes.contains_key(process_id))
+            .collect()
+    }
+
     pub(crate) async fn allocate_process_id(&self) -> i32 {
         loop {
             let mut store = self.process_store.lock().await;
@@ -504,6 +512,32 @@ impl UnifiedExecProcessManager {
         }
     }
 
+    async fn release_process_id_if_matches(
+        &self,
+        process_id: i32,
+        expected_process: &Arc<UnifiedExecProcess>,
+    ) {
+        let removed = {
+            let mut store = self.process_store.lock().await;
+            // No entry means an unstored short-lived process still owns only
+            // the reservation. A different entry is a reused ID and must stay.
+            let belongs_to_replacement = store
+                .processes
+                .get(&process_id)
+                .is_some_and(|entry| !Arc::ptr_eq(&entry.process, expected_process));
+            if belongs_to_replacement {
+                return;
+            }
+            let entry = store.processes.remove(&process_id);
+            if !should_use_deterministic_process_ids() {
+                store.reserved_process_ids.remove(&process_id);
+            }
+            entry
+        };
+        if let Some(entry) = removed {
+            unregister_network_approval_for_entry(&entry).await;
+        }
+    }
     #[tracing::instrument(
         name = "unified_exec.exec_command",
         level = "info",
@@ -711,7 +745,8 @@ impl UnifiedExecProcessManager {
                 wall_time,
             )
             .await;
-            self.release_process_id(request.process_id).await;
+            self.release_process_id_if_matches(request.process_id, &process)
+                .await;
             return Err(fail_process_with_message(process.as_ref(), message));
         }
         if let Some(message) = process.failure_message() {
@@ -733,7 +768,8 @@ impl UnifiedExecProcessManager {
                 wall_time,
             )
             .await;
-            self.release_process_id(request.process_id).await;
+            self.release_process_id_if_matches(request.process_id, &process)
+                .await;
             if let Err(message) = finish_result {
                 return Err(fail_process_with_message(process.as_ref(), message));
             }
@@ -821,7 +857,8 @@ impl UnifiedExecProcessManager {
                     wall_time,
                 )
                 .await;
-                self.release_process_id(request.process_id).await;
+                self.release_process_id_if_matches(request.process_id, &process)
+                    .await;
                 return Err(fail_process_with_message(process.as_ref(), message));
             }
             let exit_code = process.exit_code();
@@ -847,7 +884,8 @@ impl UnifiedExecProcessManager {
             )
             .await;
 
-            self.release_process_id(request.process_id).await;
+            self.release_process_id_if_matches(request.process_id, &process)
+                .await;
             process
                 .check_for_sandbox_denial_with_text(&text)
                 .await
@@ -871,6 +909,7 @@ impl UnifiedExecProcessManager {
             max_output_tokens: request.max_output_tokens,
             process_id: response_process_id,
             exit_code,
+            wait_reason: None,
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
             hook_command: Some(request.hook_command.clone()),
@@ -1125,6 +1164,7 @@ impl UnifiedExecProcessManager {
             max_output_tokens: request.max_output_tokens,
             process_id,
             exit_code,
+            wait_reason: None,
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
             hook_command: Some(hook_command),
@@ -1132,7 +1172,7 @@ impl UnifiedExecProcessManager {
 
         let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
         if should_emit_interaction
-            && let Some(WriteStdinInteractionEvent { session, turn }) = request.interaction_event
+            && let Some(UnifiedExecInteractionEvent { session, turn }) = request.interaction_event
         {
             let interaction = TerminalInteractionEvent {
                 call_id: response.event_call_id.clone(),
@@ -1164,7 +1204,6 @@ impl UnifiedExecProcessManager {
         else {
             return ProcessStatus::Unknown;
         };
-
         let exit_code = entry.process.exit_code();
         let process_id = entry.process_id;
 
@@ -1646,17 +1685,21 @@ impl UnifiedExecProcessManager {
                 &mut post_exit_deadline,
             )
             .await;
+            let output_notified = output_notify.notified();
+            let output_closed_notified = output_closed_notify.notified();
+            tokio::pin!(output_notified);
+            tokio::pin!(output_closed_notified);
+            // Both producers use `notify_waiters`, which does not retain a
+            // permit. Register before inspecting the buffer and close flag.
+            output_notified.as_mut().enable();
+            output_closed_notified.as_mut().enable();
             let drained_output: HeadTailBuffer<MAX_BYTES>;
             let has_drained_output: bool;
-            let mut wait_for_output = None;
             {
                 let mut guard = output_buffer.lock().await;
                 drained_output = std::mem::take(&mut guard.pending);
                 has_drained_output =
                     drained_output.retained_bytes() > 0 || drained_output.omitted_bytes() > 0;
-                if !has_drained_output {
-                    wait_for_output = Some(output_notify.notified());
-                }
             }
 
             if !has_drained_output {
@@ -1677,25 +1720,19 @@ impl UnifiedExecProcessManager {
                     if close_wait_remaining == Duration::ZERO {
                         break StopReason::PostExitDeadline;
                     }
-                    let notified = wait_for_output.unwrap_or_else(|| output_notify.notified());
-                    let closed = output_closed_notify.notified();
-                    tokio::pin!(notified);
-                    tokio::pin!(closed);
                     tokio::select! {
-                        _ = &mut notified => {}
-                        _ = &mut closed => {}
+                        _ = &mut output_notified => {}
+                        _ = &mut output_closed_notified => {}
                         _ = tokio::time::sleep(close_wait_remaining) => break StopReason::PostExitDeadline,
                         _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
                     }
                     continue;
                 }
 
-                let notified = wait_for_output.unwrap_or_else(|| output_notify.notified());
-                tokio::pin!(notified);
                 let exit_notified = cancellation_token.cancelled();
                 tokio::pin!(exit_notified);
                 tokio::select! {
-                    _ = &mut notified => {}
+                    _ = &mut output_notified => {}
                     _ = &mut exit_notified => exit_signal_received = true,
                     _ = tokio::time::sleep(remaining) => break StopReason::Deadline,
                     _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
@@ -1792,14 +1829,26 @@ impl UnifiedExecProcessManager {
                 return None;
             }
 
-            // Do not prune processes while write_stdin or terminal event
-            // publication holds their interaction lock.
-            if let Some(interaction_lock) = candidate_process
-                .as_ref()
-                .map(|process| process.interaction_lock())
-                && let Ok(_interaction_guard) = interaction_lock.try_lock_owned()
-            {
-                return store.remove(process_id);
+            let initial_exec_command_active = store
+                .processes
+                .get(&process_id)
+                .is_some_and(|entry| entry.initial_exec_command_active.load(Ordering::Acquire));
+            if initial_exec_command_active {
+                found_locked_exited_process |= candidate_has_exited;
+                meta.retain(|(id, _, _)| *id != process_id);
+                continue;
+            }
+
+            // Do not prune processes while an interaction, event-driven wait,
+            // or terminal event publication is active for them.
+            if let Some(candidate_process) = candidate_process.as_ref() {
+                let interaction_lock = candidate_process.interaction_lock();
+                let wait_process_lock = candidate_process.wait_process_lock();
+                if let Ok(_interaction_guard) = interaction_lock.try_lock_owned()
+                    && let Ok(_wait_process_guard) = wait_process_lock.try_lock_owned()
+                {
+                    return store.remove(process_id);
+                }
             }
             found_locked_exited_process |= candidate_has_exited
                 || candidate_process.is_some_and(|process| process.has_exited());
@@ -1952,3 +2001,5 @@ enum ProcessStatus {
 #[cfg(test)]
 #[path = "process_manager_tests.rs"]
 mod tests;
+
+mod wait_process;

@@ -341,14 +341,21 @@ pub(super) async fn run_main_inner(
     let implicit_connection = explicit_remote_endpoint.is_none();
     let default_daemon = if implicit_connection && reuse_implicit_local_daemon {
         startup_draft
-            .run_until(maybe_probe_default_daemon_socket(&codex_home))
+            .run_until(probe_default_daemon_socket(&codex_home))
             .await?
     } else {
         explicit_local_daemon_socket
+            .map(DefaultDaemonSocket::Compatible)
+            .unwrap_or(DefaultDaemonSocket::Absent)
     };
+    if cli.agents_overview
+        && let Some(message) = default_daemon.shared_agents_error()
+    {
+        return Err(std::io::Error::other(message));
+    }
     let mut app_server_target = app_server_target_for_launch(
         explicit_remote_endpoint,
-        default_daemon,
+        default_daemon.into_compatible_path(),
         reuse_implicit_local_daemon,
         workload_identity_selected,
         std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),

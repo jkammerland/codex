@@ -67,7 +67,11 @@ mod client;
 mod client_websockets;
 mod cloud_config;
 mod code_mode;
+#[cfg(not(target_os = "windows"))]
+mod code_mode_dispatch_liveness;
 mod code_mode_elicitation;
+#[cfg(not(target_os = "windows"))]
+mod code_mode_live_exec_sessions;
 mod code_mode_model_messages;
 mod codex_apps_protocol;
 mod codex_delegate;
@@ -147,6 +151,7 @@ mod mcp_subagent_elicitation;
 mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;
+mod mcp_unbounded_waits;
 mod mcp_user_verification;
 mod model_overrides;
 #[path = "model_provider_requirements_tests.rs"]

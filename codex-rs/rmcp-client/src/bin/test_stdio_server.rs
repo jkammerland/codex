@@ -2,6 +2,9 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -295,6 +298,10 @@ impl TestToolServer {
             "properties": {
                 "sleep_before_ms": { "type": "number" },
                 "sleep_after_ms": { "type": "number" },
+                "started_file": { "type": "string" },
+                "release_file": { "type": "string" },
+                "exit_file": { "type": "string" },
+                "call_count_file": { "type": "string" },
                 "barrier": {
                     "type": "object",
                     "properties": {
@@ -469,6 +476,14 @@ struct SyncArgs {
     sleep_before_ms: Option<u64>,
     #[serde(default)]
     sleep_after_ms: Option<u64>,
+    #[serde(default)]
+    started_file: Option<PathBuf>,
+    #[serde(default)]
+    release_file: Option<PathBuf>,
+    #[serde(default)]
+    exit_file: Option<PathBuf>,
+    #[serde(default)]
+    call_count_file: Option<PathBuf>,
     #[serde(default)]
     barrier: Option<SyncBarrierArgs>,
 }
@@ -941,10 +956,55 @@ impl TestToolServer {
     }
 
     async fn sync_result(args: SyncArgs) -> Result<CallToolResult, McpError> {
+        if let Some(path) = &args.call_count_file {
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path)
+                .and_then(|mut file| writeln!(file, "sync"))
+                .map_err(|error| {
+                    McpError::internal_error(
+                        format!(
+                            "failed to update sync call count file {}: {error}",
+                            path.display()
+                        ),
+                        None,
+                    )
+                })?;
+        }
+
         if let Some(delay) = args.sleep_before_ms
             && delay > 0
         {
             sleep(Duration::from_millis(delay)).await;
+        }
+
+        if let Some(path) = args.started_file {
+            std::fs::write(&path, "started").map_err(|error| {
+                McpError::internal_error(
+                    format!(
+                        "failed to write sync started file {}: {error}",
+                        path.display()
+                    ),
+                    None,
+                )
+            })?;
+        }
+
+        if args.release_file.is_some() || args.exit_file.is_some() {
+            loop {
+                if args.exit_file.as_ref().is_some_and(|path| path.is_file()) {
+                    std::process::exit(42);
+                }
+                if args
+                    .release_file
+                    .as_ref()
+                    .is_some_and(|path| path.is_file())
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
         }
 
         if let Some(barrier) = args.barrier {

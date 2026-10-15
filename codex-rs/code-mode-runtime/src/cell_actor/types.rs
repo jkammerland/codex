@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::time::Instant;
 
+use codex_code_mode_protocol::YieldReason;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -291,7 +292,10 @@ impl CellState {
                 event,
                 completed_at,
             } if matches!(mode, ObserveMode::YieldAfter(_)) => {
-                match response_tx.send(Ok(CellEvent::Yielded { content_items })) {
+                match response_tx.send(Ok(CellEvent::Yielded {
+                    content_items,
+                    reason: YieldReason::Requested,
+                })) {
                     Ok(()) => {
                         *phase = CellPhase::Completed {
                             pending_initial_yield_items: None,
@@ -300,7 +304,7 @@ impl CellState {
                         };
                         ObservationDelivery::Buffered
                     }
-                    Err(Ok(CellEvent::Yielded { content_items })) => {
+                    Err(Ok(CellEvent::Yielded { content_items, .. })) => {
                         *phase = CellPhase::Completed {
                             pending_initial_yield_items: Some(content_items),
                             event,
@@ -419,7 +423,7 @@ fn buffered_completion(
             *result_buffered_for = completed_at.elapsed();
             content_items
         }
-        CellEvent::Yielded { content_items }
+        CellEvent::Yielded { content_items, .. }
         | CellEvent::Pending { content_items, .. }
         | CellEvent::Terminated { content_items } => content_items,
     };

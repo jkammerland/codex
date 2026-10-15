@@ -18,10 +18,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod exec_command;
+mod wait_process;
 mod write_stdin;
 
 pub use exec_command::ExecCommandHandler;
 pub(crate) use exec_command::ExecCommandHandlerOptions;
+pub use wait_process::WaitProcessHandler;
 pub use write_stdin::WriteStdinHandler;
 
 /// Terminal tools expose the unified-exec process ID as `session_id`.

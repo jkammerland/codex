@@ -15,6 +15,7 @@ use codex_install_context::InstallContext;
 use crate::Daemon;
 use crate::install_lock::acquire_install_lock;
 use crate::managed_install;
+use crate::runtime_identity::DaemonOwnership;
 use crate::settings::DaemonSettings;
 
 /// The complete CLI package offered for a daemon installation.
@@ -28,13 +29,16 @@ pub struct InstallRequest {
 
 /// Prepare a missing package while the caller holds the daemon operation lock.
 pub(super) async fn prepare(daemon: &Daemon, settings: &DaemonSettings) -> Result<()> {
-    let source = InstallContext::current().package_layout.as_ref();
+    let source = InstallContext::current()
+        .package_layout
+        .as_ref()
+        .map(|layout| layout.package_dir.as_path());
     // Keep package replacement state out of the CLI dispatcher's async stack frame.
     Box::pin(prepare_from_package(
         daemon,
         settings,
         InstallMode::Missing,
-        source.map(|layout| layout.package_dir.as_path()),
+        source,
         &std::env::current_exe()?,
         |_| Ok(true),
     ))
@@ -52,12 +56,15 @@ pub async fn update_from_cli(
     crate::backend::windows::ensure_not_elevated()?;
     let daemon = Daemon::from_environment()?;
     let settings = daemon.load_settings().await?;
-    let source = InstallContext::current().package_layout.as_ref();
+    let source = InstallContext::current()
+        .package_layout
+        .as_ref()
+        .map(|layout| layout.package_dir.as_path());
     if !Box::pin(prepare_from_package(
         &daemon,
         &settings,
         InstallMode::Replace,
-        source.map(|layout| layout.package_dir.as_path()),
+        source,
         &std::env::current_exe()?,
         confirm,
     ))
@@ -133,6 +140,10 @@ async fn prepare_from_package(
         backend.is_some() || crate::client::probe(&daemon.socket_path).await.is_err(),
         "app server is running but is not managed by codex app-server daemon"
     );
+    if backend.is_some() {
+        let info = crate::client::probe(&daemon.socket_path).await?;
+        crate::runtime_identity::validate_probe(&info, DaemonOwnership::ManagedExisting)?;
+    }
     let selected = managed_install::managed_codex_bin(home);
     let previous_release = previous_root.join("current").canonicalize().ok();
     if mode == InstallMode::Missing {
@@ -292,11 +303,24 @@ async fn prepare_from_package(
     validate_package(stage.path(), entrypoint)?;
     let binary_version =
         managed_install::managed_codex_version(&stage.path().join(entrypoint)).await?;
+    let fork_compatibility = !codex_build_info::CODEX_FORK_BUILD_ID.is_empty()
+        && binary_version == codex_build_info::CODEX_CLI_VERSION;
     anyhow::ensure!(
-        !stable || version == binary_version,
+        !stable || version == binary_version || fork_compatibility,
         "the CLI package version does not match its executable"
     );
-    let name = if stable && mode == InstallMode::Missing {
+    let digest = if fork_compatibility {
+        // Preserve normalized package metadata while stamping the fork identity.
+        metadata["version"] = serde_json::Value::String(binary_version.clone());
+        let bytes = serde_json::to_vec(&metadata)?;
+        std::fs::write(stage.path().join("codex-package.json"), &bytes)?;
+        staged_digests.insert(PathBuf::from("codex-package.json"), blake3::hash(&bytes));
+        package_tree(stage.path(), /*destination*/ None, &mut staged_digests)?
+    } else {
+        digest
+    };
+    let package_is_stable = stable && !fork_compatibility;
+    let name = if package_is_stable && mode == InstallMode::Missing {
         format!("{version}-{target}")
     } else {
         format!("local-{digest}-{target}")
@@ -322,7 +346,7 @@ async fn prepare_from_package(
     let standalone = home.join("packages/standalone");
     let canonical_source = source.canonicalize()?;
     let follows_latest = mode == InstallMode::Missing
-        && stable
+        && package_is_stable
         && (standalone.join("current").canonicalize().ok().as_deref()
             != Some(canonical_source.as_path())
             || std::fs::read_to_string(standalone.join("auto-update-version"))
@@ -412,10 +436,12 @@ async fn prepare_from_package(
             managed_codex_bin: root.join("current").join(entrypoint),
             ..daemon.clone()
         };
-        selected.start_managed_backend(settings).await.context(
-            "daemon package selected but could not start; retry with `codex app-server daemon start`",
-        )?;
-        selected.wait_until_ready().await?;
+        selected
+            .start_managed_backend_and_validate(settings, &selected.managed_codex_bin)
+            .await
+            .context(
+                "daemon package selected but could not start; retry with `codex app-server daemon start`",
+            )?;
     }
     if let Err(error) = crate::release_pruning::prune(daemon, &root, settings).await {
         tracing::debug!(%error, "skipped daemon release pruning");

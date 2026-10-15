@@ -229,7 +229,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
         updated_input,
     } = hooks.run_pre_tool_use(request).await;
     emit_hook_completed_events(sess, turn_context, hook_events).await;
-    record_additional_contexts(sess, turn_context, additional_contexts).await;
+    record_tool_additional_contexts(sess, turn_context, additional_contexts).await;
 
     if !should_block {
         return PreToolUseHookResult::Continue { updated_input };
@@ -881,6 +881,26 @@ pub(crate) async fn record_additional_contexts(
         developer_messages.as_slice(),
     )
     .await;
+}
+
+/// Records tool-hook context only while the tool call's originating turn is active.
+///
+/// Nested code-mode tools can outlive the turn that dispatched them. Their hook
+/// output must not be recorded into a newer turn that happens to be active when
+/// the nested tool resumes.
+pub(crate) async fn record_tool_additional_contexts(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    additional_contexts: Vec<codex_hooks::HookContext>,
+) {
+    let developer_messages = additional_context_messages(additional_contexts);
+    if developer_messages.is_empty() {
+        return;
+    }
+
+    let _ = sess
+        .record_conversation_items_if_running_for_turn(turn_context, developer_messages)
+        .await;
 }
 
 fn additional_context_messages(

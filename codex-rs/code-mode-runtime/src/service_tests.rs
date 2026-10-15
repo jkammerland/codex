@@ -20,6 +20,7 @@ use codex_code_mode_protocol::CodeModeSession;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::NotificationFuture;
 use codex_code_mode_protocol::ToolInvocationFuture;
+use codex_code_mode_protocol::YieldReason;
 use codex_protocol::ToolName;
 use pretty_assertions::assert_eq;
 use serde_json::Value as JsonValue;
@@ -85,6 +86,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         }
     );
 
@@ -113,6 +115,7 @@ async fn interrupt_yields_execute_and_wait_without_stopping_the_cell() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::Requested,
         })
     );
 
@@ -213,6 +216,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -234,6 +238,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
 
@@ -358,6 +363,7 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -377,6 +383,7 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         })
     );
 
@@ -387,6 +394,7 @@ async fn zero_yield_limit_is_immediate_and_scoped_to_its_session() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 
@@ -736,6 +744,7 @@ text("after exit");
         response.await.unwrap().unwrap(),
         RuntimeResponse::Yielded {
             code_mode_host_duration: None,
+            reason: YieldReason::Requested,
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "before yield".to_string(),
@@ -1019,6 +1028,7 @@ async fn shutdown_interrupts_cpu_bound_cells() {
             code_mode_host_duration: None,
             cell_id: cell_id("1"),
             content_items: Vec::new(),
+            reason: YieldReason::DeadlineElapsed,
         }
     );
 

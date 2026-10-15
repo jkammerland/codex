@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios.rs
+assertion_line: 1410
 expression: snapshot
 ---
 Scenario: Astra continues after new user input yields a running code cell, then waits for its result.

@@ -746,62 +746,6 @@ fn resolve_remote_addr_rejects_invalid_remote_addresses() {
     }
 }
 
-#[tokio::test]
-async fn default_daemon_auto_connect_skips_missing_socket() -> color_eyre::Result<()> {
-    let codex_home = TempDir::new()?;
-    assert!(
-        maybe_probe_default_daemon_socket(codex_home.path())
-            .await
-            .is_none()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn default_daemon_auto_connect_probes_socket_only() -> color_eyre::Result<()> {
-    let codex_home = TempDir::new()?;
-    let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
-    #[cfg(windows)]
-    {
-        let parent = socket_path.as_path().parent().expect("socket parent");
-        std::fs::create_dir_all(parent)?;
-        let listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
-        assert!(
-            maybe_probe_default_daemon_socket(codex_home.path())
-                .await
-                .is_none()
-        );
-        drop(listener);
-        std::fs::remove_dir_all(parent)?;
-    }
-    codex_uds::prepare_private_socket_directory(
-        socket_path.as_path().parent().expect("socket parent"),
-    )
-    .await?;
-    let _listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
-
-    let expected = Some(socket_path);
-    #[cfg(windows)]
-    let expected = {
-        // Existing Windows CI may run elevated; an elevated listener must
-        // never be selected implicitly, even when its directory is private.
-        let output = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"])
-                .output()?;
-        assert!(output.status.success());
-        match String::from_utf8(output.stdout)?.trim() {
-            "True" => None,
-            "False" => expected,
-            other => panic!("unexpected elevation result: {other}"),
-        }
-    };
-    assert_eq!(
-        maybe_probe_default_daemon_socket(codex_home.path()).await,
-        expected
-    );
-    Ok(())
-}
-
 #[test]
 fn app_server_target_for_launch_uses_local_daemon_for_default_socket() -> color_eyre::Result<()> {
     let socket_path = AbsolutePathBuf::relative_to_current_dir("codex.sock")?;

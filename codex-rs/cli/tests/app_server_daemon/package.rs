@@ -115,7 +115,14 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
             assert!(!state.join("app-server-updater.pid").exists());
             None
         }
-        InitialDaemon::Legacy => Some(daemon.pid("app-server-updater.pid")?),
+        InitialDaemon::Legacy => {
+            if codex_build_info::CODEX_FORK_BUILD_ID.is_empty() {
+                Some(daemon.pid("app-server-updater.pid")?)
+            } else {
+                assert!(!state.join("app-server-updater.pid").exists());
+                None
+            }
+        }
     };
     if action == "start" {
         let initial_current = initial_root.join("current");

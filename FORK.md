@@ -20,6 +20,10 @@ The retired history migration repair remains narrowly checksum-matched and
 transactional, without replaying destructive SQL or bypassing validation.
 Windows builders must retain the historically qualified migration byte format.
 
+Outgoing Responses requests, including Responses Lite, omit unsupported
+`content_item_metadata` to avoid backend rejection. Internal history provenance
+and supported `content_item_kinds` remain intact.
+
 Qualification is scoped to focused native checks and complete staged packages.
 Staging does not authorize installation, selection, daemon changes, or pushes.
 The retained fleet controller and installer are historical tooling; their raw

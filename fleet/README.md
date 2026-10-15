@@ -20,12 +20,22 @@ separate controller change.
 
 ## Windows operating mode (2026-09-20)
 
+Current qualification: the worker successfully installed the matching MCP.25
+daemon with `codex app-server daemon update --from-cli --yes`, then started it
+from a local non-elevated PowerShell console. CLI, managed package, and running
+daemon all report `0.163.0+jkammerland.mcp.25`; worker auto-start is enabled.
+SSH junction traversal remains blocked under RedirectionGuard. Local-console
+success does not establish SSH lifecycle support or terminal-close survival.
+The administrator account remains opted out of daemon auto-start.
+
+### Historical parked mode
+
 Maintainer decision: **park Windows shared-daemon / `codex agents` support**.
 Use Batch Codex through `windows-offload` for Windows builds, tests, and reviews.
 This is an operational decision, not removal of daemon code or Windows support.
 Linux and Mac shared-daemon support remains enabled.
 
-Windows account configuration explicitly disables `daemon_auto_start` using
+The parked account configuration explicitly disables `daemon_auto_start` using
 `codex features disable daemon_auto_start`. Upstream enables it by default;
 without this override, ordinary CLI startup attempts the retained old daemon
 package and fails the maintained-fork version check. Preserve this account

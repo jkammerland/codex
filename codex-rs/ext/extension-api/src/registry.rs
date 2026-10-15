@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::ApprovalReviewContributor;
 use crate::ConfigContributor;
 use crate::ContextContributor;
+use crate::ExecutionControl;
 use crate::ExtensionEventSink;
 use crate::McpServerContributor;
 use crate::MessageLifecycleContributor;
@@ -29,6 +30,7 @@ impl<C: Sync> Default for ExtensionRegistryBuilder<C> {
             registry: ExtensionRegistry {
                 event_sink: Arc::new(NoopExtensionEventSink),
                 turn_start_admission: None,
+                execution_control: ExecutionControl::default(),
                 thread_lifecycle_contributors: Vec::new(),
                 turn_lifecycle_contributors: Vec::new(),
                 config_contributors: Vec::new(),
@@ -69,6 +71,11 @@ impl<C: Sync> ExtensionRegistryBuilder<C> {
     /// Installs the host gate for turn-input submissions that start a new turn.
     pub fn turn_start_admission(&mut self, admission: Arc<dyn TurnStartAdmission>) {
         self.registry.turn_start_admission = Some(admission);
+    }
+
+    /// Installs cooperative execution admission shared by all host threads.
+    pub fn execution_control(&mut self, control: ExecutionControl) {
+        self.registry.execution_control = control;
     }
 
     /// Registers one approval-review contributor.
@@ -161,6 +168,7 @@ impl<C: Sync> ExtensionRegistryBuilder<C> {
 pub struct ExtensionRegistry<C: Sync> {
     event_sink: Arc<dyn ExtensionEventSink>,
     turn_start_admission: Option<Arc<dyn TurnStartAdmission>>,
+    execution_control: ExecutionControl,
     thread_lifecycle_contributors: Vec<Arc<dyn ThreadLifecycleContributor<C>>>,
     turn_lifecycle_contributors: Vec<Arc<dyn TurnLifecycleContributor>>,
     config_contributors: Vec<Arc<dyn ConfigContributor<C>>>,
@@ -178,10 +186,16 @@ pub struct ExtensionRegistry<C: Sync> {
 }
 
 impl<C: Sync> ExtensionRegistry<C> {
+    /// Host admission for enrolled thread families; unrelated threads pass through.
+    pub fn execution_control(&self) -> &ExecutionControl {
+        &self.execution_control
+    }
+
     /// Copies the registered contributors into a builder for host-specific additions.
     pub fn to_builder(&self) -> ExtensionRegistryBuilder<C> {
         ExtensionRegistryBuilder {
             registry: Self {
+                execution_control: self.execution_control.clone(),
                 event_sink: self.event_sink.clone(),
                 turn_start_admission: self.turn_start_admission.clone(),
                 thread_lifecycle_contributors: self.thread_lifecycle_contributors.clone(),

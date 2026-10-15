@@ -102,6 +102,15 @@ impl ToolOrchestrator {
                 .as_ref()
                 .map(ActiveNetworkApproval::execution_proxy),
         };
+        // Approval may have completed after a hold was applied. Recheck before
+        // every attempt, including sandbox escalation retries.
+        let _execution = tokio::select! {
+            biased;
+            _ = tool_ctx.cancellation_token.cancelled() => {
+                return (Err(ToolError::Codex(codex_protocol::error::CodexErr::TurnAborted)), None);
+            }
+            permit = tool_ctx.session.enter_execution() => permit,
+        };
         let run_result = tool
             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
             .await;

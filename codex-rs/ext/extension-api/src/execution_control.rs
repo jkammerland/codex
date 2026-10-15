@@ -1,0 +1,205 @@
+//! Cooperative execution admission shared by a host and its thread runtimes.
+
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use codex_protocol::ThreadId;
+use tokio::sync::watch;
+
+/// A hold closes admission without cancelling operations already admitted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ExecutionMode {
+    #[default]
+    Running,
+    Paused,
+    Stopped,
+}
+
+/// Snapshot of one enrolled root, including work admitted for its descendants.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExecutionControlSnapshot {
+    pub revision: u64,
+    pub mode: ExecutionMode,
+    pub reconciling: bool,
+    pub in_flight: usize,
+}
+
+#[derive(Default)]
+struct State {
+    parents: HashMap<ThreadId, ThreadId>,
+    roots: HashMap<ThreadId, ExecutionControlSnapshot>,
+}
+
+impl State {
+    fn root(&self, mut thread_id: ThreadId) -> Option<ThreadId> {
+        let mut visited = HashSet::new();
+        while visited.insert(thread_id) {
+            if self.roots.contains_key(&thread_id) {
+                return Some(thread_id);
+            }
+            thread_id = *self.parents.get(&thread_id)?;
+        }
+        None
+    }
+}
+
+/// Host-owned admission state. Persistence and cancellation belong to the host.
+///
+/// All state transitions and permit acquisition share a lock. Closing admission
+/// therefore cannot race with an operation being counted as newly admitted.
+#[derive(Clone)]
+pub struct ExecutionControl {
+    state: Arc<Mutex<State>>,
+    changed: watch::Sender<()>,
+}
+
+impl Default for ExecutionControl {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(State::default())),
+            changed: watch::channel(()).0,
+        }
+    }
+}
+
+impl ExecutionControl {
+    /// Restore durable state before loading sessions. A coordinator must confirm
+    /// this revision or a newer one before coordinated execution can resume.
+    pub fn restore(&self, root: ThreadId, revision: u64, mode: ExecutionMode) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.roots.insert(
+            root,
+            ExecutionControlSnapshot {
+                revision,
+                mode,
+                reconciling: true,
+                in_flight: 0,
+            },
+        );
+        self.changed.send_replace(());
+    }
+
+    /// Record lineage before a child can execute, including unenrolled parents.
+    pub fn inherit(&self, thread_id: ThreadId, parent_id: ThreadId) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if thread_id != parent_id {
+            state.parents.insert(thread_id, parent_id);
+        }
+        self.changed.send_replace(());
+    }
+
+    /// Restore or update an enrolled root. A stale revision never changes its mode.
+    /// Equal revisions are idempotent, even when their supplied modes differ.
+    pub fn apply(
+        &self,
+        root: ThreadId,
+        revision: u64,
+        mode: ExecutionMode,
+    ) -> ExecutionControlSnapshot {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state.roots.entry(root).or_insert(ExecutionControlSnapshot {
+            revision,
+            mode,
+            reconciling: false,
+            in_flight: 0,
+        });
+        if revision > entry.revision {
+            entry.revision = revision;
+            entry.mode = mode;
+        }
+        if revision == entry.revision && mode == entry.mode {
+            entry.reconciling = false;
+        }
+        let snapshot = *entry;
+        self.changed.send_replace(());
+        snapshot
+    }
+
+    /// Return the controlling root, if this thread belongs to an enrolled family.
+    pub fn root(&self, thread_id: ThreadId) -> Option<ThreadId> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .root(thread_id)
+    }
+
+    pub fn snapshot(&self, thread_id: ThreadId) -> Option<ExecutionControlSnapshot> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .root(thread_id)
+            .and_then(|root| state.roots.get(&root).copied())
+    }
+
+    /// Return immediately when held. Session input loops must never await a hold.
+    pub fn try_enter(&self, thread_id: ThreadId) -> Option<ExecutionPermit> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = state.root(thread_id);
+        if let Some(root) = root {
+            let entry = state.roots.get_mut(&root)?;
+            if entry.mode != ExecutionMode::Running || entry.reconciling {
+                return None;
+            }
+            entry.in_flight += 1;
+            self.changed.send_replace(());
+        }
+        Some(ExecutionPermit {
+            control: self.clone(),
+            root,
+        })
+    }
+
+    /// Wait without polling. Callers retain their existing cancellation handling.
+    pub async fn enter(&self, thread_id: ThreadId) -> ExecutionPermit {
+        let mut changed = self.changed.subscribe();
+        loop {
+            if let Some(permit) = self.try_enter(thread_id) {
+                return permit;
+            }
+            // The sender is retained by self, so this subscription cannot close.
+            let _ = changed.changed().await;
+        }
+    }
+
+    /// Observe admission and completion changes without running an agent turn.
+    pub fn subscribe(&self) -> watch::Receiver<()> {
+        self.changed.subscribe()
+    }
+}
+
+/// Counts an admitted operation until it finishes or is explicitly cancelled.
+pub struct ExecutionPermit {
+    control: ExecutionControl,
+    root: Option<ThreadId>,
+}
+
+impl Drop for ExecutionPermit {
+    fn drop(&mut self) {
+        let Some(root) = self.root else { return };
+        let mut state = self
+            .control
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = state.roots.get_mut(&root) {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
+        }
+        self.control.changed.send_replace(());
+    }
+}

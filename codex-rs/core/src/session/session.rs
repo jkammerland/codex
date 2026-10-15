@@ -1725,6 +1725,12 @@ impl Session {
             }
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
+            let source = &session_configuration.session_source;
+            if let Some(parent_id) = source.parent_thread_id().or_else(|| {
+                source.is_non_root_agent().then(|| ThreadId::from(session_id))
+            }) {
+                extensions.execution_control().inherit(thread_id, parent_id);
+            }
             session_extension_data.insert(analytics_events_client.clone());
             session_extension_data.insert(session_telemetry.clone());
             let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));

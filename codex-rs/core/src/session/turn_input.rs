@@ -205,6 +205,15 @@ pub(super) async fn handle(
     mode: TurnInputMode,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    if matches!(&request.input, SubmittedTurnInput::UserInput { content, .. } if !content.is_empty())
+        && request.start.parent_turn_id.is_none()
+    {
+        session
+            .services
+            .extensions
+            .execution_control()
+            .resume_for_user(session.thread_id);
+    }
     let Some(_execution) = session.try_enter_execution() else {
         return Err(CodexErr::InvalidRequest(
             "session execution is held by team control".to_string(),
@@ -219,7 +228,8 @@ pub(super) async fn handle(
                 }
                 SubmittedTurnInput::UserInput { .. }
                 | SubmittedTurnInput::ResponseItem(_)
-                | SubmittedTurnInput::InterAgentCommunication(_) => TurnStartKind::Automatic,
+                | SubmittedTurnInput::InterAgentCommunication(_)
+                | SubmittedTurnInput::TeamMessage(_) => TurnStartKind::Automatic,
             };
             start_if_idle(session, request, submission_id, kind).await
         }
@@ -493,9 +503,12 @@ async fn steer(
         responsesapi_client_metadata,
         ..
     } = request;
-    if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
+    if !matches!(
+        &input,
+        SubmittedTurnInput::UserInput { .. } | SubmittedTurnInput::TeamMessage(_)
+    ) {
         return Err(CodexErr::InvalidRequest(
-            "only user input can steer a turn".to_string(),
+            "only user or attributed team input can steer a turn".to_string(),
         ));
     }
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
@@ -686,6 +699,18 @@ async fn merge_additional_context_input(
 
 async fn pending_turn_input(session: &Session, input: SubmittedTurnInput) -> TurnInput {
     match input {
+        SubmittedTurnInput::TeamMessage(message) => {
+            use crate::context::ContextualUserFragment;
+            let delivery_id = message.delivery_id.clone();
+            let mut item = ContextualUserFragment::into(crate::context::TeamMessage(message));
+            if let ResponseItem::Message { id, .. } = &mut item {
+                *id = Some(codex_protocol::ResponseItemId::with_suffix(
+                    "msg",
+                    format_args!("team-{delivery_id}"),
+                ));
+            }
+            TurnInput::ResponseItem(item.into())
+        }
         SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
             content,
             client_id,

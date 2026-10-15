@@ -466,6 +466,8 @@ pub enum PluginStartupTasks {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerRuntimeOptions {
+    /// Optional authenticated loopback listener beside the local control socket.
+    pub loopback_listen: Option<std::net::SocketAddr>,
     pub code_mode_host_transport: CodeModeHostTransport,
     pub plugin_startup_tasks: PluginStartupTasks,
     pub remote_control_startup_mode: RemoteControlStartupMode,
@@ -476,6 +478,7 @@ pub struct AppServerRuntimeOptions {
 impl Default for AppServerRuntimeOptions {
     fn default() -> Self {
         Self {
+            loopback_listen: None,
             code_mode_host_transport: CodeModeHostTransport::Local,
             plugin_startup_tasks: PluginStartupTasks::Start,
             remote_control_startup_mode: RemoteControlStartupMode::ResolvePersisted,
@@ -497,6 +500,16 @@ pub async fn run_main_with_transport_options(
     auth: AppServerWebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<AppServerExit> {
+    if let Some(address) = runtime_options.loopback_listen
+        && (!address.ip().is_loopback()
+            || !matches!(transport, AppServerTransport::UnixSocket { .. })
+            || auth.config.is_none())
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "--listen-loopback requires --listen unix://, a loopback address, and websocket authentication",
+        ));
+    }
     let loader_overrides = loader_overrides_with_test_user_config_file(
         loader_overrides,
         test_user_config_file_from_env(),
@@ -746,6 +759,9 @@ pub async fn run_main_with_transport_options(
         ));
     }
     let installation_id = resolve_installation_id(&config.codex_home).await?;
+    let team_host = codex_team_extension::PreparedTeamHost::load(&config, installation_id.clone())
+        .await
+        .map_err(std::io::Error::other)?;
     let transport_shutdown_token = CancellationToken::new();
     // Remote enrollment must cancel before RPC drain without shutting down telemetry.
     let remote_control_shutdown_token = transport_shutdown_token.child_token();
@@ -798,6 +814,17 @@ pub async fn run_main_with_transport_options(
             transport_accept_handles.push(accept_handle);
         }
         AppServerTransport::Off => {}
+    }
+    if let Some(bind_address) = runtime_options.loopback_listen {
+        transport_accept_handles.push(
+            start_websocket_acceptor(
+                bind_address,
+                transport_event_tx.clone(),
+                transport_shutdown_token.clone(),
+                policy_from_settings(&auth)?,
+            )
+            .await?,
+        );
     }
     drop(unix_socket_startup_lock);
 
@@ -968,6 +995,7 @@ pub async fn run_main_with_transport_options(
             ))),
             auth_manager,
             installation_id,
+            team_host,
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),
             remote_control_handle: Some(remote_control_handle.clone()),

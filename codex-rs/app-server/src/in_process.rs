@@ -423,6 +423,10 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
     args.config.auth_config().validate()?;
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
+    let team_host =
+        codex_team_extension::PreparedTeamHost::load(&args.config, installation_id.clone())
+            .await
+            .map_err(std::io::Error::other)?;
     let auth_manager =
         AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
             .await
@@ -492,6 +496,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 ))),
                 auth_manager,
                 installation_id,
+                team_host,
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,

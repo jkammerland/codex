@@ -14,6 +14,7 @@ use codex_utils_path_uri::PathUri;
 
 use crate::ConversationHistorySnapshot;
 use crate::ExtensionData;
+use sha2::Digest;
 
 /// Future returned by one tool-lifecycle callback.
 pub type ToolLifecycleFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -64,6 +65,7 @@ pub enum McpToolSource {
 pub struct McpToolContext {
     tool: crate::McpToolInfo,
     source: McpToolSource,
+    registration_fingerprint: Option<String>,
 }
 
 impl McpToolContext {
@@ -99,7 +101,19 @@ impl McpToolContext {
             McpToolSource::Other
         };
 
-        Self { tool, source }
+        let registration_fingerprint = registration.and_then(|server| {
+            let mut value = serde_json::to_value(server.config()).ok()?;
+            value.sort_all_objects();
+            Some(format!(
+                "{:x}",
+                sha2::Sha256::digest(serde_json::to_vec(&value).ok()?)
+            ))
+        });
+        Self {
+            tool,
+            source,
+            registration_fingerprint,
+        }
     }
 
     /// Returns frozen metadata for the exact model-visible MCP tool being executed.
@@ -110,6 +124,12 @@ impl McpToolContext {
     /// Returns the registration source captured with the executable call.
     pub fn source(&self) -> &McpToolSource {
         &self.source
+    }
+
+    /// Opaque identity of the frozen registration. Never contains configuration
+    /// plaintext; hosts can refuse to send old job handles to a changed endpoint.
+    pub fn registration_fingerprint(&self) -> Option<&str> {
+        self.registration_fingerprint.as_deref()
     }
 }
 

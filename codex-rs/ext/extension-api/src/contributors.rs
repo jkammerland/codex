@@ -134,6 +134,15 @@ pub trait ContextContributor: Send + Sync {
 /// extension-private thread state and retain any session capabilities supplied
 /// by the host. Other heavy dependencies belong on the extension value.
 pub trait ThreadLifecycleContributor<C: Sync>: Send + Sync {
+    /// Called after persistent next-turn settings have changed. Implementations
+    /// can recheck pending work without starting a polling model turn.
+    fn on_thread_settings_changed<'a>(
+        &'a self,
+        _thread_store: &'a ExtensionData,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
     /// Called after host startup has initialized the thread-scoped store.
     fn on_thread_start<'a>(&'a self, input: ThreadStartInput<'a, C>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {

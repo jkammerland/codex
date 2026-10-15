@@ -92,6 +92,7 @@ pub use types::SearchTextRange;
 pub use types::SearchThreadOccurrencesParams;
 pub use types::SearchThreadsParams;
 pub use types::SortDirection;
+pub use types::StoredExecutionHistory;
 pub use types::StoredModelContext;
 pub use types::StoredThread;
 pub use types::StoredThreadHistory;

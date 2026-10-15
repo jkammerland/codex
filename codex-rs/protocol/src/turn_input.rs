@@ -36,6 +36,17 @@ pub enum TurnInput {
     },
     ResponseItem(ResponseItem),
     InterAgentCommunication(InterAgentCommunication),
+    TeamMessage(TeamMessageInput),
+}
+
+/// Peer input authenticated and attributed by the team host, never user input.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TeamMessageInput {
+    pub message_id: String,
+    pub delivery_id: String,
+    pub sender: String,
+    pub body: String,
+    pub reply_to: Option<String>,
 }
 
 /// One turn input and the context that follows it through submission.

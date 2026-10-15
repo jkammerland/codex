@@ -628,6 +628,60 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalClearResponse,
     },
+    #[experimental("team/outboxList")]
+    TeamOutboxList => "team/outboxList" {
+        params: v2::TeamOutboxListParams,
+        serialization: global("team"),
+        response: v2::TeamOutboxListResponse,
+    },
+    #[experimental("team/outboxAck")]
+    TeamOutboxAck => "team/outboxAck" {
+        params: v2::TeamOutboxAckParams,
+        serialization: global("team"),
+        response: v2::TeamOutboxAckResponse,
+    },
+    #[experimental("team/sync")]
+    TeamSync => "team/sync" {
+        params: v2::TeamSyncParams,
+        serialization: global("team"),
+        response: v2::TeamSyncResponse,
+    },
+    #[experimental("team/agentRequest")]
+    TeamAgentRequest => "team/agentRequest" {
+        params: v2::TeamAgentRequestParams,
+        serialization: global("team"),
+        response: v2::TeamAgentRequestResponse,
+    },
+    #[experimental("team/agentCredential")]
+    TeamAgentCredential => "team/agentCredential" {
+        params: v2::TeamAgentCredentialParams,
+        serialization: global("team"),
+        response: v2::TeamAgentCredentialResponse,
+    },
+    #[experimental("team/hostRead")]
+    TeamHostRead => "team/hostRead" {
+        params: v2::TeamHostReadParams,
+        serialization: global("team"),
+        response: v2::TeamHostReadResponse,
+    },
+    #[experimental("team/enroll")]
+    TeamEnroll => "team/enroll" {
+        params: v2::TeamEnrollParams,
+        serialization: global("team"),
+        response: v2::TeamEnrollResponse,
+    },
+    #[experimental("team/control")]
+    TeamControl => "team/control" {
+        params: v2::TeamControlParams,
+        serialization: global("team"),
+        response: v2::TeamControlResponse,
+    },
+    #[experimental("team/deliver")]
+    TeamDeliver => "team/deliver" {
+        params: v2::TeamDeliverParams,
+        serialization: global("team"),
+        response: v2::TeamDeliverResponse,
+    },
     #[experimental("thread/queue/add")]
     ThreadQueueAdd => "thread/queue/add" {
         params: v2::ThreadQueueAddParams,
@@ -1914,6 +1968,8 @@ server_notification_definitions! {
     ThreadAttachmentUpdated => "thread/attachment/updated" (v2::ThreadAttachmentUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     ThreadGoalCleared => "thread/goal/cleared" (v2::ThreadGoalClearedNotification),
+    #[experimental("team/changed")]
+    TeamChanged => "team/changed" (v2::TeamChangedNotification),
     #[experimental("thread/queue/changed")]
     ThreadQueueChanged => "thread/queue/changed" (v2::ThreadQueueChangedNotification),
     #[experimental("project/changed")]

@@ -271,6 +271,18 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     requested_model: Option<&str>,
     requested_reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<(), FunctionCallError> {
+    if session
+        .services
+        .extensions
+        .execution_control()
+        .root(session.thread_id)
+        .is_some()
+        && (requested_model.is_some() || requested_reasoning_effort.is_some())
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "Team model and effort selections belong to the user. Omit model overrides to inherit the configured policy.".into(),
+        ));
+    }
     let requested_model = requested_model.or(turn.config.agent_default_subagent_model.as_deref());
     let requested_reasoning_effort = requested_reasoning_effort
         .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone());

@@ -4950,6 +4950,172 @@ class SubagentMigration(BaseModel):
     name: str
 
 
+class TeamAddress(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    machine_id: Annotated[str, Field(alias="machineId")]
+    server_id: Annotated[str, Field(alias="serverId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ReplyTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    body: str
+    message_id: str
+    type: Annotated[Literal["reply"], Field(title="ReplyTeamAgentActionType")]
+
+
+class DirectoryTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cursor: str | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    type: Annotated[Literal["directory"], Field(title="DirectoryTeamAgentActionType")]
+
+
+class InboxTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cursor: str | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    type: Annotated[Literal["inbox"], Field(title="InboxTeamAgentActionType")]
+
+
+class PostTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    body: str
+    reply_to: str | None = None
+    topic: str
+    type: Annotated[Literal["post"], Field(title="PostTeamAgentActionType")]
+
+
+class BoardTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cursor: str | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    topic: str
+    type: Annotated[Literal["board"], Field(title="BoardTeamAgentActionType")]
+
+
+class SubscribeTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    enabled: bool
+    topic: str
+    type: Annotated[Literal["subscribe"], Field(title="SubscribeTeamAgentActionType")]
+
+
+class TeamCancellationAdapter(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    cancel_arguments: Annotated[Any, Field(alias="cancelArguments")]
+    cancel_id_field: Annotated[str, Field(alias="cancelIdField")]
+    cancel_tool: Annotated[str, Field(alias="cancelTool")]
+    confirmation_pointer: Annotated[str, Field(alias="confirmationPointer")]
+    confirmation_value: Annotated[Any, Field(alias="confirmationValue")]
+    job_id_pointer: Annotated[str, Field(alias="jobIdPointer")]
+    launch_tool: Annotated[str, Field(alias="launchTool")]
+    plugin_id: Annotated[
+        str | None,
+        Field(
+            alias="pluginId",
+            description="Require this plugin ID, or a user-configured MCP server when absent.",
+        ),
+    ] = None
+    server: str
+
+
+class TeamChangedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    revision: int
+
+
+class TeamDeliveryMode(Enum):
+    next_turn = "nextTurn"
+    safe_boundary = "safeBoundary"
+
+
+class TeamEnrollment(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    address: TeamAddress
+    alias: str
+    continuation_turn_id: Annotated[
+        str | None,
+        Field(
+            alias="continuationTurnId",
+            description="A stopped turn has priority over subsequently queued messages.",
+        ),
+    ] = None
+    manually_held: Annotated[bool, Field(alias="manuallyHeld")]
+
+
+class TeamExecutionMode(Enum):
+    running = "running"
+    paused = "paused"
+    stopped = "stopped"
+
+
+class TeamJobStatus(Enum):
+    running = "running"
+    cancellation_pending = "cancellationPending"
+    cancelled = "cancelled"
+    unconfirmed = "unconfirmed"
+
+
+class TeamMessageKind(Enum):
+    request = "request"
+    reply = "reply"
+    note = "note"
+    board = "board"
+
+
+class TeamOutboxEntry(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: str
+    kind: str
+    payload: Any
+    sequence: int
+
+
+class TeamReceiptState(Enum):
+    pending = "pending"
+    accepted = "accepted"
+    completed = "completed"
+    interrupted = "interrupted"
+    needs_reconciliation = "needsReconciliation"
+
+
+class TeamTrackedJob(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    detail: str | None = None
+    handle: str | None = None
+    id: str
+    server: str
+    status: TeamJobStatus
+    thread_id: Annotated[str, Field(alias="threadId")]
+    tool: str
+
+
 class TerminalInteractionNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -8924,6 +9090,21 @@ class ThreadGoalClearedServerNotification(BaseModel):
     params: ThreadGoalClearedNotification
 
 
+class TeamChangedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[Literal["team/changed"], Field(title="Team/changedNotificationMethod")]
+    params: TeamChangedNotification
+
+
 class ThreadQueueChangedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -9409,6 +9590,101 @@ class SubAgentSource(
         populate_by_name=True,
     )
     root: SubAgentSourceValue | ThreadSpawnSubAgentSource | OtherSubAgentSource
+
+
+class SendTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    body: str
+    delivery: TeamDeliveryMode
+    kind: TeamMessageKind
+    recipient: TeamAddress
+    reply_to: str | None = None
+    type: Annotated[Literal["send"], Field(title="SendTeamAgentActionType")]
+
+
+class TeamAgentAction(
+    RootModel[
+        ReplyTeamAgentAction
+        | DirectoryTeamAgentAction
+        | InboxTeamAgentAction
+        | SendTeamAgentAction
+        | PostTeamAgentAction
+        | BoardTeamAgentAction
+        | SubscribeTeamAgentAction
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: Annotated[
+        ReplyTeamAgentAction
+        | DirectoryTeamAgentAction
+        | InboxTeamAgentAction
+        | SendTeamAgentAction
+        | PostTeamAgentAction
+        | BoardTeamAgentAction
+        | SubscribeTeamAgentAction,
+        Field(description="Agent actions deliberately omit execution controls and model settings."),
+    ]
+
+
+class TeamAgentRuntime(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    alias: str
+    archived: bool
+    continuation_turn_id: Annotated[str | None, Field(alias="continuationTurnId")] = None
+    current_effort: Annotated[str | None, Field(alias="currentEffort")] = None
+    current_model: Annotated[str | None, Field(alias="currentModel")] = None
+    in_flight: Annotated[int, Field(alias="inFlight", ge=0)]
+    jobs: list[TeamTrackedJob]
+    loaded: bool
+    manually_held: Annotated[bool, Field(alias="manuallyHeld")]
+    model_error: Annotated[str | None, Field(alias="modelError")] = None
+    next_effort: Annotated[str | None, Field(alias="nextEffort")] = None
+    next_model: Annotated[str | None, Field(alias="nextModel")] = None
+    parent_thread_id: Annotated[str | None, Field(alias="parentThreadId")] = None
+    reconciling: bool
+    root_thread_id: Annotated[str, Field(alias="rootThreadId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str | None, Field(alias="turnId")] = None
+
+
+class TeamControlState(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    coordinator_id: Annotated[str, Field(alias="coordinatorId")]
+    mode: TeamExecutionMode
+    revision: int
+
+
+class TeamMessage(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    body: str
+    created_at: Annotated[int, Field(alias="createdAt")]
+    id: str
+    kind: TeamMessageKind
+    recipient: TeamAddress | None = None
+    reply_to: Annotated[str | None, Field(alias="replyTo")] = None
+    sender: TeamAddress
+    topic: str | None = None
+
+
+class TeamReceipt(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    delivery_id: Annotated[str, Field(alias="deliveryId")]
+    detail: str | None = None
+    state: TeamReceiptState
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str | None, Field(alias="turnId")] = None
 
 
 class ThreadForkParams(BaseModel):
@@ -11015,6 +11291,17 @@ class SessionSource(RootModel[SessionSourceValue | CustomSessionSource | SubAgen
     root: SessionSourceValue | CustomSessionSource | SubAgentSessionSource
 
 
+class TeamDelivery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: str
+    message: TeamMessage
+    mode: TeamDeliveryMode
+    thread_id: Annotated[str, Field(alias="threadId")]
+    wake: bool
+
+
 class FunctionCallOutputThreadItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -12511,6 +12798,7 @@ class ServerNotification(
         | ThreadAttachmentUpdatedServerNotification
         | ThreadGoalUpdatedServerNotification
         | ThreadGoalClearedServerNotification
+        | TeamChangedServerNotification
         | ThreadQueueChangedServerNotification
         | ProjectChangedServerNotification
         | ThreadProjectUpdatedServerNotification
@@ -12599,6 +12887,7 @@ class ServerNotification(
         | ThreadAttachmentUpdatedServerNotification
         | ThreadGoalUpdatedServerNotification
         | ThreadGoalClearedServerNotification
+        | TeamChangedServerNotification
         | ThreadQueueChangedServerNotification
         | ProjectChangedServerNotification
         | ThreadProjectUpdatedServerNotification

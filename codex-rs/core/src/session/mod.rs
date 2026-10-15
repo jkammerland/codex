@@ -616,6 +616,17 @@ impl Session {
         };
 
         let mut config = Arc::new(config);
+        // Enrollment keeps the user's exact selection when a provider catalog
+        // changes across host restarts or child creation.
+        let enrollment_thread = match &conversation_history {
+            InitialHistory::Resumed(history) => Some(history.conversation_id),
+            _ => reserved_thread_id,
+        };
+        let coordinated = enrollment_thread
+            .into_iter()
+            .chain(parent_thread_id)
+            .any(|id| extensions.execution_control().root(id).is_some());
+        let allow_provider_model_fallback = allow_provider_model_fallback && !coordinated;
         let refresh_strategy = if session_source.is_non_root_agent() {
             codex_models_manager::manager::RefreshStrategy::Offline
         } else {
@@ -4820,6 +4831,19 @@ impl Session {
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
         let had_active_turn = self.active_turn.lock().await.is_some();
+        if had_active_turn
+            && self
+                .services
+                .extensions
+                .execution_control()
+                .root(self.thread_id)
+                .is_some()
+        {
+            self.services
+                .extensions
+                .execution_control()
+                .hold_manually(self.thread_id);
+        }
         self.abort_all_tasks(TurnAbortReason::Interrupted).await;
         if !had_active_turn {
             self.cancel_mcp_startup();

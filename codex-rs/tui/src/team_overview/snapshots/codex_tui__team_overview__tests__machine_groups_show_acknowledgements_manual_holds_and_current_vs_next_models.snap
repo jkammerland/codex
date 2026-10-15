@@ -1,0 +1,30 @@
+---
+source: tui/src/team_overview/tests.rs
+assertion_line: 89
+expression: "render(&panel(), 110, 26)"
+---
+Codex team · Paused · revision 4 · 1 host(s) unconfirmed
+New execution is held. Already admitted model requests and tools may finish.
+
+┌Machines → servers → status─────────────────────────────────────────────────────────────────────────────────┐
+│  Linux (linux)                                                                                             │
+│    Primary account · connected · applied 4                                                                 │
+│      working                                                                                               │
+│›       builder                                                                                             │
+│          current: previous-model / medium   next: chosen-model / high                                      │
+│  Windows (windows)                                                                                         │
+│    Primary account · disconnected · applied 3                                                              │
+│      Connection lost; Stop remains unconfirmed                                                             │
+│      manual hold                                                                                           │
+│        reviewer · manual hold                                                                              │
+│          current: —   next: chosen-model / high                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+│                                                                                                            │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+↑↓ select · Enter open · g group · m model · n request · b board · e rename · l listen
+p/F6 pause all · r/F7 resume all · s/F8 stop all · q leave panel

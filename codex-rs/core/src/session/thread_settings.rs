@@ -123,6 +123,11 @@ pub(super) async fn emit_applied(
     submission_id: String,
     snapshot: ThreadSettingsSnapshot,
 ) {
+    for contributor in session.services.extensions.thread_lifecycle_contributors() {
+        contributor
+            .on_thread_settings_changed(&session.services.thread_extension_data)
+            .await;
+    }
     let msg = EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
         thread_id: Some(session.thread_id()),
         thread_settings: snapshot,

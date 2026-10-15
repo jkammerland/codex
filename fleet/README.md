@@ -5,8 +5,8 @@
 `hosts.json` tracks the current update targets, installed versions, and staging
 status. It includes the additional Linux target `dnarb`, reached through
 `dnarb-offload` (SSH alias `dnarb`). Include it in future fleet staging and
-activation work. Its MCP.25 stage is pending; registration does not imply that
-the package has been built, qualified, or installed there.
+activation work. Consult each inventory entry for its installed and staged
+state; registration alone does not imply qualification or installation.
 
 The inventory records the exact source commit embedded in the staged packages,
 which may precede documentation-only tracking commits. It is tracking data;

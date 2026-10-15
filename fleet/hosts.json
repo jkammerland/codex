@@ -4,28 +4,32 @@
     "version": "0.163.0+jkammerland.mcp.25",
     "stagedSourceCommit": "f68ac3279cb2030f43094d1de10b635bcc43717a",
     "sourceRef": "rebase/mcp25-main-20261015",
-    "activation": "not_requested"
+    "activation": "installed_local_daemon_restart_pending"
   },
   "hosts": [
     {
       "name": "local",
       "platform": "linux",
       "endpoint": "local-offload",
-      "installedVersion": "0.160.1+jkammerland.mcp.24",
-      "staging": "ready"
+      "installedVersion": "0.163.0+jkammerland.mcp.25",
+      "staging": "ready",
+      "managedDaemonVersion": "0.163.0+jkammerland.mcp.25",
+      "runningDaemonVersion": "0.160.1+jkammerland.mcp.24",
+      "daemonRestart": "pending_controller_exit"
     },
     {
       "name": "mac",
       "platform": "darwin",
       "endpoint": "mac-offload",
-      "installedVersion": "0.160.1+jkammerland.mcp.24",
-      "staging": "ready"
+      "installedVersion": "0.163.0+jkammerland.mcp.25",
+      "staging": "ready",
+      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25"
     },
     {
       "name": "windows-admin",
       "platform": "windows",
       "sshTarget": "WIN11",
-      "installedVersion": "0.160.1+jkammerland.mcp.24",
+      "installedVersion": "0.163.0+jkammerland.mcp.25",
       "staging": "ready",
       "sharedDaemon": "parked"
     },
@@ -33,7 +37,7 @@
       "name": "windows-worker",
       "platform": "windows",
       "endpoint": "windows-offload",
-      "installedVersion": "0.160.1+jkammerland.mcp.24",
+      "installedVersion": "0.163.0+jkammerland.mcp.25",
       "staging": "ready",
       "sharedDaemon": "parked"
     },
@@ -42,8 +46,9 @@
       "platform": "linux",
       "endpoint": "dnarb-offload",
       "sshTarget": "dnarb",
-      "installedVersion": "0.160.1+jkammerland.mcp.24",
-      "staging": "pending",
+      "installedVersion": "0.163.0+jkammerland.mcp.25",
+      "staging": "ready",
+      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25",
       "mcpServerCommit": "0722feb5c2606c71a3a4339e366896caf805d709"
     }
   ]

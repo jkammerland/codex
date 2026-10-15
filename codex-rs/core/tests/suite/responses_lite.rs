@@ -133,7 +133,7 @@ async fn base_instructions_use_input_items(responses_lite: bool) -> Result<()> {
             .as_str()
             .is_some_and(|id| id.starts_with("msg_"))
     );
-    let mut expected_instructions = serde_json::json!({
+    let expected_instructions = serde_json::json!({
         "id": instructions["id"],
         "type": "message",
         "role": "developer",
@@ -147,14 +147,47 @@ async fn base_instructions_use_input_items(responses_lite: bool) -> Result<()> {
     });
     let mut actual_instructions = instructions.clone();
     if responses_lite {
-        expected_instructions["internal_chat_message_metadata_passthrough"]["content_item_metadata"] =
-            serde_json::json!([{"provenance": {"type": "harness", "hook": false}}]);
         actual_instructions["internal_chat_message_metadata_passthrough"]
             .as_object_mut()
             .context("base instructions should carry content metadata")?
             .retain(|key, _| !matches!(key.as_str(), "turn_id" | "create_time"));
     }
     assert_eq!(actual_instructions, expected_instructions);
+
+    // Both deployed Responses routes reject provenance, but still accept kinds.
+    for item in input {
+        assert!(
+            item["internal_chat_message_metadata_passthrough"]
+                .get("content_item_metadata")
+                .is_none(),
+            "outgoing item must omit unsupported provenance: {item}"
+        );
+    }
+    let user = input
+        .iter()
+        .find(|item| item["content"][0]["text"] == "hello")
+        .context("request should contain the user message")?;
+    assert_eq!(
+        user["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        serde_json::json!(["user.text"])
+    );
+
+    // Wire filtering must leave the original history's source attribution intact.
+    let history = test.codex.conversation_history_snapshot().await;
+    let stored_user = history
+        .items()
+        .map(serde_json::to_value)
+        .collect::<serde_json::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|item| item["content"][0]["text"] == "hello")
+        .context("history should retain the user message")?;
+    let mut expected_stored_metadata = user["internal_chat_message_metadata_passthrough"].clone();
+    expected_stored_metadata["content_item_metadata"] =
+        serde_json::json!([{"provenance": {"type": "user"}}]);
+    assert_eq!(
+        stored_user["internal_chat_message_metadata_passthrough"],
+        expected_stored_metadata
+    );
 
     let tools = if responses_lite {
         assert!(body.get("tools").is_none());

@@ -142,7 +142,10 @@ fn test_get_command_keeps_path_prepends_after_login_startup() -> anyhow::Result<
         ),
         (already_present.clone(), already_present),
     ] {
+        // BASH_ENV supplies the fixture's login startup. Host profiles must not
+        // run with the deliberately restricted PATH before that setup executes.
         let output = std::process::Command::new(&execution_command[0])
+            .arg("--noprofile")
             .args(&execution_command[1..])
             .env("BASH_ENV", &startup)
             .env("CODEX_TEST_LOGIN_PATH", login_path)
@@ -524,6 +527,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
         max_output_tokens: None,
         process_id: None,
         exit_code: Some(0),
+        wait_reason: None,
         original_token_count: None,
         output_omitted_bytes: None,
         hook_command: Some("echo three".to_string()),
@@ -555,6 +559,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_interactive_completi
         max_output_tokens: None,
         process_id: None,
         exit_code: Some(0),
+        wait_reason: None,
         original_token_count: None,
         output_omitted_bytes: None,
         hook_command: Some("echo three".to_string()),
@@ -587,6 +592,7 @@ async fn exec_command_post_tool_use_payload_skips_running_sessions() {
         max_output_tokens: None,
         process_id: Some(45),
         exit_code: None,
+        wait_reason: None,
         original_token_count: None,
         output_omitted_bytes: None,
         hook_command: Some("echo three".to_string()),
@@ -614,6 +620,7 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
         max_output_tokens: None,
         process_id: None,
         exit_code: Some(0),
+        wait_reason: None,
         original_token_count: None,
         output_omitted_bytes: None,
         hook_command: Some("sleep 1; echo finished".to_string()),
@@ -646,6 +653,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         max_output_tokens: None,
         process_id: None,
         exit_code: Some(0),
+        wait_reason: None,
         original_token_count: None,
         output_omitted_bytes: None,
         hook_command: Some("sleep 2; echo alpha".to_string()),
@@ -659,6 +667,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         max_output_tokens: None,
         process_id: None,
         exit_code: Some(0),
+        wait_reason: None,
         original_token_count: None,
         output_omitted_bytes: None,
         hook_command: Some("sleep 1; echo beta".to_string()),

@@ -27,3 +27,17 @@ def read_workspace_version() -> str:
                     return match.group(1)
 
     raise RuntimeError(f"Could not find [workspace.package].version in {cargo_toml}")
+
+
+def validate_maintained_release_version(version: str, workspace_version: str) -> None:
+    """Keep maintained fork packages tied to their compiled discovery version."""
+    base, _, metadata = version.partition("+")
+    if metadata.startswith("jkammerland.mcp."):
+        if workspace_version.partition("-")[0] == "0.0.0":
+            raise ValueError(
+                "Maintained releases require a nonzero Cargo workspace version"
+            )
+        if base != workspace_version:
+            raise ValueError(
+                "Maintained package version must match the Cargo workspace version"
+            )

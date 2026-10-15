@@ -1939,9 +1939,13 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
         "an async hook result from the previous turn must not start a model turn"
     );
 
-    // Keep the next prompt's hook pending so only the first hook's buffered
-    // output can contribute to the next model turn.
-    fs::remove_file(release_path).context("reset the async hook gate")?;
+    if !automatic_continuation {
+        fs::remove_file(
+            test.codex_home_path()
+                .join("async_user_prompt_submit_release"),
+        )
+        .context("regate the next prompt's unrelated async hook")?;
+    }
 
     let next_prompt = "observe the buffered async context";
     let next_turn = if automatic_continuation {

@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios.rs
+assertion_line: 1091
 expression: "context_snapshot::format_request_history_snapshot(\"Astra checks a Settings release using direct collaboration and Code Mode tools.\",\n&mock.requests(),\n&ContextSnapshotOptions::default().include_request_settings(),)"
 ---
 Scenario: Astra checks a Settings release using direct collaboration and Code Mode tools.

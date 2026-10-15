@@ -164,12 +164,14 @@ impl CodeModeExecuteHandler {
             .code_mode_host_duration()
             .unwrap_or_else(|| started_at.elapsed());
         Ok(handle_runtime_response(
+            &exec,
             &step_context.settings.model_info,
             response,
             args.max_output_tokens,
             wall_time,
             exec.turn.config.code_mode.experimental_show_cell_overhead,
-        ))
+        )
+        .await)
     }
 }
 

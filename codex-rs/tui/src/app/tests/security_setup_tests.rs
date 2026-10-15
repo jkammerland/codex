@@ -229,17 +229,21 @@ async fn security_setup_skips_fetch_when_server_auth_does_not_match_saved_login(
         let endpoint = crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?;
         let daemon = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
-            serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| {
-                assert_eq!(request.method, "getAuthStatus");
-                assert_eq!(
-                    request.params,
-                    Some(json!({"includeToken": true, "refreshToken": false}))
-                );
-                std::future::ready(Some(json!({"result": {
-                    "authMethod": auth_method, "authToken": auth_token,
-                    "requiresOpenaiAuth": true
-                }})))
-            })
+            serve_reconnect_requests(
+                tokio_tungstenite::accept_async(stream).await?,
+                "2.0.0",
+                |request| {
+                    assert_eq!(request.method, "getAuthStatus");
+                    assert_eq!(
+                        request.params,
+                        Some(json!({"includeToken": true, "refreshToken": false}))
+                    );
+                    std::future::ready(Some(json!({"result": {
+                        "authMethod": auth_method, "authToken": auth_token,
+                        "requiresOpenaiAuth": true
+                    }})))
+                },
+            )
             .await
         });
         let server = AppServerSession::new(

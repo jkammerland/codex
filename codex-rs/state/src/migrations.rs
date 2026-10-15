@@ -55,6 +55,52 @@ pub(crate) fn runtime_thread_history_migrator() -> Migrator {
     runtime_migrator(&THREAD_HISTORY_MIGRATOR)
 }
 
+pub(crate) async fn migrate_thread_history(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    // The retired fork migration 7 only cleared a projection. Preserve its
+    // completed record under its release date, without replaying the DELETEs,
+    // so upstream's migration 7 keeps its original number and checksum.
+    const LEGACY_CHECKSUM: &str = "EC16C397FD4AD4138AEDE7F3CB37E9301E780D77F1D7944B61B5D11C43A6C4A7206F2102C11DC75312F0337F2ED576E7";
+    let has_upstream_seven = migrator.migrations.iter().any(|migration| {
+        migration.version == 7 && migration.description == "thread item lifecycle timestamps"
+    });
+    let has_migrations = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if has_upstream_seven && has_migrations {
+        let checksum = sqlx::query_scalar::<_, String>(
+            "SELECT hex(checksum) FROM _sqlx_migrations WHERE version = 7 AND success = 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        if checksum.as_deref() == Some(LEGACY_CHECKSUM) {
+            // Serialize concurrent repairs and commit the renumbering together
+            // with upstream's schema change. Any migration error rolls both back.
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query(
+                "UPDATE _sqlx_migrations SET version = 202608300007
+                 WHERE version = 7 AND success = 1 AND hex(checksum) = ?
+                   AND NOT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 202608300007)",
+            )
+            .bind(LEGACY_CHECKSUM)
+            .execute(&mut *tx)
+            .await?;
+            migrator
+                .run_direct(/*target*/ None, &mut *tx, /*skip*/ false)
+                .await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+    }
+    migrator.run(pool).await?;
+    Ok(())
+}
+
 pub(crate) async fn repair_legacy_recency_migration_version(
     pool: &SqlitePool,
     migrator: &Migrator,
@@ -121,3 +167,7 @@ WHERE version = ?
 #[cfg(test)]
 #[path = "migrations_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "legacy_thread_history_migration_tests.rs"]
+mod legacy_thread_history_migration_tests;

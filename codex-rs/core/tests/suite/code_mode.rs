@@ -1777,7 +1777,7 @@ async fn code_mode_wait_id_stays_known_after_compaction(
                 ev_custom_tool_call(
                     "call-exec",
                     "exec",
-                    r#"await tools.test_sync_tool({}); text("started"); yield_control(); await new Promise(() => {});"#,
+                    r#"await tools.test_sync_tool({}); text("started"); yield_control(); text("pending observation"); await new Promise(() => {});"#,
                 ),
                 ev_completed("resp-start"),
             ]),
@@ -2869,7 +2869,7 @@ async fn code_mode_result_metadata_keeps_prepared_call_binding_across_runtime_re
     });
     let code = format!(
         "const tool = ALL_TOOLS.find(({{ name }}) => name.endsWith(\"{RESULT_METADATA_TOOL}\")); \
-         const pending = tools[tool.name]({arguments}); yield_control(); await pending; \
+         const pending = tools[tool.name]({arguments}); yield_control(); text(\"pending inventory\"); await pending; \
          await tools[tool.name]({arguments}); text(\"done\");"
     );
     let (test, follow_up) =
@@ -2883,7 +2883,7 @@ async fn code_mode_result_metadata_keeps_prepared_call_binding_across_runtime_re
     tokio::time::timeout(Duration::from_secs(10), reached_rx).await??;
 
     // Yield may precede call admission. Drain inventory after the lifecycle gate is reached;
-    // the short wait is only a poll budget while the gate keeps acceptance blocked.
+    // the buffered marker makes the observation visible while acceptance stays blocked.
     let held_wait = responses::mount_function_call_agent_response(
         &server,
         "call-2",
@@ -3021,7 +3021,7 @@ async fn code_mode_late_result_metadata_with_large_arguments_survives_waits() ->
     let later_arguments = serde_json::json!({ "query": "later" });
     let code = format!(
         "const tool = ALL_TOOLS.find(({{ name }}) => name.endsWith(\"{RESULT_METADATA_TOOL}\")); \
-         const pending = tools[tool.name]({arguments}); yield_control(); await pending; \
+         const pending = tools[tool.name]({arguments}); yield_control(); text(\"pending inventory\"); await pending; \
          await tools[tool.name]({later_arguments}); text(\"accepted\"); \
          yield_control(); await new Promise(() => {{}});"
     );
@@ -5053,6 +5053,227 @@ text((await tools.exec_command({{cmd: "printf 'phase 3'"}})).output);
 
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_wait_coalesces_quiet_deadlines_without_resampling() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        let _ = config.features.enable(Feature::CodeMode);
+    });
+    let test = builder.build(&server).await?;
+    let completion_gate = test.workspace_path("code-mode-wait-completion.ready");
+    let completion_wait = wait_for_file_source(&completion_gate)?;
+    let code = format!(
+        r#"
+yield_control();
+{completion_wait}
+text("finished after quiet deadlines");
+"#
+    );
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-coalesce-exec"),
+            ev_custom_tool_call("call-coalesce-exec", "exec", &code),
+            ev_completed("resp-coalesce-exec"),
+        ]),
+    )
+    .await;
+    let first_completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-coalesce-waiting", "waiting"),
+            ev_completed("resp-coalesce-waiting"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn("start a cell that will become quiet")
+        .await?;
+    let first_request = first_completion.single_request();
+    let first_items = custom_tool_output_items(&first_request, "call-coalesce-exec");
+    let cell_id = extract_running_cell_id(text_item(&first_items, /*index*/ 0));
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-coalesce-wait"),
+            responses::ev_function_call(
+                "call-coalesce-wait",
+                "wait",
+                &serde_json::to_string(&serde_json::json!({
+                    "cell_id": cell_id,
+                    "yield_time_ms": 1,
+                }))?,
+            ),
+            ev_completed("resp-coalesce-wait"),
+        ]),
+    )
+    .await;
+    let completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-coalesce-done", "done"),
+            ev_completed("resp-coalesce-done"),
+        ]),
+    )
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait for the quiet cell".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RawResponseItem(raw) => match &raw.item {
+            ResponseItem::FunctionCall { call_id, .. } if call_id == "call-coalesce-wait" => {
+                Some(())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 100)).await;
+    assert!(
+        completion.requests().is_empty(),
+        "quiet deadline wakes must not trigger another model request"
+    );
+
+    fs::write(&completion_gate, "ready")?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let completion_request = completion.single_request();
+    let completion_items = function_tool_output_items(&completion_request, "call-coalesce-wait");
+    assert_eq!(completion_items.len(), 2);
+    assert_regex_match(
+        concat!(
+            r"(?s)\A",
+            r"Script completed\nWall time \d+\.\d seconds\nOutput:\n\z"
+        ),
+        text_item(&completion_items, /*index*/ 0),
+    );
+    assert_eq!(
+        text_item(&completion_items, /*index*/ 1),
+        "finished after quiet deadlines"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_wait_retires_observer_before_input_wake_observation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        let _ = config.features.enable(Feature::CodeMode);
+    });
+    let test = builder.build(&server).await?;
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-input-wake-exec"),
+            ev_custom_tool_call(
+                "call-input-wake-exec",
+                "exec",
+                "yield_control(); await new Promise(() => {});",
+            ),
+            ev_completed("resp-input-wake-exec"),
+        ]),
+    )
+    .await;
+    let initial_completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-input-wake-waiting", "waiting"),
+            ev_completed("resp-input-wake-waiting"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn("start an indefinitely quiet cell").await?;
+    let initial_items =
+        custom_tool_output_items(&initial_completion.single_request(), "call-input-wake-exec");
+    let cell_id = extract_running_cell_id(text_item(&initial_items, /*index*/ 0));
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-input-wake-wait"),
+            responses::ev_function_call(
+                "call-input-wake-wait",
+                "wait",
+                &serde_json::to_string(&serde_json::json!({
+                    "cell_id": cell_id,
+                    "yield_time_ms": 60_000,
+                }))?,
+            ),
+            ev_completed("resp-input-wake-wait"),
+        ]),
+    )
+    .await;
+    let completion = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-input-wake-done", "input received"),
+            ev_completed("resp-input-wake-done"),
+        ]),
+    )
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait for the quiet cell".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RawResponseItem(raw) => match &raw.item {
+            ResponseItem::FunctionCall { call_id, .. } if call_id == "call-input-wake-wait" => {
+                Some(())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "new direction".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let output = completion
+        .single_request()
+        .function_call_output_text("call-input-wake-wait")
+        .expect("input should release the code-mode wait");
+    assert!(
+        output.contains("Script running with cell ID"),
+        "unexpected input-wake output: {output}"
+    );
+    assert!(
+        !output.contains("already has an active observer"),
+        "replacement observation raced the canceled wait: {output}"
+    );
+    Ok(())
+}
+
+#[cfg_attr(windows, ignore = "no exec_command on Windows")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_yield_and_termination_are_not_starved_by_runtime_output() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -5784,52 +6005,10 @@ text("session b done");
     let second_request = second_completion.single_request();
     let second_items = custom_tool_output_items(&second_request, "call-2");
     assert_eq!(second_items.len(), 2);
-    let session_b_id = extract_running_cell_id(text_item(&second_items, /*index*/ 0));
+    let _session_b_id = extract_running_cell_id(text_item(&second_items, /*index*/ 0));
     assert_eq!(text_item(&second_items, /*index*/ 1), "session b start");
 
     fs::write(&session_a_gate, "ready")?;
-    responses::mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-5"),
-            responses::ev_function_call(
-                "call-3",
-                "wait",
-                &serde_json::to_string(&serde_json::json!({
-                    "cell_id": session_b_id.clone(),
-                    "yield_time_ms": 1_000,
-                }))?,
-            ),
-            ev_completed("resp-5"),
-        ]),
-    )
-    .await;
-    let third_completion = responses::mount_sse_once(
-        &server,
-        sse(vec![
-            ev_assistant_message("msg-3", "session b still waiting"),
-            ev_completed("resp-6"),
-        ]),
-    )
-    .await;
-
-    test.submit_turn("wait session b").await?;
-
-    let third_request = third_completion.single_request();
-    let third_items = function_tool_output_items(&third_request, "call-3");
-    assert_eq!(third_items.len(), 1);
-    assert_regex_match(
-        concat!(
-            r"(?s)\A",
-            r"Script running with cell ID \d+\nWall time \d+\.\d seconds\nOutput:\n\z"
-        ),
-        text_item(&third_items, /*index*/ 0),
-    );
-    assert_eq!(
-        extract_running_cell_id(text_item(&third_items, /*index*/ 0)),
-        session_b_id
-    );
-
     for _ in 0..100 {
         if session_a_done_marker.exists() {
             break;

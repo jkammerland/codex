@@ -3737,6 +3737,7 @@ async fn exec_command_routing_output(
         .context("initial model request should be recorded")?;
     let tools = tool_names(&request.body_json());
     assert!(tools.contains(&"exec_command".to_string()));
+    assert!(tools.contains(&"wait_process".to_string()));
     assert!(tools.contains(&"write_stdin".to_string()));
 
     Ok(output)

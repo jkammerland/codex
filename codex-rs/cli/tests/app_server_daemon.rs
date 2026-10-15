@@ -35,9 +35,20 @@ fn managed_daemon_restarts_from_deleted_working_directory() -> Result<()> {
         String::from_utf8_lossy(&started.stderr)
     );
     let old_pid = daemon.pid("app-server.pid")?;
-    let old_updater_pid = daemon.pid("app-server-updater.pid")?;
-    signal(old_updater_pid, libc::SIGTERM)?;
-    wait_for_exit(old_updater_pid)?;
+    // Maintained forks keep the official updater disabled across restarts.
+    let updater_record = daemon
+        .home
+        .path()
+        .join("app-server-daemon/app-server-updater.pid");
+    let old_updater_pid = if codex_build_info::CODEX_FORK_BUILD_ID.is_empty() {
+        let pid = daemon.pid("app-server-updater.pid")?;
+        signal(pid, libc::SIGTERM)?;
+        wait_for_exit(pid)?;
+        Some(pid)
+    } else {
+        assert!(!updater_record.exists());
+        None
+    };
 
     // Delete the restart caller's cwd without changing the test process's cwd.
     let restarted = Command::new("/bin/sh")
@@ -59,19 +70,23 @@ fn managed_daemon_restarts_from_deleted_working_directory() -> Result<()> {
     let restarted: Value = serde_json::from_slice(&restarted.stdout)?;
     assert_eq!(restarted["status"], "restarted");
     assert_ne!(daemon.pid("app-server.pid")?, old_pid);
-    assert_ne!(daemon.pid("app-server-updater.pid")?, old_updater_pid);
     assert_eq!(daemon.lifecycle("version")?["status"], "running");
-    let updater_socket = daemon
-        .home
-        .path()
-        .join("app-server-daemon/app-server-updater.sock");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while std::os::unix::net::UnixStream::connect(&updater_socket).is_err() {
-        ensure!(
-            Instant::now() < deadline,
-            "replacement updater did not become ready"
-        );
-        std::thread::sleep(Duration::from_millis(50));
+    if let Some(old_updater_pid) = old_updater_pid {
+        assert_ne!(daemon.pid("app-server-updater.pid")?, old_updater_pid);
+        let updater_socket = daemon
+            .home
+            .path()
+            .join("app-server-daemon/app-server-updater.sock");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while std::os::unix::net::UnixStream::connect(&updater_socket).is_err() {
+            ensure!(
+                Instant::now() < deadline,
+                "replacement updater did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    } else {
+        assert!(!updater_record.exists());
     }
     Ok(())
 }

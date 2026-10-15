@@ -906,6 +906,7 @@ async fn unattended_modals_survive_unfinished_terminal_input() -> Result<()> {
         let (stream, _) = listener.accept().await?;
         super::disconnect::serve_reconnect_requests(
             tokio_tungstenite::accept_async(stream).await?,
+            crate::CODEX_CLI_VERSION,
             |request| {
                 std::future::ready(Some(match request.method.as_str() {
                     "thread/list" | "thread/loaded/list" => {
@@ -1394,6 +1395,7 @@ async fn remote_overview_startup_hides_disabled_older_server_notice() -> Result<
         let (stream, _) = listener.accept().await?;
         super::disconnect::serve_reconnect_requests(
             tokio_tungstenite::accept_async(stream).await?,
+            "2.0.0",
             |_request| std::future::ready(None),
         )
         .await

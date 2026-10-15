@@ -28,6 +28,7 @@ use codex_code_mode_protocol::host::RequestId;
 use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SessionId;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
+use codex_code_mode_protocol::host::WAIT_YIELD_REASON_CAPABILITY;
 use codex_code_mode_protocol::host::WireWaitOutcome;
 use codex_code_mode_protocol::host::YIELD_OBSERVATION_CAPABILITY;
 use codex_code_mode_runtime::InProcessCodeModeSession;
@@ -42,6 +43,7 @@ use tokio_util::task::TaskTracker;
 
 use self::delegate::RemoteDelegate;
 use self::peer::HostPeer;
+use self::peer::YieldReasonEncoding;
 
 pub use self::grpc::GrpcCodeModeHost;
 pub use self::transport::DEFAULT_LISTEN_URL;
@@ -62,7 +64,7 @@ const OUTGOING_CHANNEL_CAPACITY: usize = 128;
 
 enum NegotiatedConnection {
     Rejected,
-    Accepted,
+    Accepted { wait_yield_reason: bool },
 }
 
 struct HostLimits {
@@ -111,10 +113,10 @@ where
 {
     let mut reader = FramedReader::new(reader);
     let mut writer = FramedWriter::new(writer);
-    match negotiate(&mut reader, &mut writer).await? {
+    let wait_yield_reason = match negotiate(&mut reader, &mut writer).await? {
         NegotiatedConnection::Rejected => return Ok(()),
-        NegotiatedConnection::Accepted => {}
-    }
+        NegotiatedConnection::Accepted { wait_yield_reason } => wait_yield_reason,
+    };
     let (outgoing_tx, outgoing_rx) = mpsc::channel::<EncodedFrame>(OUTGOING_CHANNEL_CAPACITY);
     let peer = Arc::new(HostPeer::new(outgoing_tx));
     let state = Arc::new(HostState {
@@ -123,6 +125,7 @@ where
         seen_session_ids: Mutex::new(SeenSessionIds::default()),
         requests: Mutex::new(RequestRegistry::default()),
         request_tasks: TaskTracker::new(),
+        wait_yield_reason,
         closing: AtomicBool::new(false),
         peer: Arc::clone(&peer),
     });
@@ -258,10 +261,18 @@ async fn negotiate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         return Ok(NegotiatedConnection::Rejected);
     }
 
+    let wait_yield_reason_capability = Capability::new(WAIT_YIELD_REASON_CAPABILITY)?;
+    let wait_yield_reason = client_hello
+        .required_capabilities()
+        .contains(&wait_yield_reason_capability)
+        || client_hello
+            .optional_capabilities()
+            .contains(&wait_yield_reason_capability);
     let host_capabilities = CapabilitySet::try_new(
         [
             SESSION_RESOURCE_LIMITS_CAPABILITY,
             YIELD_OBSERVATION_CAPABILITY,
+            WAIT_YIELD_REASON_CAPABILITY,
         ]
         .into_iter()
         .map(Capability::new)
@@ -293,7 +304,7 @@ async fn negotiate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         .write(&HostToClient::HostHello(hello))
         .await
         .context("failed to write code-mode host hello")?;
-    Ok(NegotiatedConnection::Accepted)
+    Ok(NegotiatedConnection::Accepted { wait_yield_reason })
 }
 
 struct HostState {
@@ -302,6 +313,7 @@ struct HostState {
     seen_session_ids: Mutex<SeenSessionIds>,
     requests: Mutex<RequestRegistry>,
     request_tasks: TaskTracker,
+    wait_yield_reason: bool,
     closing: AtomicBool,
     peer: Arc<HostPeer>,
 }
@@ -442,6 +454,11 @@ impl HostState {
                             request_id,
                             started,
                             active_cell_permit,
+                            if self.wait_yield_reason {
+                                YieldReasonEncoding::Include
+                            } else {
+                                YieldReasonEncoding::Omit
+                            },
                             received_at,
                         );
                         let _ = initial_response_sent.await;
@@ -463,8 +480,7 @@ impl HostState {
                             result = session.wait(request.into(), Some(yield_signal)) => result.and_then(|outcome| {
                                 let outcome = outcome.with_code_mode_host_duration(received_at.elapsed());
                                 Ok(HostResponse::WaitCompleted {
-                                    outcome: WireWaitOutcome::try_from(outcome)
-                                        .map_err(|error| error.to_string())?,
+                                    outcome: self.wire_wait_outcome(outcome)?,
                                 })
                             }),
                         }
@@ -481,8 +497,7 @@ impl HostState {
                     Ok(session) => session.terminate(cell_id.into()).await.and_then(|outcome| {
                         let outcome = outcome.with_code_mode_host_duration(received_at.elapsed());
                         Ok(HostResponse::WaitCompleted {
-                            outcome: WireWaitOutcome::try_from(outcome)
-                                .map_err(|error| error.to_string())?,
+                            outcome: self.wire_wait_outcome(outcome)?,
                         })
                     }),
                     Err(err) => Err(err),
@@ -546,6 +561,18 @@ impl HostState {
             )),
         );
         Ok(())
+    }
+
+    fn wire_wait_outcome(
+        &self,
+        outcome: codex_code_mode_protocol::WaitOutcome,
+    ) -> Result<WireWaitOutcome, String> {
+        if self.wait_yield_reason {
+            WireWaitOutcome::try_from_wait_outcome_with_yield_reason(outcome)
+                .map_err(|error| error.to_string())
+        } else {
+            WireWaitOutcome::try_from(outcome).map_err(|error| error.to_string())
+        }
     }
 
     fn session(&self, session_id: &SessionId) -> Result<Arc<InProcessCodeModeSession>, String> {

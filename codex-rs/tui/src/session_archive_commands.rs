@@ -280,7 +280,9 @@ pub(super) async fn start_app_server_for_session_command(
         )
         .is_none();
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
-        super::maybe_probe_default_daemon_socket(codex_home.as_path()).await
+        super::probe_default_daemon_socket(codex_home.as_path())
+            .await
+            .into_compatible_path()
     } else {
         None
     };

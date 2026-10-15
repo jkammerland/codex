@@ -29,6 +29,7 @@ pub use tool_catalog::tool_is_model_visible;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -90,7 +91,16 @@ pub(crate) struct McpServerConnection {
     // Startup-only budget; changing it must not replace a ready connection.
     startup_timeout: Duration,
     startup_trigger: Option<watch::Sender<bool>>,
+    shutdown_started: AtomicBool,
     _diagnostics_guard: GaugeGuard,
+}
+
+fn configured_tool_timeout(timeout: Option<Duration>) -> Option<Duration> {
+    match timeout {
+        Some(timeout) if timeout.is_zero() => None,
+        Some(timeout) => Some(timeout),
+        None => Some(DEFAULT_TOOL_TIMEOUT),
+    }
 }
 
 impl McpServerConnection {
@@ -154,6 +164,9 @@ impl McpServerConnection {
     }
 
     async fn shutdown(&self) {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.client.shutdown().await;
     }
 
@@ -173,6 +186,20 @@ impl McpServerConnection {
 impl Drop for McpServerConnection {
     fn drop(&mut self) {
         self.client.cancel_token.cancel();
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let client = self.client.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!(
+                "dropping an MCP connection outside a Tokio runtime; transport cleanup is unproven"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            client.shutdown().await;
+        });
     }
 }
 
@@ -375,11 +402,8 @@ impl McpConnectionSet {
             let startup_timeout = configured_config
                 .startup_timeout_sec
                 .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
-            let configured_tool_timeout = Some(
-                configured_config
-                    .tool_timeout_sec
-                    .unwrap_or(DEFAULT_TOOL_TIMEOUT),
-            );
+            let configured_tool_timeout =
+                configured_tool_timeout(configured_config.tool_timeout_sec);
             let resolved_environment =
                 runtime_context.resolve_server_environment(&server_name, &configured_config);
             // For built-in Codex Apps, `CODEX_CONNECTORS_TOKEN` is a debug
@@ -673,6 +697,7 @@ impl McpConnectionSet {
                         client: async_managed_client.clone(),
                         startup_timeout,
                         startup_trigger,
+                        shutdown_started: AtomicBool::new(false),
                         _diagnostics_guard: LIVE_CONNECTIONS.track(),
                     }),
                     protocol_mode,

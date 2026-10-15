@@ -40,8 +40,8 @@
       "endpoint": "windows-offload",
       "installedVersion": "0.163.0+jkammerland.mcp.25",
       "staging": "ready",
-      "sharedDaemon": "parked",
-      "daemonAutoStart": false
+      "sharedDaemon": "qualification_pending",
+      "daemonAutoStart": true
     },
     {
       "name": "dnarb",

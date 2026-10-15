@@ -154,6 +154,11 @@ impl Harness {
             AnalyticsEventsClient::disabled(),
         ));
         let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+            team_host: codex_team_extension::PreparedTeamHost::load(
+                &config,
+                "test-installation".into(),
+            )
+            .await?,
             outgoing: Arc::clone(&outgoing),
             analytics_events_client: AnalyticsEventsClient::disabled(),
             arg0_paths: Arg0DispatchPaths::default(),

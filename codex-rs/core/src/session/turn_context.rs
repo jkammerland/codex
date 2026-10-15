@@ -544,6 +544,15 @@ impl TurnContext {
         Arc::clone(&self.next_step_settings.load().model_info)
     }
 
+    /// Read both active model settings from one immutable version for host UI.
+    pub(crate) fn capture_current_model_selection(&self) -> (String, Option<String>) {
+        let settings = self.current_settings.load();
+        (
+            settings.model_info.slug.clone(),
+            settings.reasoning_effort().map(ToString::to_string),
+        )
+    }
+
     /// Legacy: returns the frozen initial-turn model metadata.
     /// Step-scoped consumers should use their captured `StepContext::settings`.
     pub(crate) fn model_info(&self) -> &Arc<ModelInfo> {
@@ -1191,6 +1200,21 @@ impl Session {
         should_start: impl FnOnce(&SessionConfiguration, &SessionConfiguration) -> bool + Send,
     ) -> CodexResult<Option<(Arc<TurnContext>, ThreadSettingsSnapshot)>> {
         let service_tier_for_turn = updates.service_tier_for_turn.clone();
+        if self
+            .services
+            .extensions
+            .execution_control()
+            .root(self.thread_id)
+            .is_some()
+        {
+            let proposed = self
+                .preview_settings(&updates)
+                .await
+                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+            if let Some(error) = self.team_model_error(&proposed).await {
+                return Err(CodexErr::InvalidRequest(error));
+            }
+        }
         let commit = match self.update_settings_if(updates, should_start).await {
             Ok(Some(commit)) => commit,
             Ok(None) => return Ok(None),

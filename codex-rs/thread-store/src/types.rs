@@ -184,6 +184,14 @@ pub struct StoredThreadHistory {
     pub revision: Option<String>,
 }
 
+/// Append-only execution evidence from the thread's current storage generation.
+/// This is for host recovery, not conversation rendering or model context.
+#[derive(Clone, Debug)]
+pub struct StoredExecutionHistory {
+    pub generation: String,
+    pub items: Vec<RolloutItem>,
+}
+
 /// Persisted rollout items needed to reconstruct the latest model-visible context.
 ///
 /// Local stores may return only a resumable suffix while stores without targeted reads may return

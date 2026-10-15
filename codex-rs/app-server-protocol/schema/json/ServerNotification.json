@@ -4134,6 +4134,18 @@
         }
       ]
     },
+    "TeamChangedNotification": {
+      "properties": {
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
     "TerminalInteractionNotification": {
       "properties": {
         "itemId": {
@@ -7447,6 +7459,26 @@
         "params"
       ],
       "title": "Thread/goal/clearedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "team/changed"
+          ],
+          "title": "Team/changedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/TeamChangedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Team/changedNotification",
       "type": "object"
     },
     {

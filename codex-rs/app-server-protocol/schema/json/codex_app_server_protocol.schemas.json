@@ -4927,6 +4927,26 @@
           "properties": {
             "method": {
               "enum": [
+                "team/changed"
+              ],
+              "title": "Team/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/TeamChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Team/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/queue/changed"
               ],
               "title": "Thread/queue/changedNotificationMethod",
@@ -20947,6 +20967,652 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "TeamAddress": {
+        "properties": {
+          "machineId": {
+            "type": "string"
+          },
+          "serverId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "machineId",
+          "serverId",
+          "threadId"
+        ],
+        "type": "object"
+      },
+      "TeamAgentAction": {
+        "description": "Agent actions deliberately omit execution controls and model settings.",
+        "oneOf": [
+          {
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "reply"
+                ],
+                "title": "ReplyTeamAgentActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "body",
+              "message_id",
+              "type"
+            ],
+            "title": "ReplyTeamAgentAction",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "directory"
+                ],
+                "title": "DirectoryTeamAgentActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "DirectoryTeamAgentAction",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "inbox"
+                ],
+                "title": "InboxTeamAgentActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "InboxTeamAgentAction",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "delivery": {
+                "$ref": "#/definitions/v2/TeamDeliveryMode"
+              },
+              "kind": {
+                "$ref": "#/definitions/v2/TeamMessageKind"
+              },
+              "recipient": {
+                "$ref": "#/definitions/v2/TeamAddress"
+              },
+              "reply_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "send"
+                ],
+                "title": "SendTeamAgentActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "body",
+              "delivery",
+              "kind",
+              "recipient",
+              "type"
+            ],
+            "title": "SendTeamAgentAction",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "reply_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "topic": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "post"
+                ],
+                "title": "PostTeamAgentActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "body",
+              "topic",
+              "type"
+            ],
+            "title": "PostTeamAgentAction",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limit": {
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "topic": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "board"
+                ],
+                "title": "BoardTeamAgentActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "topic",
+              "type"
+            ],
+            "title": "BoardTeamAgentAction",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "topic": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "subscribe"
+                ],
+                "title": "SubscribeTeamAgentActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "enabled",
+              "topic",
+              "type"
+            ],
+            "title": "SubscribeTeamAgentAction",
+            "type": "object"
+          }
+        ]
+      },
+      "TeamAgentRuntime": {
+        "properties": {
+          "alias": {
+            "type": "string"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "continuationTurnId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currentEffort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currentModel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inFlight": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/definitions/v2/TeamTrackedJob"
+            },
+            "type": "array"
+          },
+          "loaded": {
+            "type": "boolean"
+          },
+          "manuallyHeld": {
+            "type": "boolean"
+          },
+          "modelError": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nextEffort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nextModel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parentThreadId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reconciling": {
+            "type": "boolean"
+          },
+          "rootThreadId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "alias",
+          "archived",
+          "inFlight",
+          "jobs",
+          "loaded",
+          "manuallyHeld",
+          "reconciling",
+          "rootThreadId",
+          "threadId"
+        ],
+        "type": "object"
+      },
+      "TeamCancellationAdapter": {
+        "additionalProperties": false,
+        "description": "User-owned mapping from a trusted MCP launch result to an idempotent cancel.",
+        "properties": {
+          "cancelArguments": true,
+          "cancelIdField": {
+            "type": "string"
+          },
+          "cancelTool": {
+            "type": "string"
+          },
+          "confirmationPointer": {
+            "type": "string"
+          },
+          "confirmationValue": true,
+          "jobIdPointer": {
+            "type": "string"
+          },
+          "launchTool": {
+            "type": "string"
+          },
+          "pluginId": {
+            "description": "Require this plugin ID, or a user-configured MCP server when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cancelArguments",
+          "cancelIdField",
+          "cancelTool",
+          "confirmationPointer",
+          "confirmationValue",
+          "jobIdPointer",
+          "launchTool",
+          "server"
+        ],
+        "type": "object"
+      },
+      "TeamChangedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "title": "TeamChangedNotification",
+        "type": "object"
+      },
+      "TeamControlState": {
+        "properties": {
+          "coordinatorId": {
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/definitions/v2/TeamExecutionMode"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "coordinatorId",
+          "mode",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "TeamDelivery": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "message": {
+            "$ref": "#/definitions/v2/TeamMessage"
+          },
+          "mode": {
+            "$ref": "#/definitions/v2/TeamDeliveryMode"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "wake": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "message",
+          "mode",
+          "threadId",
+          "wake"
+        ],
+        "type": "object"
+      },
+      "TeamDeliveryMode": {
+        "enum": [
+          "nextTurn",
+          "safeBoundary"
+        ],
+        "type": "string"
+      },
+      "TeamEnrollment": {
+        "properties": {
+          "address": {
+            "$ref": "#/definitions/v2/TeamAddress"
+          },
+          "alias": {
+            "type": "string"
+          },
+          "continuationTurnId": {
+            "description": "A stopped turn has priority over subsequently queued messages.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "manuallyHeld": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "address",
+          "alias",
+          "manuallyHeld"
+        ],
+        "type": "object"
+      },
+      "TeamExecutionMode": {
+        "enum": [
+          "running",
+          "paused",
+          "stopped"
+        ],
+        "type": "string"
+      },
+      "TeamJobStatus": {
+        "enum": [
+          "running",
+          "cancellationPending",
+          "cancelled",
+          "unconfirmed"
+        ],
+        "type": "string"
+      },
+      "TeamMessage": {
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/definitions/v2/TeamMessageKind"
+          },
+          "recipient": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/TeamAddress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replyTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sender": {
+            "$ref": "#/definitions/v2/TeamAddress"
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "body",
+          "createdAt",
+          "id",
+          "kind",
+          "sender"
+        ],
+        "type": "object"
+      },
+      "TeamMessageKind": {
+        "enum": [
+          "request",
+          "reply",
+          "note",
+          "board"
+        ],
+        "type": "string"
+      },
+      "TeamOutboxEntry": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "payload": true,
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "payload",
+          "sequence"
+        ],
+        "type": "object"
+      },
+      "TeamReceipt": {
+        "properties": {
+          "deliveryId": {
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/definitions/v2/TeamReceiptState"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "deliveryId",
+          "state",
+          "threadId"
+        ],
+        "type": "object"
+      },
+      "TeamReceiptState": {
+        "enum": [
+          "pending",
+          "accepted",
+          "completed",
+          "interrupted",
+          "needsReconciliation"
+        ],
+        "type": "string"
+      },
+      "TeamTrackedJob": {
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "handle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/TeamJobStatus"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "server",
+          "status",
+          "threadId",
+          "tool"
         ],
         "type": "object"
       },

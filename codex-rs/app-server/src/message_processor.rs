@@ -168,6 +168,7 @@ pub(crate) struct MessageProcessor {
     search_processor: SearchRequestProcessor,
     thread_goal_processor: ThreadGoalRequestProcessor,
     thread_queue_processor: ThreadQueueRequestProcessor,
+    team_processor: super::request_processors::TeamRequestProcessor,
     thread_processor: ThreadRequestProcessor,
     turn_processor: TurnRequestProcessor,
     windows_sandbox_processor: WindowsSandboxRequestProcessor,
@@ -265,6 +266,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) user_verification: Arc<crate::user_verification::Service>,
     pub(crate) installation_id: String,
+    pub(crate) team_host: codex_team_extension::PreparedTeamHost,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
     pub(crate) rpc_transport: AppServerRpcTransport,
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
@@ -292,6 +294,7 @@ impl MessageProcessor {
             auth_manager,
             user_verification,
             installation_id,
+            team_host,
             code_mode_session_provider,
             rpc_transport,
             remote_control_handle,
@@ -331,7 +334,11 @@ impl MessageProcessor {
             app_server_extension_event_sink(outgoing.clone(), thread_state_manager.clone());
         let mut queue_service = None;
         let sample_responses = Arc::new(crate::thread_sample::SampleResponseRegistry::default());
+        let mut team_service = None;
         let thread_manager = Arc::new_cyclic(|thread_manager| {
+            let host =
+                codex_team_extension::TeamHostService::new(team_host, thread_manager.clone());
+            team_service = Some(host.clone());
             queue_service = queue_store.map(|queue| {
                 Arc::new(QueuedItemService::new(
                     queue,
@@ -349,6 +356,7 @@ impl MessageProcessor {
                 thread_extensions(
                     config.as_ref(),
                     ThreadExtensionDependencies {
+                        team_service: host,
                         sample_responses: Arc::clone(&sample_responses),
                         event_sink: Arc::clone(&extension_event_sink),
                         auth_manager: auth_manager.clone(),
@@ -508,6 +516,14 @@ impl MessageProcessor {
             Arc::clone(&goal_service),
             config_manager.clone(),
         );
+        #[allow(
+            clippy::expect_used,
+            reason = "Arc::new_cyclic above synchronously initializes the team service"
+        )]
+        let team_processor = super::request_processors::TeamRequestProcessor::new(
+            team_service.expect("team host initialized"),
+            outgoing.clone(),
+        );
         let thread_queue_processor = ThreadQueueRequestProcessor::new(
             Arc::clone(&thread_manager),
             Arc::clone(&thread_store),
@@ -624,6 +640,7 @@ impl MessageProcessor {
             search_processor,
             thread_goal_processor,
             thread_queue_processor,
+            team_processor,
             thread_processor,
             turn_processor,
             windows_sandbox_processor,
@@ -1392,6 +1409,51 @@ impl MessageProcessor {
                     .thread_goal_clear(request_id.clone(), params)
                     .await
             }
+            ClientRequest::TeamOutboxList { params, .. } => self
+                .team_processor
+                .outbox_list(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamOutboxAck { params, .. } => self
+                .team_processor
+                .outbox_ack(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamSync { params, .. } => self
+                .team_processor
+                .sync(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamAgentRequest { params, .. } => self
+                .team_processor
+                .agent_request(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamAgentCredential { params, .. } => self
+                .team_processor
+                .agent_credential(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamHostRead { params, .. } => self
+                .team_processor
+                .read(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamEnroll { params, .. } => self
+                .team_processor
+                .enroll(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamControl { params, .. } => self
+                .team_processor
+                .control(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamDeliver { params, .. } => self
+                .team_processor
+                .deliver(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::ThreadQueueAdd { params, .. } => self
                 .thread_queue_processor
                 .add(params)

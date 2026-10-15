@@ -1,5 +1,23 @@
 # Fork fleet releases
 
+## Active host inventory
+
+`hosts.json` tracks the current update targets, installed versions, and staging
+status. It includes the additional Linux target `dnarb`, reached through
+`dnarb-offload` (SSH alias `dnarb`). Include it in future fleet staging and
+activation work. Its MCP.25 stage is pending; registration does not imply that
+the package has been built, qualified, or installed there.
+
+The inventory records the exact source commit embedded in the staged packages,
+which may precede documentation-only tracking commits. It is tracking data;
+the historical controller does not consume it or automatically update hosts.
+
+`release.json` and the controller instructions below describe the historical
+MCP.20 raw-binary workflow, not the current complete-package deployment process.
+Do not use them to activate the staged MCP.25 packages. The controller only
+accepts Mac/Windows entries, so adding Linux targets there would require a
+separate controller change.
+
 ## Windows operating mode (2026-09-20)
 
 Maintainer decision: **park Windows shared-daemon / `codex agents` support**.
@@ -44,7 +62,7 @@ executable environment; reconnect after upgrading before submitting work.
 
 ## Release controller
 
-`release.json` is the expected state for every critical native-offload host. It
+`release.json` records the historical MCP.20 expected deployment state. It
 tracks the maintained-fork commit and version independently from the Codex MCP
 server deployment commit.
 

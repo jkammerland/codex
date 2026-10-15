@@ -827,6 +827,7 @@ async fn drain_to_completed(
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
     let _execution = sess.enter_execution().await;
+    sess.flush_team_input().await?;
     let mut stream = client_session
         .stream(
             prompt,

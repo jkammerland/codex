@@ -152,6 +152,9 @@ enum Subcommand {
     /// Internal: forward a local TCP socket through an HTTP/3 CONNECT proxy.
     #[clap(hide = true)]
     TcpTunnel(codex_tcp_tunnel::Args),
+    /// Coordinate enrolled agents across machines.
+    Team(codex_team::TeamCommand),
+
     /// Run Codex non-interactively.
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
@@ -339,6 +342,9 @@ struct AgentsCommand {
     /// The agents overview requires a shared server; this option is rejected.
     #[arg(long, hide = true)]
     no_daemon: bool,
+    /// Open the multi-machine team panel using this runtime manifest.
+    #[arg(long, value_name = "MANIFEST")]
+    team: Option<PathBuf>,
     #[clap(flatten)]
     remote: InteractiveRemoteOptions,
 
@@ -595,6 +601,10 @@ struct AppServerCommand {
         default_value = codex_app_server::AppServerTransport::DEFAULT_LISTEN_URL
     )]
     listen: codex_app_server::AppServerTransport,
+
+    /// Add an authenticated loopback websocket beside --listen unix://.
+    #[arg(long, value_name = "IP:PORT")]
+    listen_loopback: Option<std::net::SocketAddr>,
 
     /// Use stdio as the transport (equivalent to `--listen stdio://`).
     #[arg(long = "stdio", conflicts_with = "listen")]
@@ -1105,6 +1115,21 @@ async fn cli_main(
 
     let open_agents_overview = matches!(&subcommand, Some(Subcommand::Agents(_)));
     match subcommand {
+        Some(Subcommand::Team(command)) => codex_team::run(command).await?,
+        Some(Subcommand::Agents(AgentsCommand {
+            team: Some(manifest),
+            ..
+        })) => {
+            anyhow::ensure!(
+                root_remote.is_none(),
+                "team attachments use the coordinator from the manifest; omit --remote"
+            );
+            anyhow::ensure!(
+                interactive.prompt.is_none() && interactive.images.is_empty(),
+                "`codex agents` does not accept an initial prompt or images"
+            );
+            codex_tui::run_team_agents(&manifest, interactive.no_alt_screen).await?;
+        }
         None | Some(Subcommand::Agents(_)) => {
             prepend_config_flags(
                 &mut interactive.config_overrides,
@@ -1253,6 +1278,7 @@ async fn cli_main(
                 code_mode_host,
                 strict_config: app_server_strict_config,
                 listen,
+                listen_loopback,
                 stdio,
                 remote_control,
                 managed_daemon,
@@ -1299,6 +1325,7 @@ async fn cli_main(
                     }
                     let runtime_options = codex_app_server::AppServerRuntimeOptions {
                         cloud_skills_snapshot,
+                        loopback_listen: listen_loopback,
                         code_mode_host_transport: code_mode_host.into(),
                         managed_daemon,
                         remote_control_startup_mode: match (remote_control, remote_control_disabled)
@@ -2357,6 +2384,7 @@ fn unsupported_subcommand_name_for_strict_config(
         }
         Some(Subcommand::RemoteControl(remote_control)) => Some(remote_control.subcommand_name()),
         Some(Subcommand::Mcp(_)) => Some("mcp"),
+        Some(Subcommand::Team(_)) => Some("team"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
         #[cfg(any(target_os = "macos", target_os = "windows"))]

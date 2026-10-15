@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "candidate": {
+    "version": "0.163.0+jkammerland.mcp.25",
+    "stagedSourceCommit": "f68ac3279cb2030f43094d1de10b635bcc43717a",
+    "sourceRef": "rebase/mcp25-main-20261015",
+    "activation": "not_requested"
+  },
+  "hosts": [
+    {
+      "name": "local",
+      "platform": "linux",
+      "endpoint": "local-offload",
+      "installedVersion": "0.160.1+jkammerland.mcp.24",
+      "staging": "ready"
+    },
+    {
+      "name": "mac",
+      "platform": "darwin",
+      "endpoint": "mac-offload",
+      "installedVersion": "0.160.1+jkammerland.mcp.24",
+      "staging": "ready"
+    },
+    {
+      "name": "windows-admin",
+      "platform": "windows",
+      "sshTarget": "WIN11",
+      "installedVersion": "0.160.1+jkammerland.mcp.24",
+      "staging": "ready",
+      "sharedDaemon": "parked"
+    },
+    {
+      "name": "windows-worker",
+      "platform": "windows",
+      "endpoint": "windows-offload",
+      "installedVersion": "0.160.1+jkammerland.mcp.24",
+      "staging": "ready",
+      "sharedDaemon": "parked"
+    },
+    {
+      "name": "dnarb",
+      "platform": "linux",
+      "endpoint": "dnarb-offload",
+      "sshTarget": "dnarb",
+      "installedVersion": "0.160.1+jkammerland.mcp.24",
+      "staging": "pending",
+      "mcpServerCommit": "0722feb5c2606c71a3a4339e366896caf805d709"
+    }
+  ]
+}

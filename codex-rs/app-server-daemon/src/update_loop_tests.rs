@@ -279,7 +279,7 @@ printf '#!/bin/sh\nif [ "$1" = --version ]; then echo codex 1.0.0; else exit 2; 
 chmod +x "$root/releases/{release}/bin/codex"
 ln -sfn 'releases/{release}' "$root/.migration-current"
 printf '{release}' > "$root/auto-update-version"
-"#
+"#,
         );
         let http = FakeInstallerHttp::new(InstallerResponse::Success(script.as_bytes().to_vec()));
         let error = super::migration::run(&http, &legacy).await.unwrap_err();
@@ -305,7 +305,7 @@ printf '{release}' > "$root/auto-update-version"
         assert_eq!(output, UpdateOutput {
         status: UpdateStatus::Updated,
         installed_version: Some("1.0.0".to_string()),
-        running_version: (running).then(|| "1.0.0".to_string()),
+        running_version: (running).then(|| codex_build_info::CODEX_CLI_VERSION.to_string()),
         managed_codex_path: dedicated.join("current/bin/codex"),
         message: "The daemon was updated and moved to its dedicated package. The legacy CLI package was left unchanged.".to_string(),
     });
@@ -337,7 +337,7 @@ printf '{release}' > "$root/auto-update-version"
         assert!(!old_updater.is_starting_or_running().await.unwrap());
         let new_updater =
             crate::backend::pid_update_loop_backend(selected.backend_paths(&daemon_settings));
-        assert_eq!(new_updater.is_starting_or_running().await.unwrap(), running);
+        assert!(!new_updater.is_starting_or_running().await.unwrap());
         new_updater.stop().await.unwrap();
         new_backend.stop().await.unwrap();
         if let Some(server) = server {
@@ -430,7 +430,10 @@ fn manual_update_daemon(home: &TempDir) -> (Daemon, String) {
     std::fs::create_dir_all(bin.parent().expect("binary parent")).expect("release directory");
     codex_utils_cargo_bin::write_executable(
         &bin,
-        "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo codex 1.0.0; else exec sleep 30; fi\n",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo codex {}; else exec sleep 30; fi\n",
+            codex_build_info::CODEX_CLI_VERSION
+        ),
     )
     .expect("managed binary");
     std::os::unix::fs::symlink(format!("releases/{release}"), standalone.join("current"))
@@ -691,19 +694,12 @@ async fn test_control_server(
                 .await
                 .expect("initialize request")
                 .expect("frame");
-            let version = if std::fs::read_to_string(
-                crate::managed_install::package_root(&codex_home).join("auto-update-version"),
-            )
-            .unwrap_or_default()
-            .starts_with("1.1.0")
-            {
-                "1.1.0"
-            } else {
-                "1.0.0"
-            };
             websocket.send(tokio_tungstenite::tungstenite::Message::Text(
                 serde_json::json!({"id": 1, "result": {
-                    "userAgent": format!("codex_app_server_daemon/{version}"),
+                        "userAgent": format!(
+                            "codex_app_server_daemon/{}",
+                        codex_build_info::CODEX_CLI_VERSION
+                    ),
                     "codexHome": codex_home, "platformFamily": "unix", "platformOs": std::env::consts::OS,
                 }}).to_string().into(),
             )).await.expect("initialize response");
@@ -848,7 +844,8 @@ async fn daemon_start_and_restart_preserve_launch_features() {
     )
     .unwrap();
         codex_utils_cargo_bin::write_executable(&daemon.managed_codex_bin, &format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo codex 1.0.0; exit; fi\nif [ \"$3\" = --help ]; then exit; fi\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo codex {}; exit; fi\nif [ \"$3\" = --help ]; then exit; fi\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
+        codex_build_info::CODEX_CLI_VERSION,
         args_path.display(),
     )).unwrap();
         let control = async {
@@ -1041,7 +1038,8 @@ async fn check_manual_update_restart(package_directory: &str) {
         )
     } else {
         format!(
-            r#"printf '#!/bin/sh\nif [ "$1" = --version ]; then echo codex 1.1.0; else exec sleep 30; fi\n' > '{root}/releases/{next}/bin/codex'"#,
+            r#"printf '#!/bin/sh\nif [ "$1" = --version ]; then echo codex {cli_version}; else exec sleep 30; fi\n' > '{root}/releases/{next}/bin/codex'"#,
+            cli_version = codex_build_info::CODEX_CLI_VERSION,
             root = standalone.display()
         )
     };
@@ -1095,8 +1093,14 @@ async fn check_manual_update_restart(package_directory: &str) {
         .expect("first request task")
         .expect("manual update");
     assert_eq!(output.status, UpdateStatus::Updated);
-    assert_eq!(output.installed_version.as_deref(), Some(version));
-    assert_eq!(output.running_version.as_deref(), Some(version));
+    assert_eq!(
+        output.installed_version.as_deref(),
+        Some(codex_build_info::CODEX_CLI_VERSION)
+    );
+    assert_eq!(
+        output.running_version.as_deref(),
+        Some(codex_build_info::CODEX_CLI_VERSION)
+    );
     assert_eq!(
         output.managed_codex_path,
         standalone.join("current/bin/codex")

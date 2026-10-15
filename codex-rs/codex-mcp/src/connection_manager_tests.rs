@@ -144,6 +144,7 @@ impl McpConnectionSet {
                     client,
                     startup_timeout: DEFAULT_STARTUP_TIMEOUT,
                     startup_trigger: None,
+                    shutdown_started: AtomicBool::new(false),
                     _diagnostics_guard: LIVE_CONNECTIONS.track(),
                 }),
                 metadata: McpServerMetadata {
@@ -4074,6 +4075,31 @@ async fn shutdown_continues_after_caller_is_aborted() {
 }
 
 #[tokio::test]
+async fn dropping_last_connection_shuts_down_ready_transport() {
+    let client = create_ready_async_managed_client(Vec::new()).await;
+    let transport = Arc::clone(&client.client().await.expect("ready client").client);
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.insert_test_client("drop-test", client);
+
+    assert!(!transport.is_closed().await);
+    drop(manager);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !transport.is_closed().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the last connection owner should shut down its transport");
+}
+
+#[tokio::test]
 async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
     let codex_home = tempdir().expect("tempdir");
     let cache_context = create_codex_apps_tools_cache_context(
@@ -5288,6 +5314,22 @@ fn mcp_init_error_display_includes_startup_timeout_hint() {
     }
 }
 
+#[test]
+fn configured_tool_timeout_supports_explicit_unbounded_mode() {
+    assert_eq!(
+        [
+            configured_tool_timeout(None),
+            configured_tool_timeout(Some(Duration::from_secs(17))),
+            configured_tool_timeout(Some(Duration::ZERO)),
+        ],
+        [
+            Some(DEFAULT_TOOL_TIMEOUT),
+            Some(Duration::from_secs(17)),
+            None,
+        ]
+    );
+}
+
 fn reusable_server_config(url: &str) -> McpServerConfig {
     McpServerConfig {
         auth: Default::default(),
@@ -5377,11 +5419,12 @@ async fn manager_with_reusable_ready_server(
                     .startup_timeout_sec
                     .unwrap_or(DEFAULT_STARTUP_TIMEOUT),
                 startup_trigger: None,
+                shutdown_started: AtomicBool::new(false),
                 _diagnostics_guard: LIVE_CONNECTIONS.track(),
             }),
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(config),
-            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
+            tool_timeout: configured_tool_timeout(config.tool_timeout_sec),
             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
         },
     );
@@ -5826,11 +5869,12 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
                     .startup_timeout_sec
                     .unwrap_or(DEFAULT_STARTUP_TIMEOUT),
                 startup_trigger: None,
+                shutdown_started: AtomicBool::new(false),
                 _diagnostics_guard: LIVE_CONNECTIONS.track(),
             }),
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(&config),
-            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
+            tool_timeout: configured_tool_timeout(config.tool_timeout_sec),
             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
         },
     );
@@ -6652,6 +6696,7 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
             .startup_timeout_sec
             .unwrap_or(DEFAULT_STARTUP_TIMEOUT),
         startup_trigger: None,
+        shutdown_started: AtomicBool::new(false),
         _diagnostics_guard: LIVE_CONNECTIONS.track(),
     });
 

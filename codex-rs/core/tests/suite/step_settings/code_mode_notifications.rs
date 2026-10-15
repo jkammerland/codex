@@ -4,7 +4,7 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn yielded_notifications_keep_originating_budgets_after_model_switch() -> Result<()> {
+async fn yielded_notifications_stay_with_their_originating_turn_after_model_switch() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let test = step_settings_test()
@@ -34,7 +34,7 @@ async fn yielded_notifications_keep_originating_budgets_after_model_switch() -> 
                     "call-a",
                     "exec",
                     &format!(
-                        "// @exec: {{\"yield_time_ms\": 1}}\n{barrier}\nnotify({});",
+                        "// @exec: {{\"yield_time_ms\": 1}}\n{barrier}\nnotify({});\ntext('A finished');",
                         serde_json::to_string(&a_text)?,
                     ),
                 ),
@@ -125,12 +125,28 @@ async fn yielded_notifications_keep_originating_budgets_after_model_switch() -> 
             .collect::<Vec<_>>(),
         [json!(MODEL_B), json!(MODEL_B), json!(MODEL_B)],
     );
-    assert_eq!(raw_notifications.len(), 2, "both cells must notify");
+    assert_eq!(
+        raw_notifications.len(),
+        1,
+        "only the active turn may notify"
+    );
+    assert_eq!(raw_notifications[0]["call_id"], "call-b");
+    let wait_a_item = requests[2].function_call_output("call-wait-a");
+    let wait_a_output = wait_a_item["output"]
+        .as_array()
+        .expect("wait A content items")
+        .iter()
+        .map(|item| item["text"].as_str().expect("wait A text item"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Notification delivery errors are logged, not promoted to cell failures.
+    // A finishes normally, but its notification must not enter B's history.
+    assert!(wait_a_output.starts_with("Script completed"));
+    assert!(wait_a_output.contains("A finished"));
     let mut expected = Vec::new();
     let mut expected_saved = Vec::new();
     for raw in &raw_notifications {
         let (text, budget) = match raw["call_id"].as_str().expect("call id") {
-            "call-a" => (&a_text, 120),
             "call-b" => (&b_text, 480),
             other => panic!("unexpected notification call: {other}"),
         };
@@ -154,7 +170,7 @@ async fn yielded_notifications_keep_originating_budgets_after_model_switch() -> 
         live.iter()
             .map(|item| item["call_id"].as_str().unwrap())
             .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from(["call-a", "call-b"])
+        std::collections::BTreeSet::from(["call-b"])
     );
 
     test.codex.shutdown_and_wait().await?;

@@ -102,6 +102,7 @@ pub(crate) struct UnifiedExecProcess {
     output: OutputHandles,
     output_drained: Arc<Notify>,
     interaction_lock: Arc<Mutex<()>>,
+    wait_process_lock: Arc<Mutex<()>>,
     state_tx: watch::Sender<ProcessState>,
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
@@ -148,6 +149,7 @@ impl UnifiedExecProcess {
             output,
             output_drained,
             interaction_lock: Arc::new(Mutex::new(())),
+            wait_process_lock: Arc::new(Mutex::new(())),
             state_tx,
             state_rx,
             output_task: None,
@@ -201,6 +203,14 @@ impl UnifiedExecProcess {
 
     pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.interaction_lock)
+    }
+
+    pub(super) fn wait_process_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.wait_process_lock)
+    }
+
+    pub(super) fn subscribe_state(&self) -> watch::Receiver<ProcessState> {
+        self.state_rx.clone()
     }
 
     pub(super) fn has_exited(&self) -> bool {

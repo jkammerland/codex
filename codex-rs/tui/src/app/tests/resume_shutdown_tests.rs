@@ -91,6 +91,7 @@ async fn failed_close_status_read_reconnects_remote_or_closes_embedded() -> Resu
             let (stream, _) = listener.accept().await?;
             serve_reconnect_requests(
                 tokio_tungstenite::accept_async(stream).await?,
+                "2.0.0",
                 move |request| {
                     assert_eq!(request.method, "thread/read");
                     let attempt = server_reads.fetch_add(/*val*/ 1, Ordering::SeqCst);

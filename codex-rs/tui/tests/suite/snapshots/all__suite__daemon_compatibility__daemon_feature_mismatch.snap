@@ -1,5 +1,6 @@
 ---
 source: tui/tests/suite/daemon_compatibility.rs
+assertion_line: 172
 expression: warning
 ---
-⚠ Running without the shared background server: This session requires api_key_model_discovery to be enabled.
+  This session requires api_key_model_discovery to be enabled

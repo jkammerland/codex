@@ -40,8 +40,12 @@
       "endpoint": "windows-offload",
       "installedVersion": "0.163.0+jkammerland.mcp.25",
       "staging": "ready",
-      "sharedDaemon": "qualification_pending",
-      "daemonAutoStart": true
+      "sharedDaemon": "running_local_console",
+      "daemonAutoStart": true,
+      "managedDaemonVersion": "0.163.0+jkammerland.mcp.25",
+      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25",
+      "daemonLaunchContext": "local_non_elevated_console",
+      "sshDaemonQualification": "blocked_junction_traversal"
     },
     {
       "name": "dnarb",

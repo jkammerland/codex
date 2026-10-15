@@ -831,6 +831,7 @@ async fn drain_to_completed(
     prompt: &Prompt,
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
+    let _execution = sess.enter_execution().await;
     let mut stream = client_session
         .stream(
             prompt,

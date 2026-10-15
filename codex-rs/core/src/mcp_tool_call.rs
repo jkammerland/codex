@@ -472,6 +472,8 @@ async fn handle_approved_mcp_tool_call(
     source: &crate::tools::context::ToolCallSource,
     approval_application: McpToolApprovalApplication,
 ) -> HandledMcpToolCall {
+    // An approval response does not release an independent team hold.
+    let _execution = sess.enter_execution().await;
     let turn_context = step_context.turn.as_ref();
     let server = invocation.server.clone();
     let tool_name = invocation.tool.clone();

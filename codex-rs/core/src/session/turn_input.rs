@@ -234,6 +234,11 @@ pub(super) async fn handle(
     mode: TurnInputMode,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    let Some(_execution) = session.try_enter_execution() else {
+        return Err(CodexErr::InvalidRequest(
+            "session execution is held by team control".to_string(),
+        ));
+    };
     let request = request.into();
     let result = match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
@@ -464,6 +469,11 @@ async fn start_if_idle(
     kind: TurnStartKind,
     expected_previous_turn_id: Option<String>,
 ) -> CodexResult<TurnInputSubmission> {
+    let Some(_execution) = session.try_enter_execution() else {
+        return Err(CodexErr::InvalidRequest(
+            "session execution is held by team control".to_string(),
+        ));
+    };
     let WithTurnExtensionData {
         request,
         turn_extension_init,

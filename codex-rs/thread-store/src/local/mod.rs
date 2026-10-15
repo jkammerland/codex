@@ -14,6 +14,7 @@ mod read_thread;
 mod revert_thread;
 mod rollout_migration;
 // This lands before the reader PRs that consume the shared lineage resolver.
+mod execution_history;
 #[allow(dead_code)]
 mod rollout_lineage;
 mod search_threads;
@@ -633,6 +634,13 @@ impl ThreadStore for LocalThreadStore {
             };
             Ok(history_revision::read(&resolved.path).await.as_ref() == Some(&revision))
         })
+    }
+
+    fn load_execution_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, crate::StoredExecutionHistory> {
+        Box::pin(execution_history::load(self, params))
     }
 
     fn prepare_fork(&self, params: PrepareForkParams) -> ThreadStoreFuture<'_, PreparedFork> {

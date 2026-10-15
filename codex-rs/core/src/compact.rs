@@ -827,6 +827,8 @@ async fn drain_to_completed(
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
     let _execution = sess.enter_execution().await;
+    sess.flush_team_input().await?;
+
 
     sess.set_server_reasoning_included(turn_context.model_info().use_responses_lite)
         .await;

@@ -254,6 +254,20 @@ pub trait ThreadStore: Any + Send + Sync {
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory>;
 
+    /// Loads this thread's own append-only execution evidence, including for
+    /// paginated sessions. Generations must change when history is reverted.
+    /// Backends without this capability leave recovery explicitly unconfirmed.
+    fn load_execution_history(
+        &self,
+        _params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, crate::StoredExecutionHistory> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "load_execution_history",
+            })
+        })
+    }
+
     /// Loads the persisted rollout items needed to reconstruct the latest model-visible context.
     ///
     /// Implementations that cannot perform a targeted read may return the full persisted history.

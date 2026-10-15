@@ -483,6 +483,13 @@ impl Session {
         let Some(_execution) = self.try_enter_execution() else {
             return;
         };
+        if self
+            .team_model_error(&self.thread_config_snapshot().await)
+            .await
+            .is_some()
+        {
+            return;
+        }
         if !self.input_queue.has_pending_mailbox_items().await {
             return;
         }

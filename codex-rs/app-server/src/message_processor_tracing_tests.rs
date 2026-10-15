@@ -262,6 +262,12 @@ pub(super) async fn build_test_processor(
     ));
     let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
         cloud_skill_provider: None,
+        team_host: codex_team_extension::PreparedTeamHost::load(
+            &config,
+            "test-installation".into(),
+        )
+        .await
+        .expect("test team host"),
         outgoing,
         analytics_events_client,
         arg0_paths: Arg0DispatchPaths::default(),

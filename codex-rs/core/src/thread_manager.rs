@@ -1000,6 +1000,24 @@ impl ThreadManager {
             .ok_or(CodexErr::ThreadNotFound(thread_id))
     }
 
+    /// Read persisted archive state without loading or resuming a runtime.
+    pub async fn is_thread_archived(
+        &self,
+        thread_id: ThreadId,
+    ) -> codex_thread_store::ThreadStoreResult<bool> {
+        Ok(self
+            .state
+            .thread_store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await?
+            .archived_at
+            .is_some())
+    }
+
     /// Updates metadata for loaded and cold threads through one entrypoint.
     ///
     /// Loaded threads route through `CodexThread`/`LiveThread`, so metadata changes stay ordered

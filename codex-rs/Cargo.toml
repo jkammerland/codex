@@ -76,6 +76,7 @@ members = [
     "ext/memories",
     "ext/mcp",
     "ext/queue",
+    "ext/team",
     "ext/skills",
     "ext/web-search",
     "external-agent-migration",
@@ -155,6 +156,8 @@ members = [
     "codex-client",
     "codex-api",
     "state",
+    "team-store",
+    "team",
     "terminal-detection",
     "test-binary-support",
     "thread-manager-sample",
@@ -277,6 +280,7 @@ codex-protocol = { path = "protocol" }
 codex-protocol-test-support = { path = "protocol/tests/support" }
 codex-prompts = { path = "prompts" }
 codex-queue-extension = { path = "ext/queue" }
+codex-team-extension = { path = "ext/team" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }
 codex-response-debug-context = { path = "response-debug-context" }
 codex-rmcp-client = { path = "rmcp-client" }
@@ -288,6 +292,8 @@ codex-shell-command = { path = "shell-command" }
 codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
+codex-team-store = { path = "team-store" }
+codex-team = { path = "team" }
 codex-stdio-to-uds = { path = "stdio-to-uds" }
 codex-terminal-detection = { path = "terminal-detection" }
 codex-test-binary-support = { path = "test-binary-support" }

@@ -334,6 +334,15 @@ impl LiveThread {
             .await
     }
 
+    pub async fn load_execution_history(&self) -> ThreadStoreResult<crate::StoredExecutionHistory> {
+        self.thread_store
+            .load_execution_history(LoadThreadHistoryParams {
+                thread_id: self.thread_id,
+                include_archived: false,
+            })
+            .await
+    }
+
     pub async fn read_thread(
         &self,
         include_archived: bool,

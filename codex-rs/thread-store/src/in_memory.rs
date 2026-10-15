@@ -984,6 +984,19 @@ impl ThreadStore for InMemoryThreadStore {
         Box::pin(InMemoryThreadStore::load_latest_model_context(self, params))
     }
 
+    fn load_execution_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, crate::StoredExecutionHistory> {
+        Box::pin(async move {
+            let history = InMemoryThreadStore::load_latest_model_context(self, params).await?;
+            Ok(crate::StoredExecutionHistory {
+                generation: history.thread_id.to_string(),
+                items: history.items,
+            })
+        })
+    }
+
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
         Box::pin(InMemoryThreadStore::read_thread(self, params))
     }

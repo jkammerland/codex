@@ -30,9 +30,24 @@ pub struct ExecutionControlSnapshot {
 struct State {
     parents: HashMap<ThreadId, ThreadId>,
     roots: HashMap<ThreadId, ExecutionControlSnapshot>,
+    manual_holds: HashSet<ThreadId>,
 }
 
 impl State {
+    fn manually_held(&self, mut thread_id: ThreadId) -> bool {
+        let mut visited = HashSet::new();
+        while visited.insert(thread_id) {
+            if self.manual_holds.contains(&thread_id) {
+                return true;
+            }
+            let Some(parent) = self.parents.get(&thread_id) else {
+                break;
+            };
+            thread_id = *parent;
+        }
+        false
+    }
+
     fn root(&self, mut thread_id: ThreadId) -> Option<ThreadId> {
         let mut visited = HashSet::new();
         while visited.insert(thread_id) {
@@ -65,6 +80,40 @@ impl Default for ExecutionControl {
 }
 
 impl ExecutionControl {
+    /// A local interruption survives later coordinator resumes.
+    pub fn hold_manually(&self, thread_id: ThreadId) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.manual_holds.insert(thread_id);
+        self.changed.send_replace(());
+    }
+
+    pub fn is_manually_held(&self, thread_id: ThreadId) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .manually_held(thread_id)
+    }
+
+    /// Explicit local user input can release its own hold, while a global hold
+    /// and holds on ancestors remain authoritative.
+    pub fn resume_for_user(&self, thread_id: ThreadId) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .root(thread_id)
+            .and_then(|root| state.roots.get(&root))
+            .is_some_and(|entry| entry.mode == ExecutionMode::Running && !entry.reconciling)
+        {
+            state.manual_holds.remove(&thread_id);
+            self.changed.send_replace(());
+        }
+    }
+
     /// Restore durable state before loading sessions. A coordinator must confirm
     /// this revision or a newer one before coordinated execution can resume.
     pub fn restore(&self, root: ThreadId, revision: u64, mode: ExecutionMode) {
@@ -152,6 +201,9 @@ impl ExecutionControl {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = state.root(thread_id);
         if let Some(root) = root {
+            if state.manually_held(thread_id) {
+                return None;
+            }
             let entry = state.roots.get_mut(&root)?;
             if entry.mode != ExecutionMode::Running || entry.reconciling {
                 return None;

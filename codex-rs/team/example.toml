@@ -1,0 +1,48 @@
+# Copy outside the repository and replace paths/SSH aliases for your accounts.
+version = 1
+
+[coordinator]
+listen = "127.0.0.1:4500"
+url = "http://127.0.0.1:4500"
+token_file = "private/operator-token"
+state_dir = "private/state"
+
+[[machines]]
+id = "local"
+label = "Local workstation"
+
+[[machines.servers]]
+id = "primary"
+label = "Primary account"
+
+[machines.servers.endpoint]
+transport = "local"
+socket = "private/daemon.sock"
+
+[[machines]]
+id = "mac"
+label = "Mac builder"
+
+[[machines.servers]]
+id = "primary"
+label = "Build account"
+
+[machines.servers.endpoint]
+transport = "ssh"
+destination = "codex-mac"
+remote_port = 4501
+token_file = "private/mac-worker-token"
+
+[[machines]]
+id = "windows"
+label = "Windows builder"
+
+[[machines.servers]]
+id = "primary"
+label = "Build account"
+
+[machines.servers.endpoint]
+transport = "ssh"
+destination = "codex-windows"
+remote_port = 4501
+token_file = "private/windows-worker-token"

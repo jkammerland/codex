@@ -330,6 +330,7 @@ async fn run_remote_compaction_request_v2(
     let mut retry_state = ResponsesStreamRetryState::default();
     loop {
         let execution = sess.enter_execution().await;
+        sess.flush_team_input().await?;
         let result = match client_session
             .stream(
                 prompt,

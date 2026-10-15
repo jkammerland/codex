@@ -1,0 +1,28 @@
+---
+source: tui/src/team_overview/tests.rs
+assertion_line: 124
+expression: "render(&panel, 100, 24)"
+---
+Codex team · Paused · revision 4 · 1 host(s) unconfirmed
+New execution is held. Already admitted model requests and tools may finish.
+
+┌Messages · ↑↓ select · f reply · t post───────────────────────────────────────────────────────────┐
+│› reviews · Board · published                                                                     │
+│  Review the compiler change and reply here.                                                      │
+│    reviewer: NeedsReconciliation                                                                 │
+│      Input is durable; inspect the original turn before continuing.                              │
+│                                                                                                  │
+│  Rejected outgoing entry windows/primary/12: recipient is not enrolled                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+↑↓ select · Enter open · g group · m model · n request · b board · e rename · l listen
+p/F6 pause all · r/F7 resume all · s/F8 stop all · q leave panel

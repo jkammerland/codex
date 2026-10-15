@@ -44,6 +44,7 @@ pub(crate) struct ThreadExtensionDependencies {
     pub(crate) http_client_factory: HttpClientFactory,
     /// Process-scoped queue shared by idle dispatch and app-server requests.
     pub(crate) queue_service: Option<Arc<QueuedItemService>>,
+    pub(crate) team_service: Arc<codex_team_extension::TeamHostService>,
     pub(crate) turn_start_admission: Option<Arc<dyn TurnStartAdmission>>,
 }
 
@@ -62,12 +63,14 @@ pub(crate) fn thread_extensions(
         git_attribution_base_url,
         http_client_factory,
         queue_service,
+        team_service,
         turn_start_admission,
     } = dependencies;
     let mut builder = ExtensionRegistryBuilder::<Config>::with_event_sink(Arc::clone(&event_sink));
     if let Some(admission) = turn_start_admission {
         builder.turn_start_admission(admission);
     }
+    codex_team_extension::install(&mut builder, team_service);
     if let Some(queue_service) = queue_service {
         codex_queue_extension::install(&mut builder, queue_service);
     }

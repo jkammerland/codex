@@ -2630,6 +2630,9 @@ async fn try_run_sampling_request(
         .enter_execution()
         .or_cancel(&cancellation_token)
         .await?;
+    // Team delivery markers must reach durable history before a model can act
+    // on them. A lost acknowledgement can then be reconciled without replay.
+    sess.flush_team_input().await?;
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
         model = step_context.settings.model_info.slug.clone(),

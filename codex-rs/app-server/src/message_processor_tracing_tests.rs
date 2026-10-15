@@ -261,6 +261,12 @@ pub(super) async fn build_test_processor(
         analytics_events_client.clone(),
     ));
     let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+        team_host: codex_team_extension::PreparedTeamHost::load(
+            &config,
+            "test-installation".into(),
+        )
+        .await
+        .expect("test team host"),
         outgoing,
         analytics_events_client,
         arg0_paths: Arg0DispatchPaths::default(),

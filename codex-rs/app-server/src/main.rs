@@ -45,6 +45,10 @@ struct AppServerArgs {
     )]
     listen: AppServerTransport,
 
+    /// Add an authenticated loopback websocket beside --listen unix://.
+    #[arg(long, value_name = "IP:PORT")]
+    listen_loopback: Option<std::net::SocketAddr>,
+
     /// Session source used to derive product restrictions and metadata.
     #[arg(
         long = "session-source",
@@ -83,6 +87,7 @@ fn main() -> anyhow::Result<()> {
             config_overrides,
             code_mode_host,
             listen,
+            listen_loopback,
             session_source,
             auth,
             strict_config,
@@ -101,6 +106,7 @@ fn main() -> anyhow::Result<()> {
         let transport = listen;
         let auth = auth.try_into_settings()?;
         let mut runtime_options = AppServerRuntimeOptions {
+            loopback_listen: listen_loopback,
             code_mode_host_transport: code_mode_host.into(),
             managed_daemon,
             ..Default::default()

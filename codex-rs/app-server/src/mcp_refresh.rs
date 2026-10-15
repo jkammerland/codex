@@ -468,6 +468,10 @@ enabled = false
                 SessionSource::Exec.restriction_product(),
             ),
         );
+        let team_host =
+            codex_team_extension::PreparedTeamHost::load(&good_config, "test-installation".into())
+                .await
+                .expect("test team host");
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             ThreadManager::new(
                 &good_config,
@@ -477,6 +481,10 @@ enabled = false
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
                 thread_extensions(ThreadExtensionDependencies {
+                    team_service: codex_team_extension::TeamHostService::new(
+                        team_host,
+                        thread_manager.clone(),
+                    ),
                     event_sink: Arc::new(NoopExtensionEventSink),
                     auth_manager: auth_manager.clone(),
                     state_db: Some(state_db.clone()),

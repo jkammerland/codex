@@ -1,4 +1,6 @@
 use crate::WithTurnExtensionData;
+mod team;
+
 use crate::agent::AgentStatus;
 use crate::agent::api::AgentControl;
 use crate::config::ConstraintResult;

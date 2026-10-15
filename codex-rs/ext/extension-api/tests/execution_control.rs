@@ -91,3 +91,21 @@ async fn restored_running_state_requires_matching_coordinator_confirmation() {
     gate.apply(root, 7, ExecutionMode::Running);
     assert!(gate.try_enter(root).is_some());
 }
+
+#[test]
+fn global_resume_preserves_local_interruptions_and_user_input_preserves_global_holds() {
+    let gate = ExecutionControl::default();
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    gate.inherit(child, root);
+    gate.apply(root, 1, ExecutionMode::Running);
+    gate.hold_manually(root);
+    gate.apply(root, 2, ExecutionMode::Paused);
+    gate.resume_for_user(root);
+    assert!(gate.is_manually_held(root));
+    gate.apply(root, 3, ExecutionMode::Running);
+    assert!(gate.try_enter(root).is_none());
+    assert!(gate.try_enter(child).is_none());
+    gate.resume_for_user(root);
+    assert!(gate.try_enter(child).is_some());
+}

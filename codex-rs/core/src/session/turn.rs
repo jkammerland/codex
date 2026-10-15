@@ -2417,6 +2417,10 @@ async fn try_run_sampling_request(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
+    let execution = sess
+        .enter_execution()
+        .or_cancel(&cancellation_token)
+        .await?;
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
         model = step_context.settings.model_info.slug.clone(),
@@ -2980,6 +2984,7 @@ async fn try_run_sampling_request(
         }
     };
     drop(sampling_timing_guard);
+    drop(execution);
 
     flush_assistant_text_segments_all(
         &sess,

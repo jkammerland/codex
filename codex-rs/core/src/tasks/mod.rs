@@ -359,6 +359,15 @@ impl Session {
         );
         let handle = tokio::spawn(
             async move {
+                // Await outside the session input loop so interruption stays responsive.
+                tokio::select! {
+                    biased;
+                    _ = task_cancellation_token.cancelled() => {
+                        done_clone.notify_waiters();
+                        return;
+                    }
+                    permit = session.enter_execution() => drop(permit),
+                }
                 let ctx_for_finish = Arc::clone(&ctx);
                 let task_result = task_for_run
                     .run(
@@ -442,6 +451,9 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
+        let Some(_execution) = self.try_enter_execution() else {
+            return;
+        };
         if !self.input_queue.has_pending_mailbox_items().await
             || (!self.input_queue.has_trigger_turn_mailbox_items().await
                 && !self.has_outstanding_durable_sleep())

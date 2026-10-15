@@ -376,6 +376,7 @@ async fn run_remote_compaction_request_v2(
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retry_state = ResponsesStreamRetryState::default();
     loop {
+        let execution = sess.enter_execution().await;
         let result = match client_session
             .stream(
                 prompt,
@@ -396,6 +397,7 @@ async fn run_remote_compaction_request_v2(
             Ok(stream) => collect_compaction_output(sess, turn_context, stream).await,
             Err(err) => Err(err),
         };
+        drop(execution);
 
         match result {
             Ok(compaction_output) => return Ok(compaction_output),

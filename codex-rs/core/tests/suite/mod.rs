@@ -70,6 +70,7 @@ mod daybreak_access;
 mod deprecation_notice;
 mod exec;
 mod exec_policy;
+mod execution_control;
 #[cfg(not(target_os = "windows"))]
 mod extension_sandbox;
 mod external_auth;

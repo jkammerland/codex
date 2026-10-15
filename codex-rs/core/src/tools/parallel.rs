@@ -160,6 +160,7 @@ impl ToolCallRuntime {
                 } else {
                     Either::Right(lock.write().await)
                 };
+                let _execution = session.enter_execution().await;
                 // Admission through the parallel-execution gate marks the end
                 // of dispatch waiting and the start of handler execution.
                 if let Some(execution_started_at) = execution_started_at {

@@ -761,6 +761,7 @@ async fn drain_to_completed(
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
 ) -> CodexResult<String> {
+    let _execution = sess.enter_execution().await;
     let mut stream = client_session
         .stream(
             prompt,

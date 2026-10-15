@@ -229,6 +229,7 @@ mod handlers;
 mod inject;
 mod reasoning_effort;
 pub(crate) use reasoning_effort::RequestEffortUsage;
+mod execution_control;
 mod input_queue;
 mod mcp;
 mod mcp_prewarm;

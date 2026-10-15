@@ -1,11 +1,16 @@
 mod capabilities;
 mod contributors;
+mod execution_control;
 mod registry;
 mod session_isolation;
 mod state;
 mod turn_admission;
 mod user_instructions;
 
+pub use execution_control::ExecutionControl;
+pub use execution_control::ExecutionControlSnapshot;
+pub use execution_control::ExecutionMode;
+pub use execution_control::ExecutionPermit;
 pub use session_isolation::SessionIsolation;
 
 pub use capabilities::AgentSpawnFuture;

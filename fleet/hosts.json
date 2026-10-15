@@ -31,7 +31,8 @@
       "sshTarget": "WIN11",
       "installedVersion": "0.163.0+jkammerland.mcp.25",
       "staging": "ready",
-      "sharedDaemon": "parked"
+      "sharedDaemon": "parked",
+      "daemonAutoStart": false
     },
     {
       "name": "windows-worker",
@@ -39,7 +40,8 @@
       "endpoint": "windows-offload",
       "installedVersion": "0.163.0+jkammerland.mcp.25",
       "staging": "ready",
-      "sharedDaemon": "parked"
+      "sharedDaemon": "parked",
+      "daemonAutoStart": false
     },
     {
       "name": "dnarb",

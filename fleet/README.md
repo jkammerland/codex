@@ -25,6 +25,13 @@ Use Batch Codex through `windows-offload` for Windows builds, tests, and reviews
 This is an operational decision, not removal of daemon code or Windows support.
 Linux and Mac shared-daemon support remains enabled.
 
+Windows account configuration explicitly disables `daemon_auto_start` using
+`codex features disable daemon_auto_start`. Upstream enables it by default;
+without this override, ordinary CLI startup attempts the retained old daemon
+package and fails the maintained-fork version check. Preserve this account
+setting during upgrades while daemon support remains parked. `--no-daemon`
+also provides an explicit per-invocation bypass.
+
 - The current Windows host is `WIN11`; `WIN11-offload` selects the separate
   standard-user `codex-worker` account. `WIN11` selects administrator `ai-dev1`.
   The older `windows-11` alias is a different machine; historical manifest

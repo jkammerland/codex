@@ -18,6 +18,18 @@ Do not use them to activate the staged MCP.25 packages. The controller only
 accepts Mac/Windows entries, so adding Linux targets there would require a
 separate controller change.
 
+## Windows daemon opt-out
+
+Windows shared-daemon support remains parked. Both account configurations
+explicitly disable `daemon_auto_start` using
+`codex features disable daemon_auto_start`. Upstream enables it by default;
+without this override, ordinary CLI startup attempts the retained old daemon
+package and fails the maintained-fork version check. Preserve this account
+setting during upgrades while daemon support remains parked. `--no-daemon`
+also provides an explicit per-invocation bypass.
+
+## Historical controller
+
 `release.json` records the historical MCP.20 expected deployment state. It
 tracks the maintained-fork commit and version independently from the Codex MCP
 server deployment commit.

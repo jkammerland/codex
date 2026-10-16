@@ -52,7 +52,7 @@ impl TeamHostService {
         clippy::await_holding_invalid_type,
         reason = "serializes durable state changes and dispatch across asynchronous operations"
     )]
-    async fn track_launch(&self, input: &ToolStartInput<'_>) -> Result<()> {
+    async fn track_launch(&self, input: ToolStartInput<'_>) -> Result<()> {
         let thread_id = ThreadId::from_string(input.thread_store.level_id())?;
         if self.gate.root(thread_id).is_none() {
             return Ok(());
@@ -289,7 +289,7 @@ impl TeamHostService {
 impl ToolLifecycleContributor for TeamHostService {
     fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
-            if let Err(error) = self.track_launch(&input).await {
+            if let Err(error) = self.track_launch(input).await {
                 tracing::error!(%error, "could not track external team work");
             }
         })

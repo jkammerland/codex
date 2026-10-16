@@ -234,8 +234,9 @@ pub(super) async fn handle(
     mode: TurnInputMode,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
-    if matches!(&request.input, SubmittedTurnInput::UserInput { content, .. } if !content.is_empty())
-        && request.start.parent_turn_id.is_none()
+    let request = request.into();
+    if matches!(&request.request.input, SubmittedTurnInput::UserInput { content, .. } if !content.is_empty())
+        && request.request.start.parent_turn_id.is_none()
     {
         session
             .services
@@ -248,7 +249,6 @@ pub(super) async fn handle(
             "session execution is held by team control".to_string(),
         ));
     };
-    let request = request.into();
     let result = match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
         TurnInputMode::StartIfIdle => {

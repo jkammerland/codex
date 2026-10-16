@@ -172,7 +172,7 @@ pub async fn run_team_agents(manifest: &Path, no_alt_screen: bool) -> Result<()>
                             },
                             KeyCode::Enter if panel.connected => if let Some(address) = panel.selected_address() {
                                 let mut command = client.attach_command(&address)?;
-                                match tui.with_restored(|| command.status()).await {
+                                match tui.with_restored(tui::TerminalHandoff::Restore, || command.status()).await {
                                     Ok(status) if status.success() => panel.notice = "Returned from agent session".into(),
                                     Ok(status) => panel.notice = format!("Agent terminal exited: {status}"),
                                     Err(error) => panel.notice = error.to_string(),

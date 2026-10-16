@@ -32,7 +32,9 @@ async fn dual_host(home: &Path) -> Result<(Child, Server)> {
 }
 
 async fn dual_host_on(home: &Path, listen: &str) -> Result<(Child, Server)> {
-    let socket = home.join("daemon.sock");
+    // Let the listener create its private socket directory, including the
+    // protected user-only ACL required by the Windows socket transport.
+    let socket = home.join("socket/daemon.sock");
     let token = home.join("worker-token");
     tokio::fs::write(&token, "test-worker-token").await?;
     let mut process = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
@@ -156,7 +158,7 @@ async fn two_hosts_exchange_mail_through_relay_and_replay_offline_controls() -> 
 
         // The socket and the authenticated listener reach the same daemon state.
         let local = client(RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::try_from(home_a.path().join("daemon.sock"))?,
+            socket_path: AbsolutePathBuf::try_from(home_a.path().join("socket/daemon.sock"))?,
         })
         .await?;
         let started_a: ThreadStartResponse = local
@@ -399,7 +401,7 @@ async fn two_hosts_exchange_mail_through_relay_and_replay_offline_controls() -> 
             dual_host_on(home_a.path(), url.strip_prefix("ws://").unwrap()).await?;
         process_a = restarted;
         let local = client(RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::try_from(home_a.path().join("daemon.sock"))?,
+            socket_path: AbsolutePathBuf::try_from(home_a.path().join("socket/daemon.sock"))?,
         })
         .await?;
         let _: ThreadResumeResponse = local

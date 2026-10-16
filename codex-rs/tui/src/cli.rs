@@ -46,6 +46,14 @@ pub struct Cli {
     #[clap(skip)]
     pub agents_overview: bool,
 
+    /// Internal: configured machines to include in the existing agents overview.
+    #[clap(skip)]
+    pub agents_manifest: Option<std::path::PathBuf>,
+
+    /// Internal: restrict the overview to the explicitly selected local server.
+    #[clap(skip)]
+    pub agents_local: bool,
+
     /// Internal: the launching CLI verified that the local daemon has a managed backend.
     #[clap(skip)]
     pub managed_daemon: bool,

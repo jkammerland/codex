@@ -295,6 +295,19 @@ async fn run_remote_compaction_request_v2(
         CompactionRequestTransport::Background(turn_state, auth_owner_generation) => {
             let settings = &step_context.settings;
             let cancellation = crate::session::async_compaction::shutdown_cancellation(sess).await;
+            // Speculation remains session-owned, but new requests share the
+            // same admission and durable input evidence as foreground sampling.
+            let _execution = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
+                execution = sess.enter_execution() => execution,
+            };
+            sess.flush_team_input(
+                &turn_context.sub_id,
+                &turn_context.extension_data,
+                &prompt.input,
+            )
+            .await?;
             let effort = sess
                 .reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
                 .await;
@@ -330,7 +343,12 @@ async fn run_remote_compaction_request_v2(
     let mut retry_state = ResponsesStreamRetryState::default();
     loop {
         let execution = sess.enter_execution().await;
-        sess.flush_team_input().await?;
+        sess.flush_team_input(
+            &turn_context.sub_id,
+            &turn_context.extension_data,
+            &prompt.input,
+        )
+        .await?;
         let result = match client_session
             .stream(
                 prompt,
@@ -420,6 +438,10 @@ async fn collect_compaction_output(
             }
         }
         match event? {
+            ResponseEvent::Created { response_id } => {
+                sess.acknowledge_team_request(&turn_context.extension_data, response_id.as_deref())
+                    .await?;
+            }
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count += 1;
                 if let ResponseItem::Compaction { .. } = item {
@@ -772,6 +794,10 @@ fn truncate_message_text_to_token_budget(
     }
     Some(envelope)
 }
+
+#[cfg(test)]
+#[path = "compact_remote_v2_team_tests.rs"]
+mod team_tests;
 
 #[cfg(test)]
 mod tests {

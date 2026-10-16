@@ -47,6 +47,9 @@ impl PreparedTeamHost {
                         u64::try_from(control.revision)?,
                         execution_mode(control.mode),
                     );
+                    if enrollment.manually_held {
+                        gate.hold_manually(ThreadId::from_string(&enrollment.address.thread_id)?);
+                    }
                 }
             }
             for (thread_id, held) in store.list::<bool>("manual_hold", "", u32::MAX).await? {
@@ -86,11 +89,17 @@ impl PreparedTeamHost {
 
 pub struct TeamHostService {
     pub(crate) cancellations: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub(crate) delivery_updates: Mutex<()>,
     pub(crate) job_updates: Arc<Mutex<()>>,
     pub(crate) gate: ExecutionControl,
     pub(crate) store: OnceCell<TeamStore>,
     pub(crate) manager: Weak<ThreadManager>,
     pub(crate) operations: Mutex<()>,
+    pub(crate) control_updates: Mutex<()>,
+    pub(crate) model_updates: Mutex<()>,
+    // Stored Running state needs a fresh coordinator confirmation after restart.
+    pub(crate) confirmed_control_revision: std::sync::atomic::AtomicI64,
+    pub(crate) control_events: mpsc::UnboundedSender<()>,
     pub(crate) events: mpsc::UnboundedSender<HostEvent>,
     pub(crate) changed: watch::Sender<i64>,
     path: PathBuf,
@@ -101,13 +110,19 @@ pub struct TeamHostService {
 impl TeamHostService {
     pub fn new(prepared: PreparedTeamHost, manager: Weak<ThreadManager>) -> Arc<Self> {
         let (events, receiver) = mpsc::unbounded_channel();
+        let (control_events, control_receiver) = mpsc::unbounded_channel();
         let service = Arc::new(Self {
             cancellations: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            delivery_updates: Mutex::new(()),
             job_updates: Arc::new(Mutex::new(())),
             gate: prepared.gate,
             store: OnceCell::new_with(prepared.store),
             manager,
             operations: Mutex::new(()),
+            control_updates: Mutex::new(()),
+            model_updates: Mutex::new(()),
+            confirmed_control_revision: std::sync::atomic::AtomicI64::new(-1),
+            control_events,
             events,
             changed: watch::channel(0).0,
             path: prepared.path,
@@ -115,6 +130,11 @@ impl TeamHostService {
             installation_id: prepared.installation_id,
         });
         tokio::spawn(Self::run(Arc::downgrade(&service), receiver));
+        tokio::spawn(Self::run_controls(
+            Arc::downgrade(&service),
+            control_receiver,
+        ));
+        let _ = service.control_events.send(());
         let mut gate_changes = service.gate.subscribe();
         let weak = Arc::downgrade(&service);
         tokio::spawn(async move {
@@ -185,7 +205,7 @@ impl TeamHostService {
         let runtime = self.runtime(&data).await?;
         Ok(TeamHostReadResponse {
             installation_id: self.installation_id.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             control,
             data,
             runtime,
@@ -197,13 +217,35 @@ impl TeamHostService {
         clippy::await_holding_invalid_type,
         reason = "serializes durable state changes and dispatch across asynchronous operations"
     )]
-    pub async fn enroll(&self, params: TeamEnrollParams) -> Result<TeamEnrollResponse> {
+    pub async fn enroll(&self, mut params: TeamEnrollParams) -> Result<TeamEnrollResponse> {
+        params.address.thread_id = ThreadId::from_string(&params.address.thread_id)?.to_string();
+        let operation = params
+            .operation_id
+            .as_ref()
+            .map(|id| {
+                (
+                    format!("{}:{id}", params.control.coordinator_id),
+                    serde_json::to_string(&params),
+                )
+            })
+            .map(|(id, digest)| digest.map(|digest| (id, digest)))
+            .transpose()?;
         let _operation = self.operations.lock().await;
+        let store = self.enable().await?;
+        if let Some((id, digest)) = &operation
+            && let Some(enrollment) = store.host_operation_result(id, digest).await?
+        {
+            if let Some(control) = store.control().await? {
+                self.apply_gate(&control).await?;
+            }
+            return Ok(TeamEnrollResponse { enrollment });
+        }
         let manager = self
             .manager
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("host is shutting down"))?;
         let thread_id = ThreadId::from_string(&params.address.thread_id)?;
+        params.address.thread_id = thread_id.to_string();
         let thread = manager.get_thread(thread_id).await?;
         let snapshot = thread.config_snapshot().await;
         ensure!(
@@ -221,10 +263,17 @@ impl TeamHostService {
         );
         thread.ensure_rollout_materialized().await;
         thread.flush_rollout().await?;
+        let _control = self.control_updates.lock().await;
         let store = self.enable().await?;
-        let control = store.apply_control(&params.control).await?;
+        let accepted_control = store.apply_control(&params.control).await?;
+        if accepted_control == params.control {
+            self.confirmed_control_revision.fetch_max(
+                accepted_control.revision,
+                std::sync::atomic::Ordering::AcqRel,
+            );
+        }
         let enrollment = store
-            .enroll(
+            .enroll_operation(
                 &TeamEnrollment {
                     address: params.address,
                     alias: params.alias,
@@ -232,9 +281,15 @@ impl TeamHostService {
                     continuation_turn_id: None,
                 },
                 &Uuid::new_v4().to_string(),
+                operation
+                    .as_ref()
+                    .map(|(id, digest)| (id.as_str(), digest.as_str())),
             )
             .await?;
-        self.apply_gate(&control).await?;
+        if let Some(control) = store.control().await? {
+            self.apply_gate(&control).await?;
+        }
+        let _ = self.control_events.send(());
         self.notify();
         let _ = self.events.send(HostEvent::Dispatch);
         Ok(TeamEnrollResponse { enrollment })
@@ -242,11 +297,35 @@ impl TeamHostService {
 
     pub(crate) async fn apply_gate(&self, control: &TeamControlState) -> Result<()> {
         if let Some(store) = self.store.get() {
+            let stopping = !self.pending_stops().await?.is_empty();
+            let unconfirmed = self
+                .confirmed_control_revision
+                .load(std::sync::atomic::Ordering::Acquire)
+                < control.revision;
+            let model_errors = store
+                .list::<String>("model_recovery_error", "", u32::MAX)
+                .await?;
             for enrollment in store.enrollments("", u32::MAX).await? {
-                self.gate.apply(
-                    ThreadId::from_string(&enrollment.address.thread_id)?,
+                let root = ThreadId::from_string(&enrollment.address.thread_id)?;
+                let leaving = store
+                    .get::<bool>("leaving", &enrollment.address.thread_id)
+                    .await?
+                    .unwrap_or(false);
+                let reconciling = stopping
+                    || unconfirmed
+                    || leaving
+                    || model_errors.iter().any(|(thread_id, _)| {
+                        thread_id == &enrollment.address.thread_id
+                            || ThreadId::from_string(thread_id)
+                                .ok()
+                                .and_then(|id| self.gate.root(id))
+                                == Some(root)
+                    });
+                self.gate.apply_reconciling(
+                    root,
                     u64::try_from(control.revision)?,
                     execution_mode(control.mode),
+                    reconciling,
                 );
             }
         }

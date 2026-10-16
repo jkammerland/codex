@@ -90,6 +90,7 @@ static LIVE_THREADS: Gauge = Gauge::new("core.threads.live");
 
 #[derive(Clone, Debug)]
 pub struct ThreadConfigSnapshot {
+    pub team_model_policy: codex_protocol::team_model::TeamModelPolicy,
     /// Host data inherited by future turns; not included in persisted settings.
     pub turn_extension_init: codex_extension_api::ExtensionDataInit,
     pub model: String,
@@ -150,6 +151,9 @@ impl ThreadConfigSnapshot {
 /// Thread settings overrides that app-server validates before starting a turn.
 #[derive(Clone, Default)]
 pub struct CodexThreadSettingsOverrides {
+    /// Internal restoration retains ownership, including fields with no coordinator revision.
+    pub restore_model_policy: Option<codex_protocol::team_model::TeamModelPolicy>,
+    pub team_selection: Option<codex_protocol::team_model::TeamModelSelection>,
     /// Replaces the data captured by future turns. Omission preserves it.
     pub turn_extension_init: Option<codex_extension_api::ExtensionDataInit>,
     pub environments: Option<TurnEnvironmentRequests>,
@@ -730,6 +734,8 @@ impl CodexThread {
         overrides: CodexThreadSettingsOverrides,
     ) -> SessionSettingsUpdate {
         let CodexThreadSettingsOverrides {
+            restore_model_policy,
+            team_selection,
             turn_extension_init,
             environments: environment_requests,
             runtime_workspace_roots,
@@ -749,6 +755,8 @@ impl CodexThread {
             disabled_plugin_ids,
         } = overrides;
         SessionSettingsUpdate {
+            restore_model_policy,
+            team_selection,
             turn_extension_init,
             step_settings: StepSettingsUpdate {
                 model,

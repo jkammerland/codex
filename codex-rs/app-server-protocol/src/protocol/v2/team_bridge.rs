@@ -86,6 +86,8 @@ pub enum TeamAgentAction {
     Reply {
         message_id: String,
         body: String,
+        #[serde(default)]
+        delivery: TeamDeliveryMode,
     },
     Directory {
         cursor: Option<String>,
@@ -134,7 +136,7 @@ pub fn team_agent_tool_schema() -> Value {
             "body": {"type": "string"},
             "kind": {"type": "string", "enum": ["request", "reply", "note"]},
             "replyTo": {"type": "string", "description": "Original message id when replying."},
-            "delivery": {"type": "string", "enum": ["nextTurn", "safeBoundary"]},
+            "delivery": {"type": "string", "enum": ["nextTurn", "safeBoundary"], "description": "Choose when a request or reply enters the recipient's input. Replies default to nextTurn when omitted; safeBoundary may steer active work at a safe boundary."},
             "topic": {"type": "string"},
             "enabled": {"type": "boolean"}
         },
@@ -158,6 +160,9 @@ pub fn team_agent_tool_schema() -> Value {
 pub struct TeamAgentRequestParams {
     pub thread_id: String,
     pub credential: String,
+    /// Stable logical operation identity for clients that retry mutations.
+    #[ts(optional = nullable)]
+    pub operation_id: Option<String>,
     pub action: TeamAgentAction,
 }
 

@@ -29,6 +29,7 @@ pub use app::AppExitInfo;
 pub use app::DisconnectInfo;
 pub use app::ExitReason;
 pub use app::ResumableThread;
+use app_server_session::AppServerBootstrap;
 use app_server_session::AppServerSession;
 use app_server_session::ThreadParamsMode;
 use codex_app_server_client::AppServerClient;
@@ -230,7 +231,6 @@ mod style;
 mod subscription;
 mod system_motion;
 mod task_mentions;
-mod team_overview;
 mod temporary_structured_request;
 mod terminal_hyperlinks;
 mod terminal_palette;
@@ -252,7 +252,6 @@ mod transcript_reflow;
 mod transcript_view;
 mod tui;
 mod turn_tip;
-pub use team_overview::run_team_agents;
 mod ui_consts;
 mod unarchive_prompt;
 pub(crate) mod update_action;
@@ -1170,9 +1169,13 @@ async fn run_ratatui_app(
         impl FnOnce(&AppServerTarget, bool) -> terminal_size_telemetry::LaunchTags,
     >,
     startup_draft: startup_draft::StartupDraft,
+    preconnected_app_server: Option<AppServerSession>,
 ) -> color_eyre::Result<AppExitInfo> {
     let backend_id = crate::backend_id::BackendId::new();
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
+    let manifest_overview = cli.agents_overview
+        && !cli.agents_local
+        && (cli.agents_manifest.is_some() || initial_config.agents_manifest.is_some());
     let workload_identity_selected = is_workload_identity_selected();
     match color_eyre::install() {
         Ok(()) => {}
@@ -1228,8 +1231,10 @@ async fn run_ratatui_app(
     session_log::maybe_init(&initial_config);
 
     let startup_app_server = startup_draft
-        .run_until(
-            &mut tui,
+        .run_until(&mut tui, async {
+            if let Some(session) = preconnected_app_server {
+                return Ok(session);
+            }
             start_app_server(
                 &mut app_server_target,
                 arg0_paths.clone(),
@@ -1243,18 +1248,18 @@ async fn run_ratatui_app(
                 &mut state_db,
                 environment_manager.clone(),
                 embedded_network_policy.clone(),
-            ),
-        )
+            )
+            .await
+            .map(|client| {
+                AppServerSession::new(backend_id, client, app_server_target.thread_params_mode())
+                    .with_local_codex_home(&initial_config.codex_home)
+            })
+        })
         .await;
     tui.terminal_size_tags =
         launch_telemetry.record(&app_server_target, matches!(&startup_app_server, Ok(Ok(_))));
     let mut app_server_session = match startup_app_server {
-        Ok(Ok(app_server)) => AppServerSession::new(
-            backend_id,
-            app_server,
-            app_server_target.thread_params_mode(),
-        )
-        .with_local_codex_home(&initial_config.codex_home),
+        Ok(Ok(app_server)) => app_server,
         Ok(Err(err)) => {
             terminal_restore_guard.restore_silently();
             session_log::log_session_end();
@@ -1267,7 +1272,9 @@ async fn run_ratatui_app(
         }
     }
     .with_remote_cwd_override(remote_cwd_override.clone());
-    if let Some(provider) = manually_selected_oss_provider.as_deref() {
+    if let Some(provider) = manually_selected_oss_provider.as_deref()
+        && !app_server_session.is_discovery_placeholder()
+    {
         match startup_draft
             .run_until(
                 &mut tui,
@@ -1300,7 +1307,9 @@ async fn run_ratatui_app(
     #[cfg(target_os = "windows")]
     let mut trust_decision_was_made = false;
     let startup_model_provider = initial_config.model_provider_id.clone();
-    let (login_status, mut startup_account) = if workload_identity_selected {
+    let (login_status, mut startup_account) = if manifest_overview {
+        (LoginStatus::NotAuthenticated, None)
+    } else if workload_identity_selected {
         (LoginStatus::AuthMode(AuthMode::Chatgpt), None)
     } else {
         let Some(active_app_server) = app_server.as_mut() else {
@@ -1880,10 +1889,11 @@ async fn run_ratatui_app(
 
     // The shared overview does not open a workspace; session selection checks trust when needed.
     // Embedded fallback cannot show the overview and still needs normal startup initialization.
-    if (!matches!(
-        session_selection,
-        resume_picker::SessionSelection::AgentsOverview
-    ) || matches!(app_server_target, AppServerTarget::Embedded))
+    if !manifest_overview
+        && (!matches!(
+            session_selection,
+            resume_picker::SessionSelection::AgentsOverview
+        ) || matches!(app_server_target, AppServerTarget::Embedded))
         && (!uses_remote_workspace || remote_cwd_override.is_some())
     {
         let resumed_thread = if matches!(app_server_target, AppServerTarget::LocalDaemon { .. })
@@ -2065,7 +2075,7 @@ async fn run_ratatui_app(
             resume_picker::SessionSelection::Resume(_)
         );
     let bypass_hook_trust_for_startup_review = config.bypass_hook_trust && !is_persistent_resume;
-    let hooks_request_handle = app_server.request_handle();
+    let hooks_request_handle = app_server.try_request_handle();
     let hooks_cwd = config.cwd.to_path_buf();
     let server_owned_fresh_bootstrap = app::startup_bootstrap::uses_server_owned_fresh_bootstrap(
         &app_server_target,
@@ -2073,15 +2083,19 @@ async fn run_ratatui_app(
         &loader_overrides,
     );
     // Connected servers resolve their own provider; the local config may differ.
-    let check_gov_cloud_guidance = config.notices.hide_gov_cloud_guidance != Some(true)
+    let check_gov_cloud_guidance = !manifest_overview
+        && config.notices.hide_gov_cloud_guidance != Some(true)
         && (config.model_provider.is_amazon_bedrock()
             || !matches!(app_server_target, AppServerTarget::Embedded));
-    let guidance_request_handle = app_server.request_handle();
+    let guidance_request_handle = app_server.try_request_handle();
     let startup_prefetch_started_at = Instant::now();
     let startup_prefetch = startup_draft
         .run_until(&mut tui, async {
             tokio::join!(
                 async {
+                    if manifest_overview {
+                        return Ok(Some(AppServerBootstrap::for_agents_discovery(&config)));
+                    }
                     if server_owned_fresh_bootstrap {
                         return Ok::<_, color_eyre::Report>(None);
                     }
@@ -2091,9 +2105,35 @@ async fn run_ratatui_app(
                     }?;
                     Ok(Some(bootstrap))
                 },
-                load_startup_hooks_review_entry(hooks_request_handle, hooks_cwd),
                 async {
-                    check_gov_cloud_guidance && check_gov_cloud(guidance_request_handle).await
+                    if manifest_overview {
+                        codex_app_server_protocol::HooksListEntry {
+                            cwd: hooks_cwd,
+                            hooks: Vec::new(),
+                            warnings: Vec::new(),
+                            errors: Vec::new(),
+                        }
+                    } else {
+                        #[expect(
+                            clippy::expect_used,
+                            reason = "Only manifest overview startup supplies a discovery placeholder, handled above."
+                        )]
+                        let hooks_request_handle =
+                            hooks_request_handle.expect("connected startup");
+                        load_startup_hooks_review_entry(hooks_request_handle, hooks_cwd).await
+                    }
+                },
+                async {
+                    if !check_gov_cloud_guidance {
+                        return false;
+                    }
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "Guidance is disabled for manifest discovery placeholders."
+                    )]
+                    let guidance_request_handle =
+                        guidance_request_handle.expect("connected startup");
+                    check_gov_cloud(guidance_request_handle).await
                 },
             )
         })
@@ -2152,6 +2192,16 @@ async fn run_ratatui_app(
 
     // Keep the large event-loop future out of the enclosing startup futures so session
     // transitions have enough stack headroom to rebuild configuration and the chat widget.
+    let agents_manifest = if cli.agents_local {
+        None
+    } else {
+        cli.agents_manifest.or_else(|| {
+            config
+                .agents_manifest
+                .as_ref()
+                .map(codex_utils_absolute_path::AbsolutePathBuf::to_path_buf)
+        })
+    };
     let app_result = Box::pin(App::run(
         &mut tui,
         app_server,
@@ -2178,6 +2228,7 @@ async fn run_ratatui_app(
         startup_draft,
         managed_worktree,
         daemon_cli_executable,
+        agents_manifest,
     ))
     .await;
 

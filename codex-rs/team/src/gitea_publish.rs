@@ -11,10 +11,11 @@ use serde_json::json;
 
 use crate::coordinator::Coordinator;
 use crate::gitea::GiteaClient;
+use crate::gitea::IntegrationIdentity;
 use crate::gitea::Origin;
 use crate::model::MessageRecord;
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 enum PublicationState {
     Ready,
     Sending,
@@ -59,13 +60,20 @@ impl Coordinator {
         if !body.contains("<!-- codex-team:") {
             return Ok(false);
         }
+        let integration = IntegrationIdentity::configured(
+            self.manifest
+                .gitea
+                .as_ref()
+                .context("Gitea integration is disabled")?,
+        )?;
         Ok(self
             .store
             .list::<Publication>("gitea_publication", "", u32::MAX)
             .await?
             .iter()
             .any(|(_, publication)| {
-                publication.origin.repository == repository
+                publication.origin.integration.as_ref() == Some(&integration)
+                    && publication.origin.repository == repository
                     && publication.origin.number == number
                     && publication.body == body
             }))
@@ -172,6 +180,11 @@ impl Coordinator {
             }
         };
         ensure!(
+            publication.origin.integration.as_ref()
+                == Some(&IntegrationIdentity::configured(config)?),
+            "queued publication is bound to another Gitea integration; restore its original configuration or inspect it manually"
+        );
+        ensure!(
             config.repositories.contains(&publication.origin.repository),
             "repository is no longer enabled for Gitea publication"
         );
@@ -192,14 +205,9 @@ impl Coordinator {
                     .map(str::to_owned);
                 publication.state = PublicationState::Published;
             } else {
-                ensure!(
-                    self.store
-                        .get::<bool>("gitea_retry", id)
-                        .await?
-                        .unwrap_or(false),
-                    "an earlier POST may have reached Gitea but its comment is not yet confirmed"
+                anyhow::bail!(
+                    "an earlier POST may have reached the original Gitea conversation; its outcome is unconfirmed and must be inspected manually"
                 );
-                publication.state = PublicationState::Ready;
             }
         }
         if publication.state == PublicationState::Ready {

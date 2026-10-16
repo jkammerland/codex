@@ -1119,6 +1119,14 @@ async fn spawned_child_receives_forked_parent_context(
         .await?;
     assert!(serde_json::to_string(&persisted.items)?.contains(TURN_0_FORK_PROMPT));
     let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
+    assert_eq!(
+        child_thread
+            .config()
+            .await
+            .configured_model_default
+            .as_deref(),
+        Some(REQUESTED_MODEL)
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         while !matches!(child_thread.agent_status().await, AgentStatus::Completed(_)) {
             sleep(Duration::from_millis(10)).await;

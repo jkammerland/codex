@@ -152,13 +152,20 @@ impl PreparedTurnInputSettings {
             cyber_access_program,
         } = self.start_options;
         let emit_thread_settings_applied = self.thread_settings_update.is_some();
+
+        // Host recovery holds its model journal while checkpointing settings.
+        // Journal before taking the persistence permit to keep that lock order.
+        let mut updates = self.thread_settings_update.unwrap_or_default();
+        updates.service_tier_for_turn = service_tier;
+        if matches!(kind, TurnStartKind::User) {
+            thread_settings::journal_model_intent(session, &mut updates).await?;
+        }
+
         let _settings_guard = if emit_thread_settings_applied {
             Some(thread_settings::acquire_persistence_lock(session).await)
         } else {
             None
         };
-        let mut updates = self.thread_settings_update.unwrap_or_default();
-        updates.service_tier_for_turn = service_tier;
 
         let options = NewTurnContextOptions {
             final_output_json_schema,
@@ -213,9 +220,10 @@ impl PreparedTurnInputSettings {
     /// Applies only persistent settings after steering succeeds. The active
     /// turn keeps its existing context; subsequent turns see the update.
     async fn apply_steered(self, session: &Session, submission_id: String) -> CodexResult<()> {
-        let Some(thread_settings_update) = self.thread_settings_update else {
+        let Some(mut thread_settings_update) = self.thread_settings_update else {
             return Ok(());
         };
+        thread_settings::journal_model_intent(session, &mut thread_settings_update).await?;
         thread_settings::apply_update(session, submission_id, thread_settings_update)
             .await
             .map_err(|error| CodexErr::InvalidRequest(error.to_string()))

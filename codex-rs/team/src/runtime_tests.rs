@@ -275,11 +275,12 @@ async fn two_hosts_exchange_mail_through_relay_and_replay_offline_controls() -> 
             .request_typed(ClientRequest::TeamAgentRequest {
                 request_id: request_id(),
                 params: TeamAgentRequestParams {
+                    operation_id: Some(uuid::Uuid::new_v4().to_string()),
                     thread_id: address_a.thread_id.clone(),
                     credential: credential.credential.clone(),
                     action: TeamAgentAction::Send {
                         recipient: TeamAddress {
-                            thread_id: "missing-recipient".into(),
+                            thread_id: uuid::Uuid::new_v4().to_string(),
                             ..address_b.clone()
                         },
                         body: "Invalid recipient".into(),
@@ -294,6 +295,7 @@ async fn two_hosts_exchange_mail_through_relay_and_replay_offline_controls() -> 
             .request_typed(ClientRequest::TeamAgentRequest {
                 request_id: request_id(),
                 params: TeamAgentRequestParams {
+                    operation_id: Some(uuid::Uuid::new_v4().to_string()),
                     thread_id: address_a.thread_id.clone(),
                     credential: credential.credential,
                     action: TeamAgentAction::Send {
@@ -520,9 +522,33 @@ async fn reconnect_finishes_persisted_stop_before_a_later_resume() -> Result<()>
         codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?);
     let host_store =
         codex_team_store::TeamStore::open(&sqlite, &home.path().join("team/host.sqlite")).await?;
+    let root = app_test_support::create_fake_rollout(
+        home.path(),
+        "2026-10-01T12-00-00",
+        "2026-10-01T12:00:00Z",
+        "Saved ordinary task",
+        Some("mock_provider"),
+        None,
+    )?;
+    host_store
+        .enroll(
+            &TeamEnrollment {
+                address: TeamAddress {
+                    machine_id: "worker".into(),
+                    server_id: "primary".into(),
+                    thread_id: root.clone(),
+                },
+                alias: "saved-root".into(),
+                manually_held: false,
+                continuation_turn_id: None,
+            },
+            "saved-credential",
+        )
+        .await?;
 
     // Simulate a crash after persisting Stop but before its cancellation intent
-    // was recorded. The launch has no handle yet, so cancellation stays pending.
+    // was recorded for an enrolled task. Unrelated external jobs stay outside
+    // the team scope; this launch has no handle so cancellation stays pending.
     host_store.apply_control(&stopped).await?;
     host_store
         .put(
@@ -531,7 +557,7 @@ async fn reconnect_finishes_persisted_stop_before_a_later_resume() -> Result<()>
             &serde_json::json!({
                 "job": TeamTrackedJob {
                     id: "pending-launch".into(),
-                    thread_id: uuid::Uuid::new_v4().to_string(),
+                    thread_id: root.clone(),
                     server: "jobs".into(),
                     tool: "launch".into(),
                     handle: None,
@@ -554,7 +580,15 @@ async fn reconnect_finishes_persisted_stop_before_a_later_resume() -> Result<()>
     let coordinator = Coordinator::open(manifest).await?;
     let _workers = crate::worker::start(&coordinator);
     until(&coordinator, "recovered Stop then Resume", |snapshot| {
-        snapshot.servers[0].connected && snapshot.servers[0].applied_revision == Some(2)
+        snapshot.servers[0].connected
+            && snapshot.servers[0].applied_revision == Some(2)
+            && snapshot.agents.iter().any(|agent| {
+                agent.enrollment.address.thread_id == root
+                    && agent
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|runtime| !runtime.reconciling)
+            })
     })
     .await?;
     let job = host_store
@@ -564,5 +598,188 @@ async fn reconnect_finishes_persisted_stop_before_a_later_resume() -> Result<()>
     assert_eq!(job["requested_revision"], serde_json::json!(1));
     assert_eq!(host_store.control().await?.unwrap().revision, 2);
     process.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_root_browsing_uses_relay_before_team_reconciliation() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = tempfile::tempdir()?;
+    // Empty new threads are persisted lazily. Browse existing ordinary history
+    // so listing has durable input without issuing an inference request.
+    let root_id = app_test_support::create_fake_rollout(
+        home.path(),
+        "2026-10-01T12-00-00",
+        "2026-10-01T12:00:00Z",
+        "Saved ordinary task",
+        Some("openai"),
+        None,
+    )?;
+    let (mut process, server) = dual_host(home.path()).await?;
+    let mut manifest = crate::tests::manifest(directory.path());
+    manifest.machines = vec![Machine {
+        id: "worker".into(),
+        label: "Worker".into(),
+        servers: vec![server.clone()],
+    }];
+    let coordinator = Coordinator::open(manifest).await?;
+    let endpoint = crate::transport::ResolvedEndpoint::open(&server.endpoint).await?;
+    coordinator
+        .endpoints
+        .write()
+        .await
+        .insert("worker/primary".into(), endpoint);
+    assert!(!coordinator.snapshot().await?.servers[0].connected);
+    assert!(coordinator.peer("worker", "primary").await.is_err());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let bind = listener.local_addr()?;
+    let app = crate::http::router(coordinator.clone(), "operator-token".into());
+    let http = tokio::spawn(async move { axum::serve(listener, app).await });
+    let relay = client(RemoteAppServerEndpoint::WebSocket {
+        websocket_url: format!("ws://{bind}/relay/worker/primary"),
+        auth_token: Some("operator-token".into()),
+    })
+    .await?;
+    let root: ThreadResumeResponse = relay
+        .request_typed(ClientRequest::ThreadResume {
+            request_id: request_id(),
+            params: ThreadResumeParams {
+                thread_id: root_id.clone(),
+                ..Default::default()
+            },
+        })
+        .await?;
+    assert_eq!(root.thread.id, root_id);
+    let list: ThreadListResponse = relay
+        .request_typed(ClientRequest::ThreadList {
+            request_id: request_id(),
+            params: serde_json::from_value(serde_json::json!({}))?,
+        })
+        .await?;
+    assert!(list.data.iter().any(|thread| thread.id == root.thread.id));
+    assert!(coordinator.agents().await?.is_empty());
+    relay.shutdown().await?;
+    http.abort();
+    process.kill().await?;
+    process.wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocked_enrollment_on_one_host_does_not_block_another_host() -> Result<()> {
+    use futures::SinkExt;
+    use futures::StreamExt;
+    use serde_json::json;
+
+    let directory = tempfile::tempdir()?;
+    let home = tempfile::tempdir()?;
+    let (mut process, server) = dual_host(home.path()).await?;
+    let local = client(RemoteAppServerEndpoint::UnixSocket {
+        socket_path: AbsolutePathBuf::try_from(home.path().join("socket/daemon.sock"))?,
+    })
+    .await?;
+    let root: ThreadStartResponse = local
+        .request_typed(ClientRequest::ThreadStart {
+            request_id: request_id(),
+            params: ThreadStartParams::default(),
+        })
+        .await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let fake_url = format!("ws://{}", listener.local_addr()?);
+    let (admitted, blocked) = tokio::sync::oneshot::channel();
+    let fake_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        while let Some(message) = socket.next().await {
+            let message = message?;
+            let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                continue;
+            };
+            let request: serde_json::Value = serde_json::from_str(&text)?;
+            if request["method"] == "initialize" {
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        json!({"id":request["id"],"result":{"userAgent":"fixture/1"}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await?;
+            } else if request["method"] == "thread/loaded/list" {
+                let _ = admitted.send(());
+                // This host deliberately never acknowledges the request. The
+                // second enrollment must finish while its original RPC waits.
+                std::future::pending::<()>().await;
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+    let fake_client = client(RemoteAppServerEndpoint::WebSocket {
+        websocket_url: fake_url,
+        auth_token: None,
+    })
+    .await?;
+    let mut manifest = crate::tests::manifest(directory.path());
+    manifest.machines = vec![Machine {
+        id: "fast".into(),
+        label: "Fast".into(),
+        servers: vec![server],
+    }];
+    let coordinator = Coordinator::open(manifest).await?;
+    coordinator.peers.write().await.insert(
+        "slow/primary".into(),
+        crate::coordinator::Peer {
+            handle: codex_app_server_client::AppServerRequestHandle::Remote(
+                fake_client.request_handle(),
+            ),
+            verified: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        },
+    );
+    coordinator.peers.write().await.insert(
+        "fast/primary".into(),
+        crate::coordinator::Peer {
+            handle: codex_app_server_client::AppServerRequestHandle::Remote(local.request_handle()),
+            verified: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        },
+    );
+    let slow_coordinator = coordinator.clone();
+    let slow_enrollment = tokio::spawn(async move {
+        slow_coordinator
+            .execute(TeamRequest::Enroll {
+                address: TeamAddress {
+                    machine_id: "slow".into(),
+                    server_id: "primary".into(),
+                    thread_id: uuid::Uuid::new_v4().to_string(),
+                },
+                alias: "slow".into(),
+            })
+            .await
+    });
+    blocked.await?;
+    coordinator
+        .execute(TeamRequest::Control {
+            mode: TeamExecutionMode::Paused,
+        })
+        .await?;
+    let response = coordinator
+        .execute(TeamRequest::Enroll {
+            address: TeamAddress {
+                machine_id: "fast".into(),
+                server_id: "primary".into(),
+                thread_id: root.thread.id,
+            },
+            alias: "fast".into(),
+        })
+        .await?;
+    assert!(matches!(response, TeamResponse::Agent { .. }));
+    assert!(!slow_enrollment.is_finished());
+    slow_enrollment.abort();
+    let _ = slow_enrollment.await;
+    fake_client.shutdown().await?;
+    fake_server.abort();
+    local.shutdown().await?;
+    process.kill().await?;
+    process.wait().await?;
     Ok(())
 }

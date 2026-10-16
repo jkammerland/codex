@@ -55,6 +55,9 @@ impl ChatWidget {
         model: String,
         effort: Option<ReasoningEffortConfig>,
     ) -> Option<SelectionSecondaryAction> {
+        if self.agents_model_picker.is_some() {
+            return None;
+        }
         // Reserve selections are already session-only.
         if model == LUNA_RESERVE_MODEL {
             return None;

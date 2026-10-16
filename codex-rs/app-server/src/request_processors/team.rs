@@ -116,6 +116,23 @@ impl TeamRequestProcessor {
             .map_err(|error| invalid_request(error.to_string()))
     }
 
+    pub(crate) fn leave(
+        &self,
+        params: codex_app_server_protocol::TeamLeaveParams,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<codex_app_server_protocol::TeamLeaveResponse, JSONRPCErrorError>,
+    > {
+        // Leave checkpoints live thread settings. Keep its large future out of
+        // the shared dispatcher so ordinary resume requests retain stack space.
+        Box::pin(async move {
+            self.service
+                .leave(params)
+                .await
+                .map_err(|error| invalid_request(error.to_string()))
+        })
+    }
+
     pub(crate) async fn control(
         &self,
         params: TeamControlParams,

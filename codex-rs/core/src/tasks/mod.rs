@@ -879,7 +879,7 @@ impl Session {
                 .time_to_first_token_ms()
                 .await;
             let error = turn_context.terminal_error.lock().await.clone();
-            self.emit_turn_stop_lifecycle(turn_context.extension_data.as_ref())
+            self.emit_turn_stop_lifecycle(turn_context.extension_data.as_ref(), error.as_ref())
                 .await;
             EventMsg::TurnComplete(TurnCompleteEvent {
                 root_turn_id: Some(turn_context.root_turn_id()),

@@ -39,6 +39,252 @@ const INITIAL_MODEL: &str = "gpt-5.4";
 pub(super) const COMMITTED_MODEL: &str = "gpt-5.2";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Default)]
+struct ModelIntentAdmission {
+    open: std::sync::atomic::AtomicBool,
+    recorded: Mutex<Vec<ThreadSettingsOverrides>>,
+    journal_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+}
+
+impl codex_extension_api::TurnStartAdmission for ModelIntentAdmission {
+    fn admit_turn_start(&self) -> Option<Box<dyn Send>> {
+        self.open
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then(|| Box::new(()) as Box<dyn Send>)
+    }
+}
+
+impl codex_extension_api::ThreadLifecycleContributor<Config> for ModelIntentAdmission {
+    fn on_model_selection_requested<'a>(
+        &'a self,
+        _thread_id: codex_protocol::ThreadId,
+        settings: &'a ThreadSettingsOverrides,
+    ) -> codex_extension_api::ExtensionFuture<'a, std::result::Result<Option<i64>, String>> {
+        Box::pin(async move {
+            self.recorded
+                .lock()
+                .expect("model intents")
+                .push(settings.clone());
+            let gate = self.journal_gate.lock().expect("journal gate").take();
+            if let Some((entered, release)) = gate {
+                entered
+                    .send(())
+                    .map_err(|_| "test stopped waiting for journal".to_string())?;
+                release
+                    .await
+                    .map_err(|_| "test did not commit journal".to_string())?;
+            }
+            Ok(Some(42))
+        })
+    }
+}
+
+#[tokio::test]
+async fn turn_model_intent_is_journaled_after_admission_and_before_inference() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let response = responses::mount_sse_once(&server, responses::sse_completed("accepted")).await;
+    let admission = Arc::new(ModelIntentAdmission::default());
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.turn_start_admission(admission.clone());
+    extensions.thread_lifecycle_contributor(admission.clone());
+    let test = test_codex()
+        .with_model(INITIAL_MODEL)
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_auto_env(&server)
+        .await?;
+    let initial = test.codex.thread_settings_snapshot().await;
+    let settings = ThreadSettingsOverrides {
+        model: Some(COMMITTED_MODEL.into()),
+        ..Default::default()
+    };
+    let request =
+        || TurnInputRequest::user_input(Vec::new()).with_thread_settings(settings.clone());
+
+    assert_eq!(
+        test.codex.start_or_steer_turn(request()).await?,
+        TurnInputSubmission::NotSubmitted {
+            reason: codex_protocol::turn_input::NotSubmittedReason::ServerDraining,
+        }
+    );
+    assert_eq!(test.codex.thread_settings_snapshot().await, initial);
+    assert!(admission.recorded.lock().expect("model intents").is_empty());
+    assert!(response.requests().is_empty());
+
+    admission
+        .open
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    *admission.journal_gate.lock().expect("journal gate") = Some((entered_tx, release_rx));
+    let submitted = tokio::spawn({
+        let codex = Arc::clone(&test.codex);
+        let settings = settings.clone();
+        async move {
+            codex
+                .start_or_steer_turn(
+                    TurnInputRequest::user_input(Vec::new()).with_thread_settings(settings),
+                )
+                .await
+        }
+    });
+    timeout(TIMEOUT, entered_rx).await??;
+    assert!(
+        response.requests().is_empty(),
+        "inference must wait for the durable model intent"
+    );
+    // Recovery can checkpoint while the journal is busy. Reversing these
+    // locks strands both recovery and the admitted turn.
+    timeout(TIMEOUT, test.codex.checkpoint_thread_settings()).await??;
+    release_tx.send(()).expect("journal is waiting");
+    let submitted = submitted.await??;
+    let TurnInputSubmission::Started { turn_id, .. } = submitted else {
+        panic!("expected accepted turn: {submitted:?}");
+    };
+    wait_for_event(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(completed) if completed.turn_id == turn_id),
+    )
+    .await;
+    assert_eq!(
+        *admission.recorded.lock().expect("model intents"),
+        vec![settings]
+    );
+    assert_eq!(
+        test.codex
+            .thread_settings_snapshot()
+            .await
+            .team_model_policy
+            .superseded_revision,
+        Some(42)
+    );
+    assert_eq!(
+        response.single_request().body_json()["model"],
+        COMMITTED_MODEL
+    );
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn team_selection_provenance_survives_resume_and_old_ack_does_not_undo_user_edit()
+-> Result<()> {
+    use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::team_model::TeamModelSelection;
+    use codex_protocol::team_model::TeamSelection;
+    use codex_protocol::team_model::TeamSelectionOrigin;
+
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build_with_auto_env(&server).await?;
+
+    // Enrollment materializes and flushes a durable root before coordinator
+    // selections are allowed. Match that precondition without starting inference.
+    test.codex.ensure_rollout_materialized().await;
+    test.codex.flush_rollout().await?;
+    assert!(
+        test.codex
+            .rollout_path()
+            .expect("durable rollout path")
+            .is_file()
+    );
+
+    let selection = TeamModelSelection {
+        revision: 1,
+        model: TeamSelection::Keep,
+        effort: TeamSelection::Default,
+    };
+    submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            team_selection: Some(selection.clone()),
+            effort: Some(None),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let accepted = test.codex.thread_settings_snapshot().await;
+    assert_eq!(
+        accepted.team_model_policy.effort_origin,
+        TeamSelectionOrigin::Default
+    );
+    assert_eq!(
+        accepted.team_model_policy.selection.as_ref(),
+        Some(&selection)
+    );
+
+    // Verify the acknowledged policy reached real history before restarting.
+    test.codex.flush_rollout().await?;
+    assert_checkpoints(&test, std::slice::from_ref(&accepted))?;
+    let resumed = builder.restart_with_auto_env(&server, &test).await?;
+    assert_eq!(
+        resumed
+            .codex
+            .thread_settings_snapshot()
+            .await
+            .team_model_policy,
+        accepted.team_model_policy
+    );
+
+    submit_thread_settings(
+        &resumed.codex,
+        ThreadSettingsOverrides {
+            effort: Some(Some(ReasoningEffort::High)),
+            ..Default::default()
+        },
+    )
+    .await?;
+    submit_thread_settings(
+        &resumed.codex,
+        ThreadSettingsOverrides {
+            team_selection: Some(selection),
+            effort: Some(None),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let after_retry = resumed.codex.thread_settings_snapshot().await;
+    assert_eq!(after_retry.reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(
+        after_retry.team_model_policy.effort_origin,
+        TeamSelectionOrigin::Explicit
+    );
+    resumed
+        .codex
+        .update_thread_settings(ThreadSettingsOverrides {
+            supersedes_team_selection: Some(2),
+            effort: Some(Some(ReasoningEffort::High)),
+            ..Default::default()
+        })
+        .await?;
+    let stale = resumed
+        .codex
+        .update_thread_settings(ThreadSettingsOverrides {
+            team_selection: Some(TeamModelSelection {
+                revision: 2,
+                model: TeamSelection::Keep,
+                effort: TeamSelection::Default,
+            }),
+            effort: Some(None),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a local edit supersedes a journaled but unapplied coordinator selection");
+    assert!(stale.to_string().contains("superseded"));
+    assert_eq!(
+        resumed
+            .codex
+            .thread_settings_snapshot()
+            .await
+            .reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+    resumed.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
 fn assert_checkpoints(test: &TestCodex, expected: &[ThreadSettingsSnapshot]) -> Result<()> {
     let rollout_path = test.codex.rollout_path().expect("rollout path");
     let rollout: Vec<RolloutLine> = std::fs::read_to_string(rollout_path)?

@@ -47,6 +47,27 @@ impl AgentsOverviewView {
         let indices = self.selectable_indices();
         let mut state = self.state();
         if indices.is_empty() {
+            if state.machines_enabled && !state.machine_notices.is_empty() && self.rows.is_empty() {
+                for (index, machine) in state
+                    .machine_notices
+                    .iter()
+                    .take(usize::from(area.height.saturating_sub(2)))
+                    .enumerate()
+                {
+                    line(machine.clone().dim(), row(area, index as u16, 1), buf);
+                }
+                let offset = state
+                    .machine_notices
+                    .len()
+                    .min(usize::from(area.height.saturating_sub(1)))
+                    as u16;
+                line(
+                    "No tasks available · F9 machines and connections".dim(),
+                    row(area, offset, 1),
+                    buf,
+                );
+                return;
+            }
             line(
                 if state.connection_notice.is_some() {
                     "Reconnecting…"
@@ -104,7 +125,9 @@ impl AgentsOverviewView {
         state.scroll = start;
         for (offset, entry) in entries.iter().skip(start).take(height).enumerate() {
             let index = match entry {
-                CenterRow::Group(index) | CenterRow::Task(index) => *index,
+                CenterRow::Machine(index) | CenterRow::Group(index) | CenterRow::Task(index) => {
+                    *index
+                }
                 CenterRow::Gap => continue,
                 CenterRow::ShowMore => {
                     let rect = row(viewport, offset as u16, /*height*/ 1);
@@ -139,6 +162,17 @@ impl AgentsOverviewView {
             };
             let task = &self.rows[index];
             let rect = row(viewport, offset as u16, /*height*/ 1);
+            if matches!(entry, CenterRow::Machine(_)) {
+                line(
+                    task.machine_label
+                        .clone()
+                        .unwrap_or_else(|| "Machine".into())
+                        .bold(),
+                    rect,
+                    buf,
+                );
+                continue;
+            }
             if matches!(entry, CenterRow::Group(_)) {
                 let group = if self.is_pinned(index) {
                     "Pinned".to_owned()
@@ -177,6 +211,11 @@ impl AgentsOverviewView {
                             .saturating_sub(count.width() + 2)
                             .min(/*other*/ 64),
                     )
+                } else {
+                    group
+                };
+                let group = if let Some(host) = &task.host {
+                    format!("{group} · {}", host.server_id)
                 } else {
                     group
                 };

@@ -12,7 +12,7 @@ use serde_json::Value;
 use serde_json::json;
 
 #[derive(Debug, Parser)]
-pub(crate) struct McpCommand {
+pub struct McpCommand {
     #[arg(long, required_unless_present = "url", conflicts_with = "url")]
     socket: Option<PathBuf>,
     #[arg(long, required_unless_present = "socket", conflicts_with = "socket")]
@@ -59,13 +59,17 @@ pub(crate) async fn run(command: McpCommand) -> Result<()> {
         channel_capacity: 64,
     })
     .await?;
-    let tools = json!([{"name":"team", "description":"Read the team directory, inbox and board; send attributed requests, replies or notes; manage your own topic subscriptions. Model and execution controls are user-owned.", "inputSchema":team_agent_tool_schema()}]);
+    let tools = json!([{"name":"team", "description":"Read the team directory, inbox and board; send attributed requests, replies or notes; manage your own topic subscriptions. Requests and replies support nextTurn or safeBoundary delivery; replies default to nextTurn when omitted. Model and execution controls are user-owned.", "inputSchema":team_agent_tool_schema()}]);
+    let bridge_id = uuid::Uuid::new_v4().to_string();
+    let bridge_id = bridge_id.as_str();
     let (client_ref, thread, credential_ref) =
         (&client, command.thread.as_str(), credential.as_str());
     crate::mcp_stdio::serve(tools, |request| async move {
-        Ok(call(client_ref, thread, credential_ref, &request)
-            .await?
-            .result)
+        Ok(
+            call(client_ref, thread, credential_ref, bridge_id, &request)
+                .await?
+                .result,
+        )
     })
     .await?;
     client.shutdown().await?;
@@ -76,6 +80,7 @@ async fn call(
     client: &RemoteAppServerClient,
     thread_id: &str,
     credential: &str,
+    bridge_id: &str,
     request: &Value,
 ) -> Result<TeamAgentRequestResponse> {
     anyhow::ensure!(
@@ -93,6 +98,17 @@ async fn call(
             request_id: crate::coordinator::request_id(),
             params: TeamAgentRequestParams {
                 thread_id: thread_id.into(),
+                operation_id: Some(
+                    uuid::Uuid::new_v5(
+                        &uuid::Uuid::NAMESPACE_OID,
+                        format!(
+                            "{bridge_id}:{}",
+                            request.get("id").context("tool request id is missing")?
+                        )
+                        .as_bytes(),
+                    )
+                    .to_string(),
+                ),
                 credential: credential.into(),
                 action,
             },

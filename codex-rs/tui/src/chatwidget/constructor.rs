@@ -33,8 +33,8 @@ impl ChatWidget {
             terminal_title_invalid_items_warned,
             session_telemetry,
         } = common;
-        // Keep asynchronous widget callbacks scoped separately from the app and other widgets.
-        let app_event_tx = AppEventSender::new(app_event_tx.app_event_tx);
+        // Voice ownership is widget-local; callbacks retain their connection and attachment scope.
+        let app_event_tx = app_event_tx.for_widget();
         let model = model.filter(|m| !m.trim().is_empty());
         let mut config = config;
         config.model = model.clone();
@@ -128,6 +128,8 @@ impl ChatWidget {
             has_codex_backend_auth,
             model_catalog,
             model_popup_request_id: None,
+            agents_model_picker: None,
+            agents_model_load_request_id: None,
             permission_popup_request_id: None,
             permission_discovery: None,
             inline_permission_profile_selection: None,

@@ -72,6 +72,62 @@ impl TeamStore {
         Ok(())
     }
 
+    /// Commit related domain records under one writer admission.
+    pub async fn put_records(&self, writes: &[(&str, &str, serde_json::Value)]) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for (namespace, id, value) in writes {
+            sqlx::query("INSERT INTO record(namespace, id, payload) VALUES (?, ?, ?) ON CONFLICT(namespace, id) DO UPDATE SET payload = excluded.payload")
+                .bind(namespace).bind(id).bind(serde_json::to_string(value)?)
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        self.notify();
+        Ok(())
+    }
+
+    /// Commit record effects and their idempotency receipt together. Reusing a
+    /// logical operation with another digest is a conflict, never a second effect.
+    pub async fn put_record_once(
+        &self,
+        receipt_namespace: &str,
+        receipt_key: &str,
+        digest: &str,
+        writes: &[(&str, &str, serde_json::Value)],
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let previous: Option<String> =
+            sqlx::query_scalar("SELECT payload FROM record WHERE namespace = ? AND id = ?")
+                .bind(receipt_namespace)
+                .bind(receipt_key)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(previous) = previous {
+            ensure!(
+                previous == digest,
+                "operation identity has conflicting content"
+            );
+            return Ok(false);
+        }
+        for (namespace, id, value) in writes {
+            ensure!(
+                *namespace != receipt_namespace || *id != receipt_key,
+                "operation receipt cannot also be an effect"
+            );
+            sqlx::query("INSERT INTO record(namespace, id, payload) VALUES (?, ?, ?) ON CONFLICT(namespace, id) DO UPDATE SET payload = excluded.payload")
+                .bind(namespace).bind(id).bind(serde_json::to_string(value)?)
+                .execute(&mut *tx).await?;
+        }
+        sqlx::query("INSERT INTO record(namespace, id, payload) VALUES (?, ?, ?)")
+            .bind(receipt_namespace)
+            .bind(receipt_key)
+            .bind(digest)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.notify();
+        Ok(true)
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, namespace: &str, id: &str) -> Result<Option<T>> {
         let value: Option<String> =
             sqlx::query_scalar("SELECT payload FROM record WHERE namespace = ? AND id = ?")
@@ -115,3 +171,7 @@ impl TeamStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod tests;

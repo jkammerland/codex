@@ -96,6 +96,7 @@ impl App {
         app_server_client: &AppServerSession,
         event: AppServerEvent,
     ) {
+        self.agents_hosts.note_foreground_event();
         match event {
             AppServerEvent::Lagged { skipped } => {
                 tracing::warn!(
@@ -133,8 +134,18 @@ impl App {
                     notification.as_ref(),
                     ServerNotification::ServerRequestResolved(_)
                 );
-                self.handle_server_notification_event(app_server_client, *notification)
+                let reverted = match notification.as_ref() {
+                    ServerNotification::ThreadReverted(notification) => {
+                        ThreadId::from_string(&notification.thread_id).ok()
+                    }
+                    _ => None,
+                };
+                self.handle_server_notification_event(app_server_client, *notification, true)
                     .await;
+                if let Some(thread_id) = reverted {
+                    self.app_event_tx
+                        .send(AppEvent::CompleteHostPromptRevert { thread_id });
+                }
                 if request_resolved {
                     self.repaint_agents_overview();
                 }
@@ -163,18 +174,60 @@ impl App {
         }
     }
 
-    async fn handle_server_notification_event(
+    pub(super) async fn handle_server_notification_event(
         &mut self,
         app_server_client: &AppServerSession,
         notification: ServerNotification,
+        verify_displayed_closure: bool,
     ) {
         // A picker can leave an old runtime's close notification queued while the same thread
         // is resumed. Thread IDs survive reloads, so confirm that the displayed thread is still
         // unloaded before routing a close that would exit the TUI or switch away from it.
-        if let ServerNotification::ThreadClosed(closed) = &notification
+        if verify_displayed_closure
+            && let ServerNotification::ThreadClosed(closed) = &notification
             && let Ok(thread_id) = ThreadId::from_string(&closed.thread_id)
             && self.current_displayed_thread_id() == Some(thread_id)
         {
+            if self.agents_hosts.enabled() {
+                let scope = self.agents_hosts.scope();
+                let generation = self.agents_hosts.generation;
+                let revision = self
+                    .agents_hosts
+                    .hosts
+                    .get(&scope.host)
+                    .map_or(0, |host| host.revision);
+                let handle = app_server_client.request_handle();
+                let sender = self.app_event_tx.unscoped();
+                let thread_id = closed.thread_id.clone();
+                self.agents_hosts.spawn(async move {
+                    let result = handle
+                        .request_typed::<ThreadReadResponse>(ClientRequest::ThreadRead {
+                            request_id: RequestId::String(uuid::Uuid::new_v4().to_string()),
+                            params: ThreadReadParams {
+                                thread_id,
+                                include_turns: false,
+                            },
+                        })
+                        .await;
+                    let confirmed = match result {
+                        Ok(response) => matches!(response.thread.status, ThreadStatus::NotLoaded),
+                        Err(TypedRequestError::Server { source, .. }) => {
+                            matches!(source.code, -32602..=-32600)
+                        }
+                        Err(_) => false,
+                    };
+                    sender.send(AppEvent::AgentsHostUpdate(Box::new(
+                        super::agents_hosts::HostUpdate::ClosedVerified {
+                            scope,
+                            generation,
+                            revision,
+                            notification,
+                            confirmed,
+                        },
+                    )));
+                });
+                return;
+            }
             let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 5);
             for attempt in 0..2 {
                 let result = tokio::time::timeout_at(
@@ -297,6 +350,7 @@ impl App {
         }
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
+                self.dynamic_tool_origins.remove(&notification.request_id);
                 if let Some((_, task)) = self.dynamic_tool_tasks.remove(&notification.request_id) {
                     task.abort();
                 }
@@ -627,6 +681,8 @@ impl App {
                 return;
             }
 
+            self.dynamic_tool_origins
+                .insert(request_id.clone(), buffered_request.reply.clone());
             let requires_mcp = crate::dynamic_tools::DELEGATION_TOOLS
                 .contains(&params.tool.as_str())
                 || matches!(
@@ -643,15 +699,21 @@ impl App {
                 } else {
                     "TUI dynamic tools require an active external task"
                 });
-                self.app_event_tx.send(AppEvent::DynamicToolCallCompleted {
-                    request_id: request_id.clone(),
-                    response,
-                });
+                self.app_event_tx
+                    .clone()
+                    .with_reply(buffered_request.reply.clone())
+                    .send(AppEvent::DynamicToolCallCompleted {
+                        request_id: request_id.clone(),
+                        response,
+                    });
                 return;
             }
 
             let request_handle = app_server_client.request_handle();
-            let app_event_tx = self.app_event_tx.clone();
+            let app_event_tx = self
+                .app_event_tx
+                .clone()
+                .with_reply(buffered_request.reply.clone());
             let status_updates = self.dynamic_tool_status_updates.subscribe();
             let request_id = request_id.clone();
             let task_request_id = request_id.clone();

@@ -6,7 +6,8 @@ host. The coordinator stores the directory, messages, receipts and control histo
 Idle agents wait for events; messaging does not spend model turns on polling.
 
 This is an experimental protocol. Use matching builds of the coordinator and
-workers. Existing `codex agents` behavior is unchanged unless `--team` is supplied.
+workers. Machines and team actions extend the existing `codex agents` overview.
+Ordinary sessions are visible without joining the team; enrollment is explicit.
 
 ## Start a team
 
@@ -16,11 +17,18 @@ credentials belong outside source repositories; this manifest is separate from
 the fork's deployment inventory.
 
 ```sh
-codex team --manifest team.toml serve
-# In another terminal:
-codex team --manifest team.toml enroll local/primary/THREAD_UUID builder
-codex agents --team team.toml
+codex agents --manifest team.toml
+# Optionally enroll an existing root session:
+codex agents --manifest team.toml enroll local/primary/THREAD_UUID builder
 ```
+
+The overview starts or reuses a local coordinator asynchronously. To load the
+manifest automatically, set the top-level `agents_manifest = "/path/to/team.toml"`
+in `config.toml`. Relative paths resolve against the configuration file. Use
+`codex agents --local` to open only the local overview, or `--remote URL` for one
+explicit server. `--manifest` overrides configuration; it cannot be combined with
+`--local` or `--remote`. The old `--team` flag and `codex team` commands remain
+compatibility aliases.
 
 Enrollment accepts an existing durable root session, including one already loaded
 by the daemon. Descendants join its family. Repeating enrollment renames the alias
@@ -28,8 +36,8 @@ without replacing history or credentials. Addresses contain machine ID, server I
 and thread ID; aliases are display names. The coordinator pins each installation
 identity and refuses a changed installation until its enrollment is reviewed.
 
-The coordinator runs in the foreground and can be supervised by the operating
-system's existing service manager. Only one process can own its state directory.
+For service supervision, `codex agents --manifest team.toml serve` runs the
+coordinator in the foreground. Only one process can own its state directory.
 Its operator token is created on first start. Keep that token private: it grants
 control and interactive attachment to all enrolled hosts.
 
@@ -56,18 +64,20 @@ socket path accepted by the daemon and a running console daemon; SSH only forwar
 the connection and does not launch the worker. macOS and Linux use the same wire
 protocol.
 
-Enter in the panel opens a separate child TUI through the coordinator relay. SSH
-keys and worker transport credentials remain on the coordinator. Each attachment
-gets its own worker connection, including request IDs and approval responses.
-Leaving the child TUI returns to the panel without canceling remote work.
+Enter attaches to the selected session within the existing TUI. Machines form
+the outer groups; status, project and model grouping remain available within each
+machine. Search, pins and normal session actions remain in the same overview.
+SSH keys and worker transport credentials remain on the coordinator. Each host
+retains its connection, request IDs, pending approvals and tool replies when you
+switch machines. Leaving the panel does not cancel remote work.
 
 ## Controls and settings
 
 | Action | Effect |
 | --- | --- |
-| Pause (`p` or F6) | Hold new turns, model requests, tools, delegation, delivery and publication. Already admitted work may finish. |
-| Stop (`s` or F8) | Interrupt enrolled families and request cancellation of their owned tracked jobs. |
-| Resume (`r` or F7) | Release the global hold; continue a stopped original turn before later mail. Preserve manual holds and approvals. |
+| Pause (F6) | Hold new turns, model requests, tools, delegation, delivery and publication for enrolled families. Already admitted work may finish. |
+| Stop (F8) | Interrupt enrolled families and request cancellation of their owned tracked jobs. |
+| Resume (F7) | Release the global hold; continue a stopped original turn before later mail. Preserve manual holds and approvals. |
 
 F6/F7/F8 also work inside the model picker and message composer. Pause is cooperative;
 it does not suspend OS processes or undo completed side effects. The panel shows
@@ -77,7 +87,8 @@ An offline host cannot acknowledge a new control. Its last applied control remai
 in force, and all missing revisions are replayed on reconnect, including Stop
 followed by Resume. Startup reconciles persisted enrollment before admitting work.
 
-Use `m` to choose a model and effort from the selected host's catalog. Changes use
+Use F9 to open the selected task's team actions, including its model and effort
+picker. The picker uses that host's catalog. Changes use
 `thread/settings/update` and apply to subsequent turns; current-turn settings are
 shown separately. No substitute model is selected. Ultra is an explicit choice
 when the host offers it. Enrollment preserves existing settings. Agent messages
@@ -90,23 +101,30 @@ you select a supported model or effort. Custom providers that do not publish the
 model names retain their existing provider policy; the team never invents a replacement.
 
 ```sh
-codex team --manifest team.toml pause
-codex team --manifest team.toml stop
-codex team --manifest team.toml resume
-codex team --manifest team.toml models local primary
-codex team --manifest team.toml set-model local/primary/THREAD_UUID MODEL --effort high
-codex team --manifest team.toml status
+codex agents --manifest team.toml pause
+codex agents --manifest team.toml stop
+codex agents --manifest team.toml resume
+codex agents --manifest team.toml models local primary
+codex agents --manifest team.toml select-model local/primary/THREAD_UUID --model value:MODEL --effort value:high
+codex agents --manifest team.toml select-model local/primary/THREAD_UUID --effort default
+codex agents --manifest team.toml status
 ```
+
+Model and effort each support `keep`, `default`, `inherit` and `value:NAME`.
+Inheritance is available for descendants. Equal values do not imply inheritance.
+Requested, applied-next and active-turn settings are distinct. Models with no
+effort choices use their default without a fabricated effort level.
 
 ## Messages, wakeups and MCP
 
 ```sh
-codex team --manifest team.toml send local/primary/THREAD_UUID 'Please review the patch'
-codex team --manifest team.toml send local/primary/THREAD_UUID 'Build finished' --kind note
-codex team --manifest team.toml reply MESSAGE_UUID 'Review complete'
-codex team --manifest team.toml post builds 'Windows build is ready'
-codex team --manifest team.toml subscribe local/primary/THREAD_UUID builds
-codex team --manifest team.toml subscribe local/primary/THREAD_UUID builds --disable
+codex agents --manifest team.toml send local/primary/THREAD_UUID 'Please review the patch'
+codex agents --manifest team.toml send local/primary/THREAD_UUID 'Build finished' --kind note
+codex agents --manifest team.toml reply MESSAGE_UUID 'Review complete'
+codex agents --manifest team.toml reply MESSAGE_UUID 'Join the current turn when safe' --safe-boundary
+codex agents --manifest team.toml post builds 'Windows build is ready'
+codex agents --manifest team.toml subscribe local/primary/THREAD_UUID builds
+codex agents --manifest team.toml subscribe local/primary/THREAD_UUID builds --disable
 ```
 
 Requests and replies wake eligible idle recipients. Notes remain passive until a
@@ -115,21 +133,22 @@ allows input to join the current turn at its next safe input boundary. It never
 interrupts a tool to inject a message. Board posts wake only explicit subscribers;
 their audience is fixed when published. Enrolled agents have a native `team` tool
 for the directory, inbox, attributed messages, replies, board and subscriptions.
-The panel has `n` for requests, `e` for renaming, `l` for listening, and `b` for
-messages with `t` to post or `f` to reply.
+F9 opens enrollment, alias, message, subscription and board actions. Sending
+acknowledges durable intake; it does not wait for a model reply. A lost response
+can be retried with the same `--operation-id` to recover the original result.
 
 For an external agent client, obtain that agent's bound credential through the
 operator CLI and provide it through an environment variable:
 
 ```sh
-codex team --manifest team.toml agent-credential local/primary/THREAD_UUID
-codex team mcp --socket /ABSOLUTE/PATH/daemon.sock --thread THREAD_UUID \
+codex agents --manifest team.toml agent-credential local/primary/THREAD_UUID
+codex agents mcp --socket /ABSOLUTE/PATH/daemon.sock --thread THREAD_UUID \
   --credential-env CODEX_TEAM_AGENT_CREDENTIAL
 ```
 
 The agent MCP exposes only the `team` tool, bound to that thread. WebSocket clients
 can use `--url` and `--auth-token-env`. The separate privileged
-`codex team --manifest team.toml control-mcp` exposes `team_control` with
+`codex agents --manifest team.toml control-mcp` exposes `team_control` with
 `status`, `pause`, `resume`, and `stop`. Configure that surface only for an operator.
 Both stdio surfaces negotiate MCP 2025-06-18.
 
@@ -181,8 +200,9 @@ Issue/PR mentions of `@alias`, mapped assignments and review requests create
 attributed requests. Replies map back to the originating issue/PR. Repeated
 webhooks are deduplicated, and mirrored comments are ignored. Publication pauses
 with the team. An uncertain comment POST requires inspection and
-`codex team --manifest team.toml retry MESSAGE_UUID`; the adapter checks for its
-original comment before another POST.
+`codex agents --manifest team.toml retry MESSAGE_UUID`; the adapter checks for its
+original comment. If its outcome remains uncertain, it stays held rather than
+posting again. Publication remains bound to the original configured integration.
 
 `gitea-inspect owner/repository` queries the configured instance's version and
 project API. Project boards are listed when available; project webhook automation
@@ -194,7 +214,7 @@ and [project API](https://docs.gitea.com/api/operations/repo-list-projects/).
 ```sh
 just test -p codex-team -p codex-team-store -p codex-team-extension
 just test -p codex-app-server --test all v2::team
-just test -p codex-tui team_overview
+just test -p codex-tui -E 'test(agents_overview) | test(agents_hosts) | test(model_target)'
 ```
 
 The coordinator runtime test uses two real app-server processes and a mock model

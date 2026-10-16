@@ -9,6 +9,14 @@ use std::collections::HashSet;
 
 impl App {
     pub(in crate::app) fn prepare_agents_overview_removal(&mut self, removed: &HashSet<ThreadId>) {
+        if self
+            .chat_widget
+            .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
+            .and_then(|index| self.agents_overview.visible_targets.get(index))
+            .is_some_and(|target| target.host != self.agents_hosts.foreground)
+        {
+            return;
+        }
         let selected = self.agents_overview.selection_after_removal.or_else(|| {
             let index = self
                 .chat_widget

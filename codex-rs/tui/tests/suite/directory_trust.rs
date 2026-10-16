@@ -74,7 +74,7 @@ async fn connected_trust_cancellation_and_acceptance_control_task_creation() -> 
                         };
                         methods.lock().unwrap().push(request.method.clone());
                         let result = match request.method.as_str() {
-                            "initialize" => json!({"userAgent": "trust-pty"}),
+                            "initialize" => json!({"userAgent": format!("trust-pty/{}", codex_tui::CODEX_CLI_VERSION)}),
                             "experimentalFeature/list" => json!({"data": (["api_key_model_discovery", "code_mode_host", "auth_elicitation"].map(|name| json!({
                                 "name": name, "stage": "stable", "displayName": null,
                                 "description": null, "announcement": null,

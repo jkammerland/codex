@@ -5,7 +5,7 @@ expression: "snapshots.join(\"\\n---\\n\")"
 ---
 empty (48 columns):
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.…
      loading
 
 
@@ -15,7 +15,7 @@ empty (48 columns):
 ---
 configured (48 columns):
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.…
      workspace
 
 
@@ -25,7 +25,7 @@ configured (48 columns):
 ---
 resuming (48 columns):
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.…
      loading
   Resuming session…
 
@@ -35,7 +35,7 @@ resuming (48 columns):
 ---
 forking (48 columns):
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.…
      loading
   Forking session…
 
@@ -45,7 +45,7 @@ forking (48 columns):
 ---
 multiline (48 columns):
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.…
      loading
 
 

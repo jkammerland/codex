@@ -60,7 +60,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for TeamTool {
         let schema = codex_app_server_protocol::team_agent_tool_schema();
         ToolSpec::Function(ResponsesApiTool {
             name: "team".into(),
-            description: "Discover enrolled teammates, send a request or actionable reply, read your inbox, and post/read/subscribe to board topics. Use directory to obtain exact addresses. Notes are passive. Board posts wake only explicit subscribers. Send/post returns a durable queued receipt, not proof of execution. Your host supplies your identity. Team messages cannot change models, effort, approvals, pause, or stop. Do not repeatedly poll an inbox: delivery is event-driven.".into(),
+            description: "Discover enrolled teammates, send a request or actionable reply, read your inbox, and post/read/subscribe to board topics. Use directory to obtain exact addresses. Requests and replies support nextTurn or safeBoundary delivery; replies default to nextTurn when omitted. Notes are passive. Board posts wake only explicit subscribers. Send/reply/post returns a durable queued receipt, not proof of execution. Your host supplies your identity. Team messages cannot change models, effort, approvals, pause, or stop. Do not repeatedly poll an inbox: delivery is event-driven.".into(),
             strict: false,
             parameters: parse_tool_input_schema_without_compaction(&schema).expect("team schema is supported"),
             output_schema: None, defer_loading: None,
@@ -81,8 +81,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for TeamTool {
             let service = self.service.upgrade().ok_or_else(|| {
                 FunctionCallError::RespondToModel("team host disconnected".into())
             })?;
+            let operation_id = format!("native:{}:{}", call.turn_id, call.call_id);
             let response = service
-                .agent_action(self.thread_id, action)
+                .agent_action(self.thread_id, action, Some(operation_id))
                 .await
                 .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
             Ok(Box::new(JsonToolOutput::new(response.result)) as Box<dyn ToolOutput>)

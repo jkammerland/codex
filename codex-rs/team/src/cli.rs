@@ -19,16 +19,21 @@ pub struct TeamCommand {
     /// Runtime team manifest. Paths in it are relative to the manifest.
     #[arg(long, global = true)]
     pub manifest: Option<PathBuf>,
+    /// Reuse this identity when retrying a submission whose response was lost.
+    #[arg(long, global = true)]
+    pub operation_id: Option<String>,
     #[command(subcommand)]
-    command: Command,
+    pub command: TeamAction,
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+pub enum TeamAction {
     /// Reply to the original sender, board topic or Gitea conversation.
     Reply {
         message_id: String,
         body: String,
+        #[arg(long)]
+        safe_boundary: bool,
     },
     /// Read a bound agent credential for an external MCP bridge.
     AgentCredential {
@@ -92,6 +97,20 @@ enum Command {
         #[arg(long)]
         effort: Option<String>,
     },
+    /// Release an idle, settled enrolled family from team execution.
+    Leave {
+        #[arg(value_parser = address)]
+        address: TeamAddress,
+    },
+    /// Set each field independently: keep, default, inherit, or value:NAME.
+    SelectModel {
+        #[arg(value_parser = address)]
+        address: TeamAddress,
+        #[arg(long, default_value = "keep", value_parser = selection)]
+        model: codex_app_server_protocol::TeamSelection,
+        #[arg(long, default_value = "keep", value_parser = selection)]
+        effort: codex_app_server_protocol::TeamSelection,
+    },
     Retry {
         message_id: String,
     },
@@ -102,7 +121,7 @@ enum Command {
 }
 
 #[derive(Clone, Debug, ValueEnum)]
-enum MessageKind {
+pub enum MessageKind {
     Request,
     Reply,
     Note,
@@ -117,31 +136,61 @@ pub(crate) fn address(value: &str) -> std::result::Result<TeamAddress, String> {
     Ok(TeamAddress {
         machine_id: parts[0].into(),
         server_id: parts[1].into(),
-        thread_id: parts[2].into(),
+        thread_id: uuid::Uuid::parse_str(parts[2])
+            .map_err(|error| format!("invalid thread id: {error}"))?
+            .to_string(),
     })
 }
 
+fn selection(value: &str) -> std::result::Result<codex_app_server_protocol::TeamSelection, String> {
+    use codex_app_server_protocol::TeamSelection;
+    match value {
+        "keep" => Ok(TeamSelection::Keep),
+        "default" => Ok(TeamSelection::Default),
+        "inherit" => Ok(TeamSelection::Inherit),
+        _ => value
+            .strip_prefix("value:")
+            .filter(|value| !value.is_empty())
+            .map(|value| TeamSelection::Value {
+                value: value.into(),
+            })
+            .ok_or_else(|| "use keep, default, inherit, or value:NAME".into()),
+    }
+}
+
 pub(crate) async fn run(command: TeamCommand) -> Result<()> {
-    if let Command::Mcp(mcp) = command.command {
+    if let TeamAction::Mcp(mcp) = command.command {
         return crate::mcp::run(mcp).await;
     }
     let manifest = command
         .manifest
         .context("--manifest is required for operator commands")?;
-    if matches!(command.command, Command::Serve) {
+    if matches!(command.command, TeamAction::Serve) {
         return crate::http::serve(Manifest::load(&manifest).await?).await;
     }
     let client = TeamClient::from_manifest(&manifest).await?;
-    if matches!(command.command, Command::ControlMcp) {
+    if matches!(command.command, TeamAction::ControlMcp) {
         return crate::operator_mcp::run(client).await;
     }
     let request = match command.command {
-        Command::Reply { message_id, body } => TeamRequest::Reply { message_id, body },
-        Command::AgentCredential { address } => TeamRequest::AgentCredential { address },
-        Command::GiteaInspect { repository } => TeamRequest::GiteaInspect { repository },
-        Command::Status => TeamRequest::Snapshot,
-        Command::Enroll { address, alias } => TeamRequest::Enroll { address, alias },
-        Command::Send {
+        TeamAction::Reply {
+            message_id,
+            body,
+            safe_boundary,
+        } => TeamRequest::Reply {
+            message_id,
+            body,
+            delivery: if safe_boundary {
+                TeamDeliveryMode::SafeBoundary
+            } else {
+                TeamDeliveryMode::NextTurn
+            },
+        },
+        TeamAction::AgentCredential { address } => TeamRequest::AgentCredential { address },
+        TeamAction::GiteaInspect { repository } => TeamRequest::GiteaInspect { repository },
+        TeamAction::Status => TeamRequest::Snapshot,
+        TeamAction::Enroll { address, alias } => TeamRequest::Enroll { address, alias },
+        TeamAction::Send {
             recipient,
             body,
             kind,
@@ -162,8 +211,8 @@ pub(crate) async fn run(command: TeamCommand) -> Result<()> {
                 TeamDeliveryMode::NextTurn
             },
         },
-        Command::Post { topic, body } => TeamRequest::Post { topic, body },
-        Command::Subscribe {
+        TeamAction::Post { topic, body } => TeamRequest::Post { topic, body },
+        TeamAction::Subscribe {
             address,
             topic,
             disable,
@@ -172,20 +221,20 @@ pub(crate) async fn run(command: TeamCommand) -> Result<()> {
             topic,
             enabled: !disable,
         },
-        Command::Pause => TeamRequest::Control {
+        TeamAction::Pause => TeamRequest::Control {
             mode: TeamExecutionMode::Paused,
         },
-        Command::Resume => TeamRequest::Control {
+        TeamAction::Resume => TeamRequest::Control {
             mode: TeamExecutionMode::Running,
         },
-        Command::Stop => TeamRequest::Control {
+        TeamAction::Stop => TeamRequest::Control {
             mode: TeamExecutionMode::Stopped,
         },
-        Command::Models { machine, server } => TeamRequest::Models {
+        TeamAction::Models { machine, server } => TeamRequest::Models {
             machine_id: machine,
             server_id: server,
         },
-        Command::SetModel {
+        TeamAction::SetModel {
             address,
             model,
             effort,
@@ -194,14 +243,50 @@ pub(crate) async fn run(command: TeamCommand) -> Result<()> {
             model,
             effort,
         },
-        Command::Retry { message_id } => TeamRequest::Retry { message_id },
-        Command::Serve | Command::Mcp(_) | Command::ControlMcp => {
+        TeamAction::Leave { address } => TeamRequest::Leave { address },
+        TeamAction::SelectModel {
+            address,
+            model,
+            effort,
+        } => TeamRequest::SelectModel {
+            address,
+            model,
+            effort,
+        },
+        TeamAction::Retry { message_id } => TeamRequest::Retry { message_id },
+        TeamAction::Serve | TeamAction::Mcp(_) | TeamAction::ControlMcp => {
             unreachable!("long-running commands were handled above")
         }
     };
+    let operation = match command.operation_id {
+        Some(operation_id) => crate::TeamOperation {
+            operation_id,
+            request,
+        },
+        None => crate::TeamOperation::new(request),
+    };
     println!(
         "{}",
-        serde_json::to_string_pretty(&client.request(request).await?)?
+        serde_json::to_string_pretty(&client.request_operation(&operation).await?)?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_delivery_flag_defaults_to_next_turn_and_accepts_safe_boundary() {
+        for safe_boundary in [false, true] {
+            let mut args = vec!["agents", "reply", "message-id", "Reviewed"];
+            if safe_boundary {
+                args.push("--safe-boundary");
+            }
+            let command = TeamCommand::try_parse_from(args).expect("reply arguments are valid");
+            assert!(
+                matches!(command.command, TeamAction::Reply { safe_boundary: selected, .. } if selected == safe_boundary)
+            );
+        }
+    }
 }

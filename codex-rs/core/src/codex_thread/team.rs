@@ -16,6 +16,43 @@ use tokio::sync::oneshot;
 use super::CodexThread;
 
 impl CodexThread {
+    /// Journal model intent with the host before acknowledging its queue admission.
+    pub async fn prepare_team_model_selection(
+        &self,
+        settings: &codex_protocol::protocol::ThreadSettingsOverrides,
+    ) -> Result<Option<i64>> {
+        let mut superseded: Option<i64> = None;
+        for contributor in self
+            .session
+            .services
+            .extensions
+            .thread_lifecycle_contributors()
+        {
+            let revision = contributor
+                .on_model_selection_requested(self.session.thread_id(), settings)
+                .await
+                .map_err(CodexErr::InvalidRequest)?;
+            if let Some(revision) = revision {
+                superseded = Some(superseded.map_or(revision, |previous| previous.max(revision)));
+            }
+        }
+        Ok(superseded)
+    }
+
+    pub async fn configured_default_model(&self) -> String {
+        let config = self.config().await;
+        self.session
+            .services
+            .models_manager
+            .get_default_model(
+                &config.configured_model_default,
+                /*allow_provider_model_fallback*/ false,
+                codex_models_manager::manager::RefreshStrategy::Offline,
+                config.http_client_factory(),
+            )
+            .await
+    }
+
     /// Reason queued team work cannot start with the selected next-turn model.
     pub async fn team_model_error(&self) -> Option<String> {
         self.session
@@ -102,7 +139,7 @@ impl CodexThread {
             .extensions
             .execution_control()
             .snapshot(self.session.thread_id)
-            .is_some_and(|state| state.mode == ExecutionMode::Stopped)
+            .is_some_and(|state| state.mode == ExecutionMode::Stopped || state.reconciling)
         {
             return Err(CodexErr::InvalidRequest(
                 "team stop requires a closed execution gate".into(),

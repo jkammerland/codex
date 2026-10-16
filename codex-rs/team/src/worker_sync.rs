@@ -89,8 +89,17 @@ impl Coordinator {
             .into_iter()
             .map(|(_, control)| control)
             .collect::<Vec<_>>();
-        if revisions.is_empty() && reconcile {
-            revisions.push(current);
+        if reconcile {
+            if let Some(stopped) =
+                applied.filter(|control| control.mode == TeamExecutionMode::Stopped)
+            {
+                // Stop is persisted before interruption and cancellation. A
+                // crash can leave those actions unfinished even when a later
+                // Resume is already queued at the coordinator.
+                revisions.insert(0, stopped);
+            } else if revisions.is_empty() {
+                revisions.push(current);
+            }
         }
         for control in revisions {
             let response: TeamControlResponse = peer

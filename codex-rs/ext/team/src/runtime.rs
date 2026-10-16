@@ -92,10 +92,7 @@ impl TeamHostService {
             let member = TeamAgentRuntime {
                 thread_id: thread_id.to_string(),
                 root_thread_id: root_id.to_string(),
-                parent_thread_id: thread
-                    .session_configured()
-                    .parent_thread_id
-                    .map(|id| id.to_string()),
+                parent_thread_id: config.parent_thread_id.map(|id| id.to_string()),
                 alias,
                 loaded: true,
                 archived: false,

@@ -1,10 +1,10 @@
 //! Narrow host capabilities for coordinated threads. The input loop owns routing.
 
+use crate::session::Submission;
 use codex_extension_api::ExecutionMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::turn_input::TeamMessageInput;
 use codex_protocol::turn_input::TurnInput;
@@ -139,11 +139,10 @@ impl CodexThread {
             ));
         }
         if !matches!(mode, TurnInputMode::Steer { .. }) {
-            self.session
-                .services
-                .agent_control
-                .ensure_execution_capacity_for_turn_start(self)
-                .await?;
+            self.ensure_execution_capacity_for_turn_start(
+                self.session.services.agent_control.as_ref(),
+            )
+            .await?;
         }
         let (reply, result) = oneshot::channel();
         self.io
@@ -157,6 +156,8 @@ impl CodexThread {
                 trace: None,
                 parent_turn_id: None,
                 root_turn_id: None,
+                turn_extension_init: None,
+                residency_guard: None,
             })
             .await?;
         result.await.unwrap_or(Err(CodexErr::InternalAgentDied))

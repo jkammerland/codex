@@ -96,16 +96,24 @@ impl TeamClient {
     /// Credentials belong only to this child process. Its independent relay
     /// connection cannot collide with coordinator request IDs or approvals.
     pub fn attach_command(&self, address: &TeamAddress) -> Result<tokio::process::Command> {
+        let relay = self.websocket_url(&format!(
+            "relay/{}/{}",
+            address.machine_id, address.server_id
+        ))?;
+        // The interactive CLI requires an explicit port, including the default
+        // port that Url otherwise omits when serializing an HTTPS endpoint.
+        let remote = format!(
+            "{}:{}{}",
+            &relay[..url::Position::AfterHost],
+            relay
+                .port_or_known_default()
+                .context("relay port is missing")?,
+            &relay[url::Position::BeforePath..],
+        );
         let mut command = tokio::process::Command::new(std::env::current_exe()?);
         command
             .arg("--remote")
-            .arg(
-                self.websocket_url(&format!(
-                    "relay/{}/{}",
-                    address.machine_id, address.server_id
-                ))?
-                .as_str(),
-            )
+            .arg(remote)
             .args([
                 "--remote-auth-token-env",
                 "CODEX_TEAM_RELAY_TOKEN",

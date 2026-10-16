@@ -205,9 +205,10 @@ impl TeamHostService {
             .ok_or_else(|| anyhow::anyhow!("host is shutting down"))?;
         let thread_id = ThreadId::from_string(&params.address.thread_id)?;
         let thread = manager.get_thread(thread_id).await?;
-        let snapshot = thread.session_configured();
+        let snapshot = thread.config_snapshot().await;
         ensure!(
-            snapshot.parent_thread_id.is_none() && ThreadId::from(snapshot.session_id) == thread_id,
+            snapshot.parent_thread_id.is_none()
+                && ThreadId::from(thread.startup_metadata().session_id) == thread_id,
             "only root sessions may be enrolled"
         );
         ensure!(

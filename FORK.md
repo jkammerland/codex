@@ -1,5 +1,11 @@
 # Maintained MCP lifecycle fork
 
+This team trial branch adds the multi-machine coordinator to MCP.25 and uses
+`0.163.0+jkammerland.mcp.25.team.1` for both CLI and app-server. Its Cargo
+workspace version remains `0.163.0`, matching the upstream source lineage used
+for model discovery. Build the client and server from this branch together;
+changing package metadata alone does not update the model catalog request.
+
 MCP.25 transplants the maintained net delta from
 `4d98246bb637350a78925f7a479ee4810218a495` (base
 `7f892275e31002f0422477c6219189284560e689`) onto pinned upstream main

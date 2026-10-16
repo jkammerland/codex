@@ -96,7 +96,9 @@ impl TeamHostService {
             receipt.state = TeamReceiptState::NeedsReconciliation;
             receipt.turn_id = Some(match &mode {
                 TurnInputMode::Steer { expected_turn_id } => expected_turn_id.clone(),
-                TurnInputMode::StartIfIdle | TurnInputMode::StartOrSteer => submission_id.clone(),
+                TurnInputMode::StartIfIdle
+                | TurnInputMode::StartOrSteer
+                | TurnInputMode::ContinueIfIdle { .. } => submission_id.clone(),
             });
             store.update_receipt(&receipt).await?;
             let result = thread
@@ -113,8 +115,8 @@ impl TeamHostService {
                 )
                 .await?;
             match result {
-                TurnInputSubmission::Started { turn_id }
-                | TurnInputSubmission::Steered { turn_id } => {
+                TurnInputSubmission::Started { turn_id, .. }
+                | TurnInputSubmission::Steered { turn_id, .. } => {
                     receipt.state = TeamReceiptState::Accepted;
                     receipt.turn_id = Some(turn_id);
                 }

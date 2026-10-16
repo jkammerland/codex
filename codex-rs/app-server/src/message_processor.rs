@@ -379,9 +379,7 @@ impl MessageProcessor {
                     thread_state_manager.clone(),
                 )),
                 Some({
-                    let time_provider =
-                        app_server_time_provider(outgoing.clone(), thread_state_manager.clone());
-                    time_provider
+                    (app_server_time_provider(outgoing.clone(), thread_state_manager.clone())) as _
                 }),
             );
             match code_mode_session_provider {
@@ -1420,6 +1418,11 @@ impl MessageProcessor {
             ClientRequest::TeamEnroll { params, .. } => self
                 .team_processor
                 .enroll(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::TeamLeave { params, .. } => self
+                .team_processor
+                .leave(params)
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::TeamControl { params, .. } => self

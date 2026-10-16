@@ -684,6 +684,7 @@ mod thread_processor_behavior_tests {
             initial_turns_page: None,
         };
         let config_snapshot = ThreadConfigSnapshot {
+            team_model_policy: Default::default(),
             turn_extension_init: Default::default(),
             disabled_plugin_ids: Vec::new(),
             model: "gpt-5".to_string(),
@@ -898,6 +899,71 @@ mod thread_processor_behavior_tests {
                 serde_json::Value::String("low".to_string()),
             )]))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resumed_effort_clear_and_host_default_survive_without_overriding_explicit_requests()
+    -> Result<()> {
+        let directory = TempDir::new()?;
+        tokio::fs::write(
+            directory.path().join("config.toml"),
+            "model = \"host-default\"\nmodel_reasoning_effort = \"high\"\n",
+        )
+        .await?;
+        let manager = ConfigManager::new(
+            directory.path().to_path_buf(),
+            Vec::new(),
+            LoaderOverrides::default(),
+            /*strict_config*/ false,
+            CloudConfigBundleLoader::default(),
+            Arg0DispatchPaths::default(),
+            Arc::new(StaticThreadConfigLoader::new(Vec::new())),
+        );
+        let mut persisted = test_thread_metadata(Some("saved-choice"), None)?;
+        persisted.model_provider = "openai".into();
+        for (mut request, explicit_model, expected_model, expected_effort, restore_policy) in [
+            (None, None, "saved-choice", None, true),
+            (
+                None,
+                Some("caller-choice"),
+                "caller-choice",
+                Some(ReasoningEffort::High),
+                false,
+            ),
+            (
+                Some(HashMap::from([(
+                    "model_reasoning_effort".into(),
+                    json!("low"),
+                )])),
+                None,
+                "host-default",
+                Some(ReasoningEffort::Low),
+                false,
+            ),
+        ] {
+            let mut overrides = ConfigOverrides {
+                model: explicit_model.map(str::to_owned),
+                cwd: Some(directory.path().to_path_buf()),
+                ..Default::default()
+            };
+            merge_persisted_resume_metadata(&mut request, &mut overrides, &persisted);
+            let config = manager.load_with_overrides(request, overrides).await?;
+            assert_eq!(
+                (
+                    config.model.as_deref(),
+                    config.model_reasoning_effort,
+                    config.configured_model_default.as_deref(),
+                    config.restore_saved_model_policy
+                ),
+                (
+                    Some(expected_model),
+                    expected_effort,
+                    Some("host-default"),
+                    restore_policy
+                ),
+            );
+        }
         Ok(())
     }
 

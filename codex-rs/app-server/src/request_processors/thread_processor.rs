@@ -34,6 +34,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_thread_store::PersistContext;
+use futures::TryFutureExt;
 use std::ops::ControlFlow;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
@@ -238,8 +239,11 @@ fn merge_persisted_resume_metadata(
     persisted_metadata: &ThreadMetadata,
 ) {
     if has_model_resume_override(request_overrides.as_ref(), typesafe_overrides) {
+        typesafe_overrides.restore_saved_model_policy = Some(false);
         return;
     }
+    typesafe_overrides.restore_saved_model_policy = Some(true);
+    typesafe_overrides.model_reasoning_effort = Some(persisted_metadata.reasoning_effort.clone());
 
     typesafe_overrides.model = persisted_metadata.model.clone();
     typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
@@ -559,14 +563,37 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
-    pub(crate) async fn thread_resume(
+    pub(crate) fn thread_resume(
         &self,
         target: ThreadResumeTarget,
         params: ThreadResumeParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
-    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+    ) -> futures::future::BoxFuture<'_, Result<Option<ClientResponsePayload>, JSONRPCErrorError>>
+    {
+        // Allocate the retry loop at the request boundary so unrelated request
+        // arms do not retain its large construction frame while being polled.
+        Box::pin(
+            self.thread_resume_until_ready(
+                target,
+                params,
+                app_server_client_name,
+                app_server_client_version,
+                client_mcp_extensions,
+            )
+            .map_ok(|()| None),
+        )
+    }
+
+    async fn thread_resume_until_ready(
+        &self,
+        target: ThreadResumeTarget,
+        params: ThreadResumeParams,
+        app_server_client_name: Option<String>,
+        app_server_client_version: Option<String>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> Result<(), JSONRPCErrorError> {
         let mut prepared_config = None;
         // Keep the resume future off the request handler's stack.
         while Box::pin(self.thread_resume_inner(
@@ -580,27 +607,30 @@ impl ThreadRequestProcessor {
         .await?
         .is_continue()
         {}
-        Ok(None)
+        Ok(())
     }
 
-    pub(crate) async fn thread_fork(
+    pub(crate) fn thread_fork(
         &self,
         request_id: ConnectionRequestId,
         params: ThreadForkParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
-    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        // Keep the large fork future out of the shared request dispatcher's stack frame.
-        Box::pin(self.thread_fork_inner(
-            request_id,
-            params,
-            app_server_client_name,
-            app_server_client_version,
-            client_mcp_extensions,
-        ))
-        .await
-        .map(|()| None)
+    ) -> futures::future::BoxFuture<'_, Result<Option<ClientResponsePayload>, JSONRPCErrorError>>
+    {
+        // Allocate at the request boundary, then map directly so polling the
+        // fork does not retain an async wrapper's large construction frame.
+        Box::pin(
+            self.thread_fork_inner(
+                request_id,
+                params,
+                app_server_client_name,
+                app_server_client_version,
+                client_mcp_extensions,
+            )
+            .map_ok(|()| None),
+        )
     }
 
     pub(crate) async fn thread_revert(

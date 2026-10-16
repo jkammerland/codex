@@ -21,14 +21,14 @@ use crate::tools::context::ToolInvocation;
 pub(crate) async fn notify_tool_start(
     invocation: &ToolInvocation,
     mcp_tool: Option<&McpToolContext>,
-) {
+) -> Result<(), codex_tools::FunctionCallError> {
     let contributors = invocation
         .session
         .services
         .extensions
         .tool_lifecycle_contributors();
     if contributors.is_empty() {
-        return;
+        return Ok(());
     }
     let thread_store = &invocation.session.services.thread_extension_data;
     let conversation_history = invocation.session.conversation_history_snapshot().await;
@@ -38,9 +38,11 @@ pub(crate) async fn notify_tool_start(
         .await
         .and_then(|origin| origin.item_id);
 
+    let admission = codex_extension_api::ToolDispatchAdmission::default();
     for contributor in contributors {
         contributor
             .on_tool_start(ToolStartInput {
+                admission: &admission,
                 session_store: &invocation.session.services.session_extension_data,
                 thread_store,
                 turn_store: invocation.turn.extension_data.as_ref(),
@@ -56,6 +58,10 @@ pub(crate) async fn notify_tool_start(
                 source: extension_tool_call_source(invocation.source.clone()),
             })
             .await;
+    }
+    match admission.rejection() {
+        Some(reason) => Err(codex_tools::FunctionCallError::RespondToModel(reason)),
+        None => Ok(()),
     }
 }
 

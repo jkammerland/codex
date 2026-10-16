@@ -1,0 +1,15 @@
+---
+source: tui/src/app/agents_hosts_tests.rs
+assertion_line: 819
+expression: render(&app.chat_widget)
+---
+
+
+  Machines and connections
+
+
+› 1. Reload configured machines  Retry the coordinator connection
+  2. New task · Beta / main      Use this server's configured defaults
+  3. Beta / main                 Connected · select to reconnect
+
+  enter select · esc back

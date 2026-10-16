@@ -6,9 +6,13 @@ use codex_extension_api::ExtensionRegistryBuilder;
 
 mod bridge;
 mod control;
+mod control_worker;
 mod delivery;
+mod delivery_evidence;
 mod jobs;
+mod leave;
 mod lifecycle;
+mod models;
 mod runtime;
 mod service;
 mod tools;
@@ -26,3 +30,11 @@ pub fn install<C: Send + Sync + 'static>(
     registry.tool_lifecycle_contributor(service.clone());
     registry.thread_lifecycle_contributor(service);
 }
+
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod model_tests;

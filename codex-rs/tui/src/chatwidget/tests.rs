@@ -266,6 +266,8 @@ mod misalignment_policy;
 mod model_display_name_tests;
 #[path = "tests/model_picker_tests.rs"]
 mod model_picker_tests;
+#[path = "tests/model_target_tests.rs"]
+mod model_target_tests;
 #[path = "tests/permission_picker_tests.rs"]
 mod permission_picker_tests;
 #[path = "tests/permission_shortcuts_tests.rs"]

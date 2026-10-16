@@ -953,6 +953,7 @@ impl Session {
         // todo(aibrahim): store this state somewhere else so we don't need to mut config
         let config = session_configuration.original_config_do_not_use.clone();
         let mut per_turn_config = (*config).clone();
+        per_turn_config.team_model_policy = session_configuration.team_model_policy.clone();
         // Config is consumed by host plugins and MCP processes. Executor paths and
         // permissions remain on their captured environment attachments.
         per_turn_config.cwd = local_environment

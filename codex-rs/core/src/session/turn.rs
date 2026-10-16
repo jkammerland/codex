@@ -2632,7 +2632,8 @@ async fn try_run_sampling_request(
         .await?;
     // Team delivery markers must reach durable history before a model can act
     // on them. A lost acknowledgement can then be reconciled without replay.
-    sess.flush_team_input().await?;
+    sess.flush_team_input(&step_context.turn.sub_id, &turn_store, &prompt.input)
+        .await?;
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
         model = step_context.settings.model_info.slug.clone(),
@@ -2799,6 +2800,8 @@ async fn try_run_sampling_request(
 
         match event {
             ResponseEvent::Created { response_id } => {
+                sess.acknowledge_team_request(&turn_store, response_id.as_deref())
+                    .await?;
                 if let Some(response_id) = response_id {
                     turn_context
                         .extension_data

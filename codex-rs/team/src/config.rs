@@ -112,6 +112,13 @@ impl Manifest {
         for machine in &self.machines {
             validate_id(&machine.id)?;
             ensure!(
+                !matches!(
+                    machine.id.to_ascii_lowercase().as_str(),
+                    "operator" | "gitea"
+                ),
+                "machine id is reserved for an integration inbox"
+            );
+            ensure!(
                 machine_ids.insert(&machine.id),
                 "duplicate machine id: {}",
                 machine.id

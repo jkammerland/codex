@@ -4320,6 +4320,14 @@
             "body": {
               "type": "string"
             },
+            "delivery": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/TeamDeliveryMode"
+                }
+              ],
+              "default": "nextTurn"
+            },
             "message_id": {
               "type": "string"
             },
@@ -4717,6 +4725,98 @@
         "board"
       ],
       "type": "string"
+    },
+    "TeamModelSelection": {
+      "properties": {
+        "effort": {
+          "$ref": "#/definitions/TeamSelection"
+        },
+        "model": {
+          "$ref": "#/definitions/TeamSelection"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "effort",
+        "model",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "TeamSelection": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "keep"
+              ],
+              "title": "KeepTeamSelectionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "KeepTeamSelection",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "default"
+              ],
+              "title": "DefaultTeamSelectionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "DefaultTeamSelection",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "value"
+              ],
+              "title": "ValueTeamSelectionType",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "title": "ValueTeamSelection",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "inherit"
+              ],
+              "title": "InheritTeamSelectionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "InheritTeamSelection",
+          "type": "object"
+        }
+      ]
     },
     "TextElement": {
       "properties": {

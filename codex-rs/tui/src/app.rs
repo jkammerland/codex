@@ -201,6 +201,18 @@ mod agent_navigation;
 mod agent_picker;
 mod agent_status_feed;
 #[cfg(any(unix, windows))]
+pub(crate) mod agents_hosts;
+mod agents_hosts_actions;
+mod agents_hosts_attachment;
+mod agents_hosts_completions;
+mod agents_hosts_discovery;
+mod agents_hosts_lifecycle;
+pub(crate) mod agents_hosts_models;
+mod agents_hosts_revert;
+mod agents_hosts_revert_preparation;
+pub(crate) mod agents_hosts_team;
+mod agents_hosts_team_details;
+mod agents_hosts_usage;
 mod agents_overview;
 mod agents_overview_actions;
 mod agents_overview_details;
@@ -576,6 +588,7 @@ pub(crate) struct App {
     transcript_reflow: TranscriptReflowState,
     initial_history_replay_buffer: Option<InitialHistoryReplayBuffer>,
     pending_thread_switch_resets: usize,
+    pending_host_prompt_reverts: HashMap<ThreadId, agents_hosts_revert::PendingHostPromptRevert>,
     pub(crate) scrollback_has_older_history: bool,
 
     pub(crate) enhanced_keys_supported: bool,
@@ -636,6 +649,7 @@ pub(crate) struct App {
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     agents_overview: agents_overview::AgentsOverviewState,
+    agents_hosts: agents_hosts::AgentsHosts,
     side_threads: HashMap<ThreadId, SideThreadState>,
     abandoned_side_threads: HashSet<ThreadId>,
     active_thread_id: Option<ThreadId>,
@@ -648,6 +662,10 @@ pub(crate) struct App {
     dynamic_tool_status_updates:
         tokio::sync::broadcast::Sender<codex_app_server_protocol::ThreadStatusChangedNotification>,
     dynamic_tool_tasks: HashMap<codex_app_server_protocol::RequestId, (String, JoinHandle<()>)>,
+    dynamic_tool_origins: HashMap<
+        codex_app_server_protocol::RequestId,
+        codex_app_server_client::AppServerReplyHandle,
+    >,
     pending_startup_thread_start: bool,
     pending_server_version_notice: Option<crate::status::remote_connection::ServerVersionNotice>,
     /// Opens the session picker after event dispatch returns, with a fresh stack.
@@ -861,6 +879,34 @@ impl App {
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
+        // Team controls belong to the enclosing App, including while its picker or composer is open.
+        if self.agents_hosts.enabled()
+            && let TuiEvent::Key(key) = &event
+            && key.kind == KeyEventKind::Press
+            && key.modifiers.is_empty()
+            && let Some(mode) = match key.code {
+                KeyCode::F(6) => Some(codex_app_server_protocol::TeamExecutionMode::Paused),
+                KeyCode::F(7) => Some(codex_app_server_protocol::TeamExecutionMode::Running),
+                KeyCode::F(8) => Some(codex_app_server_protocol::TeamExecutionMode::Stopped),
+                _ => None,
+            }
+        {
+            self.app_event_tx
+                .unscoped()
+                .send(AppEvent::AgentsTeamRequest(
+                    codex_team::TeamRequest::Control { mode },
+                ));
+            return Ok(AppRunControl::Continue);
+        }
+        if matches!(&event, TuiEvent::Paste(_))
+            && self
+                .current_displayed_thread_id()
+                .is_some_and(|id| self.pending_host_prompt_reverts.contains_key(&id))
+            && self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+        {
+            return Ok(AppRunControl::Continue);
+        }
         tui.link_hover.observe(&event);
         self.refresh_link_hover(tui)?;
         self.invalidate_right_click_paste(&event);
@@ -1288,6 +1334,18 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        if self.agents_hosts.enabled() {
+            for (_, (_, task)) in self.dynamic_tool_tasks.drain() {
+                task.abort();
+            }
+            for (_, task) in self.thread_event_listener_tasks.drain() {
+                task.abort();
+            }
+            for (_, cancellation) in self.pending_thread_titles.drain() {
+                cancellation.cancel();
+            }
+            self.recap.stop_ui_tasks();
+        }
         if let Err(err) = self.chat_widget.clear_managed_terminal_title() {
             tracing::debug!(error = %err, "failed to clear terminal title on app drop");
         }

@@ -343,6 +343,7 @@ async fn installed_extension_uses_http_after_warm_socket_auth_expires() -> Resul
         }
         registry.tool_lifecycle_contributors()[0]
             .on_tool_start(ToolStartInput {
+                admission: &codex_extension_api::ToolDispatchAdmission::default(),
                 permissions: Box::pin(async { Some(Default::default()) }),
                 session_store: &session_store,
                 thread_store,
@@ -621,6 +622,7 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
     ] {
         fixture.registry.tool_lifecycle_contributors()[0]
             .on_tool_start(ToolStartInput {
+                admission: &codex_extension_api::ToolDispatchAdmission::default(),
                 permissions: Box::pin(async { panic!("unexpected permission resolution") }),
                 session_store: &fixture.session_store,
                 thread_store,
@@ -720,6 +722,7 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
     };
     fixture.registry.tool_lifecycle_contributors()[0]
         .on_tool_start(ToolStartInput {
+            admission: &codex_extension_api::ToolDispatchAdmission::default(),
             permissions: Box::pin(async { Some(Default::default()) }),
             session_store: &fixture.session_store,
             thread_store,
@@ -1090,6 +1093,7 @@ async fn sample_configured_conversation_history_with_delivery(
 
     registry.tool_lifecycle_contributors()[0]
         .on_tool_start(ToolStartInput {
+            admission: &codex_extension_api::ToolDispatchAdmission::default(),
             permissions: Box::pin(async { Some(Default::default()) }),
             session_store: &session_store,
             thread_store,
@@ -1210,6 +1214,7 @@ impl GuardianFailureFixture {
         };
         self.registry.tool_lifecycle_contributors()[0]
             .on_tool_start(ToolStartInput {
+                admission: &codex_extension_api::ToolDispatchAdmission::default(),
                 permissions: Box::pin(async { Some(Default::default()) }),
                 session_store: &self.session_store,
                 thread_store,
@@ -2499,6 +2504,7 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
     };
     registry.tool_lifecycle_contributors()[0]
         .on_tool_start(ToolStartInput {
+            admission: &codex_extension_api::ToolDispatchAdmission::default(),
             permissions: Box::pin(async { panic!("unexpected permission resolution") }),
             session_store: &session_store,
             thread_store,
@@ -2804,6 +2810,7 @@ async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<(
     };
     registry.tool_lifecycle_contributors()[0]
         .on_tool_start(ToolStartInput {
+            admission: &codex_extension_api::ToolDispatchAdmission::default(),
             permissions: Box::pin(async { Some(Default::default()) }),
             session_store: &session_store,
             thread_store,
@@ -3336,6 +3343,7 @@ async fn assert_parent_compaction_reuse(parent_context_for_review: bool) -> Resu
 
     registry.tool_lifecycle_contributors()[0]
         .on_tool_start(ToolStartInput {
+            admission: &codex_extension_api::ToolDispatchAdmission::default(),
             permissions: Box::pin(async { Some(Default::default()) }),
             session_store: &session_store,
             thread_store,
@@ -3430,6 +3438,7 @@ async fn assert_parent_compaction_reuse(parent_context_for_review: bool) -> Resu
         let call_id = format!("call-{}", index + 2);
         registry.tool_lifecycle_contributors()[0]
             .on_tool_start(ToolStartInput {
+                admission: &codex_extension_api::ToolDispatchAdmission::default(),
                 permissions: Box::pin(async { Some(Default::default()) }),
                 session_store: &session_store,
                 thread_store,
@@ -3536,6 +3545,7 @@ async fn cached_approval_respects_action_order_and_wrapper_lag() -> Result<()> {
             },
         };
         progress.observe(&ToolStartInput {
+            admission: &codex_extension_api::ToolDispatchAdmission::default(),
             permissions: Box::pin(async { Some(Default::default()) }),
             session_store: &fixture.session_store,
             thread_store: store,
@@ -3736,6 +3746,7 @@ fn seed_cached_score(
 
 fn observe_unscored_call(progress: &GuardianV2ScoreProgress, store: &ExtensionData) -> usize {
     progress.observe(&ToolStartInput {
+        admission: &codex_extension_api::ToolDispatchAdmission::default(),
         permissions: Box::pin(async { Some(Default::default()) }),
         session_store: store,
         thread_store: store,

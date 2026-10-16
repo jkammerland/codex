@@ -39,6 +39,7 @@ async fn paused_host_queues_one_delivery_and_resumes_the_original_thread() -> Re
         .request(|request_id| ClientRequest::TeamEnroll {
             request_id,
             params: TeamEnrollParams {
+                operation_id: None,
                 address: address.clone(),
                 alias: "reviewer".into(),
                 control: control.clone(),
@@ -179,6 +180,7 @@ async fn stop_resumes_the_original_turn_once_before_later_mail() -> Result<()> {
         .request(|request_id| ClientRequest::TeamEnroll {
             request_id,
             params: TeamEnrollParams {
+                operation_id: None,
                 address: address.clone(),
                 alias: "builder".into(),
                 control: control.clone(),
@@ -306,6 +308,7 @@ async fn agent_credential_cannot_impersonate_another_enrolled_session() -> Resul
             .request(|request_id| ClientRequest::TeamEnroll {
                 request_id,
                 params: TeamEnrollParams {
+                    operation_id: None,
                     address: TeamAddress {
                         machine_id: "local".into(),
                         server_id: "primary".into(),
@@ -329,6 +332,7 @@ async fn agent_credential_cannot_impersonate_another_enrolled_session() -> Resul
         .send_request(
             "team/agentRequest",
             Some(serde_json::to_value(TeamAgentRequestParams {
+                operation_id: None,
                 thread_id: second.id.clone(),
                 credential: credential.credential.clone(),
                 action: TeamAgentAction::Directory {
@@ -346,6 +350,7 @@ async fn agent_credential_cannot_impersonate_another_enrolled_session() -> Resul
         .request(|request_id| ClientRequest::TeamAgentRequest {
             request_id,
             params: TeamAgentRequestParams {
+                operation_id: None,
                 thread_id: first.id,
                 credential: credential.credential,
                 action: TeamAgentAction::Directory {

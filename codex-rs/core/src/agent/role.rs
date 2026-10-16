@@ -183,12 +183,17 @@ mod role_overrides {
         next_config.config_layer_stack = build_config_layer_stack(config, &role_layer_toml)?;
         if let Some(model) = &overrides.model {
             next_config.model = Some(model.clone());
+            next_config.configured_model_default = Some(model.clone());
+            next_config.team_model_policy.model_origin =
+                codex_protocol::team_model::TeamSelectionOrigin::Role;
         }
         if let Some(instructions) = &overrides.developer_instructions {
             next_config.developer_instructions = Some(instructions.clone());
         }
         if let Some(effort) = overrides.model_reasoning_effort.clone() {
             next_config.model_reasoning_effort = Some(effort);
+            next_config.team_model_policy.effort_origin =
+                codex_protocol::team_model::TeamSelectionOrigin::Role;
         }
         if let Some(summary) = overrides.model_reasoning_summary {
             next_config.model_reasoning_summary = Some(summary);

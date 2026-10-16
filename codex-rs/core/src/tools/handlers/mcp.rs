@@ -209,7 +209,7 @@ impl McpHandler {
                     .get(call.server_name()),
             )
         });
-        notify_tool_start(&invocation, mcp_tool.as_ref()).await;
+        notify_tool_start(&invocation, mcp_tool.as_ref()).await?;
 
         let originating_call = invocation.originating_call().await;
         let ToolInvocation {

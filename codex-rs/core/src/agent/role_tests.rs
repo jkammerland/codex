@@ -89,6 +89,47 @@ async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort(
 }
 
 #[tokio::test]
+async fn configured_role_keeps_field_ownership_even_when_values_match_parent() {
+    use codex_protocol::team_model::TeamSelectionOrigin;
+
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let role_path = write_role_config(
+        &home,
+        "equal-parent.toml",
+        "model = \"role-model\"\nmodel_reasoning_effort = \"high\"\n",
+    )
+    .await;
+    config.agent_roles.insert(
+        "fixed".into(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+    config.model = Some("role-model".into());
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+    config.team_model_policy.model_origin = TeamSelectionOrigin::Inherited;
+    config.team_model_policy.effort_origin = TeamSelectionOrigin::Inherited;
+
+    apply_role_to_config(&mut config, Some("fixed"))
+        .await
+        .expect("apply equal role");
+
+    assert_eq!(
+        (
+            config.team_model_policy.model_origin,
+            config.team_model_policy.effort_origin
+        ),
+        (TeamSelectionOrigin::Role, TeamSelectionOrigin::Role)
+    );
+    assert_eq!(
+        (config.model.as_deref(), config.model_reasoning_effort),
+        (Some("role-model"), Some(ReasoningEffort::High))
+    );
+}
+
+#[tokio::test]
 async fn apply_role_returns_unavailable_for_missing_user_role_file() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     config.agent_roles.insert(

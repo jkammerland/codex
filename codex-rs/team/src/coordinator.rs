@@ -21,7 +21,7 @@ use crate::transport::ResolvedEndpoint;
 #[derive(Clone)]
 pub(crate) struct Peer {
     pub handle: AppServerRequestHandle,
-    pub endpoint: ResolvedEndpoint,
+    pub verified: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) struct Coordinator {
@@ -29,9 +29,12 @@ pub(crate) struct Coordinator {
     pub manifest: Manifest,
     pub store: TeamStore,
     pub peers: RwLock<HashMap<String, Peer>>,
+    pub endpoints: RwLock<HashMap<String, ResolvedEndpoint>>,
+    pub observed_versions: Mutex<HashMap<String, u64>>,
     pub statuses: RwLock<HashMap<String, ServerStatus>>,
     pub mutations: Mutex<()>,
-    enrollments: Mutex<()>,
+    pub(crate) enrollments: crate::enrollment::AliasReservations,
+    control_updates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     model_updates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub changed: watch::Sender<u64>,
 }
@@ -91,9 +94,12 @@ impl Coordinator {
             manifest,
             store,
             peers: RwLock::new(HashMap::new()),
+            endpoints: RwLock::new(HashMap::new()),
+            observed_versions: Mutex::new(HashMap::new()),
             statuses: RwLock::new(statuses),
             mutations: Mutex::new(()),
-            enrollments: Mutex::new(()),
+            enrollments: crate::enrollment::AliasReservations::default(),
+            control_updates: Mutex::new(HashMap::new()),
             model_updates: Mutex::new(HashMap::new()),
             changed: watch::channel(0).0,
         }))
@@ -117,6 +123,15 @@ impl Coordinator {
             .get(&server_key(machine_id, server_id))
             .cloned()
             .context("worker is not connected")
+    }
+
+    pub async fn endpoint(&self, machine_id: &str, server_id: &str) -> Result<ResolvedEndpoint> {
+        self.endpoints
+            .read()
+            .await
+            .get(&server_key(machine_id, server_id))
+            .cloned()
+            .context("worker transport is not available")
     }
 
     pub async fn agents(&self) -> Result<Vec<Agent>> {
@@ -180,7 +195,11 @@ impl Coordinator {
                     credential: response.credential,
                 })
             }
-            TeamRequest::Reply { message_id, body } => {
+            TeamRequest::Reply {
+                message_id,
+                body,
+                delivery,
+            } => {
                 let original = self
                     .store
                     .get::<MessageRecord>("message", &message_id)
@@ -202,7 +221,7 @@ impl Coordinator {
                     )
                     .await?;
                 Ok(TeamResponse::Message {
-                    message: Box::new(self.ingest(message, TeamDeliveryMode::NextTurn).await?),
+                    message: Box::new(self.ingest(message, delivery).await?),
                 })
             }
             TeamRequest::GiteaInspect { repository } => Ok(TeamResponse::Gitea {
@@ -223,8 +242,12 @@ impl Coordinator {
                 self.notify();
                 Ok(TeamResponse::Control { control })
             }
+            TeamRequest::Leave { address } => {
+                self.leave(address, None).await?;
+                Ok(TeamResponse::Done)
+            }
             TeamRequest::Enroll { address, alias } => Ok(TeamResponse::Agent {
-                agent: Box::new(self.enroll(address, alias).await?),
+                agent: Box::new(self.enroll(address, alias, None).await?),
             }),
             TeamRequest::Models {
                 machine_id,
@@ -232,12 +255,28 @@ impl Coordinator {
             } => Ok(TeamResponse::Models {
                 data: self.models(&machine_id, &server_id).await?,
             }),
+            TeamRequest::SelectModel {
+                address,
+                model,
+                effort,
+            } => Ok(TeamResponse::Agent {
+                agent: Box::new(self.select_model(address, model, effort).await?),
+            }),
             TeamRequest::SetModel {
                 address,
                 model,
                 effort,
             } => Ok(TeamResponse::Agent {
-                agent: Box::new(self.set_model(address, model, effort).await?),
+                agent: Box::new(
+                    self.select_model(
+                        address,
+                        TeamSelection::Value { value: model },
+                        effort.map_or(TeamSelection::Default, |value| TeamSelection::Value {
+                            value,
+                        }),
+                    )
+                    .await?,
+                ),
             }),
             TeamRequest::Send {
                 recipient,
@@ -293,84 +332,13 @@ impl Coordinator {
         }
     }
 
-    #[allow(
-        clippy::await_holding_invalid_type,
-        reason = "serializes durable state changes and dispatch across asynchronous operations"
-    )]
-    async fn enroll(&self, address: TeamAddress, alias: String) -> Result<Agent> {
-        // Alias reservation spans the worker RPC without holding the control
-        // lock: an unreachable worker must never prevent a team-wide Pause.
-        let _enrollment = self.enrollments.lock().await;
-        ensure!(!alias.trim().is_empty(), "an agent alias is required");
-        ensure!(!self.agents().await?.iter().any(|agent| agent.enrollment.alias == alias && agent.enrollment.address != address), "agent alias is already in use");
-        let peer = self.peer(&address.machine_id, &address.server_id).await?;
-        let mut cursor = None;
-        let loaded = loop {
-            let page: ThreadLoadedListResponse = peer
-                .handle
-                .request_typed(ClientRequest::ThreadLoadedList {
-                    request_id: request_id(),
-                    params: ThreadLoadedListParams {
-                        cursor,
-                        limit: Some(1000),
-                    },
-                })
-                .await?;
-            if page.data.contains(&address.thread_id) {
-                break true;
-            }
-            let Some(next) = page.next_cursor else {
-                break false;
-            };
-            cursor = Some(next);
-        };
-        if !loaded {
-            let _: ThreadResumeResponse = peer
-                .handle
-                .request_typed(ClientRequest::ThreadResume {
-                    request_id: request_id(),
-                    params: ThreadResumeParams {
-                        thread_id: address.thread_id.clone(),
-                        ..Default::default()
-                    },
-                })
-                .await?;
-        }
-        let enrolled: TeamEnrollResponse = peer
-            .handle
-            .request_typed(ClientRequest::TeamEnroll {
-                request_id: request_id(),
-                params: TeamEnrollParams {
-                    address: address.clone(),
-                    alias,
-                    control: self.current_control().await?,
-                },
-            })
-            .await?;
-        let key = address_key(&address);
-        let read: ThreadReadResponse = peer
-            .handle
-            .request_typed(ClientRequest::ThreadRead {
-                request_id: request_id(),
-                params: ThreadReadParams {
-                    thread_id: address.thread_id.clone(),
-                    include_turns: false,
-                },
-            })
-            .await?;
-        let agent = Agent {
-            enrollment: enrolled.enrollment,
-            runtime: None,
-            status: status_text(&read.thread.status),
-            current_model: None,
-            current_effort: None,
-            next_model: None,
-            next_effort: None,
-            project: read.thread.project_id,
-        };
-        self.store.put("agent", &key, &agent).await?;
-        self.notify();
-        Ok(agent)
+    pub(crate) async fn control_update_lock(&self, machine: &str, server: &str) -> Arc<Mutex<()>> {
+        self.control_updates
+            .lock()
+            .await
+            .entry(server_key(machine, server))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub async fn models(&self, machine_id: &str, server_id: &str) -> Result<Vec<Model>> {
@@ -395,6 +363,9 @@ impl Coordinator {
             };
             cursor = Some(next);
         }
+        self.store
+            .put("models", &server_key(machine_id, server_id), &data)
+            .await?;
         Ok(data)
     }
 
@@ -405,70 +376,6 @@ impl Coordinator {
             .entry(server_key(machine, server))
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
-    }
-
-    #[allow(
-        clippy::await_holding_invalid_type,
-        reason = "serializes durable state changes and dispatch across asynchronous operations"
-    )]
-    async fn set_model(
-        &self,
-        address: TeamAddress,
-        model: String,
-        effort: Option<String>,
-    ) -> Result<Agent> {
-        let selection = self
-            .model_update_lock(&address.machine_id, &address.server_id)
-            .await;
-        let _selection = selection.lock().await;
-        let key = address_key(&address);
-        self.store
-            .get::<Agent>("agent", &key)
-            .await?
-            .context("agent is not enrolled")?;
-        let models = self.models(&address.machine_id, &address.server_id).await?;
-        let selected = models
-            .into_iter()
-            .find(|candidate| candidate.model == model)
-            .context("model is unavailable on this host; select a supported model explicitly")?;
-        ensure!(
-            effort.is_some() || selected.default_reasoning_effort.to_string() != "ultra",
-            "Ultra requires an explicit effort selection"
-        );
-        let effort = match effort {
-            Some(effort) => selected
-                .supported_reasoning_efforts
-                .iter()
-                .find(|option| option.reasoning_effort.to_string() == effort)
-                .map(|option| option.reasoning_effort.clone())
-                .context("effort is not supported by this model")?,
-            None => selected.default_reasoning_effort,
-        };
-        let peer = self.peer(&address.machine_id, &address.server_id).await?;
-        let _: ThreadSettingsUpdateResponse = peer
-            .handle
-            .request_typed(ClientRequest::ThreadSettingsUpdate {
-                request_id: request_id(),
-                params: ThreadSettingsUpdateParams {
-                    thread_id: address.thread_id,
-                    model: Some(model.clone()),
-                    effort: Some(effort.clone()),
-                    ..Default::default()
-                },
-            })
-            .await?;
-        self.store.put("model_override", &key, &true).await?;
-        let _mutation = self.mutations.lock().await;
-        let mut agent = self
-            .store
-            .get::<Agent>("agent", &key)
-            .await?
-            .context("agent is no longer enrolled")?;
-        agent.next_model = Some(model);
-        agent.next_effort = Some(effort.to_string());
-        self.store.put("agent", &key, &agent).await?;
-        self.notify();
-        Ok(agent)
     }
 }
 

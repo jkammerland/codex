@@ -206,3 +206,94 @@ async fn project_discovery_uses_the_configured_instance_capability() -> Result<(
     server.verify().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn queued_publication_retains_its_original_instance_and_legacy_origins_are_held() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let mut manifest = crate::tests::manifest(directory.path());
+    let config = GiteaConfig {
+        url: "https://gitea.example/original/".into(),
+        token_file: directory.path().join("missing-token"),
+        webhook_secret_file: directory.path().join("secret"),
+        repositories: vec!["example/project".into()],
+        assignees: Default::default(),
+    };
+    manifest.gitea = Some(config.clone());
+    let coordinator = Coordinator::open(manifest.clone()).await?;
+    let original_id = Uuid::new_v4().to_string();
+    let origin = super::Origin {
+        integration: Some(crate::gitea::IntegrationIdentity::configured(&config)?),
+        repository: "example/project".into(),
+        number: 12,
+        url: "https://gitea.example/original/example/project/issues/12".into(),
+    };
+    coordinator
+        .store
+        .put("gitea_origin", &original_id, &origin)
+        .await?;
+    let record = MessageRecord {
+        message: coordinator
+            .operator_message(
+                Some(TeamAddress {
+                    machine_id: "gitea".into(),
+                    server_id: "original".into(),
+                    thread_id: "example/project#12".into(),
+                }),
+                "Reply".into(),
+                TeamMessageKind::Reply,
+                Some(original_id),
+                None,
+            )
+            .await?,
+        delivery: TeamDeliveryMode::NextTurn,
+        targets: Some(Vec::new()),
+        receipts: Default::default(),
+        published: true,
+        error: None,
+        external_url: None,
+    };
+    coordinator
+        .store
+        .put("message", &record.message.id, &record)
+        .await?;
+    drop(coordinator);
+
+    manifest.gitea.as_mut().unwrap().url = "https://gitea.example/replacement/".into();
+    let restored = Coordinator::open(manifest).await?;
+    let error = restored.publish_gitea_reply(&record).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("bound to another Gitea integration")
+    );
+    let mut publication = restored
+        .store
+        .get::<super::Publication>("gitea_publication", &record.message.id)
+        .await?
+        .unwrap();
+    assert_eq!(publication.origin.integration, origin.integration);
+    assert_eq!(publication.state, super::PublicationState::Ready);
+
+    // Missing origin binding in an older database needs inspection, even if the
+    // operator explicitly requests Retry under the current configuration.
+    publication.origin.integration = None;
+    publication.state = super::PublicationState::Sending;
+    restored
+        .store
+        .put("gitea_publication", &record.message.id, &publication)
+        .await?;
+    restored
+        .store
+        .put("gitea_retry", &record.message.id, &true)
+        .await?;
+    assert!(
+        restored
+            .publish_gitea_reply(&record)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("bound to another Gitea integration")
+    );
+    Ok(())
+}

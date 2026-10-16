@@ -20959,6 +20959,14 @@
               "body": {
                 "type": "string"
               },
+              "delivery": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/v2/TeamDeliveryMode"
+                  }
+                ],
+                "default": "nextTurn"
+              },
               "message_id": {
                 "type": "string"
               },
@@ -21171,6 +21179,14 @@
           "alias": {
             "type": "string"
           },
+          "appliedSelectionRevision": {
+            "default": null,
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "archived": {
             "type": "boolean"
           },
@@ -21191,6 +21207,14 @@
               "string",
               "null"
             ]
+          },
+          "effortOrigin": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/TeamSelectionOrigin"
+              }
+            ],
+            "default": "legacy"
           },
           "inFlight": {
             "format": "uint32",
@@ -21215,6 +21239,14 @@
               "null"
             ]
           },
+          "modelOrigin": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/TeamSelectionOrigin"
+              }
+            ],
+            "default": "legacy"
+          },
           "nextEffort": {
             "type": [
               "string",
@@ -21236,8 +21268,24 @@
           "reconciling": {
             "type": "boolean"
           },
+          "requestedSelectionRevision": {
+            "default": null,
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "rootThreadId": {
             "type": "string"
+          },
+          "supersededSelectionRevision": {
+            "default": null,
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "threadId": {
             "type": "string"
@@ -21476,6 +21524,26 @@
         ],
         "type": "string"
       },
+      "TeamModelSelection": {
+        "properties": {
+          "effort": {
+            "$ref": "#/definitions/v2/TeamSelection"
+          },
+          "model": {
+            "$ref": "#/definitions/v2/TeamSelection"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "effort",
+          "model",
+          "revision"
+        ],
+        "type": "object"
+      },
       "TeamOutboxEntry": {
         "properties": {
           "id": {
@@ -21532,12 +21600,106 @@
       "TeamReceiptState": {
         "enum": [
           "pending",
+          "rejected",
           "accepted",
           "completed",
           "interrupted",
           "needsReconciliation"
         ],
         "type": "string"
+      },
+      "TeamSelection": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "keep"
+                ],
+                "title": "KeepTeamSelectionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "KeepTeamSelection",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "default"
+                ],
+                "title": "DefaultTeamSelectionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "DefaultTeamSelection",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "value"
+                ],
+                "title": "ValueTeamSelectionType",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "title": "ValueTeamSelection",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "inherit"
+                ],
+                "title": "InheritTeamSelectionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "InheritTeamSelection",
+            "type": "object"
+          }
+        ]
+      },
+      "TeamSelectionOrigin": {
+        "oneOf": [
+          {
+            "enum": [
+              "inherited",
+              "configured",
+              "role",
+              "explicit",
+              "default"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Old persisted settings do not establish how their values were selected.",
+            "enum": [
+              "legacy"
+            ],
+            "type": "string"
+          }
+        ]
       },
       "TeamTrackedJob": {
         "properties": {

@@ -894,6 +894,8 @@ impl TurnRequestProcessor {
         if has_any_overrides {
             thread
                 .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
+                    restore_model_policy: None,
+                    team_selection: None,
                     turn_extension_init: None,
                     disabled_plugin_ids: disabled_plugin_ids.clone(),
                     environments: environment_requests.clone(),
@@ -919,6 +921,8 @@ impl TurnRequestProcessor {
         }
 
         Ok(codex_protocol::protocol::ThreadSettingsOverrides {
+            supersedes_team_selection: None,
+            team_selection: None,
             disabled_plugin_ids,
             environments: environment_requests,
             runtime_workspace_roots,
@@ -941,11 +945,63 @@ impl TurnRequestProcessor {
     async fn thread_settings_update_inner(
         &self,
         request_id: &ConnectionRequestId,
-        params: ThreadSettingsUpdateParams,
+        mut params: ThreadSettingsUpdateParams,
     ) -> Result<ThreadSettingsUpdateResponse, JSONRPCErrorError> {
         let (_, thread) = self.load_thread(&params.thread_id).await?;
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
+        let selection = params.team_selection.take();
+        let effort_policy = params.effort_policy.take();
+        if selection.is_some() && effort_policy.is_some() {
+            return Err(invalid_request(
+                "team selection and effort policy cannot be combined",
+            ));
+        }
+        if effort_policy.is_some()
+            && (params.effort.is_some() || params.collaboration_mode.is_some())
+        {
+            return Err(invalid_request(
+                "effort policy cannot be combined with effort or collaboration mode",
+            ));
+        }
+        if let Some(codex_app_server_protocol::TeamSelection::Value { value }) = &effort_policy {
+            params.effort = Some(
+                serde_json::from_value(serde_json::Value::String(value.clone()))
+                    .map_err(|_| invalid_request("invalid reasoning effort policy"))?,
+            );
+        }
+        if matches!(
+            effort_policy,
+            Some(codex_app_server_protocol::TeamSelection::Inherit)
+        ) {
+            return Err(invalid_request(
+                "effort inheritance requires a team selection",
+            ));
+        }
+        if let Some(selection) = &selection {
+            use codex_app_server_protocol::TeamSelection;
+            if params.collaboration_mode.is_some()
+                || (matches!(selection.model, TeamSelection::Keep) && params.model.is_some())
+                || (matches!(selection.effort, TeamSelection::Keep) && params.effort.is_some())
+            {
+                return Err(invalid_request(
+                    "team selection conflicts with a legacy model, effort, or collaboration-mode update",
+                ));
+            }
+            match &selection.model {
+                TeamSelection::Value { value } => params.model = Some(value.clone()),
+                TeamSelection::Default => {
+                    params.model = Some(thread.configured_default_model().await)
+                }
+                TeamSelection::Keep | TeamSelection::Inherit => {}
+            }
+            if let TeamSelection::Value { value } = &selection.effort {
+                params.effort = Some(
+                    serde_json::from_value(serde_json::Value::String(value.clone()))
+                        .map_err(|_| invalid_request("invalid team reasoning effort"))?,
+                );
+            }
+        }
         let cwd = resolve_request_cwd(params.cwd)?;
         let environment_override = self
             .build_environment_override(
@@ -955,7 +1011,7 @@ impl TurnRequestProcessor {
                 /*environment_requests*/ None,
             )
             .await;
-        let thread_settings = self
+        let mut thread_settings = self
             .build_thread_settings_overrides(
                 thread.as_ref(),
                 ThreadSettingsBuildParams {
@@ -976,7 +1032,28 @@ impl TurnRequestProcessor {
             )
             .await?;
 
+        if matches!(
+            effort_policy,
+            Some(codex_app_server_protocol::TeamSelection::Default)
+        ) {
+            thread_settings.effort = Some(None);
+        }
+        if let Some(selection) = selection {
+            use codex_app_server_protocol::TeamSelection;
+            if matches!(selection.effort, TeamSelection::Default)
+                || (matches!(selection.effort, TeamSelection::Inherit)
+                    && thread_settings.effort.is_none())
+            {
+                thread_settings.effort = Some(None);
+            }
+            thread_settings.team_selection = Some(selection);
+        }
+
         if thread_settings != codex_protocol::protocol::ThreadSettingsOverrides::default() {
+            thread_settings.supersedes_team_selection = thread
+                .prepare_team_model_selection(&thread_settings)
+                .await
+                .map_err(|error| invalid_request(error.to_string()))?;
             self.submit_core_op(
                 request_id,
                 thread.as_ref(),

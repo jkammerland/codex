@@ -65,6 +65,7 @@ pub(super) struct AgentsOverviewState {
     pub(super) refresh_notifications: HashMap<ThreadId, Vec<ServerNotification>>,
     pub(super) rendered_full_screen: bool,
     pub(super) visible_thread_ids: Vec<ThreadId>,
+    pub(super) visible_targets: Vec<super::agents_hosts::ThreadTarget>,
     /// One-shot successor selected before a removal invalidates the displayed rows.
     pub(super) selection_after_removal: Option<ThreadId>,
     pub(super) view_state:
@@ -90,7 +91,11 @@ impl Drop for AgentsOverviewState {
 
 impl App {
     pub(super) fn open_agents_overview(&mut self, app_server: &AppServerSession) {
-        if matches!(self.app_server_target, AppServerTarget::Embedded) {
+        self.ensure_agents_hosts(app_server);
+        self.refresh_other_agents_hosts(app_server);
+        if matches!(self.app_server_target, AppServerTarget::Embedded)
+            && !self.agents_hosts.enabled()
+        {
             let workload_identity_selected = codex_login::is_workload_identity_selected();
             self.chat_widget.show_selection_view(SelectionViewParams {
                 title: Some("Shared agents unavailable".to_string()),
@@ -147,6 +152,7 @@ impl App {
             .collect();
         let selected_thread_id = self.agents_overview.selection_after_removal.take();
         let view = self.agents_overview_view(threads, selected_thread_id);
+        self.agents_overview.visible_targets = view.thread_targets(&self.agents_hosts.foreground);
         self.agents_overview.visible_thread_ids = view.thread_ids();
         self.chat_widget.show_bottom_pane_view(Box::new(view));
         if self.reconnect.offline {
@@ -308,6 +314,7 @@ impl App {
             .cloned()
             .collect();
         let view = self.agents_overview_view(threads, selected_thread_id);
+        self.agents_overview.visible_targets = view.thread_targets(&self.agents_hosts.foreground);
         self.agents_overview.visible_thread_ids = view.thread_ids();
         let next_thread_id = view
             .selected_index()
@@ -389,6 +396,21 @@ impl App {
                 continue;
             }
             rows.push(AgentsOverviewRow {
+                host: self
+                    .agents_hosts
+                    .enabled()
+                    .then(|| self.agents_hosts.foreground.clone()),
+                machine_label: self
+                    .agents_hosts
+                    .hosts
+                    .get(&self.agents_hosts.foreground)
+                    .map(|host| host.machine_label.clone()),
+                pin_rank: self
+                    .agents_overview
+                    .pinned_thread_ids
+                    .as_ref()
+                    .and_then(|ids| ids.iter().position(|id| *id == thread_id)),
+                pins_supported: self.agents_overview.pinned_thread_ids.is_some(),
                 details: self.agents_overview_details(root, &children),
                 thread: root.clone(),
                 thread_id,
@@ -398,11 +420,229 @@ impl App {
             });
         }
 
+        for (key, host) in &self.agents_hosts.hosts {
+            if key == &self.agents_hosts.foreground {
+                continue;
+            }
+            let mut remote_children: HashMap<String, Vec<&Thread>> = HashMap::new();
+            for thread in host.state.agents_overview.threads.values().flatten() {
+                if let Some(parent) = &thread.parent_thread_id {
+                    remote_children
+                        .entry(parent.clone())
+                        .or_default()
+                        .push(thread);
+                }
+            }
+            for (id, thread) in &host.state.agents_overview.threads {
+                let Some(thread) = thread else { continue };
+                if thread.parent_thread_id.is_some()
+                    || host.state.agents_overview.hidden_threads.contains(id)
+                {
+                    continue;
+                }
+                rows.push(AgentsOverviewRow {
+                    host: Some(key.clone()),
+                    machine_label: Some(if host.connected {
+                        host.machine_label.clone()
+                    } else {
+                        format!("{} · offline", host.machine_label)
+                    }),
+                    pin_rank: host
+                        .state
+                        .agents_overview
+                        .pinned_thread_ids
+                        .as_ref()
+                        .and_then(|ids| ids.iter().position(|candidate| candidate == id)),
+                    pins_supported: host.state.agents_overview.pinned_thread_ids.is_some(),
+                    details: super::agents_overview_details::AgentsOverviewDetails {
+                        lines: vec![
+                            format!("Project: {}", thread.cwd.display()).into(),
+                            format!("Model: {}", thread.model.as_deref().unwrap_or("Unknown"))
+                                .into(),
+                        ],
+                        usage_lines: host
+                            .state
+                            .agents_overview
+                            .usage
+                            .get(id)
+                            .map(super::agents_overview_usage::usage_lines)
+                            .unwrap_or_default(),
+                        last_message: host
+                            .state
+                            .agents_overview
+                            .last_messages
+                            .get(id)
+                            .map(|message| (message.clone(), thread.cwd.clone())),
+                    },
+                    thread: thread.clone(),
+                    thread_id: *id,
+                    group: agents_overview_group(thread, &remote_children),
+                    is_current: false,
+                    has_voice: false,
+                });
+            }
+        }
         self.agents_overview
             .view_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .vim_enabled = self.chat_widget.composer_is_vim_enabled();
+        for row in &mut rows {
+            let Some(host) = &row.host else { continue };
+            row.details
+                .lines
+                .push(format!("Server: {}", host.server_id).into());
+            if let Some(snapshot) = &self.agents_hosts.snapshot
+                && let Some(server) = snapshot.servers.iter().find(|server| {
+                    server.machine_id == host.machine_id && server.server_id == host.server_id
+                })
+            {
+                let applied = server.applied_revision.map_or_else(
+                    || "unconfirmed".into(),
+                    |revision| format!("applied {revision}"),
+                );
+                row.details
+                    .lines
+                    .push(format!("Team control: {applied}").into());
+                if let Some(error) = &server.error {
+                    row.details.lines.push(error.clone().into());
+                }
+            }
+            if let Some(snapshot) = &self.agents_hosts.snapshot
+                && let Some(agent) = snapshot.agents.iter().find(|agent| {
+                    agent.enrollment.address.machine_id == host.machine_id
+                        && agent.enrollment.address.server_id == host.server_id
+                        && agent.enrollment.address.thread_id == row.thread.id
+                })
+            {
+                row.details
+                    .lines
+                    .push(format!("Team alias: {}", agent.enrollment.alias).into());
+                if agent.enrollment.manually_held {
+                    row.details.lines.push("Manually held".into());
+                }
+                if let Some(model) = &agent.current_model {
+                    row.details.lines.push(
+                        format!(
+                            "Current: {model} / {}",
+                            agent.current_effort.as_deref().unwrap_or("default")
+                        )
+                        .into(),
+                    );
+                }
+                if let Some(model) = &agent.next_model {
+                    row.details.lines.push(
+                        format!(
+                            "Next: {model} / {}",
+                            agent.next_effort.as_deref().unwrap_or("default")
+                        )
+                        .into(),
+                    );
+                }
+                if let Some(selection) = &agent.requested_selection {
+                    let applied = agent
+                        .runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.applied_selection_revision);
+                    let state = if applied.is_some_and(|revision| revision >= selection.revision) {
+                        "Applied"
+                    } else {
+                        "Queued"
+                    };
+                    let selection_text =
+                        |selection: &codex_app_server_protocol::TeamSelection| match selection {
+                            codex_app_server_protocol::TeamSelection::Keep => {
+                                "unchanged".to_owned()
+                            }
+                            codex_app_server_protocol::TeamSelection::Default => {
+                                "model default".to_owned()
+                            }
+                            codex_app_server_protocol::TeamSelection::Inherit => {
+                                "parent".to_owned()
+                            }
+                            codex_app_server_protocol::TeamSelection::Value { value } => {
+                                value.clone()
+                            }
+                        };
+                    row.details.lines.push(
+                        format!(
+                            "{state}: {} / {} · revision {}",
+                            selection_text(&selection.model),
+                            selection_text(&selection.effort),
+                            selection.revision
+                        )
+                        .into(),
+                    );
+                }
+                if let Some(runtime) = &agent.runtime {
+                    if runtime.in_flight > 0 {
+                        row.details.lines.push(
+                            format!("{} admitted family operation(s)", runtime.in_flight).into(),
+                        );
+                    }
+                    if runtime.reconciling {
+                        row.details
+                            .lines
+                            .push("Settling previously admitted work".into());
+                    }
+                    if let Some(error) = &runtime.model_error {
+                        row.details.lines.push(error.clone().into());
+                    }
+                    for job in &runtime.jobs {
+                        row.details.lines.push(
+                            format!(
+                                "{}: {:?}{}",
+                                job.tool,
+                                job.status,
+                                job.detail
+                                    .as_ref()
+                                    .map_or(String::new(), |detail| format!(" · {detail}"))
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            }
+        }
+        {
+            let mut state = self
+                .agents_overview
+                .view_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.machines_enabled = self.agents_hosts.enabled();
+            state.overview_required = self.agents_hosts.enabled()
+                && self.primary_thread_id.is_none()
+                && self.agents_hosts.foreground == super::agents_hosts::HostKey::default();
+            state.machine_notices = self
+                .agents_hosts
+                .hosts
+                .iter()
+                .filter(|(key, host)| {
+                    **key != super::agents_hosts::HostKey::default() || host.connected
+                })
+                .map(|(_, host)| {
+                    format!(
+                        "{} · {}",
+                        host.label,
+                        if host.connected {
+                            "Connected"
+                        } else {
+                            "Unavailable"
+                        }
+                    )
+                })
+                .collect();
+        }
+        let team_notice = self.agents_hosts.notice.clone().or_else(|| self.agents_hosts.snapshot.as_ref().map(|snapshot| {
+            let applied = snapshot.servers.iter().filter(|server| server.applied_revision == Some(snapshot.control.revision)).count();
+            format!("Team {:?} · {applied}/{} hosts applied · F6 pause · F7 resume · F8 stop · F9 team", snapshot.control.mode, snapshot.servers.len())
+        }));
+        self.agents_overview
+            .view_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .team_notice = team_notice;
         let mut view = AgentsOverviewView::new(
             rows,
             selected_thread_id,
@@ -411,7 +651,7 @@ impl App {
                 self.environment_manager.as_ref(),
             ),
             self.local_settings.tui.status_line_use_colors,
-            self.app_event_tx.clone(),
+            self.app_event_tx.unscoped(),
             self.keymap.clone(),
             Arc::clone(&self.agents_overview.view_state),
         );

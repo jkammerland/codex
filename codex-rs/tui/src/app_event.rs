@@ -295,6 +295,29 @@ pub(crate) struct AgentPickerThreadRefresh {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    Scoped {
+        scope: crate::app::agents_hosts::ConnectionScope,
+        generation: u64,
+        event: Box<AppEvent>,
+    },
+    AgentsHostUpdate(Box<crate::app::agents_hosts::HostUpdate>),
+    AgentsHostModel(Box<crate::app::agents_hosts_models::ModelAction>),
+    AgentsTeamMenu(crate::app::agents_hosts::ThreadTarget),
+    AgentsTeamCompose(crate::app::agents_hosts_team::TeamCompose),
+    AgentsTeamRequest(codex_team::TeamRequest),
+    AgentsTeamBoard,
+    AgentsTeamMessage(String),
+    AgentsMachinesMenu,
+    NewAgentsHostSession {
+        host: crate::app::agents_hosts::HostKey,
+        cwd: Option<codex_utils_absolute_path::AbsolutePathBuf>,
+    },
+    AgentsHostReconnect(crate::app::agents_hosts::HostKey),
+    AgentsTeamRetry(String),
+    AgentsHostAction {
+        target: crate::app::agents_hosts::ThreadTarget,
+        event: Box<AppEvent>,
+    },
     AccountEmailLoaded {
         request_id: uuid::Uuid,
         email: Option<String>,
@@ -660,6 +683,9 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         selected_cell: Arc<dyn HistoryCell>,
         prompt: UserMessage,
+    },
+    CompleteHostPromptRevert {
+        thread_id: ThreadId,
     },
     FinishPromptRevert {
         thread_id: ThreadId,

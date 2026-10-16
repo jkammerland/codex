@@ -235,6 +235,13 @@ impl ThreadStartResponse {
 #[ts(export_to = "v2/")]
 pub struct ThreadSettingsUpdateParams {
     pub thread_id: String,
+    /// Durable team selection identity and per-field ownership. Omission preserves ordinary updates.
+    #[ts(optional = nullable)]
+    pub team_selection: Option<super::TeamModelSelection>,
+    /// Explicit default/value/keep effort policy. Unlike omission, default clears a saved effort.
+    /// Cannot be combined with teamSelection, effort, or collaborationMode.
+    #[ts(optional = nullable)]
+    pub effort_policy: Option<super::TeamSelection>,
     /// Replace this thread's disabled plugin IDs.
     /// Omitted/null preserves the list; [] clears it.
     #[ts(optional = nullable)]

@@ -27,6 +27,10 @@ pub(super) struct Reconnected {
     thread: Option<AppServerStartedThread>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Reconnect preserves the existing session inputs plus its optional host namespace."
+)]
 pub(super) async fn reconnect(
     target: AppServerTarget,
     config: Config,
@@ -35,6 +39,7 @@ pub(super) async fn reconnect(
     remote_cwd: Option<PathBuf>,
     task_tools: ThreadToolTransport,
     presentation: ReconnectPresentation,
+    host_key: Option<super::agents_hosts::HostKey>,
 ) -> Result<Reconnected> {
     let mode = target.thread_params_mode();
     if matches!(target, AppServerTarget::Embedded) {
@@ -59,6 +64,13 @@ pub(super) async fn reconnect(
                 .with_local_codex_home(&config.codex_home)
                 .with_remote_cwd_override(remote_cwd.clone())
                 .with_thread_tool_transport(task_tools.clone());
+            if let Some(host_key) = &host_key {
+                session.scope_task_tool_cache(
+                    &config.codex_home,
+                    &host_key.machine_id,
+                    &host_key.server_id,
+                );
+            }
             let bootstrap = session.bootstrap(&config).await?;
             let thread = if let Some(thread_id) = thread_id {
                 match session
@@ -254,6 +266,8 @@ impl App {
             self.chat_widget.pause_for_disconnect();
             self.startup_pending_protected_request = false;
             self.abort_all_thread_event_listeners();
+            self.dynamic_tool_origins.clear();
+            self.pending_host_prompt_reverts.clear();
             for (_, (_, task)) in self.dynamic_tool_tasks.drain() {
                 task.abort();
             }
@@ -293,9 +307,27 @@ impl App {
         self.store_active_thread_receiver().await;
         // Old request handles stay attached to the dead connection. Rotating the event channel
         // prevents their late completions from submitting follow-up operations on the new one.
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.app_event_tx = AppEventSender::new(tx);
-        *app_event_rx = rx;
+        if self.agents_hosts.enabled() {
+            if let Some(host) = self
+                .agents_hosts
+                .hosts
+                .get_mut(&self.agents_hosts.foreground)
+            {
+                host.epoch += 1;
+                host.connected = true;
+                host.refreshing = false;
+                host.refresh_metadata.clear();
+            }
+            self.agents_hosts.generation += 1;
+            self.app_event_tx = self
+                .app_event_tx
+                .unscoped()
+                .scoped(self.agents_hosts.scope(), self.agents_hosts.generation);
+        } else {
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.app_event_tx = AppEventSender::new(tx);
+            *app_event_rx = rx;
+        }
         // The old timer targets the discarded channel, so a new preview can be scheduled.
         self.config_notification_test_pending = None;
         {

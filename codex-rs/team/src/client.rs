@@ -8,6 +8,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::Manifest;
+use crate::TeamOperation;
 use crate::TeamRequest;
 use crate::TeamResponse;
 use crate::TeamSnapshot;
@@ -44,18 +45,37 @@ impl TeamClient {
     }
 
     pub async fn request(&self, request: TeamRequest) -> Result<TeamResponse> {
+        self.request_operation(&TeamOperation::new(request)).await
+    }
+
+    pub async fn request_operation(&self, operation: &TeamOperation) -> Result<TeamResponse> {
         let response = self
             .http
             .post(self.url.join("rpc")?)
             .bearer_auth(&self.token)
-            .json(&request)
+            .json(operation)
             .send()
-            .await?;
+            .await
+            .with_context(|| {
+                format!(
+                    "operation {} submission failed; retain this identity when retrying",
+                    operation.operation_id
+                )
+            })?;
         if !response.status().is_success() {
             let status = response.status();
-            anyhow::bail!("coordinator returned {status}: {}", response.text().await?);
+            anyhow::bail!(
+                "operation {}: coordinator returned {status}: {}",
+                operation.operation_id,
+                response.text().await?
+            );
         }
-        Ok(response.json().await?)
+        response.json().await.with_context(|| {
+            format!(
+                "operation {} response was lost or invalid; reuse this identity when retrying",
+                operation.operation_id
+            )
+        })
     }
 
     pub async fn snapshot(&self) -> Result<TeamSnapshot> {
@@ -93,13 +113,26 @@ impl TeamClient {
         Ok(url)
     }
 
+    /// URL for an independent human app-server connection on a configured host.
+    pub fn relay_url(&self, machine_id: &str, server_id: &str) -> Result<url::Url> {
+        let mut relay = self.websocket_url("relay/")?;
+        relay
+            .path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("invalid relay URL"))?
+            .pop_if_empty()
+            .push(machine_id)
+            .push(server_id);
+        Ok(relay)
+    }
+
+    pub fn relay_token(&self) -> &str {
+        &self.token
+    }
+
     /// Credentials belong only to this child process. Its independent relay
     /// connection cannot collide with coordinator request IDs or approvals.
     pub fn attach_command(&self, address: &TeamAddress) -> Result<tokio::process::Command> {
-        let relay = self.websocket_url(&format!(
-            "relay/{}/{}",
-            address.machine_id, address.server_id
-        ))?;
+        let relay = self.relay_url(&address.machine_id, &address.server_id)?;
         // The interactive CLI requires an explicit port, including the default
         // port that Url otherwise omits when serializing an HTTPS endpoint.
         let remote = format!(

@@ -19,7 +19,8 @@ impl AgentsOverviewView {
                     return true;
                 }
                 Some(ListAction::Accept) if !is_plain_text_key_event(key) => {
-                    let online = state.connection_notice.is_none() && !state.creating_worktree;
+                    let online = (state.connection_notice.is_none() || state.machines_enabled)
+                        && !state.creating_worktree;
                     drop(state);
                     if online {
                         self.activate();

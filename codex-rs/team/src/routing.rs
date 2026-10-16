@@ -65,11 +65,28 @@ impl Coordinator {
         message: TeamMessage,
         delivery: TeamDeliveryMode,
     ) -> Result<MessageRecord> {
+        let _mutation = self.mutations.lock().await;
+        let record = self.prepare_message(message, delivery).await?;
+        self.store
+            .put("message", &record.message.id, &record)
+            .await?;
+        self.notify();
+        Ok(record)
+    }
+
+    pub(crate) async fn prepare_message(
+        &self,
+        mut message: TeamMessage,
+        delivery: TeamDeliveryMode,
+    ) -> Result<MessageRecord> {
         ensure!(!message.body.trim().is_empty(), "message body is required");
-        ensure!(
-            Uuid::parse_str(&message.id).is_ok(),
-            "message id must be a UUID"
-        );
+        message.id = Uuid::parse_str(&message.id)?.to_string();
+        message.sender = canonical_address(message.sender)?;
+        message.recipient = message.recipient.map(canonical_address).transpose()?;
+        message.reply_to = message
+            .reply_to
+            .map(|id| Uuid::parse_str(&id).map(|id| id.to_string()))
+            .transpose()?;
         if message.kind == TeamMessageKind::Board {
             ensure!(
                 message.recipient.is_none()
@@ -122,7 +139,6 @@ impl Coordinator {
                 );
             }
         }
-        let _mutation = self.mutations.lock().await;
         if let Some(existing) = self
             .store
             .get::<MessageRecord>("message", &message.id)
@@ -134,7 +150,7 @@ impl Coordinator {
             );
             return Ok(existing);
         }
-        let record = MessageRecord {
+        Ok(MessageRecord {
             message,
             delivery,
             targets: None,
@@ -142,20 +158,33 @@ impl Coordinator {
             published: false,
             error: None,
             external_url: None,
-        };
-        self.store
-            .put("message", &record.message.id, &record)
-            .await?;
-        self.notify();
-        Ok(record)
+        })
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "orders subscription validation and persistence against publication and outbox intake"
+    )]
     pub(crate) async fn subscribe(
         &self,
         address: TeamAddress,
         topic: String,
         enabled: bool,
     ) -> Result<()> {
+        let _mutation = self.mutations.lock().await;
+        let (key, subscription) = self.prepare_subscription(address, topic, enabled).await?;
+        self.store.put("subscription", &key, &subscription).await?;
+        self.notify();
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_subscription(
+        &self,
+        address: TeamAddress,
+        topic: String,
+        enabled: bool,
+    ) -> Result<(String, Subscription)> {
+        let address = canonical_address(address)?;
         ensure!(!topic.trim().is_empty(), "board topic is required");
         ensure!(
             self.store
@@ -165,19 +194,14 @@ impl Coordinator {
             "subscriber is not enrolled"
         );
         let key = serde_json::to_string(&(&topic, &address))?;
-        self.store
-            .put(
-                "subscription",
-                &key,
-                &Subscription {
-                    sender: address,
-                    topic,
-                    enabled,
-                },
-            )
-            .await?;
-        self.notify();
-        Ok(())
+        Ok((
+            key,
+            Subscription {
+                sender: address,
+                topic,
+                enabled,
+            },
+        ))
     }
 
     /// Freeze the audience once, before publishing. Reconnects cannot add new
@@ -191,6 +215,12 @@ impl Coordinator {
         if self.current_control().await?.mode != TeamExecutionMode::Running {
             return Ok(());
         }
+        let enrolled = self
+            .agents()
+            .await?
+            .into_iter()
+            .map(|agent| address_key(&agent.enrollment.address))
+            .collect::<std::collections::HashSet<_>>();
         let subscriptions = self
             .store
             .list::<Subscription>("subscription", "", u32::MAX)
@@ -214,6 +244,7 @@ impl Coordinator {
                     .iter()
                     .filter(|(_, subscription)| {
                         subscription.enabled
+                            && enrolled.contains(&address_key(&subscription.sender))
                             && Some(&subscription.topic) == record.message.topic.as_ref()
                             && subscription.sender != record.message.sender
                     })
@@ -320,12 +351,23 @@ impl Coordinator {
         server_id: &str,
         receipt: TeamReceipt,
     ) -> Result<()> {
+        let _mutation = self.mutations.lock().await;
+        let (message_id, record) = self.prepare_receipt(machine_id, server_id, receipt).await?;
+        self.store.put("message", &message_id, &record).await?;
+        self.notify();
+        Ok(())
+    }
+    pub(crate) async fn prepare_receipt(
+        &self,
+        machine_id: &str,
+        server_id: &str,
+        receipt: TeamReceipt,
+    ) -> Result<(String, MessageRecord)> {
         let message_id = receipt
             .delivery_id
             .split_once(':')
             .context("invalid delivery id")?
             .0;
-        let _mutation = self.mutations.lock().await;
         let mut record = self
             .store
             .get::<MessageRecord>("message", message_id)
@@ -345,13 +387,11 @@ impl Coordinator {
             "receipt does not belong to this worker"
         );
         if record.receipts.get(&receipt.delivery_id) == Some(&receipt) {
-            return Ok(());
+            return Ok((message_id.to_owned(), record));
         }
         record
             .receipts
             .insert(receipt.delivery_id.clone(), receipt.clone());
-        self.store.put("message", message_id, &record).await?;
-        self.notify();
-        Ok(())
+        Ok((message_id.to_owned(), record))
     }
 }

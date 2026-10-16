@@ -123,6 +123,9 @@ impl App {
         let thread_id = self.active_thread_id?;
         Some(ThreadSettingsUpdateParams {
             thread_id: thread_id.to_string(),
+            effort_policy: effort
+                .is_none()
+                .then_some(codex_app_server_protocol::TeamSelection::Default),
             effort,
             collaboration_mode: Some(self.chat_widget.current_collaboration_mode().clone()),
             ..ThreadSettingsUpdateParams::default()

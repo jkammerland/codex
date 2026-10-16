@@ -449,6 +449,18 @@ pub(super) struct RecapState {
 }
 
 impl RecapState {
+    pub(super) fn stop_ui_tasks(&mut self) {
+        if let Some(task) = self.scheduled_check.take() {
+            task.abort();
+        }
+        if let Some(task) = self.in_flight_request.take() {
+            task.abort();
+        }
+        self.in_flight_request_id = None;
+        self.in_flight_trigger = None;
+        self.in_flight_thread_id = None;
+    }
+
     fn clear_in_flight_request(&mut self) {
         self.in_flight_request_id = None;
         self.in_flight_trigger = None;

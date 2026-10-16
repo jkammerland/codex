@@ -5372,3 +5372,66 @@ async fn command_center_read_only_open_requests_and_failure_preservation() -> Re
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn pooled_host_creation_requests_use_server_defaults_without_foreground_policy() -> Result<()>
+{
+    let (app, _codex_home) = make_history_test_app().await?;
+    let parent = create_history_rollout(
+        &app.config,
+        ThreadHistoryMode::Paginated,
+        "Host-owned parent",
+    )?;
+    let (mut server, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+    let mut foreground = app.config.clone();
+    foreground.model = Some("foreign-model".into());
+    foreground.model_provider_id = "foreign-provider".into();
+    foreground.model_reasoning_effort = Some(codex_protocol::openai_models::ReasoningEffort::High);
+    foreground.service_tier = Some("foreign-tier".into());
+    foreground.base_instructions = Some("Foreign base instructions".into());
+    foreground.developer_instructions = Some("Foreign developer instructions".into());
+    let cwd = app.config.cwd.as_path();
+    let started = server
+        .start_thread_with_host_defaults(&app.local_settings, &foreground, Some(cwd))
+        .await?;
+    let forked = server
+        .fork_thread_with_host_defaults(&app.local_settings, &foreground, parent, Some(cwd))
+        .await?;
+    let start_params: codex_app_server_protocol::ThreadStartParams = serde_json::from_value(
+        recorded_params(&requests, "thread/start")
+            .pop()
+            .expect("host start request"),
+    )?;
+    let fork_params: codex_app_server_protocol::ThreadForkParams = serde_json::from_value(
+        recorded_params(&requests, "thread/fork")
+            .pop()
+            .expect("host fork request"),
+    )?;
+    assert_eq!(
+        start_params,
+        codex_app_server_protocol::ThreadStartParams {
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            history_mode: Some(ThreadHistoryMode::Paginated),
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        fork_params,
+        codex_app_server_protocol::ThreadForkParams {
+            thread_id: parent.to_string(),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            exclude_turns: true,
+            ..Default::default()
+        }
+    );
+    assert_ne!(started.session.model, "foreign-model");
+    assert_ne!(forked.session.model, "foreign-model");
+    server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}

@@ -21,6 +21,7 @@ async fn enroll(app: &mut TestAppServer, thread_id: &str) -> Result<TeamAddress>
         .request(|request_id| ClientRequest::TeamEnroll {
             request_id,
             params: TeamEnrollParams {
+                operation_id: None,
                 address: address.clone(),
                 alias: "reviewer".into(),
                 control: control(1, TeamExecutionMode::Running),
@@ -392,5 +393,185 @@ async fn unavailable_model_keeps_mail_pending_until_an_explicit_supported_select
             .count(),
         1
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_safe_boundary_input_is_not_completed_by_an_unsampled_same_id_continuation()
+-> Result<()> {
+    const PEER: &str = "unique peer input awaiting a safe boundary";
+    let (_first_release, first_blocked) = oneshot::channel();
+    let (resume_release, resume_blocked) = oneshot::channel();
+    let (peer_release, peer_blocked) = oneshot::channel();
+    let (model, _) = start_streaming_sse_server(vec![
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created("original")]),
+            },
+            StreamingSseChunk {
+                gate: Some(first_blocked),
+                body: create_final_assistant_message_sse_response("original blocked")?,
+            },
+        ],
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created("continued")]),
+            },
+            StreamingSseChunk {
+                gate: Some(resume_blocked),
+                body: create_final_assistant_message_sse_response("original continued")?,
+            },
+        ],
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created("peer")]),
+            },
+            StreamingSseChunk {
+                gate: Some(peer_blocked),
+                body: create_final_assistant_message_sse_response("peer handled")?,
+            },
+        ],
+    ])
+    .await;
+    let home = tempfile::tempdir()?;
+    MockResponsesConfig::new(model.uri()).write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_managed_config()
+        .build_initialized()
+        .await?;
+    let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
+    let address = enroll(&mut app, &thread.id).await?;
+    let original = user_turn(&mut app, &thread.id).await?.turn;
+    model.wait_for_request_count(/*count*/ 1).await;
+    let _: TeamDeliverResponse = app
+        .request(|request_id| ClientRequest::TeamDeliver {
+            request_id,
+            params: TeamDeliverParams {
+                coordinator_id: "coordinator".into(),
+                delivery: TeamDelivery {
+                    id: "safe-delivery".into(),
+                    thread_id: thread.id.clone(),
+                    mode: TeamDeliveryMode::SafeBoundary,
+                    wake: true,
+                    message: TeamMessage {
+                        id: "safe-message".into(),
+                        sender: address.clone(),
+                        recipient: Some(address),
+                        kind: TeamMessageKind::Request,
+                        body: PEER.into(),
+                        reply_to: None,
+                        topic: None,
+                        created_at: 1,
+                    },
+                },
+            },
+        })
+        .await?;
+    let queued = accepted(&mut app).await?;
+    assert_eq!(
+        (queued.delivery_id.as_str(), queued.turn_id.as_deref()),
+        ("safe-delivery", Some(original.id.as_str()))
+    );
+    let _: TeamControlResponse = app
+        .request(|request_id| ClientRequest::TeamControl {
+            request_id,
+            params: TeamControlParams {
+                control: control(2, TeamExecutionMode::Stopped),
+            },
+        })
+        .await?;
+    let interrupted: TurnCompletedNotification = app.read_notification("turn/completed").await?;
+    assert_eq!(
+        (interrupted.turn.id, interrupted.turn.status),
+        (original.id.clone(), TurnStatus::Interrupted)
+    );
+    let _: TeamControlResponse = app
+        .request(|request_id| ClientRequest::TeamControl {
+            request_id,
+            params: TeamControlParams {
+                control: control(3, TeamExecutionMode::Running),
+            },
+        })
+        .await?;
+    model.wait_for_request_count(/*count*/ 2).await;
+    resume_release.send(()).unwrap();
+    let continued: TurnCompletedNotification = app.read_notification("turn/completed").await?;
+    assert_eq!(
+        (continued.turn.id, continued.turn.status),
+        (original.id.clone(), TurnStatus::Completed)
+    );
+    model.wait_for_request_count(/*count*/ 3).await;
+
+    // The continuation reused the turn ID without the peer input. Its finish
+    // must not complete that delivery; the restored copy now owns a new turn.
+    let outbox: TeamOutboxListResponse = app
+        .request(|request_id| ClientRequest::TeamOutboxList {
+            request_id,
+            params: TeamOutboxListParams {
+                coordinator_id: "coordinator".into(),
+                cursor: None,
+                limit: None,
+            },
+        })
+        .await?;
+    let receipts = outbox
+        .data
+        .into_iter()
+        .filter(|entry| entry.kind == "receipt")
+        .map(|entry| serde_json::from_value::<TeamReceipt>(entry.payload))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt.state != TeamReceiptState::Completed)
+    );
+    let requests = model
+        .requests()
+        .await
+        .into_iter()
+        .map(|body| serde_json::from_slice::<Value>(&body))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(
+        requests
+            .iter()
+            .map(|body| body.to_string().matches(PEER).count())
+            .collect::<Vec<_>>(),
+        vec![0, 0, 1]
+    );
+    peer_release.send(()).unwrap();
+    let handled: TurnCompletedNotification = app.read_notification("turn/completed").await?;
+    assert_ne!(handled.turn.id, original.id);
+    assert_eq!(handled.turn.status, TurnStatus::Completed);
+    loop {
+        let outbox: TeamOutboxListResponse = app
+            .request(|request_id| ClientRequest::TeamOutboxList {
+                request_id,
+                params: TeamOutboxListParams {
+                    coordinator_id: "coordinator".into(),
+                    cursor: None,
+                    limit: None,
+                },
+            })
+            .await?;
+        let receipts = outbox
+            .data
+            .into_iter()
+            .filter(|entry| entry.kind == "receipt")
+            .map(|entry| serde_json::from_value::<TeamReceipt>(entry.payload))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if let Some(completed) = receipts
+            .into_iter()
+            .find(|receipt| receipt.state == TeamReceiptState::Completed)
+        {
+            assert_eq!(completed.turn_id, Some(handled.turn.id));
+            break;
+        }
+        let _: TeamChangedNotification = app.read_notification("team/changed").await?;
+    }
+    model.shutdown().await;
     Ok(())
 }

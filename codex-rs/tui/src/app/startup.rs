@@ -253,6 +253,7 @@ impl App {
         mut startup_draft: StartupDraftPump,
         managed_worktree: Option<crate::ManagedTuiWorktree>,
         daemon_cli_executable: Option<AbsolutePathBuf>,
+        agents_manifest: Option<PathBuf>,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
 
@@ -272,6 +273,17 @@ impl App {
         let startup_started_at = Instant::now();
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
+        let app_event_tx = if agents_manifest.is_some() {
+            app_event_tx.scoped(
+                agents_hosts::ConnectionScope {
+                    host: agents_hosts::HostKey::default(),
+                    epoch: 0,
+                },
+                0,
+            )
+        } else {
+            app_event_tx
+        };
         if let Some(message) = project_config_warning(&config) {
             app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
                 history_cell::StartupWarningsCell::new(vec![message]),
@@ -410,21 +422,24 @@ impl App {
         if let Err(err) = startup_draft.flush_pending_events(tui).await {
             return shutdown_on_startup_error(app_server, err).await;
         }
-        let exit_info =
-            if matches!(&session_selection, SessionSelection::Fork(_)) && config.model.is_none() {
-                None
-            } else {
-                handle_model_migration_prompt_if_needed(
-                    tui,
-                    &mut config,
-                    &local_settings,
-                    &mut launch_choices,
-                    model.as_str(),
-                    &app_event_tx,
-                    &available_models,
-                )
-                .await?
-            };
+        let exit_info = if (matches!(&session_selection, SessionSelection::Fork(_))
+            && config.model.is_none())
+            || (matches!(&session_selection, SessionSelection::AgentsOverview)
+                && agents_manifest.is_some())
+        {
+            None
+        } else {
+            handle_model_migration_prompt_if_needed(
+                tui,
+                &mut config,
+                &local_settings,
+                &mut launch_choices,
+                model.as_str(),
+                &app_event_tx,
+                &available_models,
+            )
+            .await?
+        };
         if let Some(exit_info) = exit_info {
             app_server
                 .shutdown()
@@ -449,19 +464,22 @@ impl App {
                 .cloud_config_bundle(cloud_config_bundle.clone()),
         ));
         let dynamic_tool_status_updates = tokio::sync::broadcast::channel(/*capacity*/ 64).0;
-        if matches!(
-            &app_server_target,
-            AppServerTarget::LocalDaemon { .. } | AppServerTarget::Embedded
-        ) && !crate::uses_remote_workspace_or_environment(
-            &app_server_target,
-            environment_manager.as_ref(),
-        ) && let Err(error) = app_server
-            .start_dynamic_tool_mcp(
-                config.clone(),
-                app_event_tx.clone(),
-                dynamic_tool_status_updates.clone(),
+        if !app_server.is_discovery_placeholder()
+            && matches!(
+                &app_server_target,
+                AppServerTarget::LocalDaemon { .. } | AppServerTarget::Embedded
             )
-            .await
+            && !crate::uses_remote_workspace_or_environment(
+                &app_server_target,
+                environment_manager.as_ref(),
+            )
+            && let Err(error) = app_server
+                .start_dynamic_tool_mcp(
+                    config.clone(),
+                    app_event_tx.clone(),
+                    dynamic_tool_status_updates.clone(),
+                )
+                .await
         {
             tracing::warn!(%error, "TUI task delegation is unavailable without its MCP server");
         }
@@ -500,9 +518,10 @@ impl App {
 
         let status_line_invalid_items_warned = Arc::new(AtomicBool::new(false));
         let terminal_title_invalid_items_warned = Arc::new(AtomicBool::new(false));
-        let workspace_command_runner: WorkspaceCommandRunner = Arc::new(
-            AppServerWorkspaceCommandRunner::new(app_server.request_handle()),
-        );
+        let workspace_command_runner: Option<WorkspaceCommandRunner> =
+            app_server.try_request_handle().map(|handle| {
+                Arc::new(AppServerWorkspaceCommandRunner::new(handle)) as WorkspaceCommandRunner
+            });
         let enhanced_keys_supported = tui.enhanced_keys_supported();
         let wait_for_initial_session_configured =
             Self::should_wait_for_initial_session(&session_selection);
@@ -559,7 +578,7 @@ impl App {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
-                    workspace_command_runner: Some(workspace_command_runner.clone()),
+                    workspace_command_runner: workspace_command_runner.clone(),
                     initial_user_message: crate::chatwidget::create_initial_user_message(
                         initial_prompt.clone(),
                         initial_images.clone(),
@@ -693,7 +712,7 @@ impl App {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
-                    workspace_command_runner: Some(workspace_command_runner.clone()),
+                    workspace_command_runner: workspace_command_runner.clone(),
                     initial_user_message: crate::chatwidget::create_initial_user_message(
                         initial_prompt.clone(),
                         initial_images.clone(),
@@ -801,7 +820,7 @@ impl App {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
                     app_event_tx: app_event_tx.clone(),
-                    workspace_command_runner: Some(workspace_command_runner.clone()),
+                    workspace_command_runner: workspace_command_runner.clone(),
                     initial_user_message: crate::chatwidget::create_initial_user_message(
                         initial_prompt.clone(),
                         initial_images.clone(),
@@ -892,7 +911,7 @@ See the Codex keymap documentation for supported actions and examples."
             terminal_size_tags: tui.terminal_size_tags.clone(),
             app_event_tx,
             chat_widget,
-            workspace_command_runner: Some(workspace_command_runner),
+            workspace_command_runner,
             config,
             local_settings,
             launch_cwd,
@@ -925,6 +944,7 @@ See the Codex keymap documentation for supported actions and examples."
             transcript_reflow: TranscriptReflowState::default(),
             initial_history_replay_buffer: None,
             pending_thread_switch_resets: 0,
+            pending_host_prompt_reverts: HashMap::new(),
             scrollback_has_older_history: false,
             commit_animation: None,
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
@@ -964,6 +984,10 @@ See the Codex keymap documentation for supported actions and examples."
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             agents_overview,
+            agents_hosts: agents_hosts::AgentsHosts {
+                manifest: agents_manifest,
+                ..Default::default()
+            },
             side_threads: HashMap::new(),
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
@@ -975,6 +999,7 @@ See the Codex keymap documentation for supported actions and examples."
             pending_app_server_requests: PendingAppServerRequests::default(),
             dynamic_tool_status_updates,
             dynamic_tool_tasks: HashMap::new(),
+            dynamic_tool_origins: HashMap::new(),
             pending_startup_thread_start,
             pending_server_version_notice: if pending_startup_thread_start {
                 initial_server_version_notice
@@ -1141,7 +1166,9 @@ See the Codex keymap documentation for supported actions and examples."
             event_stream_ms = %event_stream_started_at.elapsed().as_millis(),
             "tui startup initial frame scheduled"
         );
-        app.refresh_startup_skills(&app_server);
+        if !start_in_agents_overview || !app.agents_hosts.enabled() {
+            app.refresh_startup_skills(&app_server);
+        }
         // Kick off a non-blocking rate-limit prefetch so the first `/status`
         // already has data and available reset credits can be surfaced, without
         // delaying the initial frame render.
@@ -1166,6 +1193,7 @@ See the Codex keymap documentation for supported actions and examples."
         let mut pending_resize: Option<(ratatui::layout::Size, Instant)> = None;
         let mut listen_for_app_server_events = true;
         let mut reconnect = None;
+        let mut reconnect_scope = None;
         let mut waiting_for_initial_session_configured = wait_for_initial_session_configured;
         let mut waiting_for_initial_session_header = true;
 
@@ -1241,7 +1269,15 @@ See the Codex keymap documentation for supported actions and examples."
                     Box::pin(app.finish_managed_worktree(*created)).await;
                     continue;
                 }
+                if reconnect_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope != &app.agents_hosts.scope())
+                {
+                    reconnect = None;
+                    reconnect_scope = None;
+                }
                 if app.reconnect.offline && !app.reconnect.failed && reconnect.is_none() {
+                    reconnect_scope = Some(app.agents_hosts.scope());
                     reconnect = Some(Box::pin(reconnect::reconnect(
                         app.app_server_target.clone(),
                         app.config.clone(),
@@ -1250,6 +1286,9 @@ See the Codex keymap documentation for supported actions and examples."
                         app_server.remote_cwd_override().map(Path::to_path_buf),
                         app_server.thread_tool_transport(),
                         app.reconnect.presentation,
+                        app.agents_hosts
+                            .enabled()
+                            .then(|| app.agents_hosts.foreground.clone()),
                     )));
                 }
                 // Replay queues history and operations. A buffered closure must not switch
@@ -1388,6 +1427,7 @@ See the Codex keymap documentation for supported actions and examples."
                     }
                     result = async { match reconnect.as_mut() { Some(future) => future.await, None => std::future::pending().await } }, if reconnect.is_some() && !has_pending_app_events => {
                         reconnect = None;
+                        reconnect_scope = None;
                         match result {
                             Ok(connected) => {
                                 if let Err(err) = app.finish_reconnect(tui, &mut app_server, &mut app_event_rx, connected, CODEX_CLI_VERSION).await {
@@ -1506,7 +1546,10 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         };
-        if let Err(err) = app_server.shutdown().await {
+        if app.agents_hosts.enabled() {
+            // Dropping UI-owned intake and request tasks never waits for remote execution.
+            drop(app_server);
+        } else if let Err(err) = app_server.shutdown().await {
             tracing::warn!(error = %err, "failed to shut down embedded app server");
         }
         let clear_pet_result = tui.clear_ambient_pet_image();

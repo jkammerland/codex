@@ -669,10 +669,16 @@ client_request_definitions! {
         serialization: global("team"),
         response: v2::TeamEnrollResponse,
     },
+    #[experimental("team/leave")]
+    TeamLeave => "team/leave" {
+        params: v2::TeamLeaveParams,
+        serialization: global("team"),
+        response: v2::TeamLeaveResponse,
+    },
     #[experimental("team/control")]
     TeamControl => "team/control" {
         params: v2::TeamControlParams,
-        serialization: global("team"),
+        serialization: global("team-control"),
         response: v2::TeamControlResponse,
     },
     #[experimental("team/deliver")]

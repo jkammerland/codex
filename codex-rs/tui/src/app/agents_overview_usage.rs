@@ -24,13 +24,13 @@ use std::time::Duration;
 use std::time::Instant;
 use uuid::Uuid;
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(/*secs*/ 60);
+pub(super) const REFRESH_INTERVAL: Duration = Duration::from_secs(/*secs*/ 60);
 
 #[derive(Default)]
 pub(super) struct AgentsOverviewUsage {
     pub(super) tokens: Option<TokenUsageBreakdown>,
     pub(super) estimate: Option<ThreadUsage>,
-    fetched_at: Option<Instant>,
+    pub(super) fetched_at: Option<Instant>,
 }
 
 impl App {
@@ -39,6 +39,17 @@ impl App {
         app_server: &AppServerSession,
         frame_requester: FrameRequester,
     ) {
+        let target = self
+            .chat_widget
+            .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
+            .and_then(|index| self.agents_overview.visible_targets.get(index))
+            .cloned();
+        if let Some(target) = target
+            && target.host != self.agents_hosts.foreground
+        {
+            self.refresh_other_agents_host_usage(app_server, frame_requester, target);
+            return;
+        }
         if self.reconnect.offline
             || self.agents_overview.usage_disabled
             || self.agents_overview.pending_usage.is_some()
@@ -99,47 +110,7 @@ impl App {
         request_id: Uuid,
         result: Result<ThreadUsageOutcome, String>,
     ) {
-        if self.agents_overview.pending_usage != Some((thread_id, request_id)) {
-            return;
-        }
-        self.agents_overview.pending_usage = None;
-        if self.agents_overview.threads.contains_key(&thread_id) {
-            let usage = self.agents_overview.usage.entry(thread_id).or_default();
-            usage.fetched_at = Some(Instant::now());
-            match result {
-                Ok(ThreadUsageOutcome::Available(mut estimate))
-                    if estimate.thread_id == thread_id.to_string() =>
-                {
-                    if let Some(previous) = &usage.estimate {
-                        let zero_credits = estimate.estimated_usage_credits_micros == 0
-                            && previous.estimated_usage_credits_micros > 0;
-                        let zero_cost = estimate.estimated_usage_usd_micros == Some(0)
-                            && previous
-                                .estimated_usage_usd_micros
-                                .is_some_and(|cost| cost > 0);
-                        if zero_credits {
-                            estimate.estimated_usage_credits_micros =
-                                previous.estimated_usage_credits_micros;
-                        }
-                        if zero_cost {
-                            estimate.estimated_usage_usd_micros =
-                                previous.estimated_usage_usd_micros;
-                        }
-                        if (zero_credits || zero_cost) && estimate.groups.is_empty() {
-                            estimate.groups.clone_from(&previous.groups);
-                        }
-                    }
-                    usage.estimate = Some(estimate);
-                }
-                Ok(ThreadUsageOutcome::Disabled) => {
-                    self.agents_overview.usage_disabled = true;
-                    for usage in self.agents_overview.usage.values_mut() {
-                        usage.estimate = None;
-                    }
-                }
-                Ok(ThreadUsageOutcome::Available(_)) | Err(_) => {}
-            }
-        }
+        apply_usage_to_state(&mut self.agents_overview, thread_id, request_id, result);
         self.repaint_agents_overview();
     }
 }
@@ -196,4 +167,52 @@ pub(super) fn usage_lines(usage: &AgentsOverviewUsage) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+pub(super) fn apply_usage_to_state(
+    state: &mut super::agents_overview::AgentsOverviewState,
+    thread_id: ThreadId,
+    request_id: Uuid,
+    result: Result<ThreadUsageOutcome, String>,
+) {
+    if state.pending_usage != Some((thread_id, request_id)) {
+        return;
+    }
+    state.pending_usage = None;
+    if state.threads.contains_key(&thread_id) {
+        let usage = state.usage.entry(thread_id).or_default();
+        usage.fetched_at = Some(Instant::now());
+        match result {
+            Ok(ThreadUsageOutcome::Available(mut estimate))
+                if estimate.thread_id == thread_id.to_string() =>
+            {
+                if let Some(previous) = &usage.estimate {
+                    let zero_credits = estimate.estimated_usage_credits_micros == 0
+                        && previous.estimated_usage_credits_micros > 0;
+                    let zero_cost = estimate.estimated_usage_usd_micros == Some(0)
+                        && previous
+                            .estimated_usage_usd_micros
+                            .is_some_and(|cost| cost > 0);
+                    if zero_credits {
+                        estimate.estimated_usage_credits_micros =
+                            previous.estimated_usage_credits_micros;
+                    }
+                    if zero_cost {
+                        estimate.estimated_usage_usd_micros = previous.estimated_usage_usd_micros;
+                    }
+                    if (zero_credits || zero_cost) && estimate.groups.is_empty() {
+                        estimate.groups.clone_from(&previous.groups);
+                    }
+                }
+                usage.estimate = Some(estimate);
+            }
+            Ok(ThreadUsageOutcome::Disabled) => {
+                state.usage_disabled = true;
+                for usage in state.usage.values_mut() {
+                    usage.estimate = None;
+                }
+            }
+            Ok(ThreadUsageOutcome::Available(_)) | Err(_) => {}
+        }
+    }
 }

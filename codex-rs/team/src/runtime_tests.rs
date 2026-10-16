@@ -488,3 +488,79 @@ async fn two_hosts_exchange_mail_through_relay_and_replay_offline_controls() -> 
     }
     result
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnect_finishes_persisted_stop_before_a_later_resume() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = tempfile::tempdir()?;
+    let mut manifest = crate::tests::manifest(directory.path());
+    let coordinator = Coordinator::open(manifest.clone()).await?;
+    coordinator
+        .execute(TeamRequest::Control {
+            mode: TeamExecutionMode::Stopped,
+        })
+        .await?;
+    let stopped = coordinator.current_control().await?;
+    coordinator
+        .execute(TeamRequest::Control {
+            mode: TeamExecutionMode::Running,
+        })
+        .await?;
+    drop(coordinator);
+
+    MockResponsesConfig::new("http://127.0.0.1:1")
+        .with_root_config(&format!(
+            "sqlite_home = {}",
+            serde_json::to_string(&home.path().display().to_string())?
+        ))
+        .write(home.path())?;
+    let sqlite =
+        codex_state::SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?);
+    let host_store =
+        codex_team_store::TeamStore::open(&sqlite, &home.path().join("team/host.sqlite")).await?;
+
+    // Simulate a crash after persisting Stop but before its cancellation intent
+    // was recorded. The launch has no handle yet, so cancellation stays pending.
+    host_store.apply_control(&stopped).await?;
+    host_store
+        .put(
+            "job",
+            "pending-launch",
+            &serde_json::json!({
+                "job": TeamTrackedJob {
+                    id: "pending-launch".into(),
+                    thread_id: uuid::Uuid::new_v4().to_string(),
+                    server: "jobs".into(),
+                    tool: "launch".into(),
+                    handle: None,
+                    status: TeamJobStatus::Unconfirmed,
+                    detail: Some("Launch handle is not known yet".into()),
+                },
+                "adapter": null,
+                "requested_revision": null,
+                "attempted_revision": null,
+                "registration_fingerprint": null,
+            }),
+        )
+        .await?;
+    let (mut process, server) = dual_host(home.path()).await?;
+    manifest.machines = vec![Machine {
+        id: "worker".into(),
+        label: "Worker".into(),
+        servers: vec![server],
+    }];
+    let coordinator = Coordinator::open(manifest).await?;
+    let _workers = crate::worker::start(&coordinator);
+    until(&coordinator, "recovered Stop then Resume", |snapshot| {
+        snapshot.servers[0].connected && snapshot.servers[0].applied_revision == Some(2)
+    })
+    .await?;
+    let job = host_store
+        .get::<serde_json::Value>("job", "pending-launch")
+        .await?
+        .context("pending launch must remain durable")?;
+    assert_eq!(job["requested_revision"], serde_json::json!(1));
+    assert_eq!(host_store.control().await?.unwrap().revision, 2);
+    process.kill().await?;
+    Ok(())
+}

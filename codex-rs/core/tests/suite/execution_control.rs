@@ -165,7 +165,7 @@ async fn pause_finishes_the_current_request_and_holds_the_next(
             text_elements: Vec::new(),
         }])
     };
-    let StartIfIdleSubmission::Started { turn_id } = test
+    let StartIfIdleSubmission::Started { turn_id, .. } = test
         .codex
         .start_turn_if_idle(input("first request"))
         .await?

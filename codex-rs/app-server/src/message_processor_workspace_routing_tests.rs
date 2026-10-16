@@ -63,7 +63,10 @@ async fn background_routing_call_sites_skip_config(api_key: Option<&str>) -> any
         outgoing_tx,
         analytics_events_client.clone(),
     ));
+    let installation_id = "11111111-1111-4111-8111-111111111111".to_string();
     let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
+        team_host: codex_team_extension::PreparedTeamHost::load(&config, installation_id.clone())
+            .await?,
         outgoing,
         analytics_events_client,
         arg0_paths: Arg0DispatchPaths::default(),
@@ -80,7 +83,7 @@ async fn background_routing_call_sites_skip_config(api_key: Option<&str>) -> any
             &auth_manager,
         ))),
         auth_manager,
-        installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        installation_id,
         code_mode_session_provider: None,
         rpc_transport: AppServerRpcTransport::Stdio,
         remote_control_handle: None,

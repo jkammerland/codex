@@ -546,7 +546,7 @@ impl TurnContext {
 
     /// Read both active model settings from one immutable version for host UI.
     pub(crate) fn capture_current_model_selection(&self) -> (String, Option<String>) {
-        let settings = self.current_settings.load();
+        let settings = self.next_step_settings.load();
         (
             settings.model_info.slug.clone(),
             settings.reasoning_effort().map(ToString::to_string),

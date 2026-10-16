@@ -1694,7 +1694,9 @@ impl Session {
                 codex_extension_api::ExtensionData::new(session_id.to_string());
             let source = &session_configuration.session_source;
             if let Some(parent_id) = source.parent_thread_id().or_else(|| {
-                source.is_non_root_agent().then(|| ThreadId::from(session_id))
+                source
+                    .is_non_root_agent()
+                    .then(|| ThreadId::from(session_id))
             }) {
                 extensions.execution_control().inherit(thread_id, parent_id);
             }

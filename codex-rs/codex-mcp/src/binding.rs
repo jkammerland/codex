@@ -391,6 +391,24 @@ impl PreparedMcpCall {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(Option<JsonValue>, Option<JsonValue>)>>,
     {
+        self.call_with_preparation_and_dispatch(requested_timeout, prepare, || Ok(()))
+            .await
+    }
+
+    /// Run a synchronous admission check after all asynchronous preparation,
+    /// immediately before the original external call begins. Once admitted,
+    /// the caller retains ownership of that call through its eventual result.
+    pub async fn call_with_preparation_and_dispatch<F, Fut, D>(
+        &self,
+        requested_timeout: Option<Duration>,
+        prepare: F,
+        before_dispatch: D,
+    ) -> Result<CallToolResult>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(Option<JsonValue>, Option<JsonValue>)>>,
+        D: FnOnce() -> Result<()>,
+    {
         let effective_timeout = match (self.client.tool_timeout, requested_timeout) {
             (Some(server_timeout), Some(requested_timeout)) => {
                 Some(server_timeout.min(requested_timeout))
@@ -430,6 +448,7 @@ impl PreparedMcpCall {
                     }
                     None => None,
                 };
+                before_dispatch()?;
                 self.client
                     .client
                     .call_tool(tool_name.clone(), arguments, meta, remaining_timeout)

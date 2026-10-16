@@ -50,6 +50,9 @@ use supports_color::Stream;
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+#[cfg(test)]
+#[path = "agents_args_tests.rs"]
+mod agents_args_tests;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
 mod cloud_config;
@@ -146,13 +149,13 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
-    /// Browse all agent sessions on the shared local app-server daemon.
+    /// Browse agent sessions and coordinate an opt-in team across machines.
     Agents(AgentsCommand),
 
     /// Internal: forward a local TCP socket through an HTTP/3 CONNECT proxy.
     #[clap(hide = true)]
     TcpTunnel(codex_tcp_tunnel::Args),
-    /// Coordinate enrolled agents across machines.
+    /// Compatibility alias for `agents` automation commands.
     Team(codex_team::TeamCommand),
 
     /// Run Codex non-interactively.
@@ -342,9 +345,26 @@ struct AgentsCommand {
     /// The agents overview requires a shared server; this option is rejected.
     #[arg(long, hide = true)]
     no_daemon: bool,
-    /// Open the multi-machine team panel using this runtime manifest.
-    #[arg(long, value_name = "MANIFEST")]
-    team: Option<PathBuf>,
+    /// Machine manifest for the shared agents overview and automation commands.
+    #[arg(
+        long,
+        alias = "team",
+        global = true,
+        value_name = "MANIFEST",
+        conflicts_with = "local"
+    )]
+    manifest: Option<PathBuf>,
+
+    /// Browse the local daemon without loading a configured machine manifest.
+    #[arg(long, global = true)]
+    local: bool,
+
+    #[command(subcommand)]
+    action: Option<codex_team::TeamAction>,
+
+    /// Reuse this operation identity when reconnecting after an uncertain automation response.
+    #[arg(long, global = true)]
+    operation_id: Option<String>,
     #[clap(flatten)]
     remote: InteractiveRemoteOptions,
 
@@ -1100,6 +1120,16 @@ async fn cli_main(
         .and_then(|options| options.remote.remote_auth_token_env.clone())
         .or(remote.remote_auth_token_env);
     if let Some(options) = agents_options {
+        anyhow::ensure!(
+            !options.local || options.action.is_none(),
+            "--local selects the local overview; omit it for team automation"
+        );
+        anyhow::ensure!(
+            root_remote.is_none() || (options.manifest.is_none() && !options.local),
+            "--remote cannot be combined with --manifest or --local"
+        );
+        interactive.agents_manifest = options.manifest.clone();
+        interactive.agents_local = options.local || root_remote.is_some();
         interactive.cwd = options.cwd.clone().or(interactive.cwd.take());
         interactive.no_alt_screen |= options.no_alt_screen;
         interactive.no_daemon |= options.no_daemon;
@@ -1117,18 +1147,34 @@ async fn cli_main(
     match subcommand {
         Some(Subcommand::Team(command)) => codex_team::run(command).await?,
         Some(Subcommand::Agents(AgentsCommand {
-            team: Some(manifest),
+            manifest,
+            action: Some(command),
+            operation_id,
             ..
         })) => {
             anyhow::ensure!(
                 root_remote.is_none(),
-                "team attachments use the coordinator from the manifest; omit --remote"
+                "agents automation uses the configured manifest; omit --remote"
             );
             anyhow::ensure!(
                 interactive.prompt.is_none() && interactive.images.is_empty(),
                 "`codex agents` does not accept an initial prompt or images"
             );
-            codex_tui::run_team_agents(&manifest, interactive.no_alt_screen).await?;
+            let manifest = match manifest {
+                Some(manifest) => Some(manifest),
+                None => {
+                    cloud_config::load_config(&root_config_overrides, LoaderOverrides::default())
+                        .await?
+                        .agents_manifest
+                        .map(AbsolutePathBuf::into_path_buf)
+                }
+            };
+            codex_team::run(codex_team::TeamCommand {
+                manifest,
+                command,
+                operation_id,
+            })
+            .await?;
         }
         None | Some(Subcommand::Agents(_)) => {
             prepend_config_flags(
@@ -2513,6 +2559,7 @@ async fn run_interactive_tui(
     remote_auth_token_env: Option<String>,
     arg0_paths: Arg0DispatchPaths,
 ) -> std::io::Result<AppExitInfo> {
+    interactive.agents_local |= remote.is_some();
     if interactive.no_daemon {
         if interactive.agents_overview {
             return Ok(AppExitInfo::fatal(
@@ -2556,15 +2603,24 @@ async fn run_interactive_tui(
         if !std::io::stdout().is_terminal() {
             return Ok(AppExitInfo::fatal("stdout is not a terminal"));
         }
-        cloud_config::load_config(&interactive.config_overrides, LoaderOverrides::default())
-            .await
-            .map_err(std::io::Error::other)?;
-        let output = codex_app_server_daemon::run(AppServerLifecycleCommand::Start)
-            .await
-            .map_err(|err| std::io::Error::other(format!(
-                "{err:#}\nThe agents overview requires a shared server. Use codex --no-daemon to work without it."
-            )))?;
-        interactive.managed_daemon = output.backend.is_some();
+        let config =
+            cloud_config::load_config(&interactive.config_overrides, LoaderOverrides::default())
+                .await
+                .map_err(std::io::Error::other)?;
+        if !interactive.agents_local {
+            interactive.agents_manifest = interactive
+                .agents_manifest
+                .or_else(|| config.agents_manifest.map(AbsolutePathBuf::into_path_buf));
+        }
+        // A manifest owns its servers; starting another daemon here could duplicate its account.
+        if interactive.agents_manifest.is_none() {
+            let output = codex_app_server_daemon::run(AppServerLifecycleCommand::Start)
+                .await
+                .map_err(|err| std::io::Error::other(format!(
+                    "{err:#}\nThe agents overview requires a shared server. Use codex --no-daemon to work without it."
+                )))?;
+            interactive.managed_daemon = output.backend.is_some();
+        }
     }
 
     let remote_endpoint = match resolve_remote_endpoint(remote, remote_auth_token_env.clone()) {

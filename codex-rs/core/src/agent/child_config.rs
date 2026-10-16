@@ -132,6 +132,13 @@ pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, St
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, String> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
+    config.restore_saved_model_policy = true;
+    config.team_model_policy = codex_protocol::team_model::TeamModelPolicy {
+        model_origin: codex_protocol::team_model::TeamSelectionOrigin::Inherited,
+        effort_origin: codex_protocol::team_model::TeamSelectionOrigin::Inherited,
+        selection: None,
+        superseded_revision: None,
+    };
     if config
         .features
         .enabled(Feature::SubagentDefaultContextLimits)
@@ -221,6 +228,16 @@ async fn apply_requested_spawn_agent_model_overrides(
         );
     }
     let turn = step_context.turn.as_ref();
+    let model_origin = if requested_model.is_some() {
+        codex_protocol::team_model::TeamSelectionOrigin::Explicit
+    } else {
+        codex_protocol::team_model::TeamSelectionOrigin::Configured
+    };
+    let effort_origin = if requested_reasoning_effort.is_some() {
+        codex_protocol::team_model::TeamSelectionOrigin::Explicit
+    } else {
+        codex_protocol::team_model::TeamSelectionOrigin::Configured
+    };
     let requested_model = requested_model.or(turn.config.agent_default_subagent_model.as_deref());
     let requested_reasoning_effort = requested_reasoning_effort
         .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone());
@@ -246,6 +263,10 @@ async fn apply_requested_spawn_agent_model_overrides(
             .await;
 
         config.model = Some(selected_model_name.clone());
+        config.team_model_policy.model_origin = model_origin;
+        if model_origin == codex_protocol::team_model::TeamSelectionOrigin::Configured {
+            config.configured_model_default = Some(selected_model_name.clone());
+        }
         if let Some(reasoning_effort) = requested_reasoning_effort {
             validate_spawn_agent_reasoning_effort(
                 &selected_model_name,
@@ -253,8 +274,11 @@ async fn apply_requested_spawn_agent_model_overrides(
                 &reasoning_effort,
             )?;
             config.model_reasoning_effort = Some(reasoning_effort);
+            config.team_model_policy.effort_origin = effort_origin;
         } else {
             config.model_reasoning_effort = selected_model_info.default_reasoning_level;
+            config.team_model_policy.effort_origin =
+                codex_protocol::team_model::TeamSelectionOrigin::Default;
         }
 
         return Ok(());
@@ -267,6 +291,7 @@ async fn apply_requested_spawn_agent_model_overrides(
             &reasoning_effort,
         )?;
         config.model_reasoning_effort = Some(reasoning_effort);
+        config.team_model_policy.effort_origin = effort_origin;
     }
 
     Ok(())

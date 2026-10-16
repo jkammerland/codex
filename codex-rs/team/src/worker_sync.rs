@@ -30,7 +30,7 @@ impl Coordinator {
             })
             .await?;
         ensure!(
-            host.protocol_version == 1,
+            host.protocol_version == 2,
             "unsupported worker team protocol"
         );
         if let Some(expected) = self.store.get::<String>("installation", &key).await? {
@@ -43,9 +43,24 @@ impl Coordinator {
                 .put("installation", &key, &host.installation_id)
                 .await?;
         }
+        let current = self.current_control().await?;
+        if let Some(applied) = &host.control {
+            ensure!(
+                applied.coordinator_id == current.coordinator_id,
+                "worker belongs to another coordinator"
+            );
+            ensure!(
+                applied.revision <= current.revision,
+                "worker control is newer than coordinator storage; restore the coordinator database"
+            );
+        }
+        peer.verified
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Some(status) = self.statuses.write().await.get_mut(&key) {
             status.installation_id = Some(host.installation_id);
+            status.applied_revision = host.control.as_ref().map(|control| control.revision);
         }
+        self.notify();
         // Reapply the matching revision once to release the startup
         // reconciliation gate. Missing revisions, including Stop, stay ordered.
         self.controls(machine, server, peer, host.control, true)
@@ -60,6 +75,37 @@ impl Coordinator {
         Ok(())
     }
 
+    pub(crate) async fn dispatch_controls(
+        &self,
+        machine: &Machine,
+        server: &Server,
+        peer: &Peer,
+    ) -> Result<()> {
+        if !peer.verified.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        let status = self
+            .statuses
+            .read()
+            .await
+            .get(&server_key(&machine.id, &server.id))
+            .cloned();
+        let Some(status) = status.filter(|status| status.installation_id.is_some()) else {
+            return Ok(());
+        };
+        let coordinator_id = self.current_control().await?.coordinator_id;
+        let applied = status.applied_revision.map(|revision| TeamControlState {
+            coordinator_id,
+            revision,
+            mode: TeamExecutionMode::Running,
+        });
+        self.controls(machine, server, peer, applied, false).await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the destination control lane must send and acknowledge durable revisions in order across RPCs"
+    )]
     async fn controls(
         &self,
         machine: &Machine,
@@ -68,7 +114,31 @@ impl Coordinator {
         applied: Option<TeamControlState>,
         reconcile: bool,
     ) -> Result<()> {
+        let lock = self.control_update_lock(&machine.id, &server.id).await;
+        let _control = lock.lock().await;
         let current = self.current_control().await?;
+        let applied = if !reconcile {
+            let cached = self
+                .statuses
+                .read()
+                .await
+                .get(&server_key(&machine.id, &server.id))
+                .and_then(|status| status.applied_revision);
+            cached
+                .filter(|revision| {
+                    applied
+                        .as_ref()
+                        .is_none_or(|value| *revision >= value.revision)
+                })
+                .map(|revision| TeamControlState {
+                    coordinator_id: current.coordinator_id.clone(),
+                    revision,
+                    mode: current.mode,
+                })
+                .or(applied)
+        } else {
+            applied
+        };
         if let Some(applied) = &applied {
             ensure!(
                 applied.coordinator_id == current.coordinator_id,
@@ -102,6 +172,7 @@ impl Coordinator {
             }
         }
         for control in revisions {
+            let requested_revision = control.revision;
             let response: TeamControlResponse = peer
                 .handle
                 .request_typed(ClientRequest::TeamControl {
@@ -109,10 +180,20 @@ impl Coordinator {
                     params: TeamControlParams { control },
                 })
                 .await?;
+            let acknowledged = self
+                .store
+                .get::<TeamControlState>(
+                    "control_history",
+                    &format!("{:020}", response.control.revision),
+                )
+                .await?;
             ensure!(
-                response.reconciled,
-                "worker has not acknowledged the requested control"
+                response.control.revision >= requested_revision
+                    && acknowledged.as_ref() == Some(&response.control),
+                "worker acknowledged an inconsistent control revision"
             );
+            // The returned control acknowledges durable admission. Cleanup can
+            // remain pending while later ordered controls use this healthy peer.
             if let Some(status) = self
                 .statuses
                 .write()
@@ -184,6 +265,10 @@ impl Coordinator {
         Ok(())
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "snapshot version checks and durable snapshot commits share a mutation fence with newer notifications"
+    )]
     async fn refresh_enrollments(
         &self,
         machine: &Machine,
@@ -192,7 +277,22 @@ impl Coordinator {
         rejoin: bool,
     ) -> Result<()> {
         let mut cursor = None;
+        let mut present = std::collections::HashSet::new();
+        let initial_version = self
+            .observed_versions
+            .lock()
+            .await
+            .get(&server_key(&machine.id, &server.id))
+            .copied()
+            .unwrap_or_default();
         loop {
+            let version = self
+                .observed_versions
+                .lock()
+                .await
+                .get(&server_key(&machine.id, &server.id))
+                .copied()
+                .unwrap_or_default();
             let host: TeamHostReadResponse = peer
                 .handle
                 .request_typed(ClientRequest::TeamHostRead {
@@ -203,16 +303,19 @@ impl Coordinator {
                     },
                 })
                 .await?;
-            for enrollment in host.data {
+            for mut enrollment in host.data {
+                enrollment.address = canonical_address(enrollment.address)?;
                 ensure!(
                     enrollment.address.machine_id == machine.id
                         && enrollment.address.server_id == server.id,
                     "manifest identity differs from worker enrollment"
                 );
                 let key = address_key(&enrollment.address);
+                present.insert(key.clone());
                 let previous = self.store.get::<Agent>("agent", &key).await?;
                 let mut agent = previous.clone().unwrap_or_else(|| Agent {
                     enrollment: enrollment.clone(),
+                    requested_selection: None,
                     runtime: None,
                     status: "unloaded".into(),
                     current_model: None,
@@ -245,18 +348,31 @@ impl Coordinator {
                     agent.current_model = None;
                     agent.current_effort = None;
                 }
+                let _mutation = self.mutations.lock().await;
+                if self
+                    .observed_versions
+                    .lock()
+                    .await
+                    .get(&server_key(&machine.id, &server.id))
+                    .copied()
+                    .unwrap_or_default()
+                    != version
+                {
+                    continue;
+                }
                 if previous.as_ref() != Some(&agent) {
                     self.store.put("agent", &key, &agent).await?;
                     self.notify();
                 }
             }
             for runtime in host.runtime {
-                let address = TeamAddress {
+                let address = canonical_address(TeamAddress {
                     machine_id: machine.id.clone(),
                     server_id: server.id.clone(),
                     thread_id: runtime.thread_id.clone(),
-                };
+                })?;
                 let key = address_key(&address);
+                present.insert(key.clone());
                 let previous = self.store.get::<Agent>("agent", &key).await?;
                 let mut agent = previous.clone().unwrap_or_else(|| Agent {
                     enrollment: TeamEnrollment {
@@ -265,6 +381,7 @@ impl Coordinator {
                         manually_held: runtime.manually_held,
                         continuation_turn_id: runtime.continuation_turn_id.clone(),
                     },
+                    requested_selection: None,
                     runtime: None,
                     status: "unloaded".into(),
                     current_model: None,
@@ -280,6 +397,13 @@ impl Coordinator {
                 agent.current_effort = runtime.current_effort.clone();
                 agent.next_model = runtime.next_model.clone();
                 agent.next_effort = runtime.next_effort.clone();
+                if agent.requested_selection.as_ref().is_some_and(|request| {
+                    runtime
+                        .superseded_selection_revision
+                        .is_some_and(|revision| revision >= request.revision)
+                }) {
+                    agent.requested_selection = None;
+                }
                 agent.status = if runtime.archived {
                     "archived"
                 } else if !runtime.loaded {
@@ -291,6 +415,18 @@ impl Coordinator {
                 }
                 .into();
                 agent.runtime = Some(runtime);
+                let _mutation = self.mutations.lock().await;
+                if self
+                    .observed_versions
+                    .lock()
+                    .await
+                    .get(&server_key(&machine.id, &server.id))
+                    .copied()
+                    .unwrap_or_default()
+                    != version
+                {
+                    continue;
+                }
                 if previous.as_ref() != Some(&agent) {
                     self.store.put("agent", &key, &agent).await?;
                     self.notify();
@@ -298,6 +434,32 @@ impl Coordinator {
             }
             let Some(next) = host.next_cursor else { break };
             cursor = Some(next);
+        }
+        let _mutation = self.mutations.lock().await;
+        if self
+            .observed_versions
+            .lock()
+            .await
+            .get(&server_key(&machine.id, &server.id))
+            .copied()
+            .unwrap_or_default()
+            == initial_version
+        {
+            let mut departed = std::collections::HashSet::new();
+            for agent in self.agents().await? {
+                let address = &agent.enrollment.address;
+                let key = address_key(address);
+                if address.machine_id == machine.id
+                    && address.server_id == server.id
+                    && !present.contains(&key)
+                {
+                    departed.insert(key);
+                }
+            }
+            if !departed.is_empty() {
+                self.forget_agents(&departed).await?;
+                self.notify();
+            }
         }
         Ok(())
     }
@@ -327,6 +489,12 @@ impl Coordinator {
             thread_id: thread_id.clone(),
         });
         let _mutation = self.mutations.lock().await;
+        *self
+            .observed_versions
+            .lock()
+            .await
+            .entry(server_key(&machine.id, &server.id))
+            .or_default() += 1;
         let Some(mut agent) = self.store.get::<Agent>("agent", &key).await? else {
             return Ok(());
         };
@@ -366,3 +534,7 @@ impl Coordinator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "worker_sync_tests.rs"]
+mod tests;

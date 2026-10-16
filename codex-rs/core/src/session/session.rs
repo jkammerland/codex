@@ -102,6 +102,7 @@ pub(crate) struct Session {
 
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
+    pub(super) team_model_policy: codex_protocol::team_model::TeamModelPolicy,
     /// Runtime provider and its provider-specific execution policy.
     pub(super) provider: SharedModelProvider,
 
@@ -278,6 +279,7 @@ impl SessionConfiguration {
             .map(|config| config.permission_profile.clone())
             .unwrap_or_else(|| self.permission_profile_state.snapshot());
         ThreadConfigSnapshot {
+            team_model_policy: self.team_model_policy.clone(),
             model: self.step_settings.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
             service_tier: self.step_settings.service_tier.clone(),
@@ -320,6 +322,7 @@ impl SessionConfiguration {
         environment_selections: &[TurnEnvironmentSelection],
     ) -> ThreadSettingsSnapshot {
         ThreadSettingsSnapshot {
+            team_model_policy: self.team_model_policy.clone(),
             model: self.step_settings.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
             service_tier: self.step_settings.service_tier.clone(),
@@ -343,6 +346,7 @@ impl SessionConfiguration {
         environment_selections: Vec<TurnEnvironmentSelection>,
     ) -> CodexThreadSettingsOverrides {
         CodexThreadSettingsOverrides {
+            restore_model_policy: Some(self.team_model_policy.clone()),
             environments: Some(TurnEnvironmentRequests::new(
                 self.legacy_fallback_cwd.clone(),
                 environment_selections
@@ -407,6 +411,53 @@ impl SessionConfiguration {
         current_environments: &[TurnEnvironmentSelection],
     ) -> ConstraintResult<Self> {
         let mut next_configuration = self.clone();
+        if let Some(revision) = updates.supersedes_team_selection {
+            next_configuration.team_model_policy.superseded_revision = Some(
+                next_configuration
+                    .team_model_policy
+                    .superseded_revision
+                    .map_or(revision, |previous| previous.max(revision)),
+            );
+        }
+        if let Some(policy) = &updates.restore_model_policy {
+            next_configuration.team_model_policy = policy.clone();
+        }
+        let mut step_updates = updates.step_settings.clone();
+        if let Some(selection) = &updates.team_selection {
+            let already_applied = self.team_model_policy.selection.as_ref() == Some(selection);
+            next_configuration
+                .team_model_policy
+                .apply(selection)
+                .map_err(|error| ConstraintError::InvalidValue {
+                    field_name: "team_selection",
+                    candidate: selection.revision.to_string(),
+                    allowed: error.into(),
+                    requirement_source: codex_config::RequirementSource::Unknown,
+                })?;
+            if already_applied {
+                step_updates.model = None;
+                step_updates.effort = None;
+            }
+        } else if updates.restore_model_policy.is_none() {
+            if step_updates.model.is_some() || step_updates.collaboration_mode.is_some() {
+                next_configuration.team_model_policy.model_origin =
+                    codex_protocol::team_model::TeamSelectionOrigin::Explicit;
+            }
+            if let Some(effort) = &step_updates.effort {
+                next_configuration.team_model_policy.effort_origin = if effort.is_some() {
+                    codex_protocol::team_model::TeamSelectionOrigin::Explicit
+                } else {
+                    codex_protocol::team_model::TeamSelectionOrigin::Default
+                };
+            } else if let Some(mode) = &step_updates.collaboration_mode {
+                next_configuration.team_model_policy.effort_origin =
+                    if mode.reasoning_effort().is_some() {
+                        codex_protocol::team_model::TeamSelectionOrigin::Explicit
+                    } else {
+                        codex_protocol::team_model::TeamSelectionOrigin::Default
+                    };
+            }
+        }
         if let Some(turn_extension_init) = &updates.turn_extension_init {
             next_configuration.turn_extension_init = turn_extension_init.clone();
         }
@@ -555,7 +606,7 @@ impl SessionConfiguration {
         // Apply step settings last: the proposed permissions and environment
         // selections must be complete before deriving their validation constraints.
         next_configuration.step_settings = Arc::new(self.step_settings.apply(
-            &updates.step_settings,
+            &step_updates,
             &next_configuration.step_settings_constraints(next_environments),
         )?);
         Ok(next_configuration)
@@ -606,6 +657,9 @@ pub(crate) struct SessionSettingsCommit {
 
 #[derive(Default, Clone)]
 pub(crate) struct SessionSettingsUpdate {
+    pub(crate) supersedes_team_selection: Option<i64>,
+    pub(crate) restore_model_policy: Option<codex_protocol::team_model::TeamModelPolicy>,
+    pub(crate) team_selection: Option<codex_protocol::team_model::TeamModelSelection>,
     pub(crate) step_settings: StepSettingsUpdate,
     /// Omission preserves the current data; an empty initializer clears it.
     pub(crate) turn_extension_init: Option<ExtensionDataInit>,

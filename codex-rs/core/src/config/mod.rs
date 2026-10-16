@@ -637,6 +637,10 @@ pub struct Config {
 
     /// Optional override of model selection.
     pub model: Option<String>,
+    /// Layer-backed default retained separately from a resumed thread's selection.
+    pub configured_model_default: Option<String>,
+    /// Explicit resume overrides own their policy instead of restoring older ownership.
+    pub restore_saved_model_policy: bool,
 
     /// Default Daybreak preference for new threads and non-interactive turns.
     pub daybreak_enabled: bool,
@@ -963,6 +967,12 @@ pub struct Config {
 
     /// Whether multi-agent tools are enabled through `[agents]`.
     pub agents_enabled: bool,
+
+    /// Machine manifest for the shared agents overview. Reading it does not enroll sessions.
+    pub agents_manifest: Option<AbsolutePathBuf>,
+
+    /// Ownership of model fields before defaults are materialized for a child.
+    pub team_model_policy: codex_protocol::team_model::TeamModelPolicy,
 
     /// User-configured maximum number of spawned agent threads per session.
     pub agent_max_threads: Option<usize>,
@@ -2684,6 +2694,9 @@ fn resolve_permission_config_syntax(
 #[derive(Default, Debug, Clone)]
 pub struct ConfigOverrides {
     pub model: Option<String>,
+    /// Some(None) restores a persisted clear without a TOML null override.
+    pub model_reasoning_effort: Option<Option<ReasoningEffort>>,
+    pub restore_saved_model_policy: Option<bool>,
     pub review_model: Option<String>,
     pub cwd: Option<PathBuf>,
     pub approval_policy: Option<AskForApproval>,
@@ -3420,6 +3433,8 @@ impl Config {
         // Destructure ConfigOverrides fully to ensure all overrides are applied.
         let ConfigOverrides {
             model,
+            model_reasoning_effort: model_reasoning_effort_override,
+            restore_saved_model_policy,
             review_model: override_review_model,
             cwd,
             approval_policy: approval_policy_override,
@@ -4101,6 +4116,18 @@ impl Config {
 
         let forced_login_method = cfg.forced_login_method;
 
+        let model_reasoning_effort = model_reasoning_effort_override.unwrap_or(cfg.model_reasoning_effort);
+        let team_model_policy = codex_protocol::team_model::TeamModelPolicy {
+            model_origin: codex_protocol::team_model::TeamSelectionOrigin::Configured,
+            effort_origin: if model_reasoning_effort.is_some() {
+                codex_protocol::team_model::TeamSelectionOrigin::Configured
+            } else {
+                codex_protocol::team_model::TeamSelectionOrigin::Default
+            },
+            selection: None,
+            superseded_revision: None,
+        };
+        let configured_model_default = cfg.model.clone();
         let model = model.or(cfg.model);
         let notices = cfg.notice.unwrap_or_default();
         let service_tier = match service_tier_override {
@@ -4517,6 +4544,10 @@ impl Config {
                 .collect(),
             tool_output_token_limit: cfg.tool_output_token_limit,
             agents_enabled,
+            agents_manifest: cfg.agents_manifest.clone(),
+            team_model_policy,
+            configured_model_default,
+            restore_saved_model_policy: restore_saved_model_policy.unwrap_or(true),
             agent_max_threads,
             agent_default_subagent_model,
             agent_default_subagent_reasoning_effort,
@@ -4569,7 +4600,7 @@ impl Config {
                 .as_ref()
                 .and_then(|auto_review| auto_review.circuit_break_action)
                 .unwrap_or_default(),
-            model_reasoning_effort: cfg.model_reasoning_effort,
+            model_reasoning_effort,
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
             model_reasoning_summary: cfg.model_reasoning_summary,
             model_catalog,

@@ -32,6 +32,18 @@ struct HttpState {
 }
 
 pub(crate) async fn serve(manifest: Manifest) -> Result<()> {
+    let automatic = std::env::var_os(crate::startup::READY_MARKER).is_some();
+    let startup = if automatic {
+        match crate::startup::prepare_automatic_start(&manifest).await? {
+            Some(startup) => Some(startup),
+            None => {
+                crate::startup::report_ready(&mut std::io::stdout().lock())?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
     let path = &manifest.coordinator.token_file;
     if !tokio::fs::try_exists(path).await? {
         if let Some(parent) = path.parent() {
@@ -53,6 +65,12 @@ pub(crate) async fn serve(manifest: Manifest) -> Result<()> {
     let coordinator = Coordinator::open(manifest).await?;
     let _workers = crate::worker::start(&coordinator);
     crate::gitea_publish::start(&coordinator);
+    if automatic {
+        crate::startup::report_ready(&mut std::io::stdout().lock())?;
+    }
+    // The child owns serialization through token creation, listener binding and
+    // readiness even if the UI that spawned it has already disconnected.
+    drop(startup);
     axum::serve(listener, router(coordinator, token))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -139,12 +157,23 @@ fn authorized(headers: &HeaderMap, expected: &str) -> bool {
 async fn rpc(
     State(state): State<HttpState>,
     headers: HeaderMap,
-    Json(request): Json<TeamRequest>,
+    Json(request): Json<serde_json::Value>,
 ) -> Response {
     if !authorized(&headers, &state.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match state.coordinator.execute(request).await {
+    let result = if request.get("operationId").is_some() {
+        match serde_json::from_value(request) {
+            Ok(operation) => state.coordinator.execute_operation(operation).await,
+            Err(error) => Err(error.into()),
+        }
+    } else {
+        match serde_json::from_value::<TeamRequest>(request) {
+            Ok(request) => state.coordinator.execute(request).await,
+            Err(error) => Err(error.into()),
+        }
+    };
+    match result {
         Ok(response) => Json(response).into_response(),
         Err(error) => (
             StatusCode::BAD_REQUEST,
@@ -188,14 +217,14 @@ async fn relay(
     if !authorized(&headers, &state.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let peer = match state.coordinator.peer(&machine, &server).await {
-        Ok(peer) => peer,
+    let endpoint = match state.coordinator.endpoint(&machine, &server).await {
+        Ok(endpoint) => endpoint,
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
     ws.max_message_size(128 << 20)
         .max_frame_size(128 << 20)
         .on_upgrade(move |socket| async move {
-            if let Err(error) = peer.endpoint.relay(socket).await {
+            if let Err(error) = endpoint.relay(socket).await {
                 tracing::debug!(%error, "interactive team relay disconnected");
             }
         })

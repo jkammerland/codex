@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/model_target_tests.rs
+assertion_line: 30
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Loading task models
+  Fetching choices from the owning machine. Esc cancels.
+
+
+no matches
+
+  enter select · esc back

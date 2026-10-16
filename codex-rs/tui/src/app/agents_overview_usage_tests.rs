@@ -229,8 +229,10 @@ fn incomplete_billing_groups_do_not_display_partial_token_totals() {
         ]
     }))
     .unwrap();
-    let mut usage = AgentsOverviewUsage::default();
-    usage.estimate = Some(estimate);
+    let usage = AgentsOverviewUsage {
+        estimate: Some(estimate),
+        ..Default::default()
+    };
     let text = usage_lines(&usage)
         .into_iter()
         .map(|line| line.to_string())

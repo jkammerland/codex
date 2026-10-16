@@ -1,0 +1,12 @@
+---
+source: tui/src/app/agents_hosts_team_tests.rs
+assertion_line: 32
+expression: output
+---
+Request · deliver at the next turn
+Review the proposed change on your machine
+and reply with the test result.
+
+
+
+Enter send · Esc cancel

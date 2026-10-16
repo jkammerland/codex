@@ -18,6 +18,8 @@ use crate::TeamHostService;
 pub(crate) struct StoredJob {
     pub job: TeamTrackedJob,
     pub adapter: Option<TeamCancellationAdapter>,
+    #[serde(default)]
+    pub launch_revision: Option<i64>,
     pub requested_revision: Option<i64>,
     pub attempted_revision: Option<i64>,
     pub registration_fingerprint: Option<String>,
@@ -54,9 +56,9 @@ impl TeamHostService {
     )]
     async fn track_launch(&self, input: ToolStartInput<'_>) -> Result<()> {
         let thread_id = ThreadId::from_string(input.thread_store.level_id())?;
-        if self.gate.root(thread_id).is_none() {
+        let Some(root) = self.gate.root(thread_id) else {
             return Ok(());
-        }
+        };
         let Some(store) = self.store.get() else {
             return Ok(());
         };
@@ -76,13 +78,33 @@ impl TeamHostService {
         let id = format!("{}:{}:{}", thread_id, input.turn_id, input.call_id);
         let _update = self.job_updates.lock().await;
         if store.get::<StoredJob>("job", &id).await?.is_some() {
+            input
+                .turn_store
+                .get_or_init(codex_extension_api::RetainedToolResults::default)
+                .retain(input.call_id.to_owned());
             return Ok(());
         }
-        let requested_revision = store
-            .control()
+        let launch_revision = input
+            .turn_store
+            .get::<codex_extension_api::ExecutionAdmissions>()
+            .and_then(|admissions| admissions.revision(input.call_id))
+            .map(i64::try_from)
+            .transpose()?;
+        let mut requested_revision = None;
+        for (_, control) in store
+            .list::<codex_app_server_protocol::TeamControlState>("control_history", "", u32::MAX)
             .await?
-            .filter(|control| control.mode == codex_app_server_protocol::TeamExecutionMode::Stopped)
-            .map(|control| control.revision);
+        {
+            if control.mode == codex_app_server_protocol::TeamExecutionMode::Stopped
+                && launch_revision.is_none_or(|revision| revision <= control.revision)
+                && store
+                    .get::<Vec<String>>("control_scope", &format!("{:020}", control.revision))
+                    .await?
+                    .is_none_or(|scope| scope.contains(&root.to_string()))
+            {
+                requested_revision = Some(control.revision);
+            }
+        }
         store
             .put(
                 "job",
@@ -100,12 +122,17 @@ impl TeamHostService {
                         ),
                     },
                     adapter: Some(adapter),
+                    launch_revision,
                     requested_revision,
                     attempted_revision: None,
                     registration_fingerprint: context.registration_fingerprint().map(str::to_owned),
                 },
             )
             .await?;
+        input
+            .turn_store
+            .get_or_init(codex_extension_api::RetainedToolResults::default)
+            .retain(input.call_id.to_owned());
         self.notify();
         Ok(())
     }
@@ -162,13 +189,25 @@ impl TeamHostService {
         clippy::await_holding_invalid_type,
         reason = "serializes durable state changes and dispatch across asynchronous operations"
     )]
-    pub(crate) async fn request_job_cancellation(&self, revision: i64) -> Result<()> {
+    pub(crate) async fn request_job_cancellation(
+        &self,
+        revision: i64,
+        roots: &[String],
+    ) -> Result<()> {
         let Some(store) = self.store.get() else {
             return Ok(());
         };
         let update = self.job_updates.lock().await;
         for (id, mut stored) in store.list::<StoredJob>("job", "", u32::MAX).await? {
-            if stored.job.status != TeamJobStatus::Cancelled {
+            if stored.job.status != TeamJobStatus::Cancelled
+                && stored
+                    .launch_revision
+                    .is_none_or(|launched| launched <= revision)
+                && ThreadId::from_string(&stored.job.thread_id)
+                    .ok()
+                    .and_then(|id| self.gate.root(id))
+                    .is_some_and(|root| roots.contains(&root.to_string()))
+            {
                 stored.requested_revision = Some(revision);
                 store.put("job", &id, &stored).await?;
             }
@@ -289,7 +328,11 @@ impl TeamHostService {
 impl ToolLifecycleContributor for TeamHostService {
     fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
+            let admission = input.admission;
             if let Err(error) = self.track_launch(input).await {
+                admission.reject(format!(
+                    "could not persist external team launch intent: {error}"
+                ));
                 tracing::error!(%error, "could not track external team work");
             }
         })

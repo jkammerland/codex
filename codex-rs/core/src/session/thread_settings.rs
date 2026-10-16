@@ -8,6 +8,7 @@ use crate::WithTurnExtensionData;
 use crate::config::ConstraintResult;
 use codex_history::RolloutItem;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
@@ -28,6 +29,35 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// Turn-bound settings are journaled only once the input has been admitted.
+/// Rejected input must not leave a model choice to recover after restart.
+pub(super) async fn journal_model_intent(
+    session: &Session,
+    updates: &mut SessionSettingsUpdate,
+) -> codex_protocol::error::Result<()> {
+    let settings = ThreadSettingsOverrides {
+        team_selection: updates.team_selection.clone(),
+        model: updates.step_settings.model.clone(),
+        effort: updates.step_settings.effort.clone(),
+        collaboration_mode: updates.step_settings.collaboration_mode.clone(),
+        ..Default::default()
+    };
+    for contributor in session.services.extensions.thread_lifecycle_contributors() {
+        if let Some(revision) = contributor
+            .on_model_selection_requested(session.thread_id(), &settings)
+            .await
+            .map_err(CodexErr::InvalidRequest)?
+        {
+            updates.supersedes_team_selection = Some(
+                updates
+                    .supersedes_team_selection
+                    .map_or(revision, |previous| previous.max(revision)),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Applies standalone thread settings. The caller holds the persistence permit through notification.
@@ -63,6 +93,8 @@ pub(super) fn prepare_update(
         turn_extension_init,
     } = overrides.into();
     let ThreadSettingsOverrides {
+        supersedes_team_selection,
+        team_selection,
         environments: environment_requests,
         runtime_workspace_roots,
         profile_workspace_roots,
@@ -81,6 +113,8 @@ pub(super) fn prepare_update(
         disabled_plugin_ids,
     } = overrides;
     SessionSettingsUpdate {
+        supersedes_team_selection,
+        team_selection,
         turn_extension_init,
         step_settings: StepSettingsUpdate {
             model,

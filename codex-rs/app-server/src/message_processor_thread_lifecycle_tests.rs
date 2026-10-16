@@ -22,13 +22,18 @@ use crate::transport::ConnectionOrigin;
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
+use app_test_support::create_fake_rollout;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use codex_app_server_protocol::InitializeResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadClosedNotification;
+use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadLoadedListResponse;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::UserInput;
 use codex_core::config::ConfigBuilder;
 use codex_login::AuthManager;
 use core_test_support::fs_wait::wait_for_path_exists;
@@ -39,6 +44,141 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
+
+#[test]
+fn ordinary_saved_thread_resumes_and_forks_on_an_eight_megabyte_stack() -> Result<()> {
+    // Match the existing app-server test stack. New RPC arms must not consume
+    // the stack needed to initialize an unrelated ordinary conversation.
+    let handle = std::thread::Builder::new()
+        .name("ordinary-thread-resume".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(Box::pin(async {
+                let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+                let home = TempDir::new()?;
+                MockResponsesConfig::new(&server.uri()).write(home.path())?;
+                let saved_message = "Existing ordinary conversation";
+                let thread_id = create_fake_rollout(
+                    home.path(),
+                    "2026-10-17T12-00-00",
+                    "2026-10-17T12:00:00Z",
+                    saved_message,
+                    Some("mock_provider"),
+                    /*git_info*/ None,
+                )?;
+                let config = Arc::new(
+                    ConfigBuilder::default()
+                        .codex_home(home.path().to_path_buf())
+                        .build()
+                        .await?,
+                );
+                let auth = AuthManager::shared_from_config(
+                    config.as_ref(),
+                    /*enable_codex_api_key_env*/ false,
+                )
+                .await?;
+                let (processor, mut outgoing) = build_test_processor(config, auth).await;
+                let owner_id = ConnectionId(1);
+                let owner = Arc::new(ConnectionSessionState::new(ConnectionOrigin::WebSocket));
+                let result: Result<()> = async {
+                    send_request(
+                        &processor,
+                        owner_id,
+                        &owner,
+                        json!({"id": 1, "method": "initialize", "params": {
+                            "clientInfo": {"name": "ordinary-resume", "version": "1"}
+                        }}),
+                    )
+                    .await;
+                    let _: InitializeResponse =
+                        read_response_from(&mut outgoing, owner_id, /*request_id*/ 1).await;
+                    send_request(
+                        &processor,
+                        owner_id,
+                        &owner,
+                        json!({"id": 2, "method": "thread/resume", "params": {
+                            "threadId": thread_id
+                        }}),
+                    )
+                    .await;
+                    let resumed: ThreadResumeResponse =
+                        read_response_from(&mut outgoing, owner_id, /*request_id*/ 2).await;
+                    assert_eq!(resumed.thread.id, thread_id);
+                    assert_eq!(resumed.thread.session_id, thread_id);
+                    let messages: Vec<_> = resumed
+                        .thread
+                        .turns
+                        .iter()
+                        .flat_map(|turn| &turn.items)
+                        .filter_map(|item| match item {
+                            ThreadItem::UserMessage { content, .. } => Some(content.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        messages,
+                        vec![vec![UserInput::Text {
+                            text: saved_message.to_string(),
+                            text_elements: Vec::new(),
+                        }]]
+                    );
+
+                    // Fork the persisted conversation and its descendant through
+                    // the same dispatcher, retaining the original saved message.
+                    let mut parent_id = thread_id.clone();
+                    for request_id in 3..5 {
+                        send_request(
+                            &processor,
+                            owner_id,
+                            &owner,
+                            json!({"id": request_id, "method": "thread/fork", "params": {
+                                "threadId": parent_id
+                            }}),
+                        )
+                        .await;
+                        let forked: ThreadForkResponse =
+                            read_response_from(&mut outgoing, owner_id, request_id).await;
+                        assert_ne!(forked.thread.id, parent_id);
+                        let forked_messages: Vec<_> = forked
+                            .thread
+                            .turns
+                            .iter()
+                            .flat_map(|turn| &turn.items)
+                            .filter_map(|item| match item {
+                                ThreadItem::UserMessage { content, .. } => Some(content.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        assert_eq!(forked_messages, messages);
+                        parent_id = forked.thread.id;
+                    }
+                    let requests = server
+                        .received_requests()
+                        .await
+                        .context("mock server request recording unavailable")?;
+                    anyhow::ensure!(
+                        requests
+                            .iter()
+                            .all(|request| !request.url.path().ends_with("/responses")),
+                        "resuming saved history must not start inference: {requests:?}"
+                    );
+                    Ok(())
+                }
+                .await;
+
+                drop(outgoing);
+                processor.clear_runtime_references();
+                processor.shutdown_threads().await;
+                result
+            }))
+        })?;
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("ordinary thread resume test panicked"))?
+}
 
 #[tokio::test]
 async fn thread_start_unloads_after_requesting_connection_closes_during_mcp_startup() -> Result<()>

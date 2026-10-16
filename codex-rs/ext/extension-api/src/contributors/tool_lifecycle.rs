@@ -134,8 +134,31 @@ impl McpToolContext {
     }
 }
 
+/// Synchronous pre-dispatch rejection for contributors that own durable effects.
+/// A storage failure can therefore stop dispatch before an external tool acts.
+#[derive(Default)]
+pub struct ToolDispatchAdmission(std::sync::Mutex<Option<String>>);
+
+impl ToolDispatchAdmission {
+    pub fn reject(&self, reason: String) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert(reason);
+    }
+
+    pub fn rejection(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// Input supplied when the host starts executing one tool call.
 pub struct ToolStartInput<'a> {
+    /// A contributor may reject dispatch when its required durable intent failed.
+    pub admission: &'a ToolDispatchAdmission,
     /// Store scoped to the host session runtime.
     pub session_store: &'a ExtensionData,
     /// Store scoped to this thread runtime.

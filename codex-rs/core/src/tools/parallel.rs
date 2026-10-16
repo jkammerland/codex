@@ -222,6 +222,11 @@ impl ToolCallRuntime {
                     .enter_execution()
                     .or_cancel_tool(&invocation_cancellation_token)
                     .await?;
+                if let Some(revision) = _execution.revision() {
+                    turn.extension_data
+                        .get_or_init(codex_extension_api::ExecutionAdmissions::default)
+                        .record(dispatch_call_id.clone(), revision);
+                }
                 // Admission through the parallel-execution gate marks the end
                 // of dispatch waiting and the start of handler execution.
                 if let Some(execution_started_at) = execution_started_at {
@@ -270,6 +275,22 @@ impl ToolCallRuntime {
                         || dispatch_handle.is_finished()
                     {
                         dispatch_handle.await.map_err(Self::tool_task_join_error)?
+                    } else if abort_turn.extension_data.get::<codex_extension_api::RetainedToolResults>()
+                        .is_some_and(|retained| retained.retain_after_cancellation(&call.call_id))
+                    {
+                        // Keep the original owned launch alive solely to publish
+                        // its late handle. Local interruption must not await the
+                        // external effect or discard the host's cancellation proof.
+                        dispatch_handle.detach();
+                        call_state.terminal_outcome_reached.store(true, Ordering::Release);
+                        notify_tool_aborted(
+                            abort_session.as_ref(),
+                            abort_turn.as_ref(),
+                            call.call_id.as_str(),
+                            &call.tool_name,
+                            abort_source.clone(),
+                        ).await;
+                        Ok(Self::aborted_response(&call, Some(started.elapsed().as_secs_f32().max(0.1))))
                     } else {
                         let secs = started.elapsed().as_secs_f32().max(0.1);
                         abort_dispatch_span.record("aborted", true);
@@ -888,3 +909,7 @@ mod tests {
 #[cfg(test)]
 #[path = "parallel_observation_tests.rs"]
 mod observation_tests;
+
+#[cfg(test)]
+#[path = "parallel_retention_tests.rs"]
+mod retention_tests;

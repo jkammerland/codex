@@ -26,6 +26,8 @@ use crate::session_log;
 pub(crate) struct AppEventSender {
     pub app_event_tx: UnboundedSender<AppEvent>,
     pub(crate) voice_only: Arc<AtomicBool>,
+    scope: Option<(crate::app::agents_hosts::ConnectionScope, u64)>,
+    reply: Option<codex_app_server_client::AppServerReplyHandle>,
 }
 
 impl AppEventSender {
@@ -33,7 +35,37 @@ impl AppEventSender {
         Self {
             app_event_tx,
             voice_only: Arc::default(),
+            scope: None,
+            reply: None,
         }
+    }
+
+    pub(crate) fn for_widget(mut self) -> Self {
+        self.voice_only = Arc::default();
+        self
+    }
+
+    pub(crate) fn with_reply(
+        mut self,
+        reply: codex_app_server_client::AppServerReplyHandle,
+    ) -> Self {
+        self.reply = Some(reply);
+        self
+    }
+
+    pub(crate) fn scoped(
+        mut self,
+        scope: crate::app::agents_hosts::ConnectionScope,
+        generation: u64,
+    ) -> Self {
+        self.scope = Some((scope, generation));
+        self
+    }
+
+    pub(crate) fn unscoped(&self) -> Self {
+        let mut sender = self.clone();
+        sender.scope = None;
+        sender
     }
 
     /// Send an event to the app event channel. If it fails, we swallow the
@@ -64,6 +96,26 @@ impl AppEventSender {
         if !matches!(event, AppEvent::CodexOp(_)) {
             session_log::log_inbound_app_event(&event);
         }
+        if let (Some(reply), AppEvent::DynamicToolCallCompleted { response, .. }) =
+            (&self.reply, &event)
+            && let Ok(result) = serde_json::to_value(response)
+        {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                if let Err(error) = reply.resolve(result).await {
+                    tracing::warn!(%error, "failed to resolve originating dynamic tool call");
+                }
+            });
+        }
+        let event = if let Some((scope, generation)) = &self.scope {
+            AppEvent::Scoped {
+                scope: scope.clone(),
+                generation: *generation,
+                event: Box::new(event),
+            }
+        } else {
+            event
+        };
         if let Err(e) = self.app_event_tx.send(event) {
             tracing::error!("failed to send event: {e}");
         }

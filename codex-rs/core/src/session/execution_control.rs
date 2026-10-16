@@ -44,9 +44,14 @@ impl Session {
         None
     }
 
-    /// Persist delivery markers before any model request, including compaction.
-    /// Recovery can only retry absent input if no model could have acted on it.
-    pub(crate) async fn flush_team_input(&self) -> codex_protocol::error::Result<()> {
+    /// Persist the selected team input before any model request, including
+    /// compaction. The callback records request participation, not just history.
+    pub(crate) async fn flush_team_input(
+        &self,
+        turn_id: &str,
+        turn_store: &codex_extension_api::ExtensionData,
+        input: &[codex_protocol::models::ResponseItem],
+    ) -> codex_protocol::error::Result<()> {
         if self
             .services
             .extensions
@@ -59,6 +64,43 @@ impl Session {
                     "failed to persist team input: {error}"
                 ))
             })?;
+            for contributor in self.services.extensions.turn_lifecycle_contributors() {
+                contributor
+                    .on_model_request(codex_extension_api::TurnModelRequestInput {
+                        turn_id,
+                        input,
+                        thread_store: &self.services.thread_extension_data,
+                        turn_store,
+                    })
+                    .await
+                    .map_err(codex_protocol::error::CodexErr::Fatal)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn acknowledge_team_request(
+        &self,
+        turn_store: &codex_extension_api::ExtensionData,
+        response_id: Option<&str>,
+    ) -> codex_protocol::error::Result<()> {
+        if self
+            .services
+            .extensions
+            .execution_control()
+            .root(self.thread_id)
+            .is_some()
+        {
+            for contributor in self.services.extensions.turn_lifecycle_contributors() {
+                contributor
+                    .on_model_acknowledged(codex_extension_api::TurnModelAcknowledgedInput {
+                        response_id,
+                        thread_store: &self.services.thread_extension_data,
+                        turn_store,
+                    })
+                    .await
+                    .map_err(codex_protocol::error::CodexErr::Fatal)?;
+            }
         }
         Ok(())
     }

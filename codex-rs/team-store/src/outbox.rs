@@ -41,6 +41,50 @@ impl TeamStore {
         Ok(())
     }
 
+    /// Queue an agent effect and preserve its result under the host-owned call
+    /// identity. Lost tool replies can be recovered without creating new mail.
+    pub async fn enqueue_agent_operation(
+        &self,
+        operation_id: &str,
+        digest: &str,
+        id: &str,
+        kind: &str,
+        payload: &Value,
+        result: &Value,
+    ) -> Result<Value> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let previous: Option<String> = sqlx::query_scalar(
+            "SELECT payload FROM record WHERE namespace = 'agent_operation' AND id = ?",
+        )
+        .bind(operation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(previous) = previous {
+            let previous: Value = serde_json::from_str(&previous)?;
+            ensure!(
+                previous["digest"].as_str() == Some(digest),
+                "operation identity has conflicting content"
+            );
+            return Ok(previous["result"].clone());
+        }
+        sqlx::query("INSERT INTO outbox(id, kind, payload) VALUES (?, ?, ?)")
+            .bind(id)
+            .bind(kind)
+            .bind(serde_json::to_string(payload)?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO record(namespace, id, payload) VALUES ('agent_operation', ?, ?)")
+            .bind(operation_id)
+            .bind(serde_json::to_string(
+                &serde_json::json!({"digest": digest, "result": result}),
+            )?)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.notify();
+        Ok(result.clone())
+    }
+
     pub async fn outbox(&self, after: i64, limit: u32) -> Result<Vec<OutboxEntry>> {
         let rows: Vec<(i64, String, String, String)> = sqlx::query_as("SELECT sequence, id, kind, payload FROM outbox WHERE acknowledged = 0 AND sequence > ? ORDER BY sequence LIMIT ?")
             .bind(after).bind(limit).fetch_all(&self.pool).await?;

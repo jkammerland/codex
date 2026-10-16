@@ -1,0 +1,29 @@
+---
+source: tui/src/app/agents_hosts_tests.rs
+assertion_line: 81
+expression: render(&view)
+---
+  Agent command center  Group: Status  g
+   All 2   Needs you 1   Working 0   Ready 1   Inactive 0                          tab/⇧tab filter
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+      Tasks                                               │ Task details
+  Alpha                                                   │
+  Ready · main  1                                         │ Local task
+  › ○ Local task                                          │ ○ Ready
+  Beta                                                    │
+                                                          │ Model: Unknown
+  Needs input · main  1                                   │ Reasoning: Unknown
+    ! Remote task                                         │
+                                                          │ Project
+                                                          │ /tmp/project
+                                                          │ Server: main
+                                                          │
+                                                          │ Prompt
+                                                          │ Local task
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+  ? help  esc back  ↑/↓ move  enter open  n new

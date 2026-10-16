@@ -35,6 +35,11 @@ impl TeamHostService {
                     next_model: None,
                     next_effort: None,
                     model_error: None,
+                    model_origin: Default::default(),
+                    effort_origin: Default::default(),
+                    requested_selection_revision: None,
+                    applied_selection_revision: None,
+                    superseded_selection_revision: None,
                     in_flight: 0,
                     reconciling: true,
                     manually_held: root.manually_held,
@@ -101,7 +106,30 @@ impl TeamHostService {
                 current_effort: active.and_then(|(_, _, effort)| effort),
                 next_model: Some(config.model),
                 next_effort: config.reasoning_effort.map(|effort| effort.to_string()),
-                model_error: thread.team_model_error().await,
+                model_error: store
+                    .get::<String>("model_recovery_error", &thread_id.to_string())
+                    .await?
+                    .or(thread.team_model_error().await),
+                model_origin: config.team_model_policy.model_origin,
+                effort_origin: config.team_model_policy.effort_origin,
+                requested_selection_revision: store
+                    .get::<serde_json::Value>("model_selection_request", &thread_id.to_string())
+                    .await?
+                    .and_then(|request| {
+                        request
+                            .pointer("/selection/revision")
+                            .and_then(serde_json::Value::as_i64)
+                    }),
+                applied_selection_revision: config
+                    .team_model_policy
+                    .selection
+                    .as_ref()
+                    .map(|selection| selection.revision),
+                superseded_selection_revision: config.team_model_policy.superseded_revision.max(
+                    store
+                        .get::<i64>("model_selection_superseded", &thread_id.to_string())
+                        .await?,
+                ),
                 in_flight: gate.in_flight.try_into().unwrap_or(u32::MAX),
                 reconciling: gate.reconciling,
                 manually_held: self.gate.is_manually_held(thread_id),
@@ -135,6 +163,15 @@ impl TeamHostService {
                 .gate
                 .snapshot(thread_id)
                 .is_some_and(|gate| gate.reconciling);
+            member.model_error = store
+                .get::<String>("model_recovery_error", &member.thread_id)
+                .await?
+                .or(member.model_error.take());
+            member.superseded_selection_revision = member.superseded_selection_revision.max(
+                store
+                    .get::<i64>("model_selection_superseded", &member.thread_id)
+                    .await?,
+            );
             member.jobs = self.jobs(&member.thread_id).await?;
         }
         Ok(members.into_values().collect())

@@ -54,6 +54,7 @@ pub use tool_lifecycle::McpToolContext;
 pub use tool_lifecycle::McpToolResultInput;
 pub use tool_lifecycle::McpToolSource;
 pub use tool_lifecycle::ToolCallOutcome;
+pub use tool_lifecycle::ToolDispatchAdmission;
 pub use tool_lifecycle::ToolFinishInput;
 pub use tool_lifecycle::ToolLifecycleFuture;
 pub use tool_lifecycle::ToolStartInput;
@@ -63,6 +64,8 @@ pub use turn_input::TurnInputContext;
 pub use turn_input::TurnInputEnvironment;
 pub use turn_lifecycle::TurnAbortInput;
 pub use turn_lifecycle::TurnErrorInput;
+pub use turn_lifecycle::TurnModelAcknowledgedInput;
+pub use turn_lifecycle::TurnModelRequestInput;
 pub use turn_lifecycle::TurnStartInput;
 pub use turn_lifecycle::TurnStartPhase;
 pub use turn_lifecycle::TurnStopInput;
@@ -162,6 +165,15 @@ pub trait ContextContributor: Send + Sync {
 /// extension-private thread state and retain any session capabilities supplied
 /// by the host. Other heavy dependencies belong on the extension value.
 pub trait ThreadLifecycleContributor<C: Sync>: Send + Sync {
+    /// Persist a host-owned model selection intent before core queues it.
+    fn on_model_selection_requested<'a>(
+        &'a self,
+        _thread_id: codex_protocol::ThreadId,
+        _settings: &'a codex_protocol::protocol::ThreadSettingsOverrides,
+    ) -> ExtensionFuture<'a, Result<Option<i64>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+
     /// Called after persistent next-turn settings have changed. Implementations
     /// can recheck pending work without starting a polling model turn.
     fn on_thread_settings_changed<'a>(
@@ -243,6 +255,23 @@ pub trait TurnLifecycleContributor: Send + Sync {
             let _self = self;
             let _input = input;
         })
+    }
+
+    /// Persist evidence of the exact input selected for a model request. An
+    /// error prevents dispatch so the host never acts on unjournaled input.
+    fn on_model_request<'a>(
+        &'a self,
+        _input: TurnModelRequestInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// Observe provider acknowledgement separately from selection for dispatch.
+    fn on_model_acknowledged<'a>(
+        &'a self,
+        _input: TurnModelAcknowledgedInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
     }
 
     /// Observes a completed item without changing it or delaying streamed deltas.

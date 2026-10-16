@@ -827,7 +827,12 @@ async fn drain_to_completed(
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
     let _execution = sess.enter_execution().await;
-    sess.flush_team_input().await?;
+    sess.flush_team_input(
+        &turn_context.sub_id,
+        &turn_context.extension_data,
+        &prompt.input,
+    )
+    .await?;
     let mut stream = client_session
         .stream(
             prompt,
@@ -856,6 +861,10 @@ async fn drain_to_completed(
         };
         match event {
             // Keep each attempt isolated until the response completes successfully.
+            Ok(ResponseEvent::Created { response_id }) => {
+                sess.acknowledge_team_request(&turn_context.extension_data, response_id.as_deref())
+                    .await?;
+            }
             Ok(ResponseEvent::OutputItemDone(item)) => output.push(item),
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;

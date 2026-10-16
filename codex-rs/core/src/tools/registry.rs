@@ -756,7 +756,7 @@ impl ToolRegistry {
         if tool.mcp_server_name().is_none() {
             notify_tool_start(&invocation, /*mcp_tool*/ None)
                 .or_cancel_tool(&cancellation_token)
-                .await?;
+                .await??;
         }
         let mut control_tool_analytics = tool
             .is_builtin_control_tool()

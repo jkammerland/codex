@@ -49,8 +49,10 @@ async fn session_model_selection_accepts_final_choices_without_saving() {
         while rx.try_recv().is_ok() {}
         chat.handle_key_event(KeyEvent::from(KeyCode::Char('s')));
         let selected = rx.try_recv().expect("session-only selection");
+        // An empty option list follows the model default without inventing an explicit effort.
+        let expected_effort = (picker != "default_only").then_some(effort.clone());
         assert_matches!(selected, AppEvent::SelectSessionModel { model, effort: selected_effort, service_tier: None }
-            if model == expected_model && selected_effort.as_ref() == Some(&effort));
+            if model == expected_model && selected_effort == expected_effort);
         assert!(chat.bottom_pane.no_modal_or_popup_active(), "{picker}");
         assert!(
             std::iter::from_fn(|| rx.try_recv().ok()).all(|event| matches!(

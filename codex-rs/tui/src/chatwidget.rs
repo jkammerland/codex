@@ -326,6 +326,7 @@ use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_command;
 mod model_popup_state;
 mod model_popups;
+mod model_target;
 mod notifications;
 pub(crate) mod quick_dials;
 mod session_model_selection;
@@ -546,6 +547,8 @@ pub(crate) struct ChatWidget {
     model_popup_request_id: Option<uuid::Uuid>,
     /// An app event has been queued to open the permissions picker, but no view exists yet.
     pub(crate) permission_popup_pending: bool,
+    agents_model_picker: Option<crate::app::agents_hosts_models::ModelPickerContext>,
+    agents_model_load_request_id: Option<uuid::Uuid>,
     permission_popup_request_id: Option<uuid::Uuid>,
     permission_discovery: Option<crate::permission_discovery::PermissionDiscovery>,
     inline_permission_profile_selection:

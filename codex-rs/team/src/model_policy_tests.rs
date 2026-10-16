@@ -1,67 +1,199 @@
 use super::*;
-use codex_app_server_protocol::TeamEnrollment;
 use pretty_assertions::assert_eq;
 
-fn parent() -> Agent {
+fn agent(
+    id: &str,
+    parent: Option<&str>,
+    model_origin: TeamSelectionOrigin,
+    effort_origin: TeamSelectionOrigin,
+) -> Agent {
     Agent {
         enrollment: TeamEnrollment {
             address: TeamAddress {
                 machine_id: "worker".into(),
                 server_id: "primary".into(),
-                thread_id: "parent".into(),
+                thread_id: id.into(),
             },
-            alias: "builder".into(),
+            alias: id.into(),
             manually_held: false,
             continuation_turn_id: None,
         },
-        runtime: None,
-        status: "working".into(),
+        runtime: Some(TeamAgentRuntime {
+            thread_id: id.into(),
+            root_thread_id: "parent".into(),
+            parent_thread_id: parent.map(str::to_owned),
+            alias: id.into(),
+            loaded: true,
+            archived: false,
+            turn_id: None,
+            current_model: None,
+            current_effort: None,
+            next_model: Some("model".into()),
+            next_effort: Some("medium".into()),
+            model_error: None,
+            model_origin,
+            effort_origin,
+            requested_selection_revision: None,
+            applied_selection_revision: None,
+            superseded_selection_revision: None,
+            in_flight: 0,
+            reconciling: false,
+            manually_held: false,
+            continuation_turn_id: None,
+            jobs: Vec::new(),
+        }),
+        status: "idle".into(),
         project: None,
-        current_model: Some("current-model".into()),
-        current_effort: Some("medium".into()),
-        next_model: Some("next-model".into()),
-        next_effort: Some("high".into()),
+        current_model: None,
+        current_effort: None,
+        next_model: Some("model".into()),
+        next_effort: Some("medium".into()),
+        requested_selection: None,
     }
 }
 
 #[test]
-fn a_child_can_inherit_the_running_parent_before_next_turn_settings_apply() {
-    let parent = parent();
-    let child = Selection::current(&parent);
-    let binding = reconcile_inheritance(&parent, &child, None).expect("inherited selection");
-    assert_eq!(binding.applied, child);
-    assert_ne!(binding.applied, Selection::next(&parent));
-    assert_eq!(binding.pending, None);
+fn inherited_effort_can_clear_a_child_resolved_default_without_replacing_its_role_model()
+-> Result<()> {
+    let mut parent = agent(
+        "parent",
+        None,
+        TeamSelectionOrigin::Explicit,
+        TeamSelectionOrigin::Configured,
+    );
+    parent.next_effort = None;
+    let child = agent(
+        "child",
+        Some("parent"),
+        TeamSelectionOrigin::Role,
+        TeamSelectionOrigin::Inherited,
+    );
+    let (model, effort) = inherited_fields(child.runtime.as_ref().unwrap());
+    assert_eq!(
+        (&model, &effort),
+        (&TeamSelection::Keep, &TeamSelection::Inherit)
+    );
+    let desired = resolve_selection(&child, &[parent, child.clone()], model, effort)?;
+    assert_eq!(
+        desired,
+        RequestedSelection {
+            selection: TeamModelSelection {
+                revision: 0,
+                model: TeamSelection::Keep,
+                effort: TeamSelection::Inherit
+            },
+            model: None,
+            effort: None,
+        }
+    );
+    assert!(requires_update(&child, &desired));
+    Ok(())
 }
 
 #[test]
-fn a_configured_role_and_a_later_local_override_remain_user_owned() {
-    let parent = parent();
-    let role = Selection {
-        model: Some("review-model".into()),
-        effort: Some("low".into()),
-    };
-    assert!(reconcile_inheritance(&parent, &role, None).is_none());
-    let previous = Inheritance {
-        parent: parent.enrollment.address.clone(),
-        applied: Selection::current(&parent),
-        pending: Some(Selection::next(&parent)),
-    };
-    assert!(reconcile_inheritance(&parent, &role, Some(previous)).is_none());
+fn explicit_same_value_choices_are_preserved_when_parent_changes() -> Result<()> {
+    let mut parent = agent(
+        "parent",
+        None,
+        TeamSelectionOrigin::Explicit,
+        TeamSelectionOrigin::Explicit,
+    );
+    let child = agent(
+        "child",
+        Some("parent"),
+        TeamSelectionOrigin::Explicit,
+        TeamSelectionOrigin::Role,
+    );
+    parent.next_model = Some("other-model".into());
+    parent.next_effort = Some("high".into());
+    let (model, effort) = inherited_fields(child.runtime.as_ref().unwrap());
+    assert_eq!(
+        (&model, &effort),
+        (&TeamSelection::Keep, &TeamSelection::Keep)
+    );
+    let desired = resolve_selection(&child, &[parent, child.clone()], model, effort)?;
+    assert!(!requires_update(&child, &desired));
+    assert_eq!((desired.model, desired.effort), (None, None));
+    Ok(())
 }
 
 #[test]
-fn lost_setting_acknowledgement_does_not_turn_inheritance_into_an_override() {
-    let parent = parent();
-    let previous = Inheritance {
-        parent: parent.enrollment.address.clone(),
-        applied: Selection::current(&parent),
-        pending: Some(Selection::next(&parent)),
+fn inheritance_compares_fields_independently_and_never_invents_effort() -> Result<()> {
+    let mut parent = agent(
+        "parent",
+        None,
+        TeamSelectionOrigin::Explicit,
+        TeamSelectionOrigin::Explicit,
+    );
+    parent.next_effort = None;
+    let child = agent(
+        "child",
+        Some("parent"),
+        TeamSelectionOrigin::Inherited,
+        TeamSelectionOrigin::Explicit,
+    );
+    let (model, effort) = inherited_fields(child.runtime.as_ref().unwrap());
+    assert_eq!(
+        (&model, &effort),
+        (&TeamSelection::Inherit, &TeamSelection::Keep)
+    );
+    let desired = resolve_selection(&child, &[parent, child.clone()], model, effort)?;
+    assert!(!requires_update(&child, &desired));
+    assert_eq!(desired.effort, None);
+    Ok(())
+}
+
+#[test]
+fn a_model_without_effort_choices_keeps_default_effort_unset() -> Result<()> {
+    let catalog: Model = serde_json::from_value(serde_json::json!({
+        "id":"custom", "model":"custom", "displayName":"Custom", "description":"Custom provider model",
+        "hidden":false, "supportedReasoningEfforts":[], "defaultReasoningEffort":"medium", "isDefault":true
+    }))?;
+    let agent = agent(
+        "root",
+        None,
+        TeamSelectionOrigin::Configured,
+        TeamSelectionOrigin::Configured,
+    );
+    let model = TeamSelection::Value {
+        value: "custom".into(),
     };
-    let binding =
-        reconcile_inheritance(&parent, &Selection::next(&parent), Some(previous)).unwrap();
-    assert_eq!(binding.applied, Selection::next(&parent));
-    assert_eq!(binding.pending, None);
-    let resumed = reconcile_inheritance(&parent, &binding.applied.clone(), Some(binding)).unwrap();
-    assert_eq!(resumed.applied, Selection::next(&parent));
+    validate_selection(&agent, &[catalog], &model, &TeamSelection::Default)?;
+    let desired = resolve_selection(&agent, &[], model, TeamSelection::Default)?;
+    assert_eq!(desired.effort, None);
+    assert_eq!(desired.selection.effort, TeamSelection::Default);
+    Ok(())
+}
+
+#[test]
+fn an_applied_inherited_default_is_not_requeued_for_a_hosts_resolved_effort() -> Result<()> {
+    let mut parent = agent(
+        "parent",
+        None,
+        TeamSelectionOrigin::Explicit,
+        TeamSelectionOrigin::Configured,
+    );
+    parent.next_effort = None;
+    let child = agent(
+        "child",
+        Some("parent"),
+        TeamSelectionOrigin::Role,
+        TeamSelectionOrigin::Inherited,
+    );
+    let desired = resolve_selection(
+        &child,
+        &[parent, child.clone()],
+        TeamSelection::Keep,
+        TeamSelection::Inherit,
+    )?;
+    let previous = RequestedSelection {
+        selection: TeamModelSelection {
+            revision: 7,
+            ..desired.selection.clone()
+        },
+        ..desired.clone()
+    };
+    assert!(requires_update(&child, &desired));
+    assert!(same_inherited_intent(&previous, &desired));
+    Ok(())
 }

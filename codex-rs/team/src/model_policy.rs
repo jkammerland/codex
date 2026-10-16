@@ -1,54 +1,151 @@
-//! Follow parent next-turn selections until a child receives its own selection.
+//! Per-field ownership governs inheritance; equal values never establish intent.
 
+use anyhow::Context;
 use anyhow::Result;
-use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::TeamAddress;
-use codex_app_server_protocol::ThreadSettingsUpdateParams;
-use codex_app_server_protocol::ThreadSettingsUpdateResponse;
+use anyhow::ensure;
+use codex_app_server_protocol::*;
 use serde::Deserialize;
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::config::Machine;
 use crate::config::Server;
 use crate::coordinator::Coordinator;
 use crate::coordinator::Peer;
 use crate::coordinator::request_id;
-use crate::model::Agent;
-use crate::model::address_key;
+use crate::model::*;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct Selection {
+struct RequestedSelection {
+    selection: TeamModelSelection,
     model: Option<String>,
     effort: Option<String>,
 }
 
-impl Selection {
-    fn next(agent: &Agent) -> Self {
-        Self {
-            model: agent.next_model.clone(),
-            effort: agent.next_effort.clone(),
-        }
-    }
-
-    fn current(agent: &Agent) -> Self {
-        Self {
-            model: agent.current_model.clone(),
-            effort: agent.current_effort.clone(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Inheritance {
-    parent: TeamAddress,
-    applied: Selection,
-    pending: Option<Selection>,
-}
-
 impl Coordinator {
-    #[allow(
+    pub(crate) async fn select_model(
+        &self,
+        address: TeamAddress,
+        model: TeamSelection,
+        effort: TeamSelection,
+    ) -> Result<Agent> {
+        self.select_model_operation(address, model, effort, None)
+            .await
+    }
+
+    #[expect(
         clippy::await_holding_invalid_type,
-        reason = "serializes durable state changes and dispatch across asynchronous operations"
+        reason = "serializes destination selection against leave and inheritance; intent persistence and snapshot fencing share the mutation lock"
+    )]
+    pub(crate) async fn select_model_operation(
+        &self,
+        address: TeamAddress,
+        model: TeamSelection,
+        effort: TeamSelection,
+        operation: Option<(&str, &str)>,
+    ) -> Result<Agent> {
+        let address = canonical_address(address)?;
+        let lock = self
+            .model_update_lock(&address.machine_id, &address.server_id)
+            .await;
+        let _selection = lock.lock().await;
+        let key = address_key(&address);
+        let agent = self
+            .store
+            .get::<Agent>("agent", &key)
+            .await?
+            .context("agent is not enrolled")?;
+        let models = self.models(&address.machine_id, &address.server_id).await?;
+        validate_selection(&agent, &models, &model, &effort)?;
+        let agents = self.agents().await?;
+        let desired = resolve_selection(&agent, &agents, model, effort)?;
+        let _mutation = self.mutations.lock().await;
+        if let Some((id, digest)) = operation
+            && let Some(TeamResponse::Agent { agent }) = self.operation_result(id, digest).await?
+        {
+            return Ok(*agent);
+        }
+        let agent = self
+            .store
+            .get::<Agent>("agent", &key)
+            .await?
+            .context("agent is no longer enrolled")?;
+        self.persist_selection(agent, desired, operation).await
+    }
+
+    async fn persist_selection(
+        &self,
+        mut agent: Agent,
+        mut desired: RequestedSelection,
+        operation: Option<(&str, &str)>,
+    ) -> Result<Agent> {
+        let key = address_key(&agent.enrollment.address);
+        let previous = self
+            .store
+            .get::<RequestedSelection>("model_request", &key)
+            .await?;
+        desired.selection.revision = [
+            previous.as_ref().map(|request| request.selection.revision),
+            agent
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.requested_selection_revision),
+            agent
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.applied_selection_revision),
+            agent
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.superseded_selection_revision),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or_default()
+        .checked_add(1)
+        .context("model selection revision exhausted")?;
+        agent.requested_selection = Some(desired.selection.clone());
+        let response = TeamResponse::Agent {
+            agent: Box::new(agent.clone()),
+        };
+        let generated = Uuid::now_v7().to_string();
+        let (receipt, id, digest) = operation.map_or(
+            (
+                "model_request_revision",
+                generated.as_str(),
+                generated.as_str(),
+            ),
+            |(id, digest)| ("operator_operation", id, digest),
+        );
+        self.store
+            .put_record_once(
+                receipt,
+                id,
+                digest,
+                &[
+                    ("model_request", &key, serde_json::to_value(&desired)?),
+                    ("agent", &key, serde_json::to_value(&agent)?),
+                    ("operator_result", id, serde_json::to_value(response)?),
+                ],
+            )
+            .await?;
+        *self
+            .observed_versions
+            .lock()
+            .await
+            .entry(server_key(
+                &agent.enrollment.address.machine_id,
+                &agent.enrollment.address.server_id,
+            ))
+            .or_default() += 1;
+        self.notify();
+        Ok(agent)
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "keeps each destination's selection RPCs ordered and journals inherited intent under the snapshot mutation fence"
     )]
     pub(crate) async fn inherit_models(
         &self,
@@ -56,116 +153,194 @@ impl Coordinator {
         server: &Server,
         peer: &Peer,
     ) -> Result<()> {
-        let selection = self.model_update_lock(&machine.id, &server.id).await;
-        let _selection = selection.lock().await;
+        let lock = self.model_update_lock(&machine.id, &server.id).await;
+        let _selection = lock.lock().await;
+        let version = self
+            .observed_versions
+            .lock()
+            .await
+            .get(&server_key(&machine.id, &server.id))
+            .copied()
+            .unwrap_or_default();
         let agents = self.agents().await?;
         for child in &agents {
             let address = &child.enrollment.address;
             if address.machine_id != machine.id || address.server_id != server.id {
                 continue;
             }
-            let Some(runtime) = &child.runtime else {
+            let Some(runtime) = child.runtime.as_ref().filter(|runtime| runtime.loaded) else {
                 continue;
             };
-            let Some(parent_id) = &runtime.parent_thread_id else {
-                continue;
-            };
-            if !runtime.loaded {
-                continue;
-            }
             let key = address_key(address);
-            if self
+            let pending = self
                 .store
-                .get::<bool>("model_override", &key)
-                .await?
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let Some(parent) = agents.iter().find(|parent| {
-                parent.enrollment.address
-                    == TeamAddress {
-                        thread_id: parent_id.clone(),
-                        ..address.clone()
-                    }
-            }) else {
-                continue;
-            };
-            let selected = Selection::next(child);
-            let previous = self
-                .store
-                .get::<Inheritance>("model_inheritance", &key)
+                .get::<RequestedSelection>("model_request", &key)
                 .await?;
-            let Some(mut inheritance) = reconcile_inheritance(parent, &selected, previous) else {
-                self.store.put("model_override", &key, &true).await?;
-                continue;
-            };
-            let desired = Selection::next(parent);
-            if desired.model.is_none() {
-                continue;
-            }
-            if desired != selected {
-                // Journal before the RPC so its notification and a lost
-                // acknowledgement cannot be mistaken for a child override.
-                inheritance.pending = Some(desired.clone());
-                self.store
-                    .put("model_inheritance", &key, &inheritance)
-                    .await?;
-                let effort = desired
-                    .effort
-                    .as_deref()
-                    .map(str::parse)
-                    .transpose()
-                    .map_err(anyhow::Error::msg)?;
-                let _: ThreadSettingsUpdateResponse = peer
-                    .handle
-                    .request_typed(ClientRequest::ThreadSettingsUpdate {
-                        request_id: request_id(),
-                        params: ThreadSettingsUpdateParams {
-                            thread_id: address.thread_id.clone(),
-                            model: desired.model,
-                            effort,
-                            ..Default::default()
-                        },
-                    })
-                    .await?;
+            let request = if let Some(pending) = pending.clone().filter(|pending| {
+                runtime
+                    .applied_selection_revision
+                    .into_iter()
+                    .chain(runtime.superseded_selection_revision)
+                    .max()
+                    .is_none_or(|revision| revision < pending.selection.revision)
+            }) {
+                Some(pending)
             } else {
+                let (model, effort) = inherited_fields(runtime);
+                if model == TeamSelection::Keep && effort == TeamSelection::Keep {
+                    continue;
+                }
+                let desired = resolve_selection(child, &agents, model, effort)?;
+                if !requires_update(child, &desired)
+                    || pending
+                        .as_ref()
+                        .is_some_and(|previous| same_inherited_intent(previous, &desired))
+                {
+                    continue;
+                }
+                let _mutation = self.mutations.lock().await;
+                if self
+                    .observed_versions
+                    .lock()
+                    .await
+                    .get(&server_key(&machine.id, &server.id))
+                    .copied()
+                    .unwrap_or_default()
+                    != version
+                {
+                    continue;
+                }
+                self.persist_selection(child.clone(), desired, None).await?;
                 self.store
-                    .put("model_inheritance", &key, &inheritance)
-                    .await?;
-            }
+                    .get::<RequestedSelection>("model_request", &key)
+                    .await?
+            };
+            let Some(request) = request else { continue };
+            // Queue acknowledgement does not establish next-turn application.
+            // The host runtime's applied revision is the authoritative receipt.
+            let _: ThreadSettingsUpdateResponse = peer
+                .handle
+                .request_typed(ClientRequest::ThreadSettingsUpdate {
+                    request_id: request_id(),
+                    params: ThreadSettingsUpdateParams {
+                        thread_id: address.thread_id.clone(),
+                        model: request.model,
+                        effort: request
+                            .effort
+                            .as_deref()
+                            .map(str::parse)
+                            .transpose()
+                            .map_err(anyhow::Error::msg)?,
+                        team_selection: Some(request.selection),
+                        ..Default::default()
+                    },
+                })
+                .await?;
         }
         Ok(())
     }
 }
 
-// Keep explicit local selections when reconnecting. A pending value is an
-// acknowledgement of our own write, not a new user override.
-fn reconcile_inheritance(
-    parent: &Agent,
-    selected: &Selection,
-    previous: Option<Inheritance>,
-) -> Option<Inheritance> {
-    let mut inheritance = match previous {
-        Some(binding) => binding,
-        None => {
-            if *selected != Selection::next(parent) && *selected != Selection::current(parent) {
-                return None;
-            }
-            Inheritance {
-                parent: parent.enrollment.address.clone(),
-                applied: selected.clone(),
-                pending: None,
-            }
+fn inherited_fields(runtime: &TeamAgentRuntime) -> (TeamSelection, TeamSelection) {
+    let field = |origin| {
+        if origin == TeamSelectionOrigin::Inherited {
+            TeamSelection::Inherit
+        } else {
+            TeamSelection::Keep
         }
     };
-    if inheritance.pending.as_ref() == Some(selected) {
-        inheritance.applied = selected.clone();
-        inheritance.pending = None;
-    } else if *selected != inheritance.applied {
-        return None;
+    (field(runtime.model_origin), field(runtime.effort_origin))
+}
+
+fn resolve_selection(
+    agent: &Agent,
+    agents: &[Agent],
+    model: TeamSelection,
+    effort: TeamSelection,
+) -> Result<RequestedSelection> {
+    let parent = agent
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.parent_thread_id.as_ref())
+        .and_then(|parent| {
+            agents.iter().find(|candidate| {
+                candidate.enrollment.address.machine_id == agent.enrollment.address.machine_id
+                    && candidate.enrollment.address.server_id == agent.enrollment.address.server_id
+                    && candidate.enrollment.address.thread_id == *parent
+            })
+        });
+    let inherited = || parent.context("parent settings are unavailable for inheritance");
+    let resolved_model = match &model {
+        TeamSelection::Value { value } => Some(value.clone()),
+        TeamSelection::Inherit => inherited()?.next_model.clone(),
+        TeamSelection::Keep | TeamSelection::Default => None,
+    };
+    let resolved_effort = match &effort {
+        TeamSelection::Value { value } => Some(value.clone()),
+        TeamSelection::Inherit => inherited()?.next_effort.clone(),
+        TeamSelection::Keep | TeamSelection::Default => None,
+    };
+    Ok(RequestedSelection {
+        selection: TeamModelSelection {
+            revision: 0,
+            model,
+            effort,
+        },
+        model: resolved_model,
+        effort: resolved_effort,
+    })
+}
+
+fn same_inherited_intent(previous: &RequestedSelection, desired: &RequestedSelection) -> bool {
+    let model = desired.selection.model == TeamSelection::Keep
+        || previous.selection.model == TeamSelection::Inherit && previous.model == desired.model;
+    let effort = desired.selection.effort == TeamSelection::Keep
+        || previous.selection.effort == TeamSelection::Inherit && previous.effort == desired.effort;
+    model && effort
+}
+
+fn requires_update(agent: &Agent, desired: &RequestedSelection) -> bool {
+    desired.selection.model != TeamSelection::Keep && desired.model != agent.next_model
+        || desired.selection.effort != TeamSelection::Keep && desired.effort != agent.next_effort
+}
+
+fn validate_selection(
+    agent: &Agent,
+    models: &[Model],
+    model: &TeamSelection,
+    effort: &TeamSelection,
+) -> Result<()> {
+    let selected = match model {
+        TeamSelection::Value { value } => {
+            Some(models.iter().find(|model| model.model == *value).context(
+                "model is unavailable on this host; select a supported model explicitly",
+            )?)
+        }
+        TeamSelection::Keep => agent
+            .next_model
+            .as_ref()
+            .and_then(|value| models.iter().find(|model| model.model == *value)),
+        TeamSelection::Default | TeamSelection::Inherit => None,
+    };
+    if let TeamSelection::Value { value } = effort {
+        let selected =
+            selected.context("select the host model explicitly when setting its effort")?;
+        ensure!(
+            selected
+                .supported_reasoning_efforts
+                .iter()
+                .any(|effort| effort.reasoning_effort.to_string() == *value),
+            "effort is not supported by this model"
+        );
+    } else if let Some(selected) = selected {
+        ensure!(
+            effort != &TeamSelection::Default
+                || selected.supported_reasoning_efforts.is_empty()
+                || selected.default_reasoning_effort.to_string() != "ultra",
+            "Ultra requires an explicit effort selection"
+        );
     }
-    Some(inheritance)
+    Ok(())
 }
 
 #[cfg(test)]

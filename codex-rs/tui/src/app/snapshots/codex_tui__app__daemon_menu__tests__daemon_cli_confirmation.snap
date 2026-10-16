@@ -10,9 +10,9 @@ expression: "render_bottom_popup(&app.chat_widget,\nwidth).replace(r\"C:\\cli-bu
                                                           │
 
                 Update daemon and exit Codex?
-                Use this CLI package v0.163.0+jkammerland.mcp.25 from /x/cli-build/
-                bin/codex. Copy the complete package and pin it against automatic
-                updates.
+                Use this CLI package v0.163.0+jkammerland.mcp.25.team.2 from /x/cli-
+                build/bin/codex. Copy the complete package and pin it against
+                automatic updates.
                 This may restart the daemon and interrupt active or queued work.
                 Codex exits to update in this terminal. Relaunch it afterward.
 

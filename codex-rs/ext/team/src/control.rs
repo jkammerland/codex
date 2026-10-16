@@ -37,24 +37,24 @@ impl TeamHostService {
         reason = "serializes durable state changes and dispatch across asynchronous operations"
     )]
     pub async fn control(&self, params: TeamControlParams) -> Result<TeamControlResponse> {
-        let _operation = self.operations.lock().await;
+        let _update = self.control_updates.lock().await;
         let store = self.enable().await?;
         let control = store.apply_control(&params.control).await?;
-        self.apply_gate(&control).await?;
-        if control.mode == TeamExecutionMode::Stopped {
-            let stopped = self.stop_family().await;
-            self.request_job_cancellation(control.revision).await?;
-            stopped?;
+        if control == params.control {
+            self.confirmed_control_revision
+                .fetch_max(control.revision, std::sync::atomic::Ordering::AcqRel);
         }
+        self.apply_gate(&control).await?;
+        let _ = self.control_events.send(());
         self.notify();
         let _ = self.events.send(HostEvent::Dispatch);
         Ok(TeamControlResponse {
-            reconciled: control == params.control,
+            reconciled: control == params.control && self.pending_stops().await?.is_empty(),
             control,
         })
     }
 
-    async fn stop_family(&self) -> Result<()> {
+    pub(crate) async fn stop_family(&self, revision: i64, roots: &[String]) -> Result<()> {
         let Some(store) = self.store.get() else {
             return Ok(());
         };
@@ -63,7 +63,11 @@ impl TeamHostService {
         };
         let mut failures = Vec::new();
         for thread_id in manager.list_thread_ids().await {
-            if self.gate.root(thread_id).is_none() {
+            if !self
+                .gate
+                .root(thread_id)
+                .is_some_and(|root| roots.contains(&root.to_string()))
+            {
                 continue;
             }
             let Ok(thread) = manager.get_thread(thread_id).await else {
@@ -123,6 +127,12 @@ impl TeamHostService {
                     failures.push(format!("{thread_id}: {error}"));
                 }
             }
+            if thread.team_active_turn_id().await.is_none() {
+                store
+                    .put("stop_settled_revision", &thread_id.to_string(), &revision)
+                    .await?;
+                self.reconcile_delivery(&thread_id.to_string()).await?;
+            }
             let terminals = async {
                 for process in thread.list_background_terminals().await {
                     let confirmed = match process.process_id.parse() {
@@ -151,6 +161,7 @@ impl TeamHostService {
                                     }),
                                 },
                                 adapter: None,
+                                launch_revision: Some(revision),
                                 requested_revision: None,
                                 attempted_revision: None,
                                 registration_fingerprint: None,

@@ -882,6 +882,22 @@ impl Session {
         });
         // TODO (aibrahim): Consolidate config.model and config.model_reasoning_effort into config.collaboration_mode
         // to avoid extracting these fields separately and constructing CollaborationMode here.
+        let persisted_model_policy = match &conversation_history {
+            InitialHistory::Resumed(resumed) if config.restore_saved_model_policy => {
+                resumed.history.iter().rev().find_map(|item| match item {
+                    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                        if event.thread_id == Some(resumed.conversation_id) =>
+                    {
+                        Some(event.thread_settings.team_model_policy.clone())
+                    }
+                    _ => None,
+                })
+            }
+            InitialHistory::Resumed(_)
+            | InitialHistory::New
+            | InitialHistory::Cleared
+            | InitialHistory::Forked(_) => None,
+        };
         let persisted_collaboration_mode = match &conversation_history {
             InitialHistory::Resumed(resumed) => resumed
                 .history
@@ -932,6 +948,8 @@ impl Session {
         );
         let storage_originator = AuthStorageOriginator::from_client_name(&originator);
         let session_configuration = SessionConfiguration {
+            team_model_policy: persisted_model_policy
+                .unwrap_or_else(|| config.team_model_policy.clone()),
             turn_extension_init,
             provider: create_model_provider(
                 config.model_provider.clone(),

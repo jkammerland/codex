@@ -14,6 +14,10 @@ impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
     /// opens the full picker with every available preset.
     pub(crate) fn open_model_popup(&mut self) {
+        if let Some(request_id) = self.agents_model_load_request_id {
+            self.cancel_agents_model_loading(request_id);
+        }
+        self.agents_model_picker = None;
         if !self.is_session_configured() {
             self.add_info_message(
                 "Model selection is disabled until startup completes.".to_string(),
@@ -46,6 +50,22 @@ impl ChatWidget {
         if !subtitle.is_empty() {
             header.push(Line::from(subtitle.dim()));
         }
+        if let Some(context) = &self.agents_model_picker {
+            header.push(Line::from(
+                format!(
+                    "Task on {} / {} · session only",
+                    context.target.host.machine_id, context.target.host.server_id
+                )
+                .dim(),
+            ));
+            if let Some((model, effort)) = context.origins {
+                header.push(Line::from(
+                    format!("Model: {model:?} · Effort: {effort:?}")
+                        .to_lowercase()
+                        .dim(),
+                ));
+            }
+        }
         if let Some(warning) = self.model_menu_warning_line() {
             header.push(warning);
         }
@@ -53,6 +73,9 @@ impl ChatWidget {
     }
 
     fn model_menu_warning_line(&self) -> Option<Line<'static>> {
+        if self.agents_model_picker.is_some() {
+            return None;
+        }
         let base_url = self.custom_openai_base_url()?;
         let warning = format!(
             "Warning: OpenAI base URL is overridden to {base_url}. Selecting models may not be supported or work properly."
@@ -80,7 +103,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_model_popup_with_presets(&mut self, presets: Vec<ModelPreset>) {
-        if self.restrict_model_picker_to_luna_reserve() {
+        if self.agents_model_picker.is_none() && self.restrict_model_picker_to_luna_reserve() {
             self.open_luna_reserve_model_popup(presets, MODEL_SELECTION_VIEW_ID);
             return;
         }
@@ -89,12 +112,18 @@ impl ChatWidget {
             .filter(|preset| preset.show_in_picker)
             .collect();
 
-        let current_model = self.current_model();
+        let current_model = self.picker_current_model();
         let current_label = presets
             .iter()
             .find(|preset| preset.model.as_str() == current_model)
             .map(|preset| preset.display_name.clone())
-            .unwrap_or_else(|| self.model_display_name().to_string());
+            .unwrap_or_else(|| {
+                if self.agents_model_picker.is_some() {
+                    current_model.to_owned()
+                } else {
+                    self.model_display_name().to_string()
+                }
+            });
 
         let (mut auto_presets, other_presets): (Vec<ModelPreset>, Vec<ModelPreset>) = presets
             .into_iter()
@@ -133,11 +162,13 @@ impl ChatWidget {
                     let should_prompt_plan_mode_scope = self
                         .should_prompt_plan_mode_reasoning_scope(
                             model.as_str(),
-                            Some(preset.default_reasoning_effort.clone()),
+                            (!preset.supported_reasoning_efforts.is_empty())
+                                .then_some(preset.default_reasoning_effort.clone()),
                         );
                     self.model_selection_actions(
                         model.clone(),
-                        Some(preset.default_reasoning_effort.clone()),
+                        (!preset.supported_reasoning_efforts.is_empty())
+                            .then_some(preset.default_reasoning_effort.clone()),
                         should_prompt_plan_mode_scope,
                     )
                 };
@@ -150,7 +181,8 @@ impl ChatWidget {
                     } else {
                         self.session_model_selection_action(
                             model.clone(),
-                            Some(preset.default_reasoning_effort),
+                            (!preset.supported_reasoning_efforts.is_empty())
+                                .then_some(preset.default_reasoning_effort),
                         )
                     },
                     actions,
@@ -211,17 +243,12 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_all_models_popup(&mut self) {
-        if self.restrict_model_picker_to_luna_reserve() {
-            self.open_luna_reserve_model_popup(
-                self.model_catalog.try_list_models().unwrap_or_default(),
-                ALL_MODELS_SELECTION_VIEW_ID,
-            );
+        if self.agents_model_picker.is_none() && self.restrict_model_picker_to_luna_reserve() {
+            self.open_luna_reserve_model_popup(self.picker_models(), ALL_MODELS_SELECTION_VIEW_ID);
             return;
         }
         let presets = self
-            .model_catalog
-            .try_list_models()
-            .unwrap_or_default()
+            .picker_models()
             .into_iter()
             .filter(|preset| preset.show_in_picker && !Self::is_auto_model(&preset.model))
             .collect();
@@ -247,14 +274,15 @@ impl ChatWidget {
         for preset in presets.into_iter() {
             let description =
                 (!preset.description.is_empty()).then_some(preset.description.to_string());
-            let is_current = preset.model.as_str() == self.current_model();
+            let is_current = preset.model.as_str() == self.picker_current_model();
             let direct_effort = match preset.supported_reasoning_efforts.as_slice() {
-                [] => Some(preset.default_reasoning_effort.clone()),
+                [] => None,
                 [option] => Some(option.effort.clone()),
                 _ => None,
             }
             .filter(|effort| !Self::is_advanced_reasoning_effort(effort));
-            let single_supported_effort = direct_effort.is_some();
+            let single_supported_effort =
+                direct_effort.is_some() || preset.supported_reasoning_efforts.is_empty();
             let preset_for_action = preset.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 let preset_for_event = preset_for_action.clone();
@@ -266,9 +294,13 @@ impl ChatWidget {
                 name: preset.display_name.clone(),
                 description,
                 is_current,
-                secondary_action: direct_effort.and_then(|effort| {
-                    self.session_model_selection_action(preset.model.clone(), Some(effort))
-                }),
+                secondary_action: if preset.supported_reasoning_efforts.is_empty() {
+                    self.session_model_selection_action(preset.model.clone(), None)
+                } else {
+                    direct_effort.and_then(|effort| {
+                        self.session_model_selection_action(preset.model.clone(), Some(effort))
+                    })
+                },
                 actions,
                 dismiss_on_select: single_supported_effort,
                 dismiss_parent_on_child_accept: !single_supported_effort,
@@ -294,6 +326,11 @@ impl ChatWidget {
         effort_for_action: Option<ReasoningEffortConfig>,
         should_prompt_plan_mode_scope: bool,
     ) -> Vec<SelectionAction> {
+        if let Some(actions) =
+            self.target_model_selection_actions(model_for_action.clone(), effort_for_action.clone())
+        {
+            return actions;
+        }
         let warning = effort_for_action
             .as_ref()
             .and_then(|effort| self.ultra_reasoning_concurrency_warning(effort));
@@ -344,10 +381,11 @@ impl ChatWidget {
         selected_model: &str,
         selected_effort: Option<ReasoningEffortConfig>,
     ) -> bool {
-        if !self.collaboration_modes_enabled()
+        if self.agents_model_picker.is_some()
+            || !self.collaboration_modes_enabled()
             || selected_model == LUNA_RESERVE_MODEL
             || self.active_mode_kind() != ModeKind::Plan
-            || selected_model != self.current_model()
+            || selected_model != self.picker_current_model()
         {
             return false;
         }
@@ -355,7 +393,7 @@ impl ChatWidget {
         // Prompt whenever the selection is not a true no-op for both:
         // 1) the active Plan-mode effective reasoning, and
         // 2) the stored global defaults that would be updated by the fallback path.
-        selected_effort != self.effective_reasoning_effort()
+        selected_effort != self.picker_current_effort()
             || selected_model != self.current_collaboration_mode.model()
             || selected_effort != self.current_collaboration_mode.reasoning_effort()
     }
@@ -446,6 +484,7 @@ impl ChatWidget {
         })];
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            on_cancel: self.target_model_cancel_action(),
             title: Some(PLAN_MODE_REASONING_SCOPE_TITLE.to_string()),
             subtitle: Some(subtitle),
             items: vec![
@@ -476,10 +515,15 @@ impl ChatWidget {
     /// Max and Ultra require an explicit second step so expensive efforts cannot
     /// be selected accidentally while moving through the normal effort scale.
     pub(crate) fn open_reasoning_popup(&mut self, preset: ModelPreset) {
+        if preset.supported_reasoning_efforts.is_empty() {
+            self.apply_model_and_effort(preset.model, None);
+            return;
+        }
         let default_effort = preset.default_reasoning_effort.clone();
         let supported = &preset.supported_reasoning_efforts;
-        let in_plan_mode =
-            self.collaboration_modes_enabled() && self.active_mode_kind() == ModeKind::Plan;
+        let in_plan_mode = self.agents_model_picker.is_none()
+            && self.collaboration_modes_enabled()
+            && self.active_mode_kind() == ModeKind::Plan;
 
         let warn_effort = if supported
             .iter()
@@ -536,15 +580,15 @@ impl ChatWidget {
 
         let model_slug = preset.model.to_string();
         let model_label = preset.display_name.clone();
-        let is_current_model = self.current_model() == preset.model.as_str();
+        let is_current_model = self.picker_current_model() == preset.model.as_str();
         let highlight_choice = if is_current_model {
             if in_plan_mode {
                 self.config
                     .plan_mode_reasoning_effort
                     .clone()
-                    .or_else(|| self.effective_reasoning_effort())
+                    .or_else(|| self.picker_current_effort())
             } else {
-                self.effective_reasoning_effort()
+                self.picker_current_effort()
             }
         } else {
             default_choice.clone().or_else(|| choices.first().cloned())
@@ -639,6 +683,7 @@ impl ChatWidget {
         .wrap(Wrap { trim: false });
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            on_cancel: self.target_model_cancel_action(),
             header: Box::new(header),
             items,
             initial_selected_idx,
@@ -665,9 +710,9 @@ impl ChatWidget {
         }
 
         let model_slug = preset.model.to_string();
-        let is_current_model = self.current_model() == preset.model.as_str();
+        let is_current_model = self.picker_current_model() == preset.model.as_str();
         let highlight_choice = is_current_model
-            .then(|| self.effective_reasoning_effort())
+            .then(|| self.picker_current_effort())
             .flatten();
         let mut items = Vec::new();
         for effort in choices {
@@ -706,6 +751,7 @@ impl ChatWidget {
         ])
         .wrap(Wrap { trim: false });
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            on_cancel: self.target_model_cancel_action(),
             header: Box::new(header),
             items,
             ..SelectionViewParams::picker()

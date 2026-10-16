@@ -101,6 +101,10 @@ impl AgentsOverviewGroup {
 
 #[derive(Clone)]
 pub(super) struct AgentsOverviewRow {
+    pub(super) host: Option<super::agents_hosts::HostKey>,
+    pub(super) machine_label: Option<String>,
+    pub(super) pin_rank: Option<usize>,
+    pub(super) pins_supported: bool,
     pub(super) details: AgentsOverviewDetails,
     pub(super) thread: Thread,
     pub(super) thread_id: ThreadId,
@@ -150,7 +154,13 @@ pub(super) fn directory_group_key(cwd: &Path, worktrees_enabled: bool) -> PathBu
 
 #[derive(Default)]
 pub(super) struct AgentsOverviewViewState {
-    row_order: HashMap<ThreadId, (AgentsOverviewGroup, usize)>,
+    row_order:
+        HashMap<(Option<super::agents_hosts::HostKey>, ThreadId), (AgentsOverviewGroup, usize)>,
+    selected_target: Option<super::agents_hosts::ThreadTarget>,
+    pub(super) team_notice: Option<String>,
+    pub(super) machines_enabled: bool,
+    pub(super) overview_required: bool,
+    pub(super) machine_notices: Vec<String>,
     scroll: usize,
     page_height: usize,
     status_filter: usize,
@@ -225,26 +235,41 @@ impl AgentsOverviewView {
             rows.sort_by_key(|row| {
                 let rank = state
                     .row_order
-                    .get(&row.thread_id)
+                    .get(&(row.host.clone(), row.thread_id))
                     .filter(|(group, _)| *group == row.group)
                     .map_or(usize::MAX, |(_, rank)| *rank);
-                (row.group, rank)
+                (row.host.clone(), row.group, rank)
             });
             state.row_order = rows
                 .iter()
                 .enumerate()
-                .map(|(rank, row)| (row.thread_id, (row.group, rank)))
+                .map(|(rank, row)| ((row.host.clone(), row.thread_id), (row.group, rank)))
                 .collect();
         }
-        let selected = state
+        let retained = state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .rename_target
-            .and_then(|thread_id| rows.iter().position(|row| row.thread_id == thread_id))
-            .or_else(|| {
-                selected_thread_id.and_then(|id| rows.iter().position(|row| row.thread_id == id))
+            .selected_target
+            .clone();
+        let selected = retained
+            .as_ref()
+            .and_then(|target| {
+                rows.iter().position(|row| {
+                    row.host.as_ref() == Some(&target.host) && row.thread_id == target.thread_id
+                })
             })
-            .or_else(|| rows.iter().position(|row| row.is_current))
+            .or_else(|| {
+                state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .rename_target
+                    .and_then(|thread_id| rows.iter().position(|row| row.thread_id == thread_id))
+                    .or_else(|| {
+                        selected_thread_id
+                            .and_then(|id| rows.iter().position(|row| row.thread_id == id))
+                    })
+                    .or_else(|| rows.iter().position(|row| row.is_current))
+            })
             .unwrap_or(0);
         let project_groups = rows
             .iter()
@@ -309,6 +334,19 @@ impl AgentsOverviewView {
         view
     }
 
+    pub(super) fn thread_targets(
+        &self,
+        foreground: &super::agents_hosts::HostKey,
+    ) -> Vec<super::agents_hosts::ThreadTarget> {
+        self.rows
+            .iter()
+            .map(|row| super::agents_hosts::ThreadTarget {
+                host: row.host.clone().unwrap_or_else(|| foreground.clone()),
+                thread_id: row.thread_id,
+            })
+            .collect()
+    }
+
     pub(super) fn thread_ids(&self) -> Vec<ThreadId> {
         self.rows.iter().map(|row| row.thread_id).collect()
     }
@@ -346,7 +384,8 @@ impl AgentsOverviewView {
 
     fn can_toggle_selected_pin(&self) -> bool {
         !self.pin_action_pending
-            && self.pinned_thread_ranks.is_some()
+            && (self.pinned_thread_ranks.is_some()
+                || self.selected_row().is_some_and(|row| row.pins_supported))
             && self
                 .selected_row()
                 .is_some_and(|row| supports_shared_pinning(&row.thread.source))
@@ -370,6 +409,35 @@ impl AgentsOverviewView {
             visible[current.checked_sub(1).unwrap_or(visible.len() - 1)]
         };
         self.state().show_more_selected = self.selected == usize::MAX;
+        self.remember_target();
+    }
+
+    fn remember_target(&self) {
+        self.state().selected_target = self.selected_row().and_then(|row| {
+            row.host
+                .as_ref()
+                .map(|host| super::agents_hosts::ThreadTarget {
+                    host: host.clone(),
+                    thread_id: row.thread_id,
+                })
+        });
+    }
+
+    fn send_row_action(&self, event: AppEvent) {
+        self.remember_target();
+        if let Some(row) = self.selected_row()
+            && let Some(host) = &row.host
+        {
+            self.app_event_tx.send(AppEvent::AgentsHostAction {
+                target: super::agents_hosts::ThreadTarget {
+                    host: host.clone(),
+                    thread_id: row.thread_id,
+                },
+                event: Box::new(event),
+            });
+        } else {
+            self.app_event_tx.send(event);
+        }
     }
 
     fn activate(&mut self) {
@@ -383,11 +451,10 @@ impl AgentsOverviewView {
         let input = self.state().input.text().to_owned();
         if self.state().rename_target.is_some() && !input.trim().is_empty() {
             if let Some(row) = self.selected_row() {
-                self.app_event_tx
-                    .send(AppEvent::RenameAgentsOverviewThread {
-                        thread_id: row.thread_id,
-                        name: input.trim().to_string(),
-                    });
+                self.send_row_action(AppEvent::RenameAgentsOverviewThread {
+                    thread_id: row.thread_id,
+                    name: input.trim().to_string(),
+                });
             }
             self.state().rename_target = None;
             self.state().input.set_text_clearing_elements("");
@@ -396,10 +463,9 @@ impl AgentsOverviewView {
             .selected_row()
             .filter(|_| self.state().rename_target.is_none())
         {
-            self.app_event_tx
-                .send(AppEvent::SelectAgentsOverviewThread {
-                    thread_id: row.thread_id,
-                });
+            self.send_row_action(AppEvent::SelectAgentsOverviewThread {
+                thread_id: row.thread_id,
+            });
             if self.state().searching {
                 let mut state = self.state();
                 state.search.clear();
@@ -666,7 +732,7 @@ impl BottomPaneView for AgentsOverviewView {
             return;
         }
 
-        if (self.state().connection_notice.is_some()
+        if ((self.state().connection_notice.is_some() && !self.state().machines_enabled)
             || self.state().creating_worktree
             || self.state().removal.is_some())
             && self.keymap.action_for(key) != Some(ListAction::Cancel)
@@ -688,7 +754,41 @@ impl BottomPaneView for AgentsOverviewView {
             return;
         }
 
+        if self.state().machines_enabled {
+            let mode = match key.code {
+                KeyCode::F(6) => Some(codex_app_server_protocol::TeamExecutionMode::Paused),
+                KeyCode::F(7) => Some(codex_app_server_protocol::TeamExecutionMode::Running),
+                KeyCode::F(8) => Some(codex_app_server_protocol::TeamExecutionMode::Stopped),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                self.app_event_tx.send(AppEvent::AgentsTeamRequest(
+                    codex_team::TeamRequest::Control { mode },
+                ));
+                return;
+            }
+            if key.code == KeyCode::F(9) {
+                if let Some(row) = self.selected_row()
+                    && let Some(host) = &row.host
+                {
+                    self.app_event_tx.send(AppEvent::AgentsTeamMenu(
+                        super::agents_hosts::ThreadTarget {
+                            host: host.clone(),
+                            thread_id: row.thread_id,
+                        },
+                    ));
+                } else {
+                    self.app_event_tx.send(AppEvent::AgentsMachinesMenu);
+                }
+                return;
+            }
+        }
+
         if self.agents_keymap.resume.is_pressed(key) {
+            if self.state().overview_required {
+                self.app_event_tx.send(AppEvent::AgentsMachinesMenu);
+                return;
+            }
             self.app_event_tx.send(AppEvent::OpenResumePicker);
             return;
         }
@@ -708,25 +808,28 @@ impl BottomPaneView for AgentsOverviewView {
         }
         if self.agents_keymap.toggle_pin.is_pressed(key) {
             if self.can_toggle_selected_pin()
-                && let (Some(ranks), Some(row)) = (&self.pinned_thread_ranks, self.selected_row())
+                && let Some(row) = self.selected_row()
             {
                 let thread_id = row.thread_id;
-                let pinned = !ranks.contains_key(&thread_id);
+                let pinned = !self.is_pinned(self.selected);
                 self.pin_action_pending = true;
-                self.app_event_tx
-                    .send(AppEvent::ToggleAgentsOverviewPin { thread_id, pinned });
+                self.send_row_action(AppEvent::ToggleAgentsOverviewPin { thread_id, pinned });
             }
             return;
         }
         if self.agents_keymap.new_task.is_pressed(key) {
-            self.app_event_tx.send(AppEvent::NewAgentsOverviewSession {
+            if self.state().overview_required && self.selected_row().is_none() {
+                self.app_event_tx.send(AppEvent::AgentsMachinesMenu);
+                return;
+            }
+            self.send_row_action(AppEvent::NewAgentsOverviewSession {
                 cwd: self.selected_row().map(|row| row.thread.cwd.clone()),
             });
             return;
         }
         if self.agents_keymap.new_worktree.is_pressed(key) {
             if self.worktrees_enabled {
-                self.app_event_tx.send(AppEvent::NewAgentsOverviewWorktree {
+                self.send_row_action(AppEvent::NewAgentsOverviewWorktree {
                     cwd: self.selected_row().map(|row| row.thread.cwd.clone()),
                 });
             }
@@ -734,7 +837,7 @@ impl BottomPaneView for AgentsOverviewView {
         }
         if self.agents_keymap.fork.is_pressed(key) {
             if let Some(row) = self.selected_row() {
-                self.app_event_tx.send(AppEvent::ForkAgentsOverviewThread {
+                self.send_row_action(AppEvent::ForkAgentsOverviewThread {
                     thread_id: row.thread_id,
                 });
             }
@@ -761,11 +864,10 @@ impl BottomPaneView for AgentsOverviewView {
         ] {
             if bindings.is_pressed(key) {
                 if let Some(row) = self.selected_row() {
-                    self.app_event_tx
-                        .send(AppEvent::ConfirmAgentsOverviewAction {
-                            thread_id: row.thread_id,
-                            action,
-                        });
+                    self.send_row_action(AppEvent::ConfirmAgentsOverviewAction {
+                        thread_id: row.thread_id,
+                        action,
+                    });
                 }
                 return;
             }
@@ -773,8 +875,7 @@ impl BottomPaneView for AgentsOverviewView {
         if self.agents_keymap.hide.is_pressed(key) {
             if let Some(row) = self.selected_row() {
                 let thread_id = row.thread_id;
-                self.app_event_tx
-                    .send(AppEvent::HideAgentsOverviewThread { thread_id });
+                self.send_row_action(AppEvent::HideAgentsOverviewThread { thread_id });
             }
             return;
         }
@@ -782,7 +883,7 @@ impl BottomPaneView for AgentsOverviewView {
             if let Some(row) = self.selected_row()
                 && matches!(row.thread.status, ThreadStatus::Active { .. })
             {
-                self.app_event_tx.send(AppEvent::StopAgentsOverviewThread {
+                self.send_row_action(AppEvent::StopAgentsOverviewThread {
                     thread_id: row.thread_id,
                 });
             }
@@ -807,6 +908,11 @@ impl BottomPaneView for AgentsOverviewView {
                 ListAction::Accept => self.activate(),
                 ListAction::Cancel => {
                     if matches!(self.on_ctrl_c(), CancellationEvent::NotHandled) {
+                        if self.state().overview_required {
+                            self.app_event_tx
+                                .send(AppEvent::Exit(crate::app_event::ExitMode::Immediate));
+                            return;
+                        }
                         self.state().completion = Some(ViewCompletion::Cancelled);
                     }
                 }

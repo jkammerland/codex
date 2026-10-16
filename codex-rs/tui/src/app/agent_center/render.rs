@@ -213,6 +213,7 @@ impl Renderable for AgentsOverviewView {
         let notice = state
             .connection_notice
             .map(str::to_owned)
+            .or_else(|| state.team_notice.clone())
             .or_else(|| {
                 state
                     .creating_worktree

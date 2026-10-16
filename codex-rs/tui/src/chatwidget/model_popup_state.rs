@@ -59,9 +59,9 @@ impl ChatWidget {
     pub(super) fn refresh_open_model_picker(&mut self) {
         // Refresh an existing parent without reopening it or interrupting its reasoning child.
         match self.model_popup_view_id() {
-            Some(MODEL_SELECTION_VIEW_ID) => self.open_model_popup_with_presets(
-                self.model_catalog.try_list_models().unwrap_or_default(),
-            ),
+            Some(MODEL_SELECTION_VIEW_ID) => {
+                self.open_model_popup_with_presets(self.picker_models())
+            }
             Some(ALL_MODELS_SELECTION_VIEW_ID) => self.open_all_models_popup(),
             _ => {}
         }
@@ -80,6 +80,9 @@ impl ChatWidget {
             .iter()
             .position(|model| Some(model) == selected_model);
         self.model_popup_model_ids = model_ids;
+        if self.agents_model_picker.is_some() {
+            params.on_cancel = self.target_model_cancel_action();
+        }
         if let Some(view_id) = params.view_id.filter(|_| selected_index.is_some()) {
             self.bottom_pane
                 .replace_selection_view_if_present(view_id, params);

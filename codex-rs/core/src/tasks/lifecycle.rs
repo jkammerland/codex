@@ -48,10 +48,15 @@ impl Session {
         }
     }
 
-    pub(super) async fn emit_turn_stop_lifecycle(&self, turn_store: &ExtensionData) {
+    pub(super) async fn emit_turn_stop_lifecycle(
+        &self,
+        turn_store: &ExtensionData,
+        terminal_error: Option<&codex_protocol::protocol::ErrorEvent>,
+    ) {
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor
                 .on_turn_stop(codex_extension_api::TurnStopInput {
+                    terminal_error,
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
                     turn_store,

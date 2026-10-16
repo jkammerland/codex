@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_fake_rollout;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::write_models_cache;
@@ -48,6 +49,90 @@ use test_case::test_case;
 use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[tokio::test]
+async fn conflicting_effort_policy_channels_do_not_mutate_settings() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    // Resume an existing durable conversation. Empty new sessions materialize
+    // lazily, so they cannot establish the saved-settings recovery assertion.
+    let thread_id = create_fake_rollout(
+        codex_home.path(),
+        "2026-10-17T12-00-00",
+        "2026-10-17T12:00:00Z",
+        "Existing settings policy conversation",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let request_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id,
+            ..Default::default()
+        })
+        .await?;
+    let started: ThreadResumeResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+
+    let request_id = mcp
+        .send_thread_settings_update_request(ThreadSettingsUpdateParams {
+            thread_id: started.thread.id.clone(),
+            effort: Some(ReasoningEffort::High),
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadSettingsUpdateResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+    let updated = read_thread_settings_updated(&mut mcp).await?;
+    assert_eq!(updated.thread_settings.effort, Some(ReasoningEffort::High));
+
+    for mut params in [
+        json!({
+            "teamSelection": {"revision": 1, "model": {"type": "keep"}, "effort": {"type": "keep"}},
+            "effortPolicy": {"type": "default"}
+        }),
+        json!({"effortPolicy": {"type": "keep"}, "effort": "low"}),
+        json!({"effortPolicy": {"type": "value", "value": "low"}, "effort": "high"}),
+        json!({
+            "effortPolicy": {"type": "default"},
+            "collaborationMode": CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings { model: "mock-model".into(), reasoning_effort: Some(ReasoningEffort::Low), developer_instructions: None },
+            }
+        }),
+    ] {
+        params["threadId"] = json!(started.thread.id);
+        let request_id = mcp
+            .send_raw_request("thread/settings/update", Some(params))
+            .await?;
+        let error = timeout(
+            DEFAULT_TIMEOUT,
+            mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+        )
+        .await??;
+        assert!(error.error.message.contains("cannot be combined"));
+    }
+
+    // A rejected policy cannot clear the saved effort or enqueue an applied selection.
+    let request_id = mcp
+        .send_raw_request(
+            "thread/resume",
+            Some(json!({
+                "threadId": started.thread.id
+            })),
+        )
+        .await?;
+    let resumed: ThreadResumeResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+    assert_eq!(resumed.reasoning_effort, Some(ReasoningEffort::High));
+    assert!(received_response_bodies(&server).await?.is_empty());
+    Ok(())
+}
 
 #[tokio::test]
 async fn disabled_plugin_ids_replace_preserve_and_clear_without_inference() -> Result<()> {

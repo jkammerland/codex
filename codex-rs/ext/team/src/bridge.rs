@@ -85,14 +85,15 @@ impl TeamHostService {
         &self,
         params: TeamAgentCredentialParams,
     ) -> Result<TeamAgentCredentialResponse> {
+        let thread_id = ThreadId::from_string(&params.thread_id)?.to_string();
         let store = self
             .store
             .get()
             .ok_or_else(|| anyhow::anyhow!("team host is not enrolled"))?;
-        let credential = match store.credential(&params.thread_id).await? {
+        let credential = match store.credential(&thread_id).await? {
             Some(credential) => credential,
             None => store
-                .get::<String>("member_credential", &params.thread_id)
+                .get::<String>("member_credential", &thread_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("agent is not enrolled"))?,
         };
@@ -105,20 +106,29 @@ impl TeamHostService {
     ) -> Result<TeamAgentRequestResponse> {
         let expected = self
             .agent_credential(TeamAgentCredentialParams {
-                thread_id: params.thread_id.clone(),
+                thread_id: ThreadId::from_string(&params.thread_id)?.to_string(),
             })
             .await?
             .credential;
         ensure!(expected == params.credential, "invalid agent credential");
-        self.agent_action(ThreadId::from_string(&params.thread_id)?, params.action)
-            .await
+        self.agent_action(
+            ThreadId::from_string(&params.thread_id)?,
+            params.action,
+            params.operation_id,
+        )
+        .await
     }
 
     pub(crate) async fn agent_action(
         &self,
         thread_id: ThreadId,
         action: TeamAgentAction,
+        operation_id: Option<String>,
     ) -> Result<TeamAgentRequestResponse> {
+        let operation = operation_id
+            .map(|id| (format!("{thread_id}:{id}"), agent_operation_digest(&action)))
+            .map(|(id, digest)| digest.map(|digest| (id, digest)))
+            .transpose()?;
         let root = self
             .gate
             .root(thread_id)
@@ -136,7 +146,11 @@ impl TeamHostService {
             ..enrollment.address
         };
         let result = match action {
-            TeamAgentAction::Reply { message_id, body } => {
+            TeamAgentAction::Reply {
+                message_id,
+                body,
+                delivery,
+            } => {
                 let original = store
                     .deliveries(&thread_id.to_string())
                     .await?
@@ -158,7 +172,8 @@ impl TeamHostService {
                     },
                     Some(message_id),
                     original.topic,
-                    TeamDeliveryMode::NextTurn,
+                    delivery,
+                    operation.as_ref(),
                 )
                 .await?
             }
@@ -216,6 +231,7 @@ impl TeamHostService {
                     reply_to,
                     None,
                     delivery,
+                    operation.as_ref(),
                 )
                 .await?
             }
@@ -233,21 +249,32 @@ impl TeamHostService {
                     reply_to,
                     Some(topic),
                     TeamDeliveryMode::NextTurn,
+                    operation.as_ref(),
                 )
                 .await?
             }
             TeamAgentAction::Subscribe { topic, enabled } => {
                 ensure!(!topic.trim().is_empty(), "board topic is required");
                 let id = Uuid::now_v7().to_string();
-                store
-                    .enqueue(
-                        &id,
-                        "subscription",
-                        &json!({"sender": sender, "topic": topic, "enabled": enabled}),
-                    )
-                    .await?;
+                let payload = json!({"sender": sender, "topic": topic, "enabled": enabled});
+                let result = json!({"id": id, "state": "queued"});
+                let result = if let Some((operation_id, digest)) = &operation {
+                    store
+                        .enqueue_agent_operation(
+                            operation_id,
+                            digest,
+                            &id,
+                            "subscription",
+                            &payload,
+                            &result,
+                        )
+                        .await?
+                } else {
+                    store.enqueue(&id, "subscription", &payload).await?;
+                    result
+                };
                 self.notify();
-                json!({"id": id, "state": "queued"})
+                result
             }
         };
         Ok(TeamAgentRequestResponse { result })
@@ -260,14 +287,18 @@ impl TeamHostService {
     async fn queue_message(
         &self,
         sender: TeamAddress,
-        recipient: Option<TeamAddress>,
+        mut recipient: Option<TeamAddress>,
         body: String,
         kind: TeamMessageKind,
         reply_to: Option<String>,
         topic: Option<String>,
         delivery: TeamDeliveryMode,
+        operation: Option<&(String, String)>,
     ) -> Result<Value> {
         ensure!(!body.trim().is_empty(), "message body is required");
+        if let Some(recipient) = &mut recipient {
+            recipient.thread_id = ThreadId::from_string(&recipient.thread_id)?.to_string();
+        }
         let message = TeamMessage {
             id: Uuid::now_v7().to_string(),
             sender,
@@ -285,16 +316,52 @@ impl TeamHostService {
             .store
             .get()
             .ok_or_else(|| anyhow::anyhow!("team host is not enrolled"))?;
-        store
-            .enqueue(
-                &message.id,
-                "message",
-                &json!({"message": message, "delivery": delivery}),
-            )
-            .await?;
+        let payload = json!({"message": message, "delivery": delivery});
+        let result = json!({"id": message.id, "state": "queued"});
+        let result = if let Some((operation_id, digest)) = operation {
+            store
+                .enqueue_agent_operation(
+                    operation_id,
+                    digest,
+                    &message.id,
+                    "message",
+                    &payload,
+                    &result,
+                )
+                .await?
+        } else {
+            store.enqueue(&message.id, "message", &payload).await?;
+            result
+        };
         self.notify();
-        Ok(json!({"id": message.id, "state": "queued"}))
+        Ok(result)
     }
+}
+
+fn agent_operation_digest(action: &TeamAgentAction) -> Result<String> {
+    // Durable operation receipts used this exact field order before replies
+    // could choose a boundary. Keep that identity across an upgrade/retry.
+    if let TeamAgentAction::Reply {
+        message_id,
+        body,
+        delivery: TeamDeliveryMode::NextTurn,
+    } = action
+    {
+        #[derive(serde::Serialize)]
+        struct LegacyReply<'a> {
+            #[serde(rename = "type")]
+            action: &'a str,
+            #[serde(rename = "messageId")]
+            message_id: &'a str,
+            body: &'a str,
+        }
+        return Ok(serde_json::to_string(&LegacyReply {
+            action: "reply",
+            message_id,
+            body,
+        })?);
+    }
+    Ok(serde_json::to_string(action)?)
 }
 
 fn page<T: serde::Serialize>(mut data: Vec<(String, T)>, limit: Option<u32>) -> Value {

@@ -1,0 +1,26 @@
+---
+source: tui/src/app/agents_hosts_tests.rs
+assertion_line: 410
+expression: "format!(\"{board}\\n\\nDelivery details:\\n{detail}\")"
+---
+  Shared message board
+  Select a message to inspect its delivery receipts, reply, or retry
+
+
+› 1. Review the compiler change and reply here.  NextTurn · 1 receipts
+  2. Rejected outgoing entry beta/main/12        recipient is not enrolled
+
+  enter select · esc back
+
+Delivery details:
+  reviews · Board · NextTurn · published
+  Review the compiler change and reply here.
+  reviewer: NeedsReconciliation
+  Input is durable; inspect the original turn before continuing.
+
+
+› 1. Reply · next turn (preferred)
+  2. Reply · safe boundary
+  3. Retry delivery
+
+  enter select · esc back

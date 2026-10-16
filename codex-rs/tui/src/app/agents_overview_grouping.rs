@@ -48,9 +48,14 @@ pub(super) fn model_name(thread: &Thread) -> &str {
 
 impl AgentsOverviewView {
     pub(super) fn is_pinned(&self, index: usize) -> bool {
-        self.pinned_thread_ranks
-            .as_ref()
-            .is_some_and(|ranks| ranks.contains_key(&self.rows[index].thread_id))
+        let row = &self.rows[index];
+        if row.host.is_some() {
+            row.pin_rank.is_some()
+        } else {
+            self.pinned_thread_ranks
+                .as_ref()
+                .is_some_and(|ranks| ranks.contains_key(&row.thread_id))
+        }
     }
 
     pub(super) fn visible_indices(&self) -> Vec<usize> {
@@ -63,10 +68,11 @@ impl AgentsOverviewView {
             .enumerate()
             .filter_map(|(index, row)| {
                 let searchable = format!(
-                    "{} {} {}",
+                    "{} {} {} {}",
                     row.thread.name.as_deref().unwrap_or_default(),
                     row.thread.preview,
                     row.thread.cwd.display(),
+                    row.machine_label.as_deref().unwrap_or_default(),
                 )
                 .to_lowercase();
                 ((search.is_empty() || searchable.contains(&search))
@@ -75,9 +81,16 @@ impl AgentsOverviewView {
                 .then_some(index)
             })
             .partition(|index| self.is_pinned(*index));
-        if let Some(ranks) = &self.pinned_thread_ranks {
-            pinned.sort_by_key(|index| ranks.get(&self.rows[*index].thread_id).copied());
-        }
+        pinned.sort_by_key(|index| {
+            let row = &self.rows[*index];
+            if row.host.is_some() {
+                row.pin_rank
+            } else {
+                self.pinned_thread_ranks
+                    .as_ref()
+                    .and_then(|ranks| ranks.get(&row.thread_id).copied())
+            }
+        });
         match state.grouping {
             AgentsOverviewGrouping::Project => visible.sort_by_key(|index| {
                 (
@@ -100,6 +113,8 @@ impl AgentsOverviewView {
             }),
         }
         pinned.extend(visible);
+        // The host is always the outer group; the existing pin and chosen grouping order stays beneath it.
+        pinned.sort_by_key(|index| self.rows[*index].host.clone());
         pinned
     }
 
@@ -109,6 +124,9 @@ impl AgentsOverviewView {
         left: usize,
         right: usize,
     ) -> bool {
+        if self.rows[left].host != self.rows[right].host {
+            return false;
+        }
         if self.is_pinned(left) || self.is_pinned(right) {
             return self.is_pinned(left) && self.is_pinned(right);
         }

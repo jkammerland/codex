@@ -24,6 +24,8 @@ pub struct Agent {
     pub next_model: Option<String>,
     pub next_effort: Option<String>,
     pub project: Option<String>,
+    #[serde(default)]
+    pub requested_selection: Option<codex_app_server_protocol::TeamModelSelection>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,6 +75,23 @@ pub struct MessageRecord {
     pub external_url: Option<String>,
 }
 
+/// A caller retains this envelope and reuses it when a response is lost.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamOperation {
+    pub operation_id: String,
+    pub request: TeamRequest,
+}
+
+impl TeamOperation {
+    pub fn new(request: TeamRequest) -> Self {
+        Self {
+            operation_id: uuid::Uuid::now_v7().to_string(),
+            request,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -83,6 +102,8 @@ pub enum TeamRequest {
     Reply {
         message_id: String,
         body: String,
+        #[serde(default, skip_serializing_if = "TeamDeliveryMode::is_next_turn")]
+        delivery: TeamDeliveryMode,
     },
     AgentCredential {
         address: TeamAddress,
@@ -93,6 +114,9 @@ pub enum TeamRequest {
     Snapshot,
     Control {
         mode: TeamExecutionMode,
+    },
+    Leave {
+        address: TeamAddress,
     },
     Enroll {
         address: TeamAddress,
@@ -117,6 +141,11 @@ pub enum TeamRequest {
     Models {
         machine_id: String,
         server_id: String,
+    },
+    SelectModel {
+        address: TeamAddress,
+        model: codex_app_server_protocol::TeamSelection,
+        effort: codex_app_server_protocol::TeamSelection,
     },
     SetModel {
         address: TeamAddress,
@@ -154,4 +183,12 @@ pub(crate) fn address_key(address: &TeamAddress) -> String {
 
 pub(crate) fn server_key(machine_id: &str, server_id: &str) -> String {
     format!("{machine_id}/{server_id}")
+}
+
+/// Normalize root IDs before they become durable routing or deduplication keys.
+pub(crate) fn canonical_address(mut address: TeamAddress) -> anyhow::Result<TeamAddress> {
+    if !matches!(address.machine_id.as_str(), "operator" | "gitea") {
+        address.thread_id = uuid::Uuid::parse_str(&address.thread_id)?.to_string();
+    }
+    Ok(address)
 }

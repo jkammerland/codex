@@ -32,6 +32,66 @@ impl App {
         app_server: &mut AppServerSession,
         event: AppEvent,
     ) -> Result<AppRunControl> {
+        let event = match event {
+            AppEvent::Scoped {
+                mut scope,
+                generation,
+                event,
+            } => {
+                if scope.host == agents_hosts::HostKey::default() {
+                    scope.host = self.agents_hosts.initial_host.clone();
+                }
+                if scope != self.agents_hosts.scope() || generation != self.agents_hosts.generation
+                {
+                    let Some(event) = self.recover_host_completion(scope, *event) else {
+                        return Ok(AppRunControl::Continue);
+                    };
+                    event
+                } else {
+                    *event
+                }
+            }
+            event => event,
+        };
+        let event = match event {
+            AppEvent::AgentsHostUpdate(update) => {
+                self.handle_agents_host_update(tui, app_server, *update)
+                    .await?;
+                return Ok(AppRunControl::Continue);
+            }
+            AppEvent::NewAgentsHostSession { host, cwd } => {
+                let host = self.agents_hosts.canonical_host(&host);
+                self.start_other_host_task(host, cwd, /*fork_parent*/ None, app_server);
+                return Ok(AppRunControl::Continue);
+            }
+            AppEvent::AgentsHostModel(action) => {
+                self.handle_agents_host_model(app_server, *action);
+                return Ok(AppRunControl::Continue);
+            }
+            AppEvent::AgentsHostAction { mut target, event } => {
+                target.host = self.agents_hosts.canonical_host(&target.host);
+                if matches!(*event, AppEvent::SelectAgentsOverviewThread { .. }) {
+                    self.prepare_agents_host(target, app_server);
+                    return Ok(AppRunControl::Continue);
+                }
+                if target.host != self.agents_hosts.foreground
+                    || matches!(
+                        *event,
+                        AppEvent::RenameAgentsOverviewThread { .. }
+                            | AppEvent::StopAgentsOverviewThread { .. }
+                            | AppEvent::ConfirmAgentsOverviewAction { .. }
+                            | AppEvent::RunAgentsOverviewAction { .. }
+                            | AppEvent::NewAgentsOverviewSession { .. }
+                            | AppEvent::ForkAgentsOverviewThread { .. }
+                    )
+                {
+                    self.handle_background_agents_action(target, *event, app_server);
+                    return Ok(AppRunControl::Continue);
+                }
+                *event
+            }
+            event => event,
+        };
         let from_agents_overview = matches!(event, AppEvent::ForkAgentsOverviewThreadReady { .. });
         let event = if let AppEvent::ForkAgentsOverviewThreadReady { thread_id } = event {
             if self.current_displayed_thread_id() != Some(thread_id)
@@ -163,6 +223,19 @@ impl App {
             event => (event, None),
         };
         match event {
+            AppEvent::Scoped { .. } | AppEvent::AgentsHostUpdate(_) | AppEvent::AgentsHostAction { .. } | AppEvent::AgentsHostModel(_) | AppEvent::NewAgentsHostSession { .. } => {},
+            AppEvent::AgentsTeamMenu(target) => self.open_agents_team_menu(target),
+            AppEvent::AgentsTeamCompose(kind) => self.open_agents_team_compose(kind),
+            AppEvent::AgentsTeamRequest(request) => self.submit_agents_team_request(request),
+            AppEvent::AgentsTeamBoard => self.open_agents_team_board(),
+            AppEvent::AgentsTeamMessage(id) => self.open_agents_team_message(id),
+            AppEvent::AgentsMachinesMenu => self.open_agents_machines_menu(),
+            AppEvent::AgentsHostReconnect(host) => {
+                if self.agents_hosts.client.is_none() { self.ensure_agents_hosts(app_server); }
+                else if host == self.agents_hosts.foreground { self.begin_reconnect(); }
+                else { self.connect_agents_host(host); }
+            }
+            AppEvent::AgentsTeamRetry(id) => self.retry_agents_team_request(id),
             AppEvent::OpenDaemonMenu => self.open_daemon_menu(),
             AppEvent::ConfirmDaemonRestart => self.confirm_daemon_restart(),
             AppEvent::RunDaemonRestart => {
@@ -354,6 +427,10 @@ impl App {
                 response,
             } => {
                 self.dynamic_tool_tasks.remove(&request_id);
+                // The sender resolves real ingress capabilities independently of UI selection.
+                if self.dynamic_tool_origins.remove(&request_id).is_some() {
+                    return Ok(AppRunControl::Continue);
+                }
                 match serde_json::to_value(response) {
                     Ok(result) => {
                         if let Err(error) = app_server
@@ -729,6 +806,10 @@ impl App {
                     return Ok(AppRunControl::Continue);
                 };
                 let nth_user_message = crate::app_backtrack::user_count(&self.transcript_cells[..index]);
+                if self.agents_hosts.enabled() {
+                    self.start_host_prompt_revert(app_server, thread_id, nth_user_message, prompt).await?;
+                    return Ok(AppRunControl::Continue);
+                }
                 let selection: Result<(String, Vec<Turn>)> = async {
                     let channel = self.thread_event_channels.get(&thread_id)
                         .ok_or_else(|| color_eyre::eyre::eyre!("the selected thread is no longer available"))?;
@@ -828,45 +909,14 @@ impl App {
                     Err(color_eyre::eyre::eyre!("app-server disconnected"))
                 }).await
                     .wrap_err("history was reverted, but refreshing the session timed out; resume this session to reload it")??;
-                // Preserve the widget and unrelated threads; only replace this replay store.
-                self.chat_widget.restore_thread_input_state(
-                    /*input_state*/ None,
-                    crate::chatwidget::ThreadInputStateRestoreMode { preserve_in_flight_turn: false },
-                );
-                self.chat_widget.restore_user_message_to_composer(prompt);
-                self.chat_widget.set_queue_autosend_suppressed(/*suppressed*/ true);
-                self.abort_thread_event_listener(thread_id);
-                if let Some(mut rx) = self.active_thread_rx.take() {
-                    while let Ok(event) = rx.try_recv() {
-                        if let ThreadBufferedEvent::Notification(notification) = event {
-                            self.chat_widget.handle_server_notification(*notification, Some(ReplayKind::ThreadSnapshot));
-                        }
-                    }
-                }
-                let mut session = self.thread_event_channels.get(&thread_id)
-                    .ok_or_else(|| color_eyre::eyre::eyre!("reverted thread is no longer available"))?
-                    .store.lock().await.session.clone()
-                    .ok_or_else(|| color_eyre::eyre::eyre!("reverted thread has no session"))?;
-                session.rollout_path = reverted.thread.path.clone();
-                if self.primary_thread_id == Some(thread_id) {
-                    self.primary_session_configured = Some(session.clone());
-                }
-                self.thread_event_channels.remove(&thread_id);
-                self.active_thread_id = None;
-                self.recap.reset_for_new_thread(Instant::now());
-                self.recap.seed_from_turns(&retained_turns, Instant::now());
-                self.retain_realtime_replay_state_before_replace();
-                self.forget_realtime_replay_thread(thread_id);
-                self.chat_widget.reset_after_prompt_revert(reverted.thread.path, &retained_turns);
-                self.ensure_thread_channel(thread_id).store.lock().await
-                    .set_session(session, retained_turns);
-                self.activate_thread_channel(thread_id).await;
-                // Apply the trim after any transcript inserts produced by shutdown notifications.
-                // The existing reset barrier keeps terminal input blocked until then.
-                self.pending_thread_switch_resets += 1;
-                self.app_event_tx.send(AppEvent::FinishPromptRevert {
-                    thread_id, nth_user_message,
+                self.pending_host_prompt_reverts.insert(thread_id, agents_hosts_revert::PendingHostPromptRevert {
+                    prompt, retained_turns, reverted: Some(reverted), nth_user_message, notified: true, request_id: Uuid::new_v4(), error: None,
                 });
+                self.complete_host_prompt_revert(thread_id).await?;
+            }
+            AppEvent::CompleteHostPromptRevert { thread_id } => {
+                if let Some(pending) = self.pending_host_prompt_reverts.get_mut(&thread_id) { pending.notified = true; }
+                self.complete_host_prompt_revert(thread_id).await?;
             }
             AppEvent::FinishPromptRevert { thread_id, nth_user_message } => {
                 self.pending_thread_switch_resets -= 1;

@@ -42,8 +42,26 @@ pub struct CatalogRefreshInput<'a> {
     pub turn_store: &'a ExtensionData,
 }
 
+/// Actual input selected for one imminent model request. Completion of this
+/// callback is required before dispatch; history persistence alone is insufficient.
+pub struct TurnModelRequestInput<'a> {
+    pub turn_id: &'a str,
+    pub input: &'a [codex_protocol::models::ResponseItem],
+    pub thread_store: &'a ExtensionData,
+    pub turn_store: &'a ExtensionData,
+}
+
+/// Provider acknowledgement for an already journaled model request.
+pub struct TurnModelAcknowledgedInput<'a> {
+    pub response_id: Option<&'a str>,
+    pub thread_store: &'a ExtensionData,
+    pub turn_store: &'a ExtensionData,
+}
+
 /// Input supplied when the host completes a turn.
 pub struct TurnStopInput<'a> {
+    /// Final error that determines this turn's terminal status, if any.
+    pub terminal_error: Option<&'a codex_protocol::protocol::ErrorEvent>,
     /// Store scoped to the host session runtime.
     pub session_store: &'a ExtensionData,
     /// Store scoped to this thread runtime.

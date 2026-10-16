@@ -5,6 +5,10 @@ use crate::TS;
 use serde::Deserialize;
 use serde::Serialize;
 
+pub use codex_protocol::team_model::TeamModelSelection;
+pub use codex_protocol::team_model::TeamSelection;
+pub use codex_protocol::team_model::TeamSelectionOrigin;
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = "v2/")]
@@ -83,6 +87,19 @@ pub struct TeamAgentRuntime {
     pub next_model: Option<String>,
     pub next_effort: Option<String>,
     pub model_error: Option<String>,
+    #[serde(default)]
+    pub model_origin: TeamSelectionOrigin,
+    #[serde(default)]
+    pub effort_origin: TeamSelectionOrigin,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub requested_selection_revision: Option<i64>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub applied_selection_revision: Option<i64>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub superseded_selection_revision: Option<i64>,
     pub in_flight: u32,
     pub reconciling: bool,
     pub manually_held: bool,
@@ -94,6 +111,8 @@ pub struct TeamAgentRuntime {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct TeamEnrollParams {
+    #[ts(optional = nullable)]
+    pub operation_id: Option<String>,
     pub address: TeamAddress,
     pub alias: String,
     pub control: TeamControlState,
@@ -116,6 +135,23 @@ pub struct TeamControlParams {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct TeamLeaveParams {
+    #[ts(optional = nullable)]
+    pub operation_id: Option<String>,
+    pub coordinator_id: String,
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamLeaveResponse {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct TeamControlResponse {
     pub control: TeamControlState,
     /// Acknowledges durable admission state, not completion of in-flight work.
@@ -132,12 +168,20 @@ pub enum TeamMessageKind {
     Board,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = "v2/")]
 pub enum TeamDeliveryMode {
+    #[default]
     NextTurn,
     SafeBoundary,
+}
+
+impl TeamDeliveryMode {
+    /// Preserve the serialized identity of replies submitted before delivery was selectable.
+    pub fn is_next_turn(&self) -> bool {
+        matches!(self, Self::NextTurn)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -179,6 +223,7 @@ pub struct TeamDeliverParams {
 #[ts(rename_all = "camelCase", export_to = "v2/")]
 pub enum TeamReceiptState {
     Pending,
+    Rejected,
     Accepted,
     Completed,
     Interrupted,

@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/model_target_tests.rs
+assertion_line: 91
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Select Model and Effort
+  Task on laptop / primary · session only
+  model: explicit · effort: default
+
+
+› 1. Laptop model (current)  Legacy coding model.
+
+  enter select · esc back

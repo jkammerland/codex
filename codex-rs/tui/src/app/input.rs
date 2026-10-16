@@ -613,6 +613,24 @@ impl App {
             return;
         }
 
+        if self
+            .current_displayed_thread_id()
+            .is_some_and(|id| self.pending_host_prompt_reverts.contains_key(&id))
+            && self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+        {
+            // History preparation fences composer edits while navigation and team controls stay live.
+            if key_event.code == KeyCode::Esc && key_event.kind == KeyEventKind::Press {
+                self.open_agents_overview(app_server);
+            } else if matches!(key_event.code, KeyCode::Char('c' | 'C'))
+                && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                && key_event.kind == KeyEventKind::Press
+            {
+                self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
+            }
+            return;
+        }
+
         if self.should_handle_unavailable_thread_key(key_event) {
             self.chat_widget
                 .handle_restricted_key(key_event, RestrictedInputMode::UnavailableThread);

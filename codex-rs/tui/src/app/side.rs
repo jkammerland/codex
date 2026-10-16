@@ -514,10 +514,15 @@ impl App {
         self.pending_app_server_requests
             .cancel_thread_verification(&thread_id.to_string());
         let app_event_tx = self.app_event_tx.clone();
+        let origins = &mut self.dynamic_tool_origins;
         self.dynamic_tool_tasks
             .retain(|request_id, (source, task)| {
                 if source == &thread_id.to_string() {
-                    app_event_tx.send(AppEvent::DynamicToolCallCompleted {
+                    let sender = origins.get(request_id).cloned().map_or_else(
+                        || app_event_tx.clone(),
+                        |reply| app_event_tx.clone().with_reply(reply),
+                    );
+                    sender.send(AppEvent::DynamicToolCallCompleted {
                         request_id: request_id.clone(),
                         response: crate::dynamic_tools::failure_response(
                             "Source task was closed while handling a dynamic tool call",

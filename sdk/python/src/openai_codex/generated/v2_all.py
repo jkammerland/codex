@@ -4986,15 +4986,6 @@ class TeamAddress(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
 
 
-class ReplyTeamAgentAction(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    body: str
-    message_id: str
-    type: Annotated[Literal["reply"], Field(title="ReplyTeamAgentActionType")]
-
-
 class DirectoryTeamAgentAction(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -5124,10 +5115,64 @@ class TeamOutboxEntry(BaseModel):
 
 class TeamReceiptState(Enum):
     pending = "pending"
+    rejected = "rejected"
     accepted = "accepted"
     completed = "completed"
     interrupted = "interrupted"
     needs_reconciliation = "needsReconciliation"
+
+
+class KeepTeamSelection(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["keep"], Field(title="KeepTeamSelectionType")]
+
+
+class DefaultTeamSelection(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["default"], Field(title="DefaultTeamSelectionType")]
+
+
+class ValueTeamSelection(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["value"], Field(title="ValueTeamSelectionType")]
+    value: str
+
+
+class InheritTeamSelection(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["inherit"], Field(title="InheritTeamSelectionType")]
+
+
+class TeamSelection(
+    RootModel[KeepTeamSelection | DefaultTeamSelection | ValueTeamSelection | InheritTeamSelection]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: KeepTeamSelection | DefaultTeamSelection | ValueTeamSelection | InheritTeamSelection
+
+
+class TeamSelectionOriginValue(Enum):
+    inherited = "inherited"
+    configured = "configured"
+    role = "role"
+    explicit = "explicit"
+    default = "default"
+
+
+class TeamSelectionOrigin(RootModel[TeamSelectionOriginValue | Literal["legacy"]]):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: TeamSelectionOriginValue | Literal["legacy"]
 
 
 class TeamTrackedJob(BaseModel):
@@ -10060,6 +10105,16 @@ class SubAgentSource(
     root: SubAgentSourceValue | ThreadSpawnSubAgentSource | OtherSubAgentSource
 
 
+class ReplyTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    body: str
+    delivery: TeamDeliveryMode | None = "nextTurn"
+    message_id: str
+    type: Annotated[Literal["reply"], Field(title="ReplyTeamAgentActionType")]
+
+
 class SendTeamAgentAction(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10103,20 +10158,31 @@ class TeamAgentRuntime(BaseModel):
         populate_by_name=True,
     )
     alias: str
+    applied_selection_revision: Annotated[int | None, Field(alias="appliedSelectionRevision")] = (
+        None
+    )
     archived: bool
     continuation_turn_id: Annotated[str | None, Field(alias="continuationTurnId")] = None
     current_effort: Annotated[str | None, Field(alias="currentEffort")] = None
     current_model: Annotated[str | None, Field(alias="currentModel")] = None
+    effort_origin: Annotated[TeamSelectionOrigin | None, Field(alias="effortOrigin")] = "legacy"
     in_flight: Annotated[int, Field(alias="inFlight", ge=0)]
     jobs: list[TeamTrackedJob]
     loaded: bool
     manually_held: Annotated[bool, Field(alias="manuallyHeld")]
     model_error: Annotated[str | None, Field(alias="modelError")] = None
+    model_origin: Annotated[TeamSelectionOrigin | None, Field(alias="modelOrigin")] = "legacy"
     next_effort: Annotated[str | None, Field(alias="nextEffort")] = None
     next_model: Annotated[str | None, Field(alias="nextModel")] = None
     parent_thread_id: Annotated[str | None, Field(alias="parentThreadId")] = None
     reconciling: bool
+    requested_selection_revision: Annotated[
+        int | None, Field(alias="requestedSelectionRevision")
+    ] = None
     root_thread_id: Annotated[str, Field(alias="rootThreadId")]
+    superseded_selection_revision: Annotated[
+        int | None, Field(alias="supersededSelectionRevision")
+    ] = None
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str | None, Field(alias="turnId")] = None
 
@@ -10142,6 +10208,15 @@ class TeamMessage(BaseModel):
     reply_to: Annotated[str | None, Field(alias="replyTo")] = None
     sender: TeamAddress
     topic: str | None = None
+
+
+class TeamModelSelection(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    effort: TeamSelection
+    model: TeamSelection
+    revision: int
 
 
 class TeamReceipt(BaseModel):

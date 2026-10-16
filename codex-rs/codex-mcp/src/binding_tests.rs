@@ -416,6 +416,56 @@ async fn preparation_holds_catalog_authority_until_it_finishes() {
 }
 
 #[tokio::test]
+async fn final_dispatch_admission_runs_after_preparation_and_can_reject_without_calling_the_transport()
+ {
+    let step = test_step(
+        "old",
+        AppToolApproval::Prompt,
+        /*supports_sandbox_state_meta*/ false,
+    )
+    .await;
+    let prepared = step
+        .step
+        .prepare_call(SERVER_NAME, TOOL_NAME)
+        .expect("prepared test call");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let admitted = Arc::clone(&dispatched);
+    let call = tokio::spawn(async move {
+        prepared
+            .call_with_preparation_and_dispatch(
+                /*requested_timeout*/ None,
+                || async {
+                    started_tx.send(()).expect("waiting for preparation");
+                    release_rx.await.expect("release preparation");
+                    Ok((None, None))
+                },
+                || {
+                    admitted.store(true, Ordering::SeqCst);
+                    Err(anyhow::anyhow!("cancelled before external dispatch"))
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 10), started_rx)
+        .await
+        .expect("preparation started")
+        .expect("preparation signal");
+    assert!(!dispatched.load(Ordering::SeqCst));
+    release_tx.send(()).expect("preparation is waiting");
+    let error = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 10), call)
+        .await
+        .expect("call completed")
+        .expect("call task")
+        .expect_err("cancelled dispatch");
+    // The fixture's uninitialized transport would return a different error if
+    // it were reached. Preserve the final admission rejection independently.
+    assert_eq!(error.to_string(), "cancelled before external dispatch");
+    assert!(dispatched.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn sandbox_executable_requires_local_stdio_and_a_full_cli() -> anyhow::Result<()> {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;

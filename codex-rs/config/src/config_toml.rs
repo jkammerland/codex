@@ -488,6 +488,9 @@ pub struct ConfigToml {
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
 
+    /// Machine manifest used by the shared agents overview and automation commands.
+    pub agents_manifest: Option<AbsolutePathBuf>,
+
     /// Goal-related settings.
     pub goals: Option<GoalsToml>,
 

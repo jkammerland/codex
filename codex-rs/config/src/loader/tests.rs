@@ -21,6 +21,29 @@ use tempfile::tempdir;
 pub(super) struct TestFileSystem;
 
 #[test]
+fn agents_manifest_resolves_at_its_config_layer_without_reserving_a_role_name() -> anyhow::Result<()>
+{
+    let root = tempdir()?;
+    let input: TomlValue = toml::from_str(
+        "agents_manifest = './machines.toml'\n[agents.manifest]\ndescription = 'A valid role named manifest'\n",
+    )?;
+    let normalized = resolve_relative_paths_in_config_toml(input, root.path())?;
+    let parsed: ConfigToml = normalized.try_into()?;
+    assert_eq!(
+        parsed.agents_manifest.map(|path| path.to_path_buf()),
+        Some(root.path().join("machines.toml"))
+    );
+    assert_eq!(
+        parsed.agents.and_then(|agents| agents
+            .roles
+            .get("manifest")
+            .and_then(|role| role.description.clone())),
+        Some("A valid role named manifest".into())
+    );
+    Ok(())
+}
+
+#[test]
 fn project_config_cannot_override_configured_credential_broker_hosts() {
     let mut config: TomlValue = toml::from_str(
         "[shell_environment_policy.set]\n\

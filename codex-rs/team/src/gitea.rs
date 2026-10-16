@@ -17,8 +17,26 @@ use crate::config::GiteaConfig;
 use crate::coordinator::Coordinator;
 use crate::model::MessageRecord;
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct IntegrationIdentity {
+    id: String,
+    base: String,
+}
+
+impl IntegrationIdentity {
+    pub(crate) fn configured(config: &GiteaConfig) -> Result<Self> {
+        let base = url::Url::parse(&format!("{}/", config.url.trim_end_matches('/')))?.to_string();
+        Ok(Self {
+            id: Uuid::new_v5(&Uuid::NAMESPACE_URL, base.as_bytes()).to_string(),
+            base,
+        })
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Origin {
+    #[serde(default)]
+    pub integration: Option<IntegrationIdentity>,
     pub repository: String,
     pub number: u64,
     pub url: String,
@@ -182,7 +200,9 @@ impl Coordinator {
         } else {
             "issues"
         };
+        let integration = IntegrationIdentity::configured(config)?;
         let origin = Origin {
+            integration: Some(integration.clone()),
             repository: repository.into(),
             number,
             url: base
@@ -204,7 +224,7 @@ impl Coordinator {
                 continue;
             }
             let semantic_key = json!([
-                config.url,
+                integration,
                 repository,
                 number,
                 event,
@@ -248,7 +268,7 @@ impl Coordinator {
             message.id = id.clone();
             message.sender = TeamAddress {
                 machine_id: "gitea".into(),
-                server_id: "configured".into(),
+                server_id: integration.id.clone(),
                 thread_id: format!("{repository}#{number}"),
             };
             // Acknowledge the webhook only after both origin and message are

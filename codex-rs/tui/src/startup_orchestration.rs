@@ -339,7 +339,28 @@ pub(super) async fn run_main_inner(
     )?;
 
     let implicit_connection = explicit_remote_endpoint.is_none();
-    let default_daemon = if implicit_connection && reuse_implicit_local_daemon {
+    let manifest_path =
+        if cli.agents_overview && !cli.agents_local && explicit_remote_endpoint.is_none() {
+            cli.agents_manifest.clone().or_else(|| {
+                bootstrap_config
+                    .config_toml
+                    .agents_manifest
+                    .as_ref()
+                    .map(codex_utils_absolute_path::AbsolutePathBuf::to_path_buf)
+            })
+        } else {
+            None
+        };
+    // Configured discovery starts inside App. Offline machines must not gate the terminal.
+    let preconnected_app_server = manifest_path.map(|manifest_path| {
+        cli.agents_manifest = Some(manifest_path);
+        crate::app_server_session::AppServerSession::discovery_placeholder()
+    });
+
+    let default_daemon = if preconnected_app_server.is_none()
+        && explicit_remote_endpoint.is_none()
+        && reuse_implicit_local_daemon
+    {
         startup_draft
             .run_until(probe_default_daemon_socket(&codex_home))
             .await?
@@ -787,12 +808,16 @@ pub(super) async fn run_main_inner(
         launch_tags
     };
     let launch_telemetry = daemon_telemetry::Launch(Some(launch_telemetry));
-    let state_db = startup_draft
-        .run_until(init_state_db_for_app_server_target(
-            &config,
-            &app_server_target,
-        ))
-        .await??;
+    let state_db = if preconnected_app_server.is_some() {
+        None
+    } else {
+        startup_draft
+            .run_until(init_state_db_for_app_server_target(
+                &config,
+                &app_server_target,
+            ))
+            .await??
+    };
     let config_toml_log_dir_configured = config
         .config_layer_stack
         .effective_config()
@@ -960,6 +985,7 @@ pub(super) async fn run_main_inner(
         managed_daemon,
         launch_telemetry,
         startup_draft,
+        preconnected_app_server,
     ))
     .await
     .map_err(|err| {

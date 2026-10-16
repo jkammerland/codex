@@ -4,6 +4,7 @@
 use super::*;
 
 pub(super) enum CenterRow {
+    Machine(usize),
     Group(usize),
     Task(usize),
     Gap,
@@ -23,6 +24,17 @@ impl AgentsOverviewView {
                 entries.push(CenterRow::Gap);
                 entries.push(CenterRow::ShowMore);
                 continue;
+            }
+            if self.rows[index].host.is_some()
+                && previous.is_none_or(|previous: usize| {
+                    self.rows[previous]
+                        .host
+                        .as_ref()
+                        .map(|host| &host.machine_id)
+                        != self.rows[index].host.as_ref().map(|host| &host.machine_id)
+                })
+            {
+                entries.push(CenterRow::Machine(index));
             }
             if previous.is_none_or(|previous| !self.same_group(grouping, previous, index)) {
                 if previous.is_some() {

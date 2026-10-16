@@ -3,11 +3,13 @@
 //! This module owns the typed JSON-RPC calls needed by the TUI and keeps
 //! request/response plumbing out of `App` and `ChatWidget`.
 
+mod connection;
 mod daybreak_api_key_compat;
 mod events;
 mod external_agent_config;
 pub(crate) mod fs;
 mod history;
+mod host_defaults;
 mod models;
 pub(crate) mod provider_selection;
 #[cfg(test)]
@@ -323,12 +325,31 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) allowed_approval_policies: Option<Vec<AskForApproval>>,
 }
 
+impl AppServerBootstrap {
+    pub(crate) fn for_agents_discovery(config: &Config) -> Self {
+        Self {
+            duration: Duration::ZERO,
+            account_email: None,
+            auth_mode: None,
+            status_account_display: None,
+            plan_type: None,
+            requires_openai_auth: false,
+            default_model: config.model.clone().unwrap_or_default(),
+            feedback_audience: FeedbackAudience::External,
+            has_chatgpt_account: false,
+            available_models: Vec::new(),
+            collaboration_modes: Vec::new(),
+        }
+    }
+}
+
 pub(crate) struct AppServerSession {
     backend_id: crate::backend_id::BackendId,
-    client: AppServerClient,
+    client: connection::Connection,
     next_request_id: i64,
+    request_namespace: Option<Uuid>,
     history_pagination: HashMap<ThreadId, history::ThreadHistoryPagination>,
-    task_tool_threads: HashSet<ThreadId>,
+    task_tool_threads: Arc<Mutex<HashSet<ThreadId>>>,
     task_tool_capabilities_dir: Option<AbsolutePathBuf>,
     task_search_generation: Arc<AtomicU64>,
     remote_cwd_override: Option<PathBuf>,
@@ -447,12 +468,37 @@ impl AppServerSession {
         client: AppServerClient,
         thread_params_mode: ThreadParamsMode,
     ) -> Self {
+        Self::from_connection(backend_id, connection::Connection::new(client), thread_params_mode)
+    }
+
+    pub(crate) fn discovery_placeholder() -> Self {
+        Self::from_connection(
+            crate::backend_id::BackendId::new(),
+            connection::Connection::discovery_placeholder(),
+            ThreadParamsMode::Remote,
+        )
+    }
+
+    pub(crate) fn is_discovery_placeholder(&self) -> bool {
+        self.client.is_discovery_placeholder()
+    }
+
+    pub(crate) fn try_request_handle(&self) -> Option<AppServerRequestHandle> {
+        self.client.try_request_handle()
+    }
+
+    fn from_connection(
+        backend_id: crate::backend_id::BackendId,
+        client: connection::Connection,
+        thread_params_mode: ThreadParamsMode,
+    ) -> Self {
         Self {
             backend_id,
             client,
             next_request_id: 1,
+            request_namespace: None,
             history_pagination: HashMap::new(),
-            task_tool_threads: HashSet::new(),
+            task_tool_threads: Arc::new(Mutex::new(HashSet::new())),
             task_tool_capabilities_dir: None,
             task_search_generation: Arc::new(AtomicU64::new(0)),
             remote_cwd_override: None,
@@ -472,6 +518,24 @@ impl AppServerSession {
 
     pub(crate) fn backend_id(&self) -> crate::backend_id::BackendId {
         self.backend_id
+    }
+
+    pub(crate) fn request_copy(&self) -> Self {
+        let mut session =
+            Self::from_connection(self.backend_id, self.client.request_copy(), self.thread_params_mode);
+        session.request_namespace = Some(Uuid::new_v4());
+        session.task_tool_threads = self.task_tool_threads.clone();
+        session.task_tool_capabilities_dir = self.task_tool_capabilities_dir.clone();
+        session.task_search_generation = self.task_search_generation.clone();
+        session.remote_cwd_override = self.remote_cwd_override.clone();
+        session.model_provider_override = self.model_provider_override.clone();
+        session.history_support = self.history_support;
+        session.default_model = self.default_model.clone();
+        session.available_models = self.available_models.clone();
+        session.managed_new_thread_defaults = self.managed_new_thread_defaults.clone();
+        session.dynamic_tool_mcp = self.dynamic_tool_mcp.clone();
+        session.worktree_source_config_builder = self.worktree_source_config_builder.clone();
+        session
     }
 
     pub(crate) async fn start_dynamic_tool_mcp(
@@ -612,16 +676,45 @@ impl AppServerSession {
     }
 
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
-        matches!(&self.client, AppServerClient::InProcess(_))
+        self.client.is_embedded()
     }
 
     /// Carry capabilities that may exist only in memory when the optional cache is unwritable.
     pub(crate) fn inherit_task_tool_capabilities(&mut self, previous: &Self) {
-        self.task_tool_threads.extend(&previous.task_tool_threads);
+        if !Arc::ptr_eq(&self.task_tool_threads, &previous.task_tool_threads) {
+            let previous = previous
+                .task_tool_threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            self.task_tool_threads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(previous);
+        }
+    }
+
+    pub(crate) fn scope_task_tool_cache(
+        &mut self,
+        codex_home: &AbsolutePathBuf,
+        machine_id: &str,
+        server_id: &str,
+    ) {
+        // Thread IDs can be equal on different configured servers.
+        self.task_tool_capabilities_dir = Some(
+            codex_home
+                .join("tui-thread-reference-capabilities")
+                .join("hosts")
+                .join(machine_id)
+                .join(server_id),
+        );
     }
 
     pub(crate) fn task_tools_available(&self, thread_id: ThreadId) -> bool {
-        self.task_tool_threads.contains(&thread_id)
+        self.task_tool_threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&thread_id)
             || self
                 .task_tool_capabilities_dir
                 .as_ref()
@@ -629,7 +722,11 @@ impl AppServerSession {
     }
 
     pub(crate) fn remember_task_tool_thread(&mut self, thread_id: ThreadId) {
-        if self.task_tool_threads.insert(thread_id)
+        if self
+            .task_tool_threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(thread_id)
             && let Some(directory) = &self.task_tool_capabilities_dir
             && let Err(error) = std::fs::create_dir_all(directory)
                 .and_then(|()| std::fs::write(directory.join(thread_id.to_string()), []))
@@ -650,17 +747,11 @@ impl AppServerSession {
     }
 
     pub(crate) fn server_version(&self) -> Option<&str> {
-        let AppServerClient::Remote(client) = &self.client else {
-            return None;
-        };
-        client.server_version()
+        self.client.server_version()
     }
 
     pub(crate) fn server_codex_home(&self) -> Option<&str> {
-        let AppServerClient::Remote(client) = &self.client else {
-            return None;
-        };
-        client.codex_home()
+        self.client.server_codex_home()
     }
 
     pub(crate) async fn bootstrap(&mut self, config: &Config) -> Result<AppServerBootstrap> {
@@ -870,6 +961,12 @@ impl AppServerSession {
             })
             .await
             .map_err(|err| bootstrap_request_error("account/read failed during TUI bootstrap", err))
+    }
+
+    pub(crate) fn take_events(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<codex_app_server_client::AppServerEvent>> {
+        self.client.events.take()
     }
 
     pub(crate) async fn next_event(&mut self) -> Option<AppServerSessionEvent> {
@@ -1843,7 +1940,10 @@ impl AppServerSession {
     pub(crate) fn next_request_id(&mut self) -> RequestId {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        RequestId::Integer(request_id)
+        self.request_namespace
+            .map_or(RequestId::Integer(request_id), |namespace| {
+                RequestId::String(format!("{namespace}:{request_id}"))
+            })
     }
 }
 

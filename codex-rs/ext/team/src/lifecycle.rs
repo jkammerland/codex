@@ -1,25 +1,32 @@
 use std::sync::Weak;
 
+use crate::delivery_evidence::AttemptOutcome;
+use crate::delivery_evidence::runtime_attempt;
 use anyhow::Result;
 use codex_app_server_protocol::TeamExecutionMode;
-use codex_app_server_protocol::TeamReceiptState;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadReadyInput;
 use codex_extension_api::TurnAbortInput;
+use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnLifecycleContributor;
+use codex_extension_api::TurnModelRequestInput;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::TurnAbortReason;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::TeamHostService;
 
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum HostEvent {
     Dispatch,
     Ready(String),
+    SettingsChanged(String),
     Started {
         thread_id: String,
         turn_id: String,
@@ -28,6 +35,8 @@ pub(crate) enum HostEvent {
         thread_id: String,
         turn_id: String,
         interrupted: bool,
+        runtime: String,
+        error: Option<String>,
     },
 }
 
@@ -37,14 +46,91 @@ impl TeamHostService {
         reason = "serializes durable state changes and dispatch across asynchronous operations"
     )]
     pub(crate) async fn run(service: Weak<Self>, mut events: mpsc::UnboundedReceiver<HostEvent>) {
+        // Terminal events survive handler failures and host restarts. Replaying
+        // their receipt transitions never replays model or tool effects.
+        if let Some(service) = service.upgrade()
+            && let Some(store) = service.store.get()
+        {
+            match store
+                .list::<HostEvent>("lifecycle_finished", "", u32::MAX)
+                .await
+            {
+                Ok(pending) => {
+                    for (_, event) in pending {
+                        let _ = service.events.send(event);
+                    }
+                }
+                Err(error) => tracing::error!(%error, "could not restore team lifecycle outcomes"),
+            }
+        }
         while let Some(event) = events.recv().await {
             let Some(service) = service.upgrade() else {
                 break;
             };
             let _operation = service.operations.lock().await;
-            if let Err(error) = service.handle_event(event).await {
-                tracing::warn!(%error, "team host event requires reconciliation");
+            let mut pending = Vec::new();
+            if matches!(&event, HostEvent::Dispatch | HostEvent::Ready(_))
+                && let Some(store) = service.store.get()
+            {
+                match store
+                    .list::<HostEvent>("lifecycle_finished", "", u32::MAX)
+                    .await
+                {
+                    Ok(saved) => pending.extend(saved.into_iter().map(|(_, event)| event)),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not recover pending team lifecycle outcomes")
+                    }
+                }
             }
+            pending.push(event);
+            for event in pending {
+                let finished = match &event {
+                    HostEvent::Finished { runtime, .. } => Some(runtime.clone()),
+                    _ => None,
+                };
+                if let Err(error) = service.handle_event(event).await {
+                    tracing::warn!(%error, "team host event requires reconciliation");
+                } else if let (Some(runtime), Some(store)) = (finished, service.store.get())
+                    && let Err(error) = store.delete("lifecycle_finished", &runtime).await
+                {
+                    tracing::warn!(%error, "could not acknowledge team lifecycle outcome");
+                }
+            }
+        }
+    }
+
+    async fn queue_finished(
+        &self,
+        thread: &codex_extension_api::ExtensionData,
+        turn: &codex_extension_api::ExtensionData,
+        interrupted: bool,
+        error: Option<String>,
+    ) {
+        if ThreadId::from_string(thread.level_id())
+            .ok()
+            .and_then(|id| self.gate.root(id))
+            .is_none()
+        {
+            return;
+        }
+        let runtime = runtime_attempt(turn);
+        let saved = async {
+            let event = HostEvent::Finished {
+                thread_id: thread.level_id().to_string(),
+                turn_id: turn.level_id().to_string(),
+                interrupted,
+                runtime: runtime.clone(),
+                error,
+            };
+            if let Some(store) = self.store.get() {
+                store.put("lifecycle_finished", &runtime, &event).await?;
+            }
+            let _ = self.events.send(event);
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(error) = saved {
+            tracing::error!(%error, "could not persist team lifecycle outcome");
         }
     }
 
@@ -55,6 +141,10 @@ impl TeamHostService {
         match event {
             HostEvent::Dispatch => {}
             HostEvent::Ready(thread_id) => self.reconcile_delivery(&thread_id).await?,
+            HostEvent::SettingsChanged(thread_id) => {
+                self.reconcile_model_selection(ThreadId::from_string(&thread_id)?)
+                    .await?
+            }
             HostEvent::Started { thread_id, turn_id } => {
                 if self
                     .continuation_turn_id(ThreadId::from_string(&thread_id)?)
@@ -87,6 +177,8 @@ impl TeamHostService {
                 thread_id,
                 turn_id,
                 interrupted,
+                runtime,
+                error,
             } => {
                 if interrupted
                     && self
@@ -97,21 +189,14 @@ impl TeamHostService {
                     enrollment.manually_held = true;
                     store.update_enrollment(&enrollment).await?;
                 }
-                for (_, mut receipt) in store.deliveries(&thread_id).await? {
-                    if receipt.turn_id.as_deref() == Some(&turn_id)
-                        && matches!(
-                            receipt.state,
-                            TeamReceiptState::Accepted | TeamReceiptState::Interrupted
-                        )
-                    {
-                        receipt.state = if interrupted {
-                            TeamReceiptState::Interrupted
-                        } else {
-                            TeamReceiptState::Completed
-                        };
-                        store.update_receipt(&receipt).await?;
-                    }
-                }
+                let outcome = match error {
+                    Some(error) => AttemptOutcome::Failed(error),
+                    None if interrupted => AttemptOutcome::Interrupted,
+                    None => AttemptOutcome::Completed,
+                };
+                self.finish_deliveries(&thread_id, &turn_id, &runtime, outcome)
+                    .await?;
+                self.reconcile_delivery(&thread_id).await?;
             }
         }
         self.cancel_jobs().await?;
@@ -158,17 +243,37 @@ impl TeamHostService {
 }
 
 impl<C: Send + Sync + 'static> ThreadLifecycleContributor<C> for TeamHostService {
+    fn on_model_selection_requested<'a>(
+        &'a self,
+        thread_id: ThreadId,
+        settings: &'a codex_protocol::protocol::ThreadSettingsOverrides,
+    ) -> ExtensionFuture<'a, Result<Option<i64>, String>> {
+        Box::pin(async move {
+            self.journal_model_selection(thread_id, settings)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn on_thread_settings_changed<'a>(
         &'a self,
-        _thread_store: &'a codex_extension_api::ExtensionData,
+        thread_store: &'a codex_extension_api::ExtensionData,
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
-            let _ = self.events.send(HostEvent::Dispatch);
+            let _ = self.events.send(HostEvent::SettingsChanged(
+                thread_store.level_id().to_owned(),
+            ));
         })
     }
 
     fn on_thread_ready<'a>(&'a self, input: ThreadReadyInput<'a, C>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            if let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id())
+                && let Err(error) = self.reconcile_model_selection(thread_id).await
+            {
+                tracing::warn!(%thread_id, %error, "team model settings require reconciliation");
+            }
+            let _ = self.control_events.send(());
             let _ = self
                 .events
                 .send(HostEvent::Ready(input.thread_store.level_id().to_string()));
@@ -205,34 +310,77 @@ impl TurnLifecycleContributor for TeamHostService {
         })
     }
 
+    fn on_model_request<'a>(
+        &'a self,
+        input: TurnModelRequestInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.journal_model_request(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn on_model_acknowledged<'a>(
+        &'a self,
+        input: codex_extension_api::TurnModelAcknowledgedInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.journal_provider_acknowledgement(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn on_turn_error<'a>(&'a self, input: TurnErrorInput<'a>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            if ThreadId::from_string(input.thread_store.level_id())
+                .ok()
+                .and_then(|id| self.gate.root(id))
+                .is_none()
+            {
+                return;
+            }
+            if let Some(store) = self.store.get()
+                && let Err(error) = store
+                    .put(
+                        "turn_error",
+                        &runtime_attempt(input.turn_store),
+                        &format!("{:?}", input.error),
+                    )
+                    .await
+            {
+                tracing::error!(%error, "could not persist team turn error");
+            }
+        })
+    }
+
     fn on_turn_stop<'a>(&'a self, input: TurnStopInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
-            let _ = self.events.send(HostEvent::Finished {
-                thread_id: input.thread_store.level_id().to_string(),
-                turn_id: input.turn_store.level_id().to_string(),
-                interrupted: false,
-            });
+            self.queue_finished(
+                input.thread_store,
+                input.turn_store,
+                false,
+                input.terminal_error.map(|error| error.message.clone()),
+            )
+            .await;
         })
     }
 
     fn on_turn_abort<'a>(&'a self, input: TurnAbortInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
-            if input.reason == TurnAbortReason::Interrupted {
-                if let Some(store) = self.store.get()
-                    && ThreadId::from_string(input.thread_store.level_id())
-                        .is_ok_and(|id| self.gate.is_manually_held(id))
-                    && let Err(error) = store
-                        .put("manual_hold", input.thread_store.level_id(), &true)
-                        .await
-                {
-                    tracing::warn!(%error, "failed to persist local team hold");
-                }
-                let _ = self.events.send(HostEvent::Finished {
-                    thread_id: input.thread_store.level_id().to_string(),
-                    turn_id: input.turn_store.level_id().to_string(),
-                    interrupted: true,
-                });
+            if input.reason == TurnAbortReason::Interrupted
+                && let Some(store) = self.store.get()
+                && ThreadId::from_string(input.thread_store.level_id())
+                    .is_ok_and(|id| self.gate.is_manually_held(id))
+                && let Err(error) = store
+                    .put("manual_hold", input.thread_store.level_id(), &true)
+                    .await
+            {
+                tracing::warn!(%error, "failed to persist local team hold");
             }
+            self.queue_finished(input.thread_store, input.turn_store, true, None)
+                .await;
         })
     }
 }

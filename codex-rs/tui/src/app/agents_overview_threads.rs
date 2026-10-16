@@ -250,6 +250,9 @@ impl App {
     }
 
     fn start_agents_overview_refresh(&mut self, app_server: &AppServerSession) {
+        if app_server.is_discovery_placeholder() {
+            return;
+        }
         let visible = self
             .chat_widget
             .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)

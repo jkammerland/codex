@@ -443,12 +443,8 @@ fn remote_addr_has_explicit_port(addr: &str, parsed: &Url) -> bool {
         "wss" => 443,
         _ => return false,
     };
-    let expected_host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    host_and_port == format!("{expected_host}:{explicit_default_port}")
+    // Url::host_str already brackets IPv6 addresses.
+    host_and_port == format!("{host}:{explicit_default_port}")
 }
 
 fn websocket_url_supports_auth_token(parsed: &Url) -> bool {
@@ -482,10 +478,10 @@ pub fn resolve_remote_addr(addr: &str) -> color_eyre::Result<RemoteAppServerEndp
             );
         }
     };
+    // Coordinators and reverse proxies may route attachments by URL path.
     if matches!(parsed.scheme(), "ws" | "wss")
         && parsed.host_str().is_some()
         && remote_addr_has_explicit_port(addr, &parsed)
-        && parsed.path() == "/"
         && parsed.query().is_none()
         && parsed.fragment().is_none()
     {

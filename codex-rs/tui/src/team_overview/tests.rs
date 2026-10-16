@@ -2,10 +2,63 @@ use codex_app_server_protocol::*;
 use codex_team::Agent;
 use codex_team::ServerStatus;
 use codex_team::TeamSnapshot;
+use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use super::Panel;
+
+#[test]
+fn child_attachment_preserves_relay_paths_and_explicit_default_ports() -> anyhow::Result<()> {
+    let address = TeamAddress {
+        machine_id: "worker".into(),
+        server_id: "primary".into(),
+        thread_id: "existing-thread".into(),
+    };
+    for (base, argument, normalized) in [
+        (
+            "http://127.0.0.1:4500",
+            "ws://127.0.0.1:4500/relay/worker/primary",
+            "ws://127.0.0.1:4500/relay/worker/primary",
+        ),
+        (
+            "https://team.example/coordinator",
+            "wss://team.example:443/coordinator/relay/worker/primary",
+            "wss://team.example/coordinator/relay/worker/primary",
+        ),
+        (
+            "http://[::1]",
+            "ws://[::1]:80/relay/worker/primary",
+            "ws://[::1]/relay/worker/primary",
+        ),
+    ] {
+        let client = codex_team::TeamClient::new(base, "test-operator-token".into())?;
+        let command = client.attach_command(&address)?;
+        let args = command.as_std().get_args().collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "--remote",
+                argument,
+                "--remote-auth-token-env",
+                "CODEX_TEAM_RELAY_TOKEN",
+                "resume",
+                "existing-thread",
+            ]
+        );
+        let endpoint =
+            crate::resolve_remote_addr(argument).map_err(|error| anyhow::anyhow!("{error}"))?;
+        assert_eq!(
+            endpoint,
+            crate::RemoteAppServerEndpoint::WebSocket {
+                websocket_url: normalized.into(),
+                auth_token: None,
+            }
+        );
+        assert!(crate::remote_addr_supports_auth_token(&endpoint));
+    }
+    Ok(())
+}
 
 fn panel() -> Panel {
     let agents = [

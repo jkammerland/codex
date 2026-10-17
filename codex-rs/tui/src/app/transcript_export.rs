@@ -126,7 +126,7 @@ pub(super) async fn load_export_transcript(
         } else {
             cells.extend(thread_items_to_transcript_cells(
                 Some(thread_id),
-                &thread.cwd,
+                std::path::Path::new(thread.cwd.as_str()),
                 [item],
                 visibility,
                 config,

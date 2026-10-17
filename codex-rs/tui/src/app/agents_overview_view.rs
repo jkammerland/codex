@@ -124,9 +124,11 @@ struct AgentsOverviewProjectGroup {
 }
 
 impl AgentsOverviewProjectGroup {
-    fn for_thread(thread: &Thread, worktrees_enabled: bool) -> Self {
+    fn for_thread(thread: &Thread, worktrees_enabled: bool, local_filesystem: bool) -> Self {
         if worktrees_enabled
-            && let Some(identity) = codex_git_utils::repository_identity(thread.cwd.as_path())
+            && local_filesystem
+            && let Some(cwd) = thread.cwd.to_inferred_abs_path()
+            && let Some(identity) = codex_git_utils::repository_identity(cwd.as_path())
         {
             Self {
                 key: (
@@ -137,8 +139,8 @@ impl AgentsOverviewProjectGroup {
             }
         } else {
             Self {
-                key: (thread.cwd.to_path_buf(), PathBuf::new()),
-                heading: thread.cwd.to_path_buf(),
+                key: (PathBuf::from(thread.cwd.as_str()), PathBuf::new()),
+                heading: PathBuf::from(thread.cwd.render_for_ui()),
             }
         }
     }
@@ -264,7 +266,13 @@ impl AgentsOverviewView {
             .unwrap_or(0);
         let project_groups = rows
             .iter()
-            .map(|row| AgentsOverviewProjectGroup::for_thread(&row.thread, worktrees_enabled))
+            .map(|row| {
+                AgentsOverviewProjectGroup::for_thread(
+                    &row.thread,
+                    worktrees_enabled,
+                    row.host.is_none(),
+                )
+            })
             .collect();
         let center_shortcut_keys = crate::keymap::keymap_action_ids()
             .filter(|action| matches!(action.context, KeymapContext::List | KeymapContext::Agents))
@@ -530,7 +538,7 @@ impl AgentsOverviewView {
             reasoning,
             Line::default(),
             Line::from("Project".dim()),
-            Line::from(row.thread.cwd.display().to_string()),
+            Line::from(row.thread.cwd.render_for_ui()),
         ];
         lines.extend(row.details.usage_lines.clone());
         if let Some(branch) = row
@@ -562,7 +570,7 @@ impl AgentsOverviewView {
                 preview => preview,
             },
             Some(width),
-            Some(row.thread.cwd.as_path()),
+            Some(std::path::Path::new(row.thread.cwd.as_str())),
         );
         let mut prompt = wrap(prompt);
         if prompt.len() > 2 {
@@ -583,7 +591,7 @@ impl AgentsOverviewView {
                     crate::markdown_render::render_markdown_lines_with_width_and_cwd(
                         &crate::markdown::normalize_markdown_for_rendering(message),
                         Some(width),
-                        Some(cwd.as_path()),
+                        Some(std::path::Path::new(cwd.as_str())),
                     ),
                 );
             }
@@ -813,7 +821,9 @@ impl BottomPaneView for AgentsOverviewView {
         if self.agents_keymap.new_worktree.is_pressed(key) {
             if self.worktrees_enabled {
                 self.send_row_action(AppEvent::NewAgentsOverviewWorktree {
-                    cwd: self.selected_row().map(|row| row.thread.cwd.clone()),
+                    cwd: self
+                        .selected_row()
+                        .and_then(|row| row.thread.cwd.to_inferred_abs_path()),
                 });
             }
             return;

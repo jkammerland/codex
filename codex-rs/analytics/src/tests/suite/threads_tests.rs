@@ -153,10 +153,28 @@ async fn thread_initialized_classifies_validated_linked_worktrees() {
     let mut reducer = AnalyticsReducer::default();
     let mut events = Vec::new();
     ingest_initialize(&mut reducer, &mut events).await;
+    let foreign_path = if cfg!(windows) {
+        "/foreign-fleet/workspace"
+    } else {
+        r"C:\foreign-fleet\workspace"
+    };
     for (cwd, expected) in [
-        (primary.as_path(), json!(false)),
-        (linked.as_path(), json!(true)),
-        (root.as_path(), serde_json::Value::Null),
+        (
+            codex_utils_path_uri::LegacyAppPathString::from_path(&primary),
+            json!(false),
+        ),
+        (
+            codex_utils_path_uri::LegacyAppPathString::from_path(&linked),
+            json!(true),
+        ),
+        (
+            codex_utils_path_uri::LegacyAppPathString::from_path(&root),
+            serde_json::Value::Null,
+        ),
+        (
+            codex_utils_path_uri::LegacyAppPathString::from_string(foreign_path),
+            serde_json::Value::Null,
+        ),
     ] {
         events.clear();
         let mut response =
@@ -164,8 +182,7 @@ async fn thread_initialized_classifies_validated_linked_worktrees() {
         let ClientResponsePayload::ThreadStart(start) = &mut response else {
             panic!("expected thread/start response");
         };
-        start.thread.cwd = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(cwd)
-            .expect("absolute checkout path");
+        start.thread.cwd = cwd;
         reducer
             .ingest(
                 AnalyticsFact::ClientResponse {

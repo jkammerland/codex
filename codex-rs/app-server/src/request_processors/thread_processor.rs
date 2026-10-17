@@ -49,6 +49,77 @@ const THREAD_LIST_MAX_EXCLUDED_IDS: usize = 100;
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
 
+// Only the source thread's own settings can restore its fallback workspace selection.
+fn latest_owned_thread_settings(
+    history: &[RolloutItem],
+    thread_id: ThreadId,
+) -> Option<&codex_protocol::protocol::ThreadSettingsSnapshot> {
+    history.iter().rev().find_map(|item| match item {
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+            if event.thread_id == Some(thread_id) =>
+        {
+            Some(&event.thread_settings)
+        }
+        _ => None,
+    })
+}
+
+fn saved_runtime_workspaces(
+    history: &[RolloutItem],
+    thread_id: ThreadId,
+) -> Option<(&Path, Vec<&Path>)> {
+    match latest_owned_thread_settings(history, thread_id) {
+        // An owned snapshot is authoritative, even when its roots are unknown or empty.
+        Some(settings) => settings.runtime_workspace_roots.as_ref().map(|roots| {
+            (
+                settings.cwd.as_path(),
+                roots.iter().map(AbsolutePathBuf::as_path).collect(),
+            )
+        }),
+        None => {
+            if let Some(RolloutItem::SessionMeta(meta)) = history.first()
+                && meta.meta.id == thread_id
+                && let Some(roots) = &meta.meta.runtime_workspace_roots
+            {
+                Some((
+                    meta.meta.cwd.as_path(),
+                    roots.iter().map(PathBuf::as_path).collect(),
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn restore_runtime_workspaces(
+    saved_workspaces: Option<(&Path, Vec<&Path>)>,
+    requested_cwd: Option<PathBuf>,
+) -> Result<Option<Vec<AbsolutePathBuf>>, JSONRPCErrorError> {
+    let Some((saved_cwd, saved_roots)) = saved_workspaces else {
+        return Ok(None);
+    };
+    let requested_cwd = resolve_request_cwd(requested_cwd)?;
+    // Retarget before validation so an explicit cwd can replace a path from another OS.
+    let restored_roots = path_utils::replace_path_and_deduplicate(
+        saved_roots,
+        saved_cwd,
+        requested_cwd.as_ref().map_or(saved_cwd, AbsolutePathBuf::as_path),
+    )
+    .into_iter()
+    .map(|root| {
+        AbsolutePathBuf::from_absolute_path_checked(root).map_err(|err| {
+            invalid_params(format!(
+                "cannot restore workspace root `{}` on this host: {err}. Pass `runtimeWorkspaceRoots` with valid local paths or an empty list.",
+                root.display()
+            ))
+        })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    // Native validation can normalize distinct saved paths to the same root.
+    Ok(Some(resolve_runtime_workspace_roots(restored_roots)))
+}
+
 async fn stage_pending_thread_metadata(
     thread_manager: &ThreadManager,
     thread_store: &dyn ThreadStore,
@@ -1709,8 +1780,12 @@ impl ThreadRequestProcessor {
             model: config_snapshot.model,
             model_provider: config_snapshot.model_provider_id,
             service_tier: config_snapshot.service_tier,
-            cwd,
-            runtime_workspace_roots: config_snapshot.workspace_roots,
+            cwd: cwd.into(),
+            runtime_workspace_roots: config_snapshot
+                .workspace_roots
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             instruction_sources,
             approval_policy: config_snapshot.approval_policy.into(),
             approvals_reviewer: config_snapshot.approvals_reviewer.into(),
@@ -4126,14 +4201,7 @@ impl ThreadRequestProcessor {
         // Copied or referenced history can contain another thread's settings. Only snapshots
         // explicitly owned by this thread can restore its permissions, cwd, and workspace folders.
         let history_settings = if let InitialHistory::Resumed(resumed) = &thread_history {
-            resumed.history.iter().rev().find_map(|item| match item {
-                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
-                    if event.thread_id == Some(resumed.conversation_id) =>
-                {
-                    Some(&event.thread_settings)
-                }
-                _ => None,
-            })
+            latest_owned_thread_settings(&resumed.history, resumed.conversation_id)
         } else {
             None
         };
@@ -4143,52 +4211,14 @@ impl ThreadRequestProcessor {
         let mut runtime_workspace_roots =
             runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         if runtime_workspace_roots.is_none() {
-            // A retained owned snapshot is authoritative. Only use startup metadata when
-            // no such snapshot exists; missing roots do not resurrect an older selection.
-            let saved_workspaces: Option<(&Path, Vec<&Path>)> = match history_settings {
-                Some(settings) => settings.runtime_workspace_roots.as_ref().map(|roots| {
-                    (
-                        settings.cwd.as_path(),
-                        roots.iter().map(AbsolutePathBuf::as_path).collect(),
-                    )
-                }),
-                None => {
-                    if let InitialHistory::Resumed(resumed) = &thread_history
-                        && let Some(RolloutItem::SessionMeta(meta)) = resumed.history.first()
-                        && meta.meta.id == resumed.conversation_id
-                        && let Some(roots) = &meta.meta.runtime_workspace_roots
-                    {
-                        Some((
-                            meta.meta.cwd.as_path(),
-                            roots.iter().map(PathBuf::as_path).collect(),
-                        ))
-                    } else {
-                        None
-                    }
+            let saved_workspaces = match &thread_history {
+                InitialHistory::Resumed(resumed) => {
+                    saved_runtime_workspaces(&resumed.history, resumed.conversation_id)
                 }
+                _ => None,
             };
-            if let Some((saved_cwd, saved_roots)) = saved_workspaces {
-                let resume_cwd = resolve_request_cwd(cwd.as_ref().map(PathBuf::from))?;
-                // Retarget before validation so an explicit cwd can replace a
-                // startup cwd recorded on another operating system.
-                let restored_roots = path_utils::replace_path_and_deduplicate(
-                    saved_roots,
-                    saved_cwd,
-                    resume_cwd.as_ref().map_or(saved_cwd, AbsolutePathBuf::as_path),
-                )
-                    .into_iter()
-                    .map(|root| {
-                        AbsolutePathBuf::from_absolute_path_checked(root).map_err(|err| {
-                            invalid_params(format!(
-                                "cannot restore workspace root `{}` on this host: {err}. Pass `runtimeWorkspaceRoots` with valid local paths or an empty list.",
-                                root.display()
-                            ))
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                // Validation can normalize distinct saved paths to the same root.
-                runtime_workspace_roots = Some(resolve_runtime_workspace_roots(restored_roots));
-            }
+            runtime_workspace_roots =
+                restore_runtime_workspaces(saved_workspaces, cwd.as_ref().map(PathBuf::from))?;
         }
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -4488,8 +4518,12 @@ impl ThreadRequestProcessor {
                     model: session_configured.model,
                     model_provider: session_configured.model_provider_id,
                     service_tier: session_configured.service_tier,
-                    cwd: session_configured.cwd,
-                    runtime_workspace_roots: config_snapshot.workspace_roots,
+                    cwd: session_configured.cwd.into(),
+                    runtime_workspace_roots: config_snapshot
+                        .workspace_roots
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
                     instruction_sources,
                     approval_policy: session_configured.approval_policy.into(),
                     approvals_reviewer: session_configured.approvals_reviewer.into(),
@@ -5396,7 +5430,7 @@ impl ThreadRequestProcessor {
                     })?,
             )
         };
-        let history_cwd = Some(source_thread.cwd.clone());
+        let mut history_cwd = Some(source_thread.cwd.clone());
 
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
@@ -5419,6 +5453,8 @@ impl ThreadRequestProcessor {
         } else {
             Some(cli_overrides)
         };
+        let restore_workspace_roots =
+            runtime_workspace_roots.is_none() && !experimental_prediction_mode;
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -5444,22 +5480,31 @@ impl ThreadRequestProcessor {
             !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
         let needs_latest_settings =
             restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
-        let loaded_parent_settings = if paginated_source && needs_latest_settings {
+        let loaded_parent_snapshot = if restore_workspace_roots
+            || (paginated_source && needs_latest_settings)
+        {
             if let Some(parent) = loaded_parent.as_ref() {
-                let snapshot = parent.thread_settings_snapshot().await;
-                Some(PersistedResumeSettings {
-                    approval_policy: snapshot.approval_policy,
-                    approvals_reviewer: Some(snapshot.approvals_reviewer),
-                    active_permission_profile: snapshot.active_permission_profile,
-                })
+                // Keep the owned snapshot's construction off the fork handler's stack.
+                Some(Box::pin(async { Box::new(parent.thread_settings_snapshot().await) }).await)
             } else {
                 None
             }
         } else {
             None
         };
+        let loaded_parent_settings = if paginated_source && needs_latest_settings {
+            loaded_parent_snapshot
+                .as_ref()
+                .map(|snapshot| PersistedResumeSettings {
+                    approval_policy: snapshot.approval_policy,
+                    approvals_reviewer: Some(snapshot.approvals_reviewer),
+                    active_permission_profile: snapshot.active_permission_profile.clone(),
+                })
+        } else {
+            None
+        };
         let latest_context = if paginated_source
-            && needs_latest_settings
+            && (needs_latest_settings || restore_workspace_roots)
             && loaded_parent.is_none()
             && (last_turn_id.is_some() || before_turn_id.is_some())
         {
@@ -5476,12 +5521,39 @@ impl ThreadRequestProcessor {
         } else {
             None
         };
+        if restore_workspace_roots {
+            // A fork inherits the source's current fallback roots, independently of its history cutoff.
+            let saved_workspaces = match loaded_parent_snapshot.as_deref() {
+                Some(snapshot) => snapshot.runtime_workspace_roots.as_ref().map(|roots| {
+                    (
+                        snapshot.cwd.as_path(),
+                        roots.iter().map(AbsolutePathBuf::as_path).collect(),
+                    )
+                }),
+                None => saved_runtime_workspaces(
+                    latest_context
+                        .as_deref()
+                        .unwrap_or_else(|| source_history_items.as_ref()),
+                    source_thread_id,
+                ),
+            };
+            if let Some((saved_cwd, _)) = saved_workspaces.as_ref() {
+                history_cwd = Some(saved_cwd.to_path_buf());
+            }
+            typesafe_overrides.workspace_roots =
+                restore_runtime_workspaces(saved_workspaces, typesafe_overrides.cwd.clone())?;
+        }
         // The fork cutoff can remove the only TurnContext that records the selected version.
-        // Recover it from the untrimmed source or live parent, independently of permission overrides.
+        // Context fetched only for roots must not change existing version/permission inheritance.
         let source_multi_agent_version = InitialHistory::Resumed(ResumedHistory {
             history_revision: None,
             conversation_id: source_thread_id,
-            history: Arc::clone(latest_context.as_ref().unwrap_or(&source_history_items)),
+            history: Arc::clone(
+                latest_context
+                    .as_ref()
+                    .filter(|_| needs_latest_settings)
+                    .unwrap_or(&source_history_items),
+            ),
             rollout_path: source_thread.rollout_path.clone(),
         })
         .get_multi_agent_version()
@@ -5494,6 +5566,7 @@ impl ThreadRequestProcessor {
             latest_persisted_resume_settings(
                 latest_context
                     .as_deref()
+                    .filter(|_| needs_latest_settings)
                     .unwrap_or_else(|| source_history_items.as_ref()),
             )
         });
@@ -5801,8 +5874,12 @@ impl ThreadRequestProcessor {
             model: config_snapshot.model.clone(),
             model_provider: session_configured.model_provider_id,
             service_tier: config_snapshot.service_tier.clone(),
-            cwd: session_configured.cwd,
-            runtime_workspace_roots: config_snapshot.workspace_roots,
+            cwd: session_configured.cwd.into(),
+            runtime_workspace_roots: config_snapshot
+                .workspace_roots
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             instruction_sources,
             approval_policy: session_configured.approval_policy.into(),
             approvals_reviewer: session_configured.approvals_reviewer.into(),
@@ -6557,7 +6634,7 @@ pub(crate) fn thread_from_stored_thread(
         recency_at: Some(thread.recency_at.timestamp()),
         status: ThreadStatus::NotLoaded,
         path,
-        cwd,
+        cwd: cwd.into(),
         cli_version: thread.cli_version,
         originator: thread.originator,
         agent_nickname: source.get_nickname(),
@@ -6739,7 +6816,7 @@ fn build_thread_from_snapshot(
         recency_at: Some(now),
         status: ThreadStatus::NotLoaded,
         path,
-        cwd: config_snapshot.cwd().clone(),
+        cwd: config_snapshot.cwd().clone().into(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         originator: (!config_snapshot.originator.is_empty())
             .then(|| config_snapshot.originator.clone()),

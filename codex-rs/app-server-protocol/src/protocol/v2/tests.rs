@@ -322,7 +322,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             recency_at: Some(1),
             status: ThreadStatus::Idle,
             path: None,
-            cwd: absolute_path("tmp"),
+            cwd: absolute_path("tmp").into(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
             can_accept_direct_input: None,
@@ -337,7 +337,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         model: "gpt-5".to_string(),
         model_provider: "openai".to_string(),
         service_tier: None,
-        cwd: absolute_path("tmp"),
+        cwd: absolute_path("tmp").into(),
         runtime_workspace_roots: Vec::new(),
         instruction_sources: Vec::new(),
         approval_policy: AskForApproval::OnRequest,
@@ -1995,7 +1995,7 @@ fn sandbox_policy_round_trips_external_sandbox_network_access() {
         network_access: NetworkAccess::Enabled,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.to_core().expect("native sandbox policy");
     assert_eq!(
         core_policy,
         codex_protocol::protocol::SandboxPolicy::ExternalSandbox {
@@ -2013,7 +2013,7 @@ fn sandbox_policy_round_trips_read_only_network_access() {
         network_access: true,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.to_core().expect("native sandbox policy");
     assert_eq!(
         core_policy,
         codex_protocol::protocol::SandboxPolicy::ReadOnly {
@@ -2860,7 +2860,7 @@ fn sandbox_policy_round_trips_workspace_write_access() {
         exclude_slash_tmp: false,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.to_core().expect("native sandbox policy");
     assert_eq!(
         core_policy,
         codex_protocol::protocol::SandboxPolicy::WorkspaceWrite {
@@ -2910,7 +2910,7 @@ fn sandbox_policy_deserializes_legacy_workspace_write_full_access_field() {
     assert_eq!(
         policy,
         SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![absolute_path("/workspace")],
+            writable_roots: vec![absolute_path("/workspace").into()],
             network_access: true,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,

@@ -632,7 +632,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         assert_eq!(thread.model_provider, "mock_provider");
         assert!(thread.created_at > 0);
         assert_eq!(thread.updated_at, thread.created_at);
-        assert_eq!(thread.cwd, test_absolute_path("/"));
+        assert_eq!(thread.cwd, test_absolute_path("/").into());
         assert_eq!(thread.cli_version, "0.0.0");
         assert_eq!(thread.source, SessionSource::Cli);
         assert_eq!(thread.git_info, None);
@@ -660,7 +660,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         assert_eq!(thread.model_provider, "mock_provider");
         assert!(thread.created_at > 0);
         assert_eq!(thread.updated_at, thread.created_at);
-        assert_eq!(thread.cwd, test_absolute_path("/"));
+        assert_eq!(thread.cwd, test_absolute_path("/").into());
         assert_eq!(thread.cli_version, "0.0.0");
         assert_eq!(thread.source, SessionSource::Cli);
         assert_eq!(thread.git_info, None);
@@ -716,7 +716,7 @@ async fn thread_list_respects_provider_filter() -> Result<()> {
     let expected_ts = chrono::DateTime::parse_from_rfc3339("2025-01-02T11:00:00Z")?.timestamp();
     assert_eq!(thread.created_at, expected_ts);
     assert_eq!(thread.updated_at, expected_ts);
-    assert_eq!(thread.cwd, test_absolute_path("/"));
+    assert_eq!(thread.cwd, test_absolute_path("/").into());
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
     assert_eq!(thread.git_info, None);
@@ -807,8 +807,8 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
         vec![second_filtered_id.as_str(), first_filtered_id.as_str()]
     );
     assert!(!filtered_ids.contains(&unfiltered_id.as_str()));
-    assert_eq!(data[0].cwd.as_path(), second_target_cwd.as_path());
-    assert_eq!(data[1].cwd.as_path(), first_target_cwd.as_path());
+    assert_eq!(data[0].cwd.as_str(), second_target_cwd.to_str().unwrap());
+    assert_eq!(data[1].cwd.as_str(), first_target_cwd.to_str().unwrap());
 
     Ok(())
 }
@@ -2310,7 +2310,7 @@ async fn thread_list_includes_git_info() -> Result<()> {
     };
     assert_eq!(thread.git_info, Some(expected_git));
     assert_eq!(thread.source, SessionSource::Cli);
-    assert_eq!(thread.cwd, test_absolute_path("/"));
+    assert_eq!(thread.cwd, test_absolute_path("/").into());
     assert_eq!(thread.cli_version, "0.0.0");
 
     Ok(())

@@ -1,5 +1,6 @@
 use super::session_lifecycle_requests::recorded_params;
 use super::session_lifecycle_requests::start_recording_app_server;
+use super::session_lifecycle_requests::start_recording_remote_app_server;
 use super::*;
 use codex_app_server_protocol::MisalignmentErrorDetails;
 use codex_app_server_protocol::MisalignmentSteer;
@@ -36,6 +37,69 @@ fn error_notification(
         error,
         will_retry: false,
     })
+}
+
+#[tokio::test]
+async fn remote_misalignment_continuation_preserves_executor_paths() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let (mut server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    app.app_server_target = AppServerTarget::Remote {
+        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:1".into(),
+            auth_token: None,
+        },
+    };
+    app.chat_widget.remote_connection =
+        crate::status::remote_connection::remote_connection_status_value(
+            &app.app_server_target,
+            /*server_version*/ None,
+        );
+    let started = server.start_thread(&app.config).await?;
+    let thread_id = started.session.thread_id;
+    let environments = server
+        .thread_read(thread_id, /*include_turns*/ false)
+        .await?
+        .environments;
+    assert!(
+        environments
+            .as_ref()
+            .is_some_and(|environments| !environments.is_empty())
+    );
+    app.active_thread_id = Some(thread_id);
+    app.chat_widget.handle_thread_session(started.session);
+    app.chat_widget.handle_server_notification(
+        error_notification(thread_id, "failed-turn", policy_error()),
+        /*replay_kind*/ None,
+    );
+    app.chat_widget
+        .handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let review = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            AppEvent::ReviewMisalignment(review) => Some(review),
+            _ => None,
+        })
+        .expect("review action");
+
+    app.continue_misalignment(&mut server, review).await;
+
+    let turns = recorded_params(&requests, "turn/start");
+    let [turn] = turns.as_slice() else {
+        panic!("expected exactly one accepted continuation: {turns:?}");
+    };
+    assert_eq!(turn["threadId"], thread_id.to_string());
+    assert_eq!(turn["cwd"], serde_json::Value::Null);
+    assert_eq!(turn["runtimeWorkspaceRoots"], serde_json::Value::Null);
+    assert!(!app.chat_widget.has_misalignment_policy_violation());
+    assert_eq!(
+        server
+            .thread_read(thread_id, /*include_turns*/ false)
+            .await?
+            .environments,
+        environments
+    );
+    server.shutdown().await?;
+    proxy.await??;
+    Ok(())
 }
 
 #[tokio::test]

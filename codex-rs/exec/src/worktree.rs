@@ -78,7 +78,7 @@ pub(super) async fn fork_source(
         .await
         .map_err(anyhow::Error::msg)?;
         args.session_id = thread_id;
-        Ok::<_, anyhow::Error>(latest_thread_cwd(&source.thread).await)
+        latest_thread_cwd(&source.thread).await
     }
     .await;
     let shutdown = client.shutdown().await;

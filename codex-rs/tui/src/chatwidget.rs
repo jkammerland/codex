@@ -734,6 +734,7 @@ pub(crate) struct ChatWidget {
     current_rollout_path: Option<PathBuf>,
     // Current working directory (if known)
     current_cwd: Option<PathBuf>,
+    executor_workspace_roots: Vec<codex_utils_path_uri::LegacyAppPathString>,
     // App-server-backed command runner for status-line workspace metadata lookups.
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     // Instruction source files loaded for the current session, supplied by app-server.
@@ -1851,7 +1852,7 @@ impl ChatWidget {
 
     fn refresh_skills_for_current_cwd(&mut self, force_reload: bool) {
         self.submit_op(AppCommand::list_skills(
-            vec![self.config.cwd.to_path_buf()],
+            vec![self.executor_cwd().to_path_buf()],
             force_reload,
         ));
     }

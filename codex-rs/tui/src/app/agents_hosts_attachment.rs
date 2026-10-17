@@ -99,7 +99,7 @@ impl App {
     pub(super) fn start_other_host_task(
         &mut self,
         host_key: super::agents_hosts::HostKey,
-        cwd: Option<AbsolutePathBuf>,
+        cwd: Option<codex_utils_path_uri::LegacyAppPathString>,
         fork_parent: Option<ThreadId>,
         foreground: &mut AppServerSession,
     ) {
@@ -137,8 +137,11 @@ impl App {
             .local_settings
             .clone()
             .unwrap_or_else(|| self.local_settings.clone());
-        if let Some(cwd) = &cwd {
-            config.cwd = cwd.clone();
+        if !host.target.uses_remote_workspace()
+            && let Some(cwd) = &cwd
+            && let Some(cwd) = cwd.to_inferred_abs_path()
+        {
+            config.cwd = cwd;
         }
         config.model = None;
         config.model_reasoning_effort = None;
@@ -152,7 +155,7 @@ impl App {
                             &settings,
                             &config,
                             parent,
-                            cwd.as_ref().map(AbsolutePathBuf::as_path),
+                            cwd.as_ref().map(|cwd| std::path::Path::new(cwd.as_str())),
                         )
                         .await?
                 } else {
@@ -160,7 +163,7 @@ impl App {
                         .start_thread_with_host_defaults(
                             &settings,
                             &config,
-                            cwd.as_ref().map(AbsolutePathBuf::as_path),
+                            cwd.as_ref().map(|cwd| std::path::Path::new(cwd.as_str())),
                         )
                         .await?
                 };
@@ -197,7 +200,7 @@ impl App {
         if generation != self.agents_hosts.prepare_generation {
             return Ok(());
         }
-        let prepared = match result {
+        let mut prepared = match result {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.agents_hosts.notice = Some(error);
@@ -205,6 +208,17 @@ impl App {
                 return Ok(());
             }
         };
+        if !self.agents_hosts.hosts[&scope.host]
+            .target
+            .uses_remote_workspace()
+        {
+            crate::executor_paths::sync_local_config_paths(
+                &mut prepared.config,
+                &prepared.started.session.cwd,
+                &prepared.started.session.runtime_workspace_roots,
+            )
+            .map_err(color_eyre::eyre::Report::msg)?;
+        }
         if let Some(id) = self.current_displayed_thread_id()
             && let Some(input) = self.chat_widget.capture_thread_input_state()
         {
@@ -274,12 +288,7 @@ impl App {
         let generation = self.agents_hosts.generation;
         self.app_server_target = self.agents_hosts.hosts[&scope.host].target.clone();
         self.config = prepared.config;
-        self.config.cwd = prepared.started.session.cwd.clone();
-        self.config.workspace_roots = prepared.started.session.runtime_workspace_roots.clone();
         self.config.model_provider_id = prepared.started.session.model_provider_id.clone();
-        self.config
-            .permissions
-            .set_workspace_roots(prepared.started.session.runtime_workspace_roots.clone());
         self.config.model = Some(prepared.started.session.model.clone());
         self.config.model_reasoning_effort = prepared.started.session.reasoning_effort.clone();
         self.local_settings = self.local_settings.reloaded(&self.config);
@@ -295,6 +304,13 @@ impl App {
         self.workspace_command_runner = Some(Arc::new(AppServerWorkspaceCommandRunner::new(
             foreground.request_handle(),
         )));
+        // Replacement inherits connection metadata before it replays the target session. The old
+        // host's status must not make a remote POSIX cwd look like a local filesystem path.
+        self.chat_widget.remote_connection =
+            crate::status::remote_connection::remote_connection_status_value(
+                &self.app_server_target,
+                foreground.server_version(),
+            );
         let attached_thread_id = prepared.started.session.thread_id;
         self.replace_chat_widget_with_app_server_thread(
             tui,

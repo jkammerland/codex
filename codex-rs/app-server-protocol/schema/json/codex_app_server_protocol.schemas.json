@@ -20058,7 +20058,7 @@
               "writableRoots": {
                 "default": [],
                 "items": {
-                  "$ref": "#/definitions/v2/AbsolutePathBuf"
+                  "$ref": "#/definitions/v2/LegacyAppPathString"
                 },
                 "type": "array"
               }
@@ -21894,7 +21894,7 @@
           "cwd": {
             "allOf": [
               {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               }
             ],
             "description": "Working directory captured for the thread."
@@ -22636,7 +22636,7 @@
             "description": "Reviewer currently used for approval requests on this thread."
           },
           "cwd": {
-            "$ref": "#/definitions/v2/AbsolutePathBuf"
+            "$ref": "#/definitions/v2/LegacyAppPathString"
           },
           "disabledPluginIds": {
             "default": [],
@@ -25197,7 +25197,7 @@
             "description": "Effective collaboration mode. Absent when resuming from an older server."
           },
           "cwd": {
-            "$ref": "#/definitions/v2/AbsolutePathBuf"
+            "$ref": "#/definitions/v2/LegacyAppPathString"
           },
           "disabledPluginIds": {
             "default": [],
@@ -25645,7 +25645,7 @@
             "$ref": "#/definitions/v2/CollaborationMode"
           },
           "cwd": {
-            "$ref": "#/definitions/v2/AbsolutePathBuf"
+            "$ref": "#/definitions/v2/LegacyAppPathString"
           },
           "disabledPluginIds": {
             "default": [],
@@ -25928,7 +25928,7 @@
             "description": "Reviewer currently used for approval requests on this thread."
           },
           "cwd": {
-            "$ref": "#/definitions/v2/AbsolutePathBuf"
+            "$ref": "#/definitions/v2/LegacyAppPathString"
           },
           "disabledPluginIds": {
             "default": [],

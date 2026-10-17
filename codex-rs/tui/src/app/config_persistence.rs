@@ -507,7 +507,11 @@ impl App {
         app_server: &mut AppServerSession,
         setting: &str,
     ) -> Option<ConfigReadResponse> {
-        let cwd = self.chat_widget.config_ref().cwd.display().to_string();
+        let cwd = self
+            .chat_widget
+            .executor_cwd()
+            .to_string_lossy()
+            .into_owned();
         match crate::config_update::read_effective_config(app_server.request_handle(), cwd).await {
             Ok(response) => Some(response),
             Err(err) => {
@@ -1912,7 +1916,7 @@ enabled = false
                 approvals_reviewer: ApprovalsReviewer::User,
                 permission_profile: PermissionProfile::read_only(),
                 active_permission_profile: None,
-                cwd: next_cwd.clone().abs(),
+                cwd: next_cwd.clone().abs().into(),
                 runtime_workspace_roots: Vec::new(),
                 instruction_source_paths: Vec::new(),
                 reasoning_effort: None,

@@ -136,9 +136,9 @@ impl ChatWidget {
             self.on_agent_reasoning_final();
         }
         self.input_queue.submit_pending_steers_after_interrupt = false;
-        let sanitized_last_agent_message = last_agent_message.as_deref().map(|message| {
-            parse_assistant_markdown(message, self.config.cwd.as_path()).visible_markdown
-        });
+        let sanitized_last_agent_message = last_agent_message
+            .as_deref()
+            .map(|message| parse_assistant_markdown(message, self.executor_cwd()).visible_markdown);
         // For desktop notifications: prefer the notification payload, fall back to
         // the item-level copy source if present, otherwise send an empty string.
         let notification_response = sanitized_last_agent_message

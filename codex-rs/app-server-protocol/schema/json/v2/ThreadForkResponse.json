@@ -1189,7 +1189,7 @@
             "writableRoots": {
               "default": [],
               "items": {
-                "$ref": "#/definitions/AbsolutePathBuf"
+                "$ref": "#/definitions/LegacyAppPathString"
               },
               "type": "array"
             }
@@ -1378,7 +1378,7 @@
         "cwd": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Working directory captured for the thread."
@@ -3112,7 +3112,7 @@
       "description": "Reviewer currently used for approval requests on this thread."
     },
     "cwd": {
-      "$ref": "#/definitions/AbsolutePathBuf"
+      "$ref": "#/definitions/LegacyAppPathString"
     },
     "disabledPluginIds": {
       "default": [],

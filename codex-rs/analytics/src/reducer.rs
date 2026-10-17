@@ -2344,11 +2344,12 @@ impl AnalyticsReducer {
         out: &mut Vec<TrackEventRequest>,
     ) {
         let session_source: SessionSource = thread.source.into();
-        let is_worktree =
-            codex_git_utils::repository_identity(thread.cwd.as_path()).and_then(|_| {
-                codex_git_utils::get_git_repo_root(thread.cwd.canonicalize().ok()?.as_path())
-                    .map(|root| root.join(".git").is_file())
-            });
+        // Foreign host paths cannot be inspected through this process's filesystem.
+        let is_worktree = thread.cwd.to_inferred_abs_path().and_then(|cwd| {
+            codex_git_utils::repository_identity(cwd.as_path())?;
+            codex_git_utils::get_git_repo_root(cwd.canonicalize().ok()?.as_path())
+                .map(|root| root.join(".git").is_file())
+        });
         let session_id = thread.session_id;
         let thread_id = thread.id;
         let parent_thread_id = thread.parent_thread_id;

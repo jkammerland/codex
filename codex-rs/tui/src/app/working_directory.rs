@@ -493,8 +493,17 @@ impl App {
                     == config.permissions.active_permission_profile()
         };
         if session.thread_id == thread_id
-            || crate::session_resume::cwds_differ(session.cwd.as_path(), cwd.as_path())
-            || session.runtime_workspace_roots != config.workspace_roots
+            || crate::session_resume::cwds_differ(
+                std::path::Path::new(session.cwd.as_str()),
+                cwd.as_path(),
+            )
+            || session.runtime_workspace_roots
+                != config
+                    .workspace_roots
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect::<Vec<codex_utils_path_uri::LegacyAppPathString>>()
             || !permissions_match
         {
             if session.thread_id != thread_id {

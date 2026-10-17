@@ -776,6 +776,8 @@ async fn status_uses_server_provider_id_and_auth_requirement() {
     config.model_provider.requires_openai_auth = true;
     let (composite, _handle) = new_status_output_with_rate_limits_handle(
         &config,
+        &codex_utils_path_uri::PathUri::from_abs_path(&config.cwd),
+        &config.effective_workspace_roots(),
         /*requires_openai_auth*/ false,
         Some("server-ollama"),
         /*remote_connection*/ None,
@@ -807,6 +809,8 @@ async fn status_uses_server_provider_id_and_auth_requirement() {
     };
     let (composite, _handle) = new_status_output_with_rate_limits_handle(
         &config,
+        &codex_utils_path_uri::PathUri::from_abs_path(&config.cwd),
+        &config.effective_workspace_roots(),
         /*requires_openai_auth*/ true,
         Some("server-openai"),
         /*remote_connection*/ None,
@@ -1497,6 +1501,8 @@ async fn status_wraps_long_paths_and_session_ids_without_losing_text() {
     let usage = TokenUsage::default();
     let (status, handle) = new_status_output_with_rate_limits_handle(
         &config,
+        &codex_utils_path_uri::PathUri::from_abs_path(&config.cwd),
+        &config.effective_workspace_roots(),
         /*requires_openai_auth*/ true,
         /*model_provider_id*/ None,
         /*remote_connection*/ None,
@@ -1736,6 +1742,8 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
         let token_info = token_info_for(&model_slug, &config, &usage);
         let (composite, _) = new_status_output_with_rate_limits_handle(
             &config,
+            &codex_utils_path_uri::PathUri::from_abs_path(&config.cwd),
+            &config.effective_workspace_roots(),
             /*requires_openai_auth*/ true,
             /*model_provider_id*/ None,
             remote_connection.as_ref(),
@@ -1848,6 +1856,8 @@ async fn transcript_overlay_remeasures_status_after_rate_limit_refresh() {
 
     let (status, handle) = new_status_output_with_rate_limits_handle(
         &config,
+        &codex_utils_path_uri::PathUri::from_abs_path(&config.cwd),
+        &config.effective_workspace_roots(),
         /*requires_openai_auth*/ true,
         /*model_provider_id*/ None,
         /*remote_connection*/ None,
@@ -2321,6 +2331,72 @@ async fn status_context_window_uses_last_usage() {
     assert!(
         !context_line.contains("102K"),
         "context line should not use total aggregated tokens, got: {context_line}"
+    );
+}
+
+#[tokio::test]
+async fn status_uses_executor_directory_and_workspace_roots() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    let cwd = PathUri::parse("file:///C:/Pilot/project").expect("executor cwd");
+    let roots = vec![
+        cwd.clone(),
+        PathUri::parse("file:///D:/Shared/library").expect("executor root"),
+    ];
+    config
+        .permissions
+        .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::active(
+            PermissionProfile::workspace_write_with_path_uris(
+                &roots,
+                NetworkSandboxPolicy::Restricted,
+                /*exclude_tmpdir_env_var*/ true,
+                /*exclude_slash_tmp*/ true,
+            )
+            .materialize_project_roots_with_path_uris(std::slice::from_ref(&cwd)),
+            ActivePermissionProfile::new(BUILT_IN_PERMISSION_PROFILE_WORKSPACE),
+        ))
+        .expect("set executor workspace permission profile");
+
+    let remote = RemoteConnectionStatus {
+        address: "wss://worker.invalid".into(),
+        version: "test".into(),
+        is_local_daemon: false,
+        is_managed_daemon: false,
+    };
+    let now = Local
+        .with_ymd_and_hms(2024, 2, 3, 4, 5, 6)
+        .single()
+        .expect("timestamp");
+    let (status, _) = new_status_output_with_rate_limits_handle(
+        &config,
+        &cwd,
+        &roots,
+        /*requires_openai_auth*/ false,
+        /*model_provider_id*/ None,
+        Some(&remote),
+        /*account_display*/ None,
+        /*token_info*/ None,
+        &TokenUsage::default(),
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        &[],
+        /*_plan_type*/ None,
+        now,
+        "gpt-6.1-sol",
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        "<none>".into(),
+        /*refreshing_rate_limits*/ false,
+    );
+
+    // Status describes the executor without replacing the native client config.
+    let text = render_lines(&status.display_lines(/*width*/ 200)).join("\n");
+    assert!(text.contains(r"C:\Pilot\project"), "{text}");
+    assert!(text.contains(r"D:\Shared\library"), "{text}");
+    assert!(
+        !text.contains(&config.cwd.to_string_lossy().to_string()),
+        "{text}"
     );
 }
 

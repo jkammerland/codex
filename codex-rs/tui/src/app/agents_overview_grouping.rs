@@ -42,7 +42,7 @@ impl AgentsOverviewView {
                     "{} {} {} {}",
                     row.thread.name.as_deref().unwrap_or_default(),
                     row.thread.preview,
-                    row.thread.cwd.display(),
+                    row.thread.cwd.render_for_ui(),
                     row.machine_label.as_deref().unwrap_or_default(),
                 )
                 .to_lowercase();

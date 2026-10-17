@@ -372,7 +372,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
         recency_at: Some(0),
         status: codex_app_server_protocol::ThreadStatus::Idle,
         path: None,
-        cwd: test_path_buf("/tmp/project").abs(),
+        cwd: test_path_buf("/tmp/project").abs().into(),
         cli_version: "0.0.0-test".to_string(),
         originator: None,
         source: codex_app_server_protocol::SessionSource::Exec,
@@ -786,6 +786,58 @@ async fn session_configured_from_thread_response_uses_review_policy_from_respons
         "67e55044-10b1-426f-9247-bb680e5fe0c8"
     );
     assert_eq!(event.approvals_reviewer, ApprovalsReviewer::AutoReview);
+    assert_eq!(event.cwd, test_path_buf("/tmp").abs());
+}
+
+#[tokio::test]
+async fn embedded_session_bootstrap_rejects_foreign_cwd() {
+    let codex_home = tempdir().expect("create temp codex home");
+    let cwd = tempdir().expect("create temp cwd");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(cwd.path().to_path_buf()))
+        .build()
+        .await
+        .expect("build config");
+    let mut response = sample_thread_start_response();
+    let foreign_cwd = if cfg!(windows) {
+        "/foreign-fleet/workspace"
+    } else {
+        r"C:\foreign-fleet\workspace"
+    };
+    response.cwd = LegacyAppPathString::from_string(foreign_cwd);
+
+    let error = session_configured_from_thread_start_response(&response, &config)
+        .expect_err("embedded bootstrap must reject a path from another OS");
+
+    assert!(error.starts_with("embedded app-server returned an invalid native cwd:"));
+    assert_eq!(response.cwd.as_str(), foreign_cwd);
+}
+
+#[tokio::test]
+async fn embedded_resume_lookup_validates_native_cwd() {
+    let mut thread = sample_thread_start_response().thread;
+    thread.path = None;
+
+    assert_eq!(
+        latest_thread_cwd(&thread).await.expect("native cwd"),
+        test_path_buf("/tmp")
+    );
+
+    thread.cwd = LegacyAppPathString::from_string(if cfg!(windows) {
+        "/foreign-fleet/workspace"
+    } else {
+        r"C:\foreign-fleet\workspace"
+    });
+    let error = latest_thread_cwd(&thread)
+        .await
+        .expect_err("resume lookup must reject a path from another OS");
+
+    assert!(
+        error
+            .to_string()
+            .starts_with("embedded app-server returned an invalid native cwd:")
+    );
 }
 
 #[tokio::test]
@@ -879,7 +931,7 @@ fn sample_thread_start_response() -> ThreadStartResponse {
             recency_at: Some(0),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: Some(PathBuf::from("/tmp/rollout.jsonl")),
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Cli,
             can_accept_direct_input: None,
@@ -893,7 +945,7 @@ fn sample_thread_start_response() -> ThreadStartResponse {
         model: "gpt-5.4".to_string(),
         model_provider: "openai".to_string(),
         service_tier: None,
-        cwd: test_path_buf("/tmp").abs(),
+        cwd: test_path_buf("/tmp").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_sources: Vec::new(),
         approval_policy: codex_app_server_protocol::AskForApproval::OnRequest,

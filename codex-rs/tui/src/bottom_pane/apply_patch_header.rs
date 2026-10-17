@@ -49,10 +49,14 @@ pub(super) fn build_header(request: &ApplyPatchApprovalRequest) -> Box<dyn Rende
             std::iter::once(path).chain(move_destination)
         })
         .map(|path| {
-            LegacyAppPathString::from_path(path)
+            let path = LegacyAppPathString::from_path(path);
+            // Resolve against the executor's convention, including foreign Windows paths.
+            request
+                .cwd
                 .to_inferred_path_uri()
+                .and_then(|cwd| path.resolve_against(&cwd, None).ok())
                 .map(|path| path.inferred_native_path_string())
-                .unwrap_or_else(|| request.cwd.join(path).display().to_string())
+                .unwrap_or_else(|| path.render_for_ui())
         })
         .collect();
     destinations.sort();

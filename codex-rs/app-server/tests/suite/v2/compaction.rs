@@ -603,8 +603,14 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
     assert_eq!(
-        (cwd.as_path(), runtime_workspace_roots),
-        (updated_cwd.path(), updated_roots)
+        (cwd.as_str(), runtime_workspace_roots),
+        (
+            updated_cwd.path().to_str().unwrap(),
+            updated_roots
+                .into_iter()
+                .map(codex_utils_path_uri::LegacyAppPathString::from)
+                .collect::<Vec<_>>()
+        )
     );
 
     Ok(())

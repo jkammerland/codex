@@ -10,7 +10,7 @@ use codex_app_server_protocol::HooksListResponse;
 impl ChatWidget {
     pub(crate) fn add_hooks_output(&mut self) {
         self.app_event_tx.send(AppEvent::FetchHooksList {
-            cwd: self.config.cwd.to_path_buf(),
+            cwd: self.executor_cwd().to_path_buf(),
         });
     }
 
@@ -19,7 +19,7 @@ impl ChatWidget {
         cwd: PathBuf,
         result: Result<HooksListResponse, String>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 

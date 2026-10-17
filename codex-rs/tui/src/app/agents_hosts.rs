@@ -400,6 +400,15 @@ impl App {
                     self.agents_hosts.hosts.insert(key, host);
                 }
                 self.agents_hosts.client = Some(client.clone());
+
+                // Coordinator discovery is complete; retain any newer operation error.
+                if matches!(
+                    self.agents_hosts.notice.as_deref(),
+                    Some("Connecting configured machines…" | "Connecting to the team coordinator…")
+                ) {
+                    self.agents_hosts.notice = None;
+                }
+
                 for (key, label, machine_label, target) in hosts {
                     if let Some(host) = self.agents_hosts.hosts.get_mut(&key) {
                         host.label = label;

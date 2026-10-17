@@ -10,6 +10,9 @@ use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+#[path = "navigation_tests.rs"]
+mod navigation_tests;
+
 fn address() -> TeamAddress {
     TeamAddress {
         machine_id: "laptop".into(),
@@ -210,7 +213,7 @@ fn board_feed_conversation_followers_and_short_terminal() {
     key(&mut view, KeyCode::Enter);
     insta::assert_snapshot!("board_conversation_narrow", render(&view, 70, 19));
     insta::assert_snapshot!("board_very_short", render(&view, 40, 3));
-    key(&mut view, KeyCode::Char('l'));
+    key(&mut view, KeyCode::Char('v'));
     insta::assert_snapshot!("board_followers", render(&view, 90, 12));
 }
 

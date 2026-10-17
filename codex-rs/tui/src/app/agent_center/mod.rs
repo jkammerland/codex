@@ -1,5 +1,6 @@
 //! Status filters and viewport state survive refreshes of the shared task projection.
 
+pub(crate) mod board;
 mod hints;
 mod input;
 mod navigation;

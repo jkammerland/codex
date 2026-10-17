@@ -46,6 +46,10 @@
 //! layout space. Those rows show scroll arrows when suggestions extend beyond the visible menu.
 //! Warning and transcript views hide suggestions without losing the draft, query, or selection.
 //! Measurement, painting, and cursor placement share that layout, including clipped views.
+//! Board composers use a closed named-agent @ catalog with atomic stable identity bindings.
+//! Bare @ opens immediately; Enter/Tab select without submitting, and Esc dismisses the picker.
+//! Board catalog synchronization never dispatches filesystem searches.
+//!
 //! Unified mention tabs retain their position across filters; Left/Right also works at a bare `@`.
 //!
 //! Popup targeting resolves an editable token range around the cursor and treats atomic text
@@ -632,6 +636,7 @@ pub(crate) struct ChatComposer {
     skills: Option<Vec<SkillMetadata>>,
     plugins: Option<Vec<PluginCapabilitySummary>>,
     task_mentions: Option<Vec<crate::task_mentions::TaskMention>>,
+    board_mentions: Option<Vec<MentionItem>>,
     connectors_snapshot: Option<ConnectorsSnapshot>,
     collaboration_modes_enabled: bool,
     config: ChatComposerConfig,
@@ -665,7 +670,7 @@ struct MentionCompletionTarget {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct ComposerDraft {
+pub(crate) struct ComposerDraft {
     pub(super) text: String,
     text_elements: Vec<TextElement>,
     local_image_paths: Vec<PathBuf>,
@@ -805,6 +810,7 @@ impl ChatComposer {
             skills: None,
             plugins: None,
             task_mentions: None,
+            board_mentions: None,
             connectors_snapshot: None,
             collaboration_modes_enabled: false,
             config,
@@ -888,6 +894,82 @@ impl ChatComposer {
         self.effort_observed = true;
         self.effort_ignition = None;
         self.effort_status_line_transition = None;
+    }
+
+    /// Restrict @ completion to named team members; bindings carry stable Board identities.
+    pub(crate) fn set_board_mentions(
+        &mut self,
+        members: &[codex_app_server_protocol::TeamBoardMember],
+    ) {
+        self.queue_keys.clear();
+        self.footer.context_window_pending = true;
+        self.footer.hint_override = Some(Vec::new());
+        self.board_mentions = Some(
+            members
+                .iter()
+                .map(|member| {
+                    let author = &member.author;
+                    let name = if matches!(
+                        author.identity,
+                        codex_app_server_protocol::TeamBoardIdentity::User
+                    ) {
+                        "user"
+                    } else {
+                        &author.name
+                    };
+                    let machine = author.machine_name.as_deref().unwrap_or("Human");
+                    MentionItem {
+                        display_name: author.name.clone(),
+                        description: Some(format!(
+                            "{machine} · {}",
+                            if member.available {
+                                "available"
+                            } else {
+                                "offline"
+                            }
+                        )),
+                        insert_text: format!("@{name}"),
+                        search_terms: {
+                            let mut terms = vec![
+                                name.to_string(),
+                                machine.to_string(),
+                                format!("{name} {machine}"),
+                            ];
+                            if let codex_app_server_protocol::TeamBoardIdentity::Agent { address } =
+                                &author.identity
+                            {
+                                terms.extend([
+                                    address.machine_id.clone(),
+                                    address.server_id.clone(),
+                                    address.thread_id.clone(),
+                                    format!(
+                                        "{}/{}/{}",
+                                        address.machine_id, address.server_id, address.thread_id
+                                    ),
+                                ]);
+                            }
+                            terms
+                        },
+                        path: serde_json::to_string(&author.identity)
+                            .ok()
+                            .map(|identity| format!("board:{identity}")),
+                        category_tag: Some(
+                            if matches!(
+                                author.identity,
+                                codex_app_server_protocol::TeamBoardIdentity::User
+                            ) {
+                                "Human"
+                            } else {
+                                "Agent"
+                            }
+                            .into(),
+                        ),
+                        sort_rank: u8::from(!member.available),
+                    }
+                })
+                .collect(),
+        );
+        self.sync_popups();
     }
 
     pub fn set_skill_mentions(&mut self, skills: Option<Vec<SkillMetadata>>) {
@@ -1615,7 +1697,7 @@ impl ChatComposer {
         Some(element.map_range(|_| (start..end).into()))
     }
 
-    pub(super) fn snapshot_draft(&self) -> ComposerDraft {
+    pub(crate) fn snapshot_draft(&self) -> ComposerDraft {
         ComposerDraft {
             text: self.current_text(),
             text_elements: self.current_text_elements(),
@@ -1627,7 +1709,30 @@ impl ChatComposer {
         }
     }
 
-    pub(super) fn restore_draft(&mut self, draft: ComposerDraft) {
+    /// Capture accepted typing for an asynchronous editor without flushing live paste detection.
+    pub(crate) fn snapshot_draft_with_pending(&self) -> ComposerDraft {
+        let mut draft = self.snapshot_draft();
+        let recovered = self.recovery_snapshot();
+        let added = match self.draft.paste_burst.clone().flush_pending() {
+            super::paste_burst::FlushResult::Typed(ch) => ch.len_utf8(),
+            super::paste_burst::FlushResult::Paste(text) => text.len(),
+            super::paste_burst::FlushResult::None => 0,
+        };
+        let start = if self.draft.textarea.is_vim_replace_mode() {
+            self.draft
+                .textarea
+                .mouse_selection_range()
+                .map_or(draft.cursor, |range| range.start)
+        } else {
+            draft.cursor
+        };
+        draft.text = recovered.text;
+        draft.text_elements = recovered.text_elements;
+        draft.cursor = start.saturating_add(added).min(draft.text.len());
+        draft
+    }
+
+    pub(crate) fn restore_draft(&mut self, draft: ComposerDraft) {
         let ComposerDraft {
             text,
             text_elements,
@@ -2686,6 +2791,15 @@ impl ChatComposer {
     /// bindable mention matches. The query-independent catalog built during that check is carried
     /// forward only when the selected target is also ambiguous.
     fn current_mention_target(&self) -> Option<MentionCompletionTarget> {
+        if let Some(candidates) = &self.board_mentions {
+            let (range, query) =
+                self.current_editable_at_token_range_with_options(/*allow_empty*/ true)?;
+            return Some(MentionCompletionTarget {
+                range,
+                query,
+                prebuilt_mentions: Some(candidates.clone()),
+            });
+        }
         if !self.mentions_enabled() {
             return None;
         }
@@ -2783,9 +2897,10 @@ impl ChatComposer {
         let id = self.draft.textarea.insert_element(insert_text);
         let inserted_range = start_idx..start_idx.saturating_add(insert_text.len());
 
-        let mention = if path
-            .and_then(crate::task_mentions::valid_thread_path)
-            .is_some()
+        let mention = if self.board_mentions.is_some()
+            || path
+                .and_then(crate::task_mentions::valid_thread_path)
+                .is_some()
         {
             insert_text
                 .strip_prefix('@')
@@ -2869,7 +2984,8 @@ impl ChatComposer {
             .into_iter()
             .filter_map(|snapshot| {
                 if let Some(binding) = self.draft.mention_bindings.get(&snapshot.id)
-                    && crate::task_mentions::valid_thread_path(&binding.path).is_some()
+                    && (binding.path.starts_with("board:")
+                        || crate::task_mentions::valid_thread_path(&binding.path).is_some())
                     && snapshot.text == format!("{}{}", binding.sigil, binding.mention)
                 {
                     return Some((snapshot.id, binding.sigil, binding.mention.clone()));
@@ -2907,7 +3023,9 @@ impl ChatComposer {
         let mut scan_from = 0usize;
         for binding in mention_bindings {
             let token = format!("{}{}", binding.sigil, binding.mention);
-            let range = if crate::task_mentions::valid_thread_path(&binding.path).is_some() {
+            let range = if binding.path.starts_with("board:")
+                || crate::task_mentions::valid_thread_path(&binding.path).is_some()
+            {
                 self.draft
                     .textarea
                     .text_element_snapshots()
@@ -3635,10 +3753,12 @@ impl ChatComposer {
             ..
         } = input
         {
-            if !has_non_text_modifier
-                && !self.draft.disable_paste_burst
-                && self.draft.textarea.allows_paste_burst()
-            {
+            // Board mentions open immediately, without holding @ in the burst buffer.
+            let paste_burst_blocked = has_non_text_modifier
+                || self.draft.disable_paste_burst
+                || (self.board_mentions.is_some() && ch == '@');
+
+            if !paste_burst_blocked && self.draft.textarea.allows_paste_burst() {
                 // Non-ASCII characters (e.g., from IMEs) can arrive in quick bursts, so avoid
                 // holding the first char while still allowing burst detection for paste input.
                 if !ch.is_ascii() {
@@ -3833,6 +3953,16 @@ impl ChatComposer {
         }
         if !self.popups_enabled() || self.draft.textarea.mouse_selection_range().is_some() {
             self.popups.active = ActivePopup::None;
+            return;
+        }
+        // Board owns a closed agent catalog: no filesystem or task discovery is dispatched.
+        if self.board_mentions.is_some() {
+            if let Some(target) = self.current_mention_target() {
+                self.sync_mention_popup(target);
+            } else {
+                self.popups.active = ActivePopup::None;
+                self.popups.dismissed_mention_token = None;
+            }
             return;
         }
         let mut mentions_v2_token = self.current_mentions_v2_token_range();
@@ -12665,3 +12795,7 @@ mod tests {
         insta::assert_snapshot!("shutdown_in_progress", terminal.backend());
     }
 }
+
+#[cfg(test)]
+#[path = "chat_composer/board_tests.rs"]
+mod board_tests;

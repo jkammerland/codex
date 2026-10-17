@@ -306,6 +306,9 @@ pub(crate) enum AppEvent {
     AgentsTeamCompose(crate::app::agents_hosts_team::TeamCompose),
     AgentsTeamRequest(codex_team::TeamRequest),
     AgentsTeamBoard,
+    AgentsBoardDiagnostics,
+    AgentsBoardManageFollowers(String),
+    AgentsBoardOperation(codex_team::TeamOperation),
     AgentsTeamMessage(String),
     AgentsMachinesMenu,
     NewAgentsHostSession {

@@ -1,8 +1,9 @@
 ---
 source: cli/tests/daemon_startup.rs
+assertion_line: 511
 expression: transition
 ---
-  Agent command center  Group: Project  g
+  Agent command center   t Tasks   b Board  Group: Project  g
    All 0   Needs you 0   Working 0   Ready 0   Inactive 0                                         tab/shift+tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   No tasks yet                                                                │

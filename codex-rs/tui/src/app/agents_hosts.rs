@@ -71,6 +71,8 @@ pub(super) struct AgentsHosts {
     pub(super) manifest: Option<PathBuf>,
     pub(super) client: Option<TeamClient>,
     pub(super) snapshot: Option<TeamSnapshot>,
+    pub(super) board:
+        Arc<std::sync::Mutex<super::agents_overview_view::command_center::board::BoardState>>,
     pub(super) team_read_generation: Arc<std::sync::atomic::AtomicU64>,
     pub(super) applied_team_read: u64,
     pub(super) notice: Option<String>,
@@ -92,6 +94,7 @@ impl Default for AgentsHosts {
             manifest: None,
             client: None,
             snapshot: None,
+            board: Arc::default(),
             notice: None,
             started: false,
             configuration_generation: 0,
@@ -102,6 +105,11 @@ impl Default for AgentsHosts {
             failed_team_operations: std::collections::BTreeSet::new(),
         }
     }
+}
+
+pub(crate) enum TeamOperationFailure {
+    Rejected(String),
+    Unknown(String),
 }
 
 pub(crate) enum HostUpdate {
@@ -182,7 +190,7 @@ pub(crate) enum HostUpdate {
     },
     TeamOperationFinished {
         operation_id: String,
-        result: Result<(), String>,
+        result: Result<(), TeamOperationFailure>,
     },
 }
 
@@ -639,17 +647,43 @@ impl App {
                 operation_id,
                 result,
             } => match result {
-                Ok(()) => {
-                    self.agents_hosts.team_operations.remove(&operation_id);
-                    self.agents_hosts
-                        .failed_team_operations
-                        .remove(&operation_id);
+                Err(TeamOperationFailure::Rejected(reason)) => {
+                    let retain_read_retry = self
+                        .agents_hosts
+                        .board
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .operation_rejected(&operation_id, &reason);
+                    if retain_read_retry {
+                        self.agents_hosts
+                            .failed_team_operations
+                            .insert(operation_id);
+                    } else {
+                        self.agents_hosts.team_operations.remove(&operation_id);
+                        self.agents_hosts
+                            .failed_team_operations
+                            .remove(&operation_id);
+                    }
+                    self.agents_hosts.notice = Some(reason);
                 }
-                Err(error) => {
-                    self.agents_hosts
-                        .failed_team_operations
-                        .insert(operation_id);
-                    self.agents_hosts.notice = Some(error);
+                result @ (Ok(()) | Err(TeamOperationFailure::Unknown(_))) => {
+                    let confirmed = self
+                        .agents_hosts
+                        .board
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .operation_finished(&operation_id, result.is_ok());
+                    if confirmed {
+                        self.agents_hosts.team_operations.remove(&operation_id);
+                        self.agents_hosts
+                            .failed_team_operations
+                            .remove(&operation_id);
+                    } else if let Err(TeamOperationFailure::Unknown(error)) = result {
+                        self.agents_hosts
+                            .failed_team_operations
+                            .insert(operation_id);
+                        self.agents_hosts.notice = Some(error);
+                    }
                 }
             },
             HostUpdate::TeamSnapshot {
@@ -658,6 +692,19 @@ impl App {
             } => {
                 if generation >= self.agents_hosts.applied_team_read {
                     self.agents_hosts.applied_team_read = generation;
+                    let settled = {
+                        let mut board = self
+                            .agents_hosts
+                            .board
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        board.update(snapshot.board.clone());
+                        board.take_confirmed_failed_reads()
+                    };
+                    for id in settled {
+                        self.agents_hosts.team_operations.remove(&id);
+                        self.agents_hosts.failed_team_operations.remove(&id);
+                    }
                     self.agents_hosts.snapshot = Some(snapshot);
                 }
             }

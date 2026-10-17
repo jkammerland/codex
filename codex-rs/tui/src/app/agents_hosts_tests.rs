@@ -416,7 +416,26 @@ async fn unified_overview_keeps_alias_model_revisions_manual_holds_and_unconfirm
 #[tokio::test]
 async fn unified_board_preserves_delivery_reconciliation_and_rejected_outgoing_mail() {
     let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
-    app.agents_hosts.snapshot = Some(team_snapshot(ThreadId::from_u128(42)));
+    let mut snapshot = team_snapshot(ThreadId::from_u128(42));
+    snapshot
+        .board
+        .entries
+        .push(codex_app_server_protocol::TeamBoardEntry {
+            message: snapshot.messages[0].message.clone(),
+            conversation_id: "request-one".into(),
+            append_seq: 1,
+            author: codex_app_server_protocol::TeamBoardAuthor {
+                identity: codex_app_server_protocol::TeamBoardIdentity::Agent {
+                    address: snapshot.messages[0].message.sender.clone(),
+                },
+                name: "release leader".into(),
+                machine_name: Some("Alpha".into()),
+                legacy: false,
+            },
+            mentions: vec![],
+            notifications: vec![],
+        });
+    app.agents_hosts.snapshot = Some(snapshot);
     app.open_agents_team_board();
     let board = crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, 100);
     app.open_agents_team_message("request-one".into());

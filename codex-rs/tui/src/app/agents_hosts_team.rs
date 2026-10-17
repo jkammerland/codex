@@ -1,6 +1,7 @@
 //! Team membership and communication are opt-in actions on ordinary overview rows.
 
 use super::agents_hosts::HostUpdate;
+use super::agents_hosts::TeamOperationFailure;
 use super::agents_hosts::ThreadTarget;
 use super::*;
 use crate::bottom_pane::BottomPaneView;
@@ -413,70 +414,6 @@ impl App {
             }));
     }
 
-    pub(super) fn open_agents_team_board(&mut self) {
-        let mut items: Vec<SelectionItem> = self
-            .agents_hosts
-            .snapshot
-            .as_ref()
-            .map(|snapshot| {
-                snapshot
-                    .messages
-                    .iter()
-                    .rev()
-                    .map(|record| {
-                        let id = record.message.id.clone();
-                        SelectionItem {
-                            name: record
-                                .message
-                                .body
-                                .lines()
-                                .next()
-                                .unwrap_or("Message")
-                                .into(),
-                            description: Some(format!(
-                                "{:?} · {} receipts{}",
-                                record.delivery,
-                                record.receipts.len(),
-                                record
-                                    .error
-                                    .as_ref()
-                                    .map_or(String::new(), |error| format!(" · {error}"))
-                            )),
-                            actions: vec![Box::new(move |sender| {
-                                sender
-                                    .unscoped()
-                                    .send(AppEvent::AgentsTeamMessage(id.clone()))
-                            })],
-                            dismiss_on_select: true,
-                            ..Default::default()
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Some(snapshot) = &self.agents_hosts.snapshot {
-            for rejected in &snapshot.rejected_outbox {
-                items.push(SelectionItem {
-                    name: format!(
-                        "Rejected outgoing entry {}/{}/{}",
-                        rejected.machine_id, rejected.server_id, rejected.entry.sequence
-                    ),
-                    description: Some(rejected.reason.clone()),
-                    dismiss_on_select: false,
-                    ..Default::default()
-                });
-            }
-        }
-        self.chat_widget.show_selection_view(SelectionViewParams {
-            title: Some("Shared message board".into()),
-            subtitle: Some(
-                "Select a message to inspect its delivery receipts, reply, or retry".into(),
-            ),
-            items,
-            ..SelectionViewParams::picker()
-        });
-    }
-
     pub(super) fn submit_agents_team_request(&mut self, request: TeamRequest) {
         let operation = codex_team::TeamOperation::new(request);
         let id = operation.operation_id.clone();
@@ -487,7 +424,22 @@ impl App {
     }
 
     pub(super) fn retry_agents_team_request(&mut self, operation_id: String) {
+        if let Some(pending) = self
+            .agents_hosts
+            .board
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_reads
+            .get_mut(&operation_id)
+        {
+            pending.failed = false;
+        }
         let Some(client) = self.agents_hosts.client.clone() else {
+            self.agents_hosts
+                .board
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .operation_finished(&operation_id, false);
             self.agents_hosts
                 .failed_team_operations
                 .insert(operation_id);
@@ -522,10 +474,18 @@ impl App {
                     }
                     Ok(())
                 }
-                Err(_) => Err(
-                    "Team action outcome is unknown · F9 offers a retry with the same operation ID"
-                        .into(),
-                ),
+                Err(error) => {
+                    if let Some(rejected) = error.downcast_ref::<codex_team::TeamOperationRejected>() {
+                        let reason = rejected.reason.clone();
+                        let generation = generations.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if let Ok(snapshot) = client.snapshot().await {
+                            sender.send(AppEvent::AgentsHostUpdate(Box::new(HostUpdate::TeamSnapshot { generation, snapshot })));
+                        }
+                        Err(TeamOperationFailure::Rejected(reason))
+                    } else {
+                        Err(TeamOperationFailure::Unknown("Team action outcome is unknown · F9 offers a retry with the same operation ID".into()))
+                    }
+                },
             };
             sender.send(AppEvent::AgentsHostUpdate(Box::new(
                 HostUpdate::TeamOperationFinished {

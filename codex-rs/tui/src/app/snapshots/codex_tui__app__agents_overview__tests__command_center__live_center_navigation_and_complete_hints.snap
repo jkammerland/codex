@@ -1,8 +1,9 @@
 ---
 source: tui/src/app/agent_center_tests.rs
+assertion_line: 565
 expression: "screen(&view, width, height)"
 ---
-  Agent command center  Group: Projec…
+  Agents   t Tasks   b Board
    All 3   Needs you 1   Working 0   ›
   ────────────────────────────────────
   Task shortcuts

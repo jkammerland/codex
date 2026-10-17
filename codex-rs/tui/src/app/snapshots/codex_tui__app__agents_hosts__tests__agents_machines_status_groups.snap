@@ -1,9 +1,9 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 81
+assertion_line: 83
 expression: render(&view)
 ---
-  Agent command center  Group: Status  g
+  Agent command center   t Tasks   b Board  Group: Status  g
    All 2   Needs you 1   Working 0   Ready 1   Inactive 0                          tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                               │ Task details

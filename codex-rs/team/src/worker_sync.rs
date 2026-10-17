@@ -10,6 +10,7 @@ use crate::coordinator::Peer;
 use crate::coordinator::request_id;
 use crate::coordinator::status_text;
 use crate::model::*;
+use crate::thread_metadata::ThreadResumeMetadata;
 
 impl Coordinator {
     pub(crate) async fn reconcile(
@@ -329,7 +330,7 @@ impl Coordinator {
                     member.thread_id == agent.enrollment.address.thread_id && member.archived
                 });
                 if (rejoin || previous.is_none()) && !archived {
-                    let resumed: ThreadResumeResponse = peer
+                    let resumed: ThreadResumeMetadata = peer
                         .handle
                         .request_typed(ClientRequest::ThreadResume {
                             request_id: request_id(),
@@ -341,7 +342,7 @@ impl Coordinator {
                         .await?;
                     agent.status = status_text(&resumed.thread.status);
                     agent.next_model = Some(resumed.model);
-                    agent.next_effort = resumed.reasoning_effort.map(|effort| effort.to_string());
+                    agent.next_effort = resumed.reasoning_effort;
                     agent.project = resumed.thread.project_id;
                     // A reconnect does not know which settings an active turn
                     // captured. Never present its next model as the current one.
@@ -538,3 +539,7 @@ impl Coordinator {
 #[cfg(test)]
 #[path = "worker_sync_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "worker_metadata_tests.rs"]
+mod metadata_tests;

@@ -70,15 +70,15 @@ filter = 'package(codex-app-server-protocol) & (test(typescript_schema_fixtures_
 test-group = 'app_server_protocol_codegen'
 
 [[profile.default.overrides]]
-# These integration tests spawn a fresh app-server subprocess per case.
-# Keep the library unit tests parallel.
-filter = 'package(codex-app-server) & kind(test)'
+# These app-server, team runtime, and agents CLI fixtures launch native processes.
+# Keep their shared budget separate from other unit tests.
+filter = '(package(codex-app-server) & kind(test)) | (package(codex-team) & test(runtime_tests::)) | (package(codex-cli) & binary(=agents_manifest))'
 test-group = 'app_server_integration'
 
 [[profile.local.overrides]]
-# Use up to four app-server subprocesses locally. The global nextest pool still
-# limits this to the machine's logical CPU count.
-filter = 'package(codex-app-server) & kind(test)'
+# Admit up to four fixtures locally; each may own multiple native processes.
+# The global nextest pool also limits admissions to the logical CPU count.
+filter = '(package(codex-app-server) & kind(test)) | (package(codex-team) & test(runtime_tests::)) | (package(codex-cli) & binary(=agents_manifest))'
 test-group = 'app_server_integration_local'
 
 [[profile.default.overrides]]

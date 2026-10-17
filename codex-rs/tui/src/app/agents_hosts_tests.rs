@@ -447,6 +447,58 @@ async fn unified_board_preserves_delivery_reconciliation_and_rejected_outgoing_m
 }
 
 #[tokio::test]
+async fn board_team_control_snapshot_refresh_keeps_draft() -> Result<()> {
+    use super::super::agents_overview_view::command_center::TeamControlSummary;
+    use codex_app_server_protocol::TeamExecutionMode;
+
+    let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
+    let mut session = AppServerSession::discovery_placeholder();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let mut snapshot = team_snapshot(ThreadId::from_u128(42));
+    app.agents_hosts.snapshot = Some(snapshot.clone());
+    app.open_agents_team_board();
+    let draft = {
+        let mut board = app.agents_hosts.board.lock().unwrap();
+        board.compose(String::new());
+        board
+            .composer
+            .as_mut()
+            .unwrap()
+            .handle_paste("Keep my draft".into());
+        board.composer.as_ref().unwrap().snapshot_draft()
+    };
+
+    // Host acknowledgment and control updates do not need a changed Board revision.
+    snapshot.control.mode = TeamExecutionMode::Paused;
+    snapshot.control.revision += 1;
+    app.handle_agents_host_update(
+        &mut tui,
+        &mut session,
+        HostUpdate::TeamSnapshot {
+            generation: 1,
+            snapshot,
+        },
+    )
+    .await?;
+    let board = app.agents_hosts.board.lock().unwrap();
+    assert_eq!(
+        (
+            board.team_control,
+            board.composer.as_ref().unwrap().snapshot_draft(),
+        ),
+        (
+            Some(TeamControlSummary {
+                mode: TeamExecutionMode::Paused,
+                applied: 0,
+                total: 1,
+            }),
+            draft,
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn empty_discovery_session_has_no_server_or_account_transport() {
     let mut session = AppServerSession::discovery_placeholder();
     assert!(session.is_discovery_placeholder());

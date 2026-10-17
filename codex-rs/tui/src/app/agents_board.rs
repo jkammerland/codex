@@ -35,7 +35,7 @@ impl App {
                 state.composer = Some(composer);
             }
             if let Some(snapshot) = &self.agents_hosts.snapshot {
-                state.update(snapshot.board.clone());
+                state.update_team(snapshot);
             }
         }
         let view = Box::new(BoardView {
@@ -62,7 +62,7 @@ impl App {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(snapshot) = &self.agents_hosts.snapshot {
-                state.update(snapshot.board.clone());
+                state.update_team(snapshot);
             }
         }
         self.chat_widget.replace_bottom_pane_view_if_present(

@@ -8,6 +8,7 @@ mod render;
 mod tests;
 
 use crate::app::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
+use crate::app::agents_overview_view::command_center::TeamControlSummary;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ChatComposer;
@@ -58,6 +59,7 @@ pub(crate) struct DisplayedEntries {
 pub(crate) struct BoardState {
     pub(crate) active: bool,
     pub(crate) snapshot: TeamBoardSnapshot,
+    pub(crate) team_control: Option<TeamControlSummary>,
     pub(crate) selected: Option<String>,
     pub(crate) opened: Option<String>,
     pub(crate) filter: Filter,
@@ -90,6 +92,12 @@ pub(crate) struct BoardState {
 }
 
 impl BoardState {
+    pub(crate) fn update_team(&mut self, snapshot: &codex_team::TeamSnapshot) {
+        // Control and host acknowledgments can change without a new Board revision.
+        self.team_control = Some(TeamControlSummary::from(snapshot));
+        self.update(snapshot.board.clone());
+    }
+
     pub(crate) fn update(&mut self, snapshot: TeamBoardSnapshot) {
         if snapshot.revision < self.snapshot.revision {
             return;

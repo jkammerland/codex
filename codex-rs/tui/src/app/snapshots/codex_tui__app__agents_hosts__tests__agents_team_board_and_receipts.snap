@@ -3,7 +3,7 @@ source: tui/src/app/agents_hosts_tests.rs
 assertion_line: 443
 expression: "format!(\"{board}\\n\\nDelivery details:\\n{detail}\")"
 ---
-Agent command center   t Tasks   b Board
+Agent command center   t Tasks   b Board  Team Stopped · 1/1 hosts applied
  All posts   Following   Mentions
 Posts and conversations · / search · #topic in search · # set post topic
 › ● Review the compiler change and reply  Preview · Enter to read · 0 followers · f Follow conversat

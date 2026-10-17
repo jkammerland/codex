@@ -29,6 +29,66 @@ impl Renderable for MessageHeader {
 }
 
 impl App {
+    pub(super) fn open_agents_team_deliveries(&mut self) {
+        let mut items = Vec::new();
+        if let Some(snapshot) = &self.agents_hosts.snapshot {
+            for record in snapshot.messages.iter().rev() {
+                let id = record.message.id.clone();
+                items.push(SelectionItem {
+                    name: record
+                        .message
+                        .body
+                        .lines()
+                        .next()
+                        .unwrap_or("Message")
+                        .into(),
+                    description: Some(format!(
+                        "{:?} · {} receipts{}",
+                        record.message.kind,
+                        record.receipts.len(),
+                        record
+                            .error
+                            .as_ref()
+                            .map_or(String::new(), |error| format!(" · {error}"))
+                    )),
+                    actions: vec![Box::new(move |sender| {
+                        sender
+                            .unscoped()
+                            .send(AppEvent::AgentsTeamMessage(id.clone()))
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                });
+            }
+            for rejected in &snapshot.rejected_outbox {
+                items.push(SelectionItem {
+                    name: format!("Rejected outgoing entry {}", rejected.entry.id),
+                    description: Some(rejected.reason.clone()),
+                    ..Default::default()
+                });
+            }
+        }
+        for id in &self.agents_hosts.failed_team_operations {
+            let id = id.clone();
+            items.push(SelectionItem {
+                name: "Retry action with unknown outcome".into(),
+                description: Some(id.clone()),
+                actions: vec![Box::new(move |sender| {
+                    sender
+                        .unscoped()
+                        .send(AppEvent::AgentsTeamRetry(id.clone()))
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Messages and delivery diagnostics".into()),
+            items,
+            ..SelectionViewParams::picker()
+        });
+    }
+
     pub(super) fn open_agents_team_message(&mut self, id: String) {
         let Some(record) = self.agents_hosts.snapshot.as_ref().and_then(|snapshot| {
             snapshot

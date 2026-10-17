@@ -228,6 +228,13 @@ impl App {
             AppEvent::AgentsTeamCompose(kind) => self.open_agents_team_compose(kind),
             AppEvent::AgentsTeamRequest(request) => self.submit_agents_team_request(request),
             AppEvent::AgentsTeamBoard => self.open_agents_team_board(),
+            AppEvent::AgentsBoardDiagnostics => self.open_agents_team_deliveries(),
+            AppEvent::AgentsBoardManageFollowers(id) => self.open_agents_board_followers(id),
+            AppEvent::AgentsBoardOperation(operation) => {
+                let id = operation.operation_id.clone();
+                self.agents_hosts.team_operations.insert(id.clone(), operation);
+                self.retry_agents_team_request(id);
+            }
             AppEvent::AgentsTeamMessage(id) => self.open_agents_team_message(id),
             AppEvent::AgentsMachinesMenu => self.open_agents_machines_menu(),
             AppEvent::AgentsHostReconnect(host) => {

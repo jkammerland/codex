@@ -1,16 +1,32 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 410
+assertion_line: 443
 expression: "format!(\"{board}\\n\\nDelivery details:\\n{detail}\")"
 ---
-  Shared message board
-  Select a message to inspect its delivery receipts, reply, or retry
+Agent command center   t Tasks   b Board
+ All posts   Following   Mentions
+Posts and conversations · / search · #topic in search · # set post topic
+› ● Review the compiler change and reply  Preview · Enter to read · 0 followers · f Follow conversat
+  release leader · Alpha · #reviews       release leader · Alpha  Jan 01 00:00
+  0 replies · Jan 01 00:00                Review the compiler change and reply here.
 
 
-› 1. Review the compiler change and reply here.  NextTurn · 1 receipts
-  2. Rejected outgoing entry beta/main/12        recipient is not enrolled
 
-  enter select · esc back
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                          Preview does not mark replies read · Enter opens conversat
+n post · r reply · f follow · l followers · d details · F9 deliveries · Tab filter · t Tasks
 
 Delivery details:
   reviews · Board · NextTurn · published

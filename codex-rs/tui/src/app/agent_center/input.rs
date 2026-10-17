@@ -78,6 +78,10 @@ impl AgentsOverviewView {
             }
             return true;
         }
+        if key.code == KeyCode::Char('b') && key.modifiers.is_empty() {
+            self.app_event_tx.send(AppEvent::AgentsTeamBoard);
+            return true;
+        }
         if self.center_shortcut_keys.is_pressed(key) {
             return false;
         }

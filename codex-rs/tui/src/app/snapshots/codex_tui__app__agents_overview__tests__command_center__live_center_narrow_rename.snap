@@ -1,8 +1,9 @@
 ---
 source: tui/src/app/agent_center_tests.rs
+assertion_line: 417
 expression: rendered
 ---
-  Agent command center  Group: Projec…
+  Agents   t Tasks   b Board
    All 1   Needs you 0   Working 0   ›
   ────────────────────────────────────
   Rename › 界 界 界 界 界 界 界 日 本 語  é 👩‍💻

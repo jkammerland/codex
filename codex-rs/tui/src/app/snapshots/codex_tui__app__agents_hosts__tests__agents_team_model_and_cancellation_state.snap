@@ -1,9 +1,9 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 414
+assertion_line: 413
 expression: output
 ---
-  Agent command center  Group: Project  g
+  Agent command center   t Tasks   b Board  Group: Project  g
    All 1   Needs you 0   Working 0   Ready 1   Inactive 0                          tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                               │ Task details

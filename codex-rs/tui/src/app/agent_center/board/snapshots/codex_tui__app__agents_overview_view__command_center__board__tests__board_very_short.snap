@@ -1,0 +1,6 @@
+---
+source: tui/src/app/agent_center/board/tests.rs
+assertion_line: 155
+expression: "render(&view, 40, 3)"
+---
+Agent command center   t Tasks   b Board

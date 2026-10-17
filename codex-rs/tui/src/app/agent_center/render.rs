@@ -146,14 +146,20 @@ impl Renderable for AgentsOverviewView {
             .primary_hint("toggle_grouping", &self.agents_keymap.toggle_grouping)
             .map(ShortcutHint::display_label)
             .unwrap_or_default();
-        line(
-            vec![
-                "Agent command center".bold(),
-                format!("  Group: {grouping}  {group_key}").dim(),
-            ],
-            inset(layout.header),
-            buf,
-        );
+        // Keep section navigation visible before optional grouping details on narrow terminals.
+        let mut header = vec![
+            if area.width < 64 {
+                "Agents"
+            } else {
+                "Agent command center"
+            }
+            .bold(),
+            "   t Tasks   b Board".cyan(),
+        ];
+        if area.width >= 64 {
+            header.push(format!("  Group: {grouping}  {group_key}").dim());
+        }
+        line(header, inset(layout.header), buf);
         let labels = TASK_FILTERS
             .iter()
             .map(|(label, group)| {

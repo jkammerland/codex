@@ -200,6 +200,7 @@ mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_picker;
 mod agent_status_feed;
+mod agents_board;
 #[cfg(any(unix, windows))]
 pub(crate) mod agents_hosts;
 mod agents_hosts_actions;
@@ -1212,6 +1213,7 @@ impl App {
                     self.chat_widget.pre_draw_tick();
                     self.refresh_agents_overview_usage(app_server, tui.frame_requester());
                     let rendered_area = self.render_chat_widget_frame(tui, screen_size)?;
+                    self.acknowledge_agents_board_frame(tui.is_terminal_focused());
                     if tui.is_owned_screen()
                         && self.transcript_view.history
                             != crate::pager_overlay::TranscriptHistoryState::Failed

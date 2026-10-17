@@ -91,6 +91,11 @@ impl Drop for AgentsOverviewState {
 
 impl App {
     pub(super) fn open_agents_overview(&mut self, app_server: &AppServerSession) {
+        self.agents_hosts
+            .board
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active = false;
         self.ensure_agents_hosts(app_server);
         self.refresh_other_agents_hosts(app_server);
         if matches!(self.app_server_target, AppServerTarget::Embedded)
@@ -154,7 +159,16 @@ impl App {
         let view = self.agents_overview_view(threads, selected_thread_id);
         self.agents_overview.visible_targets = view.thread_targets(&self.agents_hosts.foreground);
         self.agents_overview.visible_thread_ids = view.thread_ids();
-        self.chat_widget.show_bottom_pane_view(Box::new(view));
+        if self
+            .chat_widget
+            .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
+            .is_some()
+        {
+            self.chat_widget
+                .replace_bottom_pane_view_if_present(AGENTS_OVERVIEW_VIEW_ID, Box::new(view));
+        } else {
+            self.chat_widget.show_bottom_pane_view(Box::new(view));
+        }
         if self.reconnect.offline {
             self.reconnect.presentation = reconnect::ReconnectPresentation::Overview;
             let mut state = self
@@ -283,6 +297,16 @@ impl App {
     }
 
     pub(super) fn repaint_agents_overview(&mut self) {
+        if self
+            .agents_hosts
+            .board
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+        {
+            self.repaint_agents_board();
+            return;
+        }
         let Some(selected) = self
             .chat_widget
             .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)

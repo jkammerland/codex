@@ -3,6 +3,7 @@
 use super::session_lifecycle_requests::recorded_params;
 use super::session_lifecycle_requests::start_recording_remote_app_server;
 use super::*;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use pretty_assertions::assert_eq;
 use ratatui::Terminal;
@@ -26,7 +27,10 @@ fn mark_remote(app: &mut App) {
 async fn remote_skills_refresh_dispatches_and_reports_executor_errors() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let workspace = tempdir()?;
-    let executor_cwd = workspace.path().canonicalize()?;
+
+    // Normalize Windows namespace aliases before sharing this native path with the session.
+    let executor_cwd =
+        AbsolutePathBuf::from_absolute_path(workspace.path().canonicalize()?)?.into_path_buf();
     let broken_skill = executor_cwd.join(".agents/skills/broken/SKILL.md");
     std::fs::create_dir_all(broken_skill.parent().expect("skill directory"))?;
     std::fs::write(

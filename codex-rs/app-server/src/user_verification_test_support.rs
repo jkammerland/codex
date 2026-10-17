@@ -148,7 +148,7 @@ impl Harness {
             Arg0DispatchPaths::default(),
             Arc::new(codex_config::NoopThreadConfigLoader),
         );
-        let (sender, messages) = mpsc::channel(/*buffer*/ 16);
+        let (sender, mut messages) = mpsc::channel(/*buffer*/ 16);
         let outgoing = Arc::new(OutgoingMessageSender::new(
             sender,
             AnalyticsEventsClient::disabled(),
@@ -186,6 +186,30 @@ impl Harness {
             remote_control_handle: None,
             plugin_startup_tasks: None,
         }));
+        // Startup control reconciliation announces its initial team revision before RPC work.
+        // Fence this exact event so response assertions and backpressure begin with an empty queue.
+        let initial = timeout(Duration::from_secs(/*secs*/ 10), messages.recv())
+            .await?
+            .expect("initial team notification channel");
+        let OutgoingEnvelope::Broadcast {
+            message: OutgoingMessage::AppServerNotification(initial),
+        } = initial
+        else {
+            panic!("unexpected startup message: {initial:?}")
+        };
+        assert!(
+            matches!(
+                &initial.notification,
+                rpc::ServerNotification::TeamChanged(rpc::TeamChangedNotification { revision: 1 }),
+            ),
+            "unexpected startup notification: {:?}",
+            initial.notification,
+        );
+        assert!(
+            initial.emitted_at_ms.is_some(),
+            "startup notification timestamp"
+        );
+
         Ok(Self {
             processor,
             session: Arc::new(ConnectionSessionState::new(origin)),
@@ -235,7 +259,7 @@ impl Harness {
             ..
         } = envelope
         else {
-            panic!("unexpected broadcast")
+            panic!("unexpected broadcast: {envelope:?}")
         };
         assert_eq!(connection_id, ConnectionId(1));
         message

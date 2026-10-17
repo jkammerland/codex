@@ -54,7 +54,7 @@ pub(crate) async fn load_transcript_preview(
                     .is_some_and(|name| name.ends_with(".jsonl"))
             {
                 let path = path.clone();
-                let cwd = thread.cwd.clone();
+                let cwd = std::path::PathBuf::from(thread.cwd.as_str());
                 let inline_visualization_context = inline_visualization_context.clone();
                 let scanned = tokio::task::spawn_blocking(move || {
                     scan_legacy_transcript_preview(
@@ -88,12 +88,12 @@ pub(crate) async fn load_transcript_preview(
                     .iter()
                     .rev()
                     .flat_map(|turn| turn.items.iter().rev()),
-                thread.cwd.as_path(),
+                std::path::Path::new(thread.cwd.as_str()),
                 inline_visualization_context.as_ref(),
             );
         }
         ThreadHistoryMode::Paginated => {
-            let cwd = thread.cwd.as_path();
+            let cwd = std::path::Path::new(thread.cwd.as_str());
             let mut cursor = None;
             let mut seen_cursors = HashSet::new();
             let mut scanned_items = 0_usize;

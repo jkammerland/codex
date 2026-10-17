@@ -46,7 +46,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Replacement for a tab character in rendered diff content.
@@ -310,11 +310,11 @@ fn quantize_rgb_to_ansi256(target: (u8, u8, u8)) -> Color {
 
 pub struct DiffSummary {
     changes: HashMap<PathBuf, FileChange>,
-    cwd: AbsolutePathBuf,
+    cwd: LegacyAppPathString,
 }
 
 impl DiffSummary {
-    pub(crate) fn new(changes: HashMap<PathBuf, FileChange>, cwd: AbsolutePathBuf) -> Self {
+    pub(crate) fn new(changes: HashMap<PathBuf, FileChange>, cwd: LegacyAppPathString) -> Self {
         Self { changes, cwd }
     }
 }
@@ -344,7 +344,13 @@ impl From<DiffSummary> for Box<dyn Renderable> {
                 rows.push(Box::new(RtLine::from("")));
             }
             let (added, removed) = line_counts(&change);
-            let mut path = RtLine::from(display_path_for(&path, val.cwd.as_path()));
+            let path_text = LegacyAppPathString::from_path(&path);
+            let display = val
+                .cwd
+                .to_inferred_path_uri()
+                .and_then(|cwd| path_text.to_inferred_path_uri()?.relative_path_from(&cwd))
+                .unwrap_or_else(|| path_text.render_for_ui());
+            let mut path = RtLine::from(display);
             path.push_span(" ");
             path.extend(render_line_count_summary(added, removed));
             rows.push(Box::new(path));

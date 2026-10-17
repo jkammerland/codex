@@ -411,6 +411,24 @@ async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
     };
     let (app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
     let mut app_server = app_server.with_remote_cwd_override(Some(remote_cwd.clone()));
+    // Match a real remote attachment: the displayed session, rather than native client config,
+    // owns the cwd used by auxiliary model requests.
+    app.app_server_target = crate::AppServerTarget::Remote {
+        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:1".into(),
+            auth_token: None,
+        },
+    };
+    app.chat_widget.remote_connection =
+        crate::status::remote_connection::remote_connection_status_value(
+            &app.app_server_target,
+            app_server.server_version(),
+        );
+    let foreground = app_server.start_thread(&app.config).await?;
+    let thread_id = foreground.session.thread_id;
+    app.enqueue_primary_thread_session(foreground.session, foreground.turns)
+        .await?;
+    assert_eq!(recorded_params(&requests, "thread/start").len(), 1);
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.transcript_cells
         .push(Arc::new(crate::history_cell::UserHistoryCell {
@@ -421,18 +439,25 @@ async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
             remote_image_urls: Vec::new(),
         }));
 
-    app.request_recap(&app_server, ThreadId::new(), RecapTrigger::Automatic);
-    let started_event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
-        .await?
-        .expect("recap start event");
+    app.request_recap(&app_server, thread_id, RecapTrigger::Automatic);
+    let started_event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        loop {
+            let event = app_event_rx.recv().await.expect("recap start event");
+            if matches!(event, AppEvent::RecapStarted { .. }) {
+                return Ok::<_, color_eyre::eyre::Report>(event);
+            }
+            app.handle_event(&mut tui, &mut app_server, event).await?;
+        }
+    })
+    .await??;
     app.handle_event(&mut tui, &mut app_server, started_event)
         .await?;
 
     let starts = recorded_params(&requests, "thread/start");
-    assert_eq!(starts.len(), 1);
-    assert_eq!(starts[0]["cwd"], remote_cwd.to_string_lossy().into_owned());
-    assert_eq!(starts[0]["ephemeral"], true);
-    assert_eq!(starts[0]["environments"], serde_json::json!([]));
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[1]["cwd"], remote_cwd.to_string_lossy().into_owned());
+    assert_eq!(starts[1]["ephemeral"], true);
+    assert_eq!(starts[1]["environments"], serde_json::json!([]));
 
     app_server.shutdown().await?;
     proxy.await??;

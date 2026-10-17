@@ -490,7 +490,7 @@ async fn execute_inner(
                 );
             }
             thread_start_params.model_provider = Some(source_thread.model_provider.clone());
-            thread_start_params.cwd = Some(source_thread.cwd.to_string_lossy().into_owned());
+            thread_start_params.cwd = Some(source_thread.cwd.as_str().to_owned());
             thread_start_params.project_id = source_thread.project_id.clone();
             thread_start_params.ephemeral = Some(source_thread.ephemeral);
             if features.enabled(Feature::CliDaybreak)
@@ -498,7 +498,7 @@ async fn execute_inner(
             {
                 let defaults = crate::config_update::read_effective_config_if_supported(
                     handle.clone(),
-                    source_thread.cwd.as_path(),
+                    std::path::Path::new(source_thread.cwd.as_str()),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -529,7 +529,30 @@ async fn execute_inner(
             .await?;
             thread_start_params.model = Some(source.model);
             thread_start_params.service_tier = Some(source.service_tier);
-            thread_start_params.runtime_workspace_roots = Some(source.runtime_workspace_roots);
+            // Config loads before environment selection; cwd is already portable wire text.
+            thread_start_params.cwd = Some(source.cwd.as_str().to_owned());
+            // Carry executor paths through the portable environment API. Legacy native roots
+            // cannot represent a Windows source session in a Unix frontend.
+            let environments = source.thread.environments.unwrap_or_else(|| {
+                vec![codex_app_server_protocol::ThreadEnvironment {
+                    environment_id: "local".into(),
+                    cwd: source.cwd,
+                    runtime_workspace_roots: source.runtime_workspace_roots,
+                }]
+            });
+            thread_start_params.runtime_workspace_roots = None;
+            thread_start_params.environments = Some(
+                environments
+                    .into_iter()
+                    .map(
+                        |environment| codex_app_server_protocol::TurnEnvironmentParams {
+                            environment_id: environment.environment_id,
+                            cwd: environment.cwd,
+                            runtime_workspace_roots: Some(environment.runtime_workspace_roots),
+                        },
+                    )
+                    .collect(),
+            );
             thread_start_params.approval_policy = Some(source.approval_policy);
             thread_start_params.approvals_reviewer = Some(source.approvals_reviewer);
             let sandbox_policy = if let Some(profile) = source.active_permission_profile {

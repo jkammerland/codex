@@ -233,7 +233,10 @@ impl App {
         self.sync_side_thread_ui();
     }
 
-    pub(super) async fn thread_cwd(&self, thread_id: ThreadId) -> Option<AbsolutePathBuf> {
+    pub(super) async fn thread_cwd(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<codex_utils_path_uri::LegacyAppPathString> {
         let channel = self.thread_event_channels.get(&thread_id)?;
         let store = channel.store.lock().await;
         store.session.as_ref().map(|session| session.cwd.clone())
@@ -292,7 +295,7 @@ impl App {
                     cwd: self
                         .thread_cwd(thread_id)
                         .await
-                        .unwrap_or_else(|| self.config.cwd.clone()),
+                        .unwrap_or_else(|| self.config.cwd.clone().into()),
                     changes: self
                         .thread_file_change_changes(thread_id, &params.turn_id, &params.item_id)
                         .await
@@ -422,7 +425,7 @@ impl App {
         self.chat_widget
             .add_to_history(history_cell::new_patch_event(
                 request.changes.clone(),
-                &request.cwd,
+                std::path::Path::new(request.cwd.as_str()),
             ));
     }
 
@@ -739,7 +742,7 @@ impl App {
                 // A queued refresh can outlive the workspace it was requested for.
                 if !cwds
                     .iter()
-                    .any(|cwd| cwd == self.chat_widget.config_ref().cwd.as_path())
+                    .any(|cwd| cwd == self.chat_widget.executor_cwd())
                 {
                     return Ok(true);
                 }
@@ -1394,12 +1397,12 @@ impl App {
         }
         self.config.approvals_reviewer = session.approvals_reviewer;
         if !self.app_server_target.uses_remote_workspace() {
-            self.config
-                .workspace_roots
-                .clone_from(&session.runtime_workspace_roots);
-            self.config
-                .permissions
-                .set_workspace_roots(session.runtime_workspace_roots.clone());
+            crate::executor_paths::sync_local_config_paths(
+                &mut self.config,
+                &session.cwd,
+                &session.runtime_workspace_roots,
+            )
+            .map_err(color_eyre::eyre::Report::msg)?;
         }
 
         let thread_id = session.thread_id;
@@ -1845,8 +1848,7 @@ impl App {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn handle_skills_list_response(&mut self, response: SkillsListResponse) {
-        let cwd = self.chat_widget.config_ref().cwd.clone();
-        let errors = errors_for_cwd(&cwd, &response);
+        let errors = errors_for_cwd(self.chat_widget.executor_cwd(), &response);
         let errors = self.skill_load_warnings.newly_active_errors(&errors);
         let warnings = skill_load_warning_messages(&errors);
         if self.skill_load_warnings.startup_complete {

@@ -1655,7 +1655,7 @@ impl ChatWidget {
         } else {
             Box::new(history_cell::AgentMarkdownCell::new_spoken(
                 text.to_string(),
-                &self.config.cwd,
+                self.executor_cwd(),
             ))
         }
     }

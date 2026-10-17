@@ -632,7 +632,7 @@ source = {:?}
     let response: ThreadListResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     let thread = response.data.first().expect("imported session");
-    assert_eq!(thread.cwd.as_path(), project_root);
+    assert_eq!(thread.cwd.as_str(), project_root.to_str().unwrap());
     assert_eq!(thread.preview, "first request");
     assert_eq!(thread.name, None);
 

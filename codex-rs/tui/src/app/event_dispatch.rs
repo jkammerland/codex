@@ -1002,7 +1002,7 @@ impl App {
                     &self.transcript_cells,
                 );
                 let consolidated: Arc<dyn HistoryCell> =
-                    Arc::new(history_cell::new_proposed_plan(source, &self.config.cwd));
+                    Arc::new(history_cell::new_proposed_plan(source, self.chat_widget.executor_cwd()));
 
                 if start < end {
                     self.native_history.consolidate(&self.transcript_cells[start..end], &consolidated);
@@ -1339,7 +1339,13 @@ impl App {
                     .await?;
             }
             AppEvent::DiffResult(cwd, text) => {
-                if cwds_differ(&cwd, self.chat_widget.config_ref().cwd.as_path()) {
+                let executor_cwd = self.chat_widget.executor_cwd();
+                let stale = if self.app_server_target.uses_remote_workspace() {
+                    cwd.as_path() != executor_cwd
+                } else {
+                    cwds_differ(&cwd, executor_cwd)
+                };
+                if stale {
                     return Ok(AppRunControl::Continue);
                 }
                 // Clear the in-progress state in the bottom pane
@@ -1792,7 +1798,7 @@ impl App {
                     let cwd = self
                         .thread_cwd(thread_id)
                         .await
-                        .map(|cwd| cwd.to_path_buf())
+                        .map(|cwd| std::path::PathBuf::from(cwd.as_str()))
                         .or_else(|| {
                             app_server
                                 .remote_cwd_override()
@@ -2952,6 +2958,8 @@ impl App {
             AppEvent::OpenAgentsOverview => self.open_agents_overview(app_server),
             AppEvent::ShowMoreAgentsOverview => self.show_more_agents_overview(app_server),
             AppEvent::NewAgentsOverviewSession { cwd } => {
+                // Only this local creation route resolves paths on the frontend filesystem.
+                let cwd = cwd.map(AbsolutePathBuf::try_from).transpose()?;
                 return Box::pin(self.new_agents_overview_session(tui, app_server, cwd)).await;
             }
             AppEvent::AgentsOverviewThreadsLoaded { request_id, result } => {

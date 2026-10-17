@@ -10,7 +10,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,8 +47,8 @@ pub(crate) struct ThreadSessionState {
     /// Named or implicit built-in profile that produced `permission_profile`,
     /// when the server knows it.
     pub(crate) active_permission_profile: Option<ActivePermissionProfile>,
-    pub(crate) cwd: AbsolutePathBuf,
-    pub(crate) runtime_workspace_roots: Vec<AbsolutePathBuf>,
+    pub(crate) cwd: LegacyAppPathString,
+    pub(crate) runtime_workspace_roots: Vec<LegacyAppPathString>,
     pub(crate) instruction_source_paths: Vec<PathUri>,
     pub(crate) reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
     pub(crate) collaboration_mode: Option<Box<CollaborationMode>>,
@@ -60,7 +60,7 @@ pub(crate) struct ThreadSessionState {
 impl ThreadSessionState {
     pub(crate) fn set_cwd_retargeting_implicit_runtime_workspace_root(
         &mut self,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     ) {
         let previous_cwd = std::mem::replace(&mut self.cwd, cwd.clone());
         if !self.runtime_workspace_roots.contains(&previous_cwd) {

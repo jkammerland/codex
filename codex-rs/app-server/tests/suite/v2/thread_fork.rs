@@ -237,7 +237,11 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let thread_path = thread.path.clone().expect("thread path");
     assert!(thread_path.as_path().is_absolute());
     assert_ne!(thread_path.as_path(), original_path);
-    assert!(thread.cwd.as_path().is_absolute());
+    assert!(
+        codex_utils_absolute_path::AbsolutePathBuf::try_from(thread.cwd.clone())?
+            .as_path()
+            .is_absolute()
+    );
     assert_eq!(thread.source, SessionSource::VsCode);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
     assert_eq!(thread.name, None);
@@ -3267,3 +3271,6 @@ async fn inheriting_fork_rejects_configuration_overrides() -> Result<()> {
     }
     Ok(())
 }
+
+#[path = "thread_fork_workspace_roots.rs"]
+mod workspace_roots;

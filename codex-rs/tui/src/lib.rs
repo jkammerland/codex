@@ -181,6 +181,7 @@ pub(crate) mod live_wrap;
 mod local_settings;
 mod rendered_selection;
 pub use live_wrap::RowBuilder;
+mod executor_paths;
 mod local_chatgpt_auth;
 mod managed_new_thread_defaults;
 mod markdown;
@@ -750,7 +751,7 @@ fn session_target_from_app_server_thread(
             backend_id,
             path: thread.path,
             thread_id,
-            cwd: Some(thread.cwd.to_path_buf()),
+            cwd: Some(PathBuf::from(thread.cwd.as_str())),
             history_mode: Some(thread.history_mode),
         }),
         Err(err) => {

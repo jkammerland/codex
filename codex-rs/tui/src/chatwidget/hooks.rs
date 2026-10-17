@@ -29,7 +29,7 @@ impl ChatWidget {
     fn hooks_list_target(&self) -> HooksListTarget {
         self.thread_id()
             .map(HooksListTarget::Thread)
-            .unwrap_or_else(|| HooksListTarget::Cwd(self.config.cwd.to_path_buf()))
+            .unwrap_or_else(|| HooksListTarget::Cwd(self.executor_cwd().to_path_buf()))
     }
 
     pub(crate) fn open_hooks_browser(&mut self, entry: HooksListEntry) {

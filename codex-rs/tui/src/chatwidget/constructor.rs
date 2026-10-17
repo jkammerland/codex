@@ -68,6 +68,11 @@ impl ChatWidget {
         let active_cell = Some(header);
 
         let current_cwd = Some(config.cwd.to_path_buf());
+        let executor_workspace_roots = config
+            .workspace_roots
+            .iter()
+            .map(codex_utils_path_uri::LegacyAppPathString::from_abs_path)
+            .collect();
         let effective_service_tier = crate::service_tier_resolution::effective_service_tier(
             &config,
             &local_settings.notices,
@@ -265,6 +270,7 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             current_cwd,
+            executor_workspace_roots,
             workspace_command_runner,
             instruction_source_paths: Vec::new(),
             session_network_proxy: None,

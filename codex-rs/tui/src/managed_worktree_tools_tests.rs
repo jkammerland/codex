@@ -241,7 +241,10 @@ async fn creation_attaches_to_original_task_and_survives_service_restart_scenari
             },
         })
         .await?;
-    assert_eq!(read.thread.cwd.as_path(), dunce::canonicalize(home.path())?);
+    assert_eq!(
+        read.thread.cwd.as_str(),
+        dunce::canonicalize(home.path())?.to_string_lossy()
+    );
     let fresh = ManagedWorktreeTools::new(&config)
         .await
         .map_err(|error| color_eyre::eyre::eyre!(error.to_string()))?;

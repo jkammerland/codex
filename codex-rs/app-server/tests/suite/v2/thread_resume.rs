@@ -235,7 +235,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
         cwd,
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, primary.read_response(resume_id)).await??;
-    assert_eq!(cwd.as_path(), saved_cwd);
+    assert_eq!(cwd.as_str(), saved_cwd.to_str().unwrap());
     assert_eq!(resumed.id, conversation_id);
     assert_eq!(resumed.history_mode, ThreadHistoryMode::Paginated);
     assert_eq!(resumed.preview, "Saved user message");
@@ -275,7 +275,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     } = timeout(DEFAULT_READ_TIMEOUT, secondary.read_response(resume_id)).await??;
     // The resume checkpoint keeps the effective cwd inside the bounded replay,
     // even after the original settings snapshot falls outside its window.
-    assert_eq!(cwd.as_path(), saved_cwd);
+    assert_eq!(cwd.as_str(), saved_cwd.to_str().unwrap());
     assert_eq!(resumed.preview, "Saved user message");
     assert!(resumed.turns.is_empty());
 
@@ -762,7 +762,7 @@ async fn thread_resume_restores_startup_and_updated_runtime_workspace_roots() ->
         runtime_workspace_roots,
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-    assert_eq!(runtime_workspace_roots, vec![explicit_cwd.clone()]);
+    assert_eq!(runtime_workspace_roots, vec![explicit_cwd.clone().into()]);
 
     // A cwd-only update must retain the fallback's additional folder, not the live roots.
     mcp.clear_message_buffer();
@@ -835,7 +835,13 @@ async fn thread_resume_restores_startup_and_updated_runtime_workspace_roots() ->
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
     assert_eq!(
         (cwd, runtime_workspace_roots),
-        (initial_cwd.clone(), expected_roots)
+        (
+            initial_cwd.clone().into(),
+            expected_roots
+                .into_iter()
+                .map(LegacyAppPathString::from)
+                .collect::<Vec<_>>()
+        )
     );
 
     Ok(())
@@ -953,7 +959,14 @@ sandbox = "unelevated"
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
         assert_eq!(
             (resumed.cwd, resumed.runtime_workspace_roots),
-            (expected_cwd.clone(), expected_roots.clone())
+            (
+                expected_cwd.clone().into(),
+                expected_roots
+                    .iter()
+                    .cloned()
+                    .map(LegacyAppPathString::from)
+                    .collect::<Vec<_>>()
+            )
         );
         if index < 3 {
             mcp.start_turn_and_wait_for_completion(TurnStartParams {
@@ -1094,7 +1107,14 @@ async fn cold_resume_workspace_roots_validate_foreign_startup_paths() -> Result<
             } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
             assert_eq!(
                 (thread.id, cwd, runtime_workspace_roots),
-                (thread_id, local_cwd.clone(), expected_roots)
+                (
+                    thread_id,
+                    local_cwd.clone().into(),
+                    expected_roots
+                        .into_iter()
+                        .map(LegacyAppPathString::from)
+                        .collect::<Vec<_>>()
+                )
             );
         } else {
             let error = timeout(
@@ -1536,7 +1556,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
             .await?;
         let ThreadReadResponse { thread: read, .. } =
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
-        assert_eq!(read.cwd.as_path(), persisted_cwd);
+        assert_eq!(read.cwd.as_str(), persisted_cwd.to_str().unwrap());
 
         let list_id = mcp
             .send_raw_request(
@@ -1579,8 +1599,8 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     assert_eq!(model, "gpt-5.2-codex");
     assert_eq!(reasoning_effort, Some(ReasoningEffort::Ultra));
     assert_eq!(approvals_reviewer, ApprovalsReviewer::AutoReview);
-    assert_eq!(thread.cwd.as_path(), live_cwd);
-    assert_eq!(cwd.as_path(), live_cwd);
+    assert_eq!(thread.cwd.as_str(), live_cwd.to_str().unwrap());
+    assert_eq!(cwd.as_str(), live_cwd.to_str().unwrap());
 
     let update_id = mcp
         .send_thread_settings_update_request(ThreadSettingsUpdateParams {
@@ -1632,7 +1652,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
     assert_eq!(reasoning_effort, Some(ReasoningEffort::High));
-    assert_eq!(cwd.as_path(), persisted_cwd);
+    assert_eq!(cwd.as_str(), persisted_cwd.to_str().unwrap());
     let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path).await?;
     let mode = items.iter().rev().find_map(|item| match item {
         RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
@@ -1788,7 +1808,7 @@ async fn cold_resume_reresolves_persisted_active_permission_profile() -> Result<
         );
         assert_eq!(
             runtime_workspace_roots,
-            vec![previous_workspace_root.path().abs()]
+            vec![previous_workspace_root.path().abs().into()]
         );
     }
     Ok(())
@@ -2478,7 +2498,7 @@ async fn goal_first_live_thread_appears_in_state_db_thread_list() -> Result<()> 
                 "modelProviders": ["mock_provider"],
                 "sourceKinds": ["vscode"],
                 "archived": false,
-                "cwd": cwd.as_path().to_string_lossy().to_string(),
+                "cwd": cwd.as_str(),
                 "useStateDbOnly": true,
             })),
         )
@@ -2721,8 +2741,8 @@ async fn thread_resume_returns_rollout_history() -> Result<()> {
     assert_eq!(thread.preview, preview);
     assert_eq!(thread.model_provider, "mock_provider");
     assert!(thread.path.as_ref().expect("thread path").is_absolute());
-    assert_eq!(thread.cwd.as_path(), cwd.as_path());
-    assert_eq!(cwd, test_absolute_path("/"));
+    assert_eq!(thread.cwd, cwd);
+    assert_eq!(cwd, test_absolute_path("/").into());
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
     assert_eq!(thread.git_info, None);
@@ -4932,7 +4952,10 @@ async fn thread_resume_checkpoints_settings_without_advancing_recency() -> Resul
         .await?;
     let ThreadResumeResponse { cwd, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-    assert_eq!(cwd, AbsolutePathBuf::from_absolute_path(codex_home.path())?);
+    assert_eq!(
+        cwd,
+        AbsolutePathBuf::from_absolute_path(codex_home.path())?.into()
+    );
 
     let turn_id = mcp
         .send_turn_start_request(TurnStartParams {

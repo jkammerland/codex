@@ -89,7 +89,20 @@ impl AppServerSession {
             config.permissions.permission_profile().clone(),
             config.permissions.active_permission_profile(),
             thread.cwd.clone(),
-            config.workspace_roots.clone(),
+            if let Some(environments) = &thread.environments {
+                environments
+                    .first()
+                    .map(|environment| environment.runtime_workspace_roots.clone())
+                    .unwrap_or_default()
+            } else if !self.uses_remote_workspace() {
+                config
+                    .workspace_roots
+                    .iter()
+                    .map(codex_utils_path_uri::LegacyAppPathString::from_abs_path)
+                    .collect()
+            } else {
+                vec![thread.cwd.clone()]
+            },
             Vec::new(),
             thread.reasoning_effort,
             local_settings,

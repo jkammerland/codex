@@ -1106,8 +1106,23 @@ async fn request_plugin_list_with_marketplace_kinds(
     cwd: PathBuf,
     marketplace_kinds: Option<Vec<PluginListMarketplaceKind>>,
 ) -> Result<PluginListResponse> {
-    let cwd = AbsolutePathBuf::try_from(cwd).wrap_err("plugin list cwd must be absolute")?;
     let request_id = RequestId::String(format!("plugin-list-{}", Uuid::new_v4()));
+    if let AppServerRequestHandle::Remote(handle) = &request_handle {
+        // Preserve the executor's path text, just as the remote filesystem RPCs do.
+        let response = handle
+            .request_json_rpc(codex_app_server_protocol::JSONRPCRequest {
+                id: request_id,
+                method: "plugin/list".into(),
+                params: Some(serde_json::json!({
+                    "cwds": [cwd], "marketplaceKinds": marketplace_kinds, "forceRefetch": false,
+                })),
+                trace: None,
+            })
+            .await?
+            .map_err(|error| color_eyre::eyre::eyre!("plugin/list failed: {}", error.message))?;
+        return serde_json::from_value(response).wrap_err("plugin/list returned invalid data");
+    }
+    let cwd = AbsolutePathBuf::try_from(cwd).wrap_err("plugin list cwd must be absolute")?;
     request_handle
         .request_typed(ClientRequest::PluginList {
             request_id,

@@ -481,7 +481,10 @@ async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()
     )
     .await?;
     let updated = read_thread_settings_updated(&mut mcp).await?;
-    assert_eq!(updated.thread_settings.cwd.as_path(), workspace.path());
+    assert_eq!(
+        updated.thread_settings.cwd.as_str(),
+        workspace.path().to_str().unwrap()
+    );
 
     start_text_turn(&mut mcp, thread.id).await?;
     timeout(

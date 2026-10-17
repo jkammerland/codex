@@ -270,7 +270,7 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
         let completed = mcp
             .start_turn_and_wait_for_completion(TurnStartParams {
                 thread_id: parent.id.clone(),
-                cwd: Some(parent.cwd.as_path().to_path_buf()),
+                cwd: Some(AbsolutePathBuf::try_from(parent.cwd.clone())?.into_path_buf()),
                 input: vec![UserInput::Text {
                     text: text.to_string(),
                     text_elements: Vec::new(),
@@ -383,8 +383,15 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
             })
             .await?;
         assert_eq!(
-            (cwd.as_path(), runtime_workspace_roots),
-            (saved_cwd.as_path(), saved_roots.clone())
+            (cwd.as_str(), runtime_workspace_roots),
+            (
+                saved_cwd.to_str().unwrap(),
+                saved_roots
+                    .iter()
+                    .cloned()
+                    .map(codex_utils_path_uri::LegacyAppPathString::from)
+                    .collect::<Vec<_>>()
+            )
         );
         mcp.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: child.id.clone(),

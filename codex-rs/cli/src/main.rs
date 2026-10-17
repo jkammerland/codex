@@ -5095,6 +5095,105 @@ enabled = true
     }
 
     #[test]
+    fn agents_subscribe_normal_and_remove_keep_feature_toggles_empty() {
+        for expected_remove in [false, true] {
+            let mut args = vec![
+                "codex",
+                "agents",
+                "--manifest",
+                "team.toml",
+                "subscribe",
+                "local/primary/11111111-1111-4111-8111-111111111111",
+                "builds",
+            ];
+            if expected_remove {
+                args.push("--remove");
+            }
+
+            let cli = MultitoolCli::try_parse_from(args).expect("subscription arguments");
+            assert!(cli.feature_toggles.enable.is_empty());
+            assert!(cli.feature_toggles.disable.is_empty());
+            let Some(Subcommand::Agents(options)) = cli.subcommand else {
+                panic!("expected agents command");
+            };
+            assert_eq!(options.manifest, Some(PathBuf::from("team.toml")));
+            let Some(codex_team::TeamAction::Subscribe {
+                address,
+                topic,
+                remove,
+            }) = options.action
+            else {
+                panic!("expected subscribe action");
+            };
+            assert_eq!(
+                address,
+                codex_app_server_protocol::TeamAddress {
+                    machine_id: "local".into(),
+                    server_id: "primary".into(),
+                    thread_id: "11111111-1111-4111-8111-111111111111".into(),
+                }
+            );
+            assert_eq!(topic, "builds");
+            assert_eq!(remove, expected_remove);
+        }
+    }
+
+    #[test]
+    fn agents_subscribe_global_disable_preserves_feature_and_subscription_flags() {
+        for expected_remove in [false, true] {
+            for (mut args, trailing_toggle) in [
+                (
+                    vec!["codex", "--disable", "unified_exec", "agents"],
+                    Vec::new(),
+                ),
+                (
+                    vec!["codex", "agents", "--disable", "unified_exec"],
+                    Vec::new(),
+                ),
+                (vec!["codex", "agents"], vec!["--disable", "unified_exec"]),
+            ] {
+                args.extend([
+                    "--manifest",
+                    "team.toml",
+                    "subscribe",
+                    "local/primary/11111111-1111-4111-8111-111111111111",
+                    "builds",
+                ]);
+                args.extend(trailing_toggle);
+                if expected_remove {
+                    args.push("--remove");
+                }
+
+                let cli = MultitoolCli::try_parse_from(args)
+                    .expect("global feature and subscription arguments");
+                assert!(cli.feature_toggles.enable.is_empty());
+                assert_eq!(cli.feature_toggles.disable, vec!["unified_exec"]);
+                let Some(Subcommand::Agents(options)) = cli.subcommand else {
+                    panic!("expected agents command");
+                };
+                let Some(codex_team::TeamAction::Subscribe {
+                    address,
+                    topic,
+                    remove,
+                }) = options.action
+                else {
+                    panic!("expected subscribe action");
+                };
+                assert_eq!(
+                    address,
+                    codex_app_server_protocol::TeamAddress {
+                        machine_id: "local".into(),
+                        server_id: "primary".into(),
+                        thread_id: "11111111-1111-4111-8111-111111111111".into(),
+                    }
+                );
+                assert_eq!(topic, "builds");
+                assert_eq!(remove, expected_remove);
+            }
+        }
+    }
+
+    #[test]
     fn feature_toggles_known_features_generate_overrides() {
         let toggles = FeatureToggles {
             enable: vec!["web_search_request".to_string()],

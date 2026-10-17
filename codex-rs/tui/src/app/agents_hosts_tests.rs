@@ -919,6 +919,82 @@ async fn machine_menu_can_create_the_first_task_without_a_thread_target() {
 }
 
 #[tokio::test]
+async fn successful_configuration_clears_only_current_startup_notices() -> Result<()> {
+    let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
+    let mut session = AppServerSession::discovery_placeholder();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let client = TeamClient::new(
+        &format!("http://{}", listener.local_addr()?),
+        "isolated-test".into(),
+    )
+    .expect("valid reserved coordinator URL");
+    app.agents_hosts.manifest = Some(PathBuf::from("manifest.toml"));
+    app.agents_hosts
+        .hosts
+        .insert(key("alpha"), host("Alpha / main"));
+    app.agents_hosts.snapshot = Some(team_snapshot(ThreadId::from_u128(42)));
+    app.agents_hosts.configuration_generation = 2;
+    app.agents_hosts.notice = Some("Connecting configured machines…".into());
+
+    // An earlier discovery must not dismiss the current attempt's progress.
+    app.handle_agents_host_update(
+        &mut tui,
+        &mut session,
+        HostUpdate::Configured {
+            generation: 1,
+            client: client.clone(),
+            hosts: Vec::new(),
+            foreground: None,
+        },
+    )
+    .await?;
+    assert_eq!(
+        (
+            app.agents_hosts.client.is_none(),
+            app.agents_hosts.notice.as_deref()
+        ),
+        (true, Some("Connecting configured machines…"))
+    );
+
+    // A successful current discovery clears progress, but not a later failure.
+    for (notice, expected) in [
+        ("Connecting configured machines…", None),
+        ("Connecting to the team coordinator…", None),
+        (
+            "Machine thread listing failed",
+            Some("Machine thread listing failed"),
+        ),
+    ] {
+        app.agents_hosts.notice = Some(notice.into());
+        app.handle_agents_host_update(
+            &mut tui,
+            &mut session,
+            HostUpdate::Configured {
+                generation: 2,
+                client: client.clone(),
+                hosts: Vec::new(),
+                foreground: None,
+            },
+        )
+        .await?;
+        assert_eq!(
+            (
+                app.agents_hosts.client.is_some(),
+                app.agents_hosts.notice.as_deref()
+            ),
+            (true, expected)
+        );
+        if notice == "Connecting configured machines…" {
+            let view = app.agents_overview_view(Vec::new(), None);
+            insta::assert_snapshot!("agents_machines_configuration_complete", render(&view));
+        }
+        app.agents_hosts.tasks.abort_all();
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn failed_initial_configuration_can_retry_without_stale_results_replacing_it() -> Result<()> {
     let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
     let mut session = AppServerSession::discovery_placeholder();

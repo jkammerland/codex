@@ -1196,7 +1196,7 @@
             "writableRoots": {
               "default": [],
               "items": {
-                "$ref": "#/definitions/AbsolutePathBuf"
+                "$ref": "#/definitions/LegacyAppPathString"
               },
               "type": "array"
             }
@@ -1413,7 +1413,7 @@
         "cwd": {
           "allOf": [
             {
-              "$ref": "#/definitions/AbsolutePathBuf"
+              "$ref": "#/definitions/LegacyAppPathString"
             }
           ],
           "description": "Working directory captured for the thread."
@@ -3154,7 +3154,7 @@
       "description": "Effective collaboration mode. Absent when resuming from an older server."
     },
     "cwd": {
-      "$ref": "#/definitions/AbsolutePathBuf"
+      "$ref": "#/definitions/LegacyAppPathString"
     },
     "disabledPluginIds": {
       "default": [],

@@ -540,6 +540,14 @@ impl ChatWidget {
     /// nearest project config layer so non-git projects can still surface a
     /// stable project label.
     fn status_line_project_root_for_cwd(&self, cwd: &Path) -> Option<PathBuf> {
+        // Native-shaped POSIX paths can still belong to another machine.
+        if self
+            .remote_connection
+            .as_ref()
+            .is_some_and(|connection| !connection.is_local_daemon)
+        {
+            return None;
+        }
         if let Some(repo_root) = get_git_repo_root(cwd) {
             return Some(repo_root);
         }
@@ -588,8 +596,9 @@ impl ChatWidget {
         let project = self.status_line_project_root_name().or_else(|| {
             let cwd = self.status_line_cwd();
             Some(
-                cwd.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
+                codex_utils_path_uri::LegacyAppPathString::from_path(cwd)
+                    .to_inferred_path_uri()
+                    .and_then(|path| path.basename())
                     .unwrap_or_else(|| format_directory_display(cwd, /*max_width*/ None)),
             )
         })?;

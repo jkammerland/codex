@@ -564,7 +564,10 @@ impl ChatWidget {
             }
             SlashCommand::Pwd => {
                 self.add_info_message(
-                    format!("Current working directory: {}", self.config.cwd.display()),
+                    format!(
+                        "Current working directory: {}",
+                        self.executor_cwd().display()
+                    ),
                     /*hint*/ None,
                 );
             }

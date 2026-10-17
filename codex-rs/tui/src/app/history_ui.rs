@@ -315,7 +315,7 @@ impl App {
         history_cell::SessionHeaderHistoryCell::new(
             self.chat_widget.model_display_name().to_string(),
             self.chat_widget.current_reasoning_effort(),
-            self.config.cwd.to_path_buf(),
+            self.chat_widget.executor_cwd().to_path_buf(),
             version,
         )
         .with_yolo_mode(history_cell::is_yolo_mode(&self.config))

@@ -215,14 +215,11 @@ impl App {
         let request_handle = app_server.request_handle();
         let model = self.chat_widget.current_model().to_string();
         let config = self.chat_widget.config_ref();
-        let cwd = if app_server.uses_remote_workspace() {
-            app_server
-                .remote_cwd_override()
-                .map(|cwd| cwd.to_string_lossy().into_owned())
-                .unwrap_or_else(|| config.cwd.display().to_string())
-        } else {
-            config.cwd.display().to_string()
-        };
+        let cwd = self
+            .chat_widget
+            .executor_cwd()
+            .to_string_lossy()
+            .into_owned();
         let options = TemporaryStructuredThreadOptions {
             thread_source: ThreadSource::Feature("system".to_string()),
             model,

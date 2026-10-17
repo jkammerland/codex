@@ -4272,7 +4272,7 @@ class WorkspaceWriteSandboxPolicy(BaseModel):
     exclude_tmpdir_env_var: Annotated[bool | None, Field(alias="excludeTmpdirEnvVar")] = False
     network_access: Annotated[bool | None, Field(alias="networkAccess")] = False
     type: Annotated[Literal["workspaceWrite"], Field(title="WorkspaceWriteSandboxPolicyType")]
-    writable_roots: Annotated[list[AbsolutePathBuf] | None, Field(alias="writableRoots")] = []
+    writable_roots: Annotated[list[LegacyAppPathString] | None, Field(alias="writableRoots")] = []
 
 
 class SandboxPolicy(
@@ -10781,7 +10781,7 @@ class ThreadSettings(BaseModel):
     approval_policy: Annotated[AskForApproval, Field(alias="approvalPolicy")]
     approvals_reviewer: Annotated[ApprovalsReviewer, Field(alias="approvalsReviewer")]
     collaboration_mode: Annotated[CollaborationMode, Field(alias="collaborationMode")]
-    cwd: AbsolutePathBuf
+    cwd: LegacyAppPathString
     disabled_plugin_ids: Annotated[
         list[str] | None,
         Field(
@@ -12635,7 +12635,9 @@ class Thread(BaseModel):
             description="Unix timestamp (in seconds) when the thread was created.",
         ),
     ]
-    cwd: Annotated[AbsolutePathBuf, Field(description="Working directory captured for the thread.")]
+    cwd: Annotated[
+        LegacyAppPathString, Field(description="Working directory captured for the thread.")
+    ]
     ephemeral: Annotated[
         bool,
         Field(
@@ -12777,7 +12779,7 @@ class ThreadForkResponse(BaseModel):
             description="Reviewer currently used for approval requests on this thread.",
         ),
     ]
-    cwd: AbsolutePathBuf
+    cwd: LegacyAppPathString
     disabled_plugin_ids: Annotated[
         list[str] | None,
         Field(
@@ -12859,7 +12861,7 @@ class ThreadResumeResponse(BaseModel):
             description="Effective collaboration mode. Absent when resuming from an older server.",
         ),
     ] = None
-    cwd: AbsolutePathBuf
+    cwd: LegacyAppPathString
     disabled_plugin_ids: Annotated[
         list[str] | None,
         Field(
@@ -12947,7 +12949,7 @@ class ThreadStartResponse(BaseModel):
             description="Reviewer currently used for approval requests on this thread.",
         ),
     ]
-    cwd: AbsolutePathBuf
+    cwd: LegacyAppPathString
     disabled_plugin_ids: Annotated[
         list[str] | None,
         Field(

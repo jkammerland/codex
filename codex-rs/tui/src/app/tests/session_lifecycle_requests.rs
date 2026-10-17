@@ -2255,6 +2255,12 @@ async fn check_dynamic_tool_requests(
     } else {
         serde_json::to_value(source_settings.sandbox)?
     };
+    let source_environments = source_settings
+        .thread
+        .environments
+        .clone()
+        .expect("source executor environments");
+    assert!(!source_environments.is_empty());
     spawn_approved_task_tool_call(
         &app,
         &app_server,
@@ -2314,6 +2320,21 @@ async fn check_dynamic_tool_requests(
         panic!("expected a background task completion event")
     };
     assert!(response.success, "{response:?}");
+    let creation_request = recorded_params(&requests, "thread/start")
+        .pop()
+        .expect("background task creation");
+    assert_eq!(
+        creation_request["cwd"],
+        serde_json::json!(source_settings.cwd)
+    );
+    assert_eq!(
+        creation_request["runtimeWorkspaceRoots"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        creation_request["environments"],
+        serde_json::json!(source_environments)
+    );
     assert_eq!(
         recorded_params(&requests, "thread/start")
             .last()
@@ -2394,15 +2415,16 @@ async fn check_dynamic_tool_requests(
             }),
         },
     );
+    let followup = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), events.recv())
+        .await?
+        .expect("follow-up task registration event");
     let AppEvent::DynamicToolThreadStarted {
         thread,
         task_tools_available,
         registered,
-    } = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), events.recv())
-        .await?
-        .expect("follow-up task registration event")
+    } = followup
     else {
-        panic!("expected follow-up task registration before its next turn")
+        panic!("expected follow-up task registration before its next turn, received: {followup:?}")
     };
     assert_eq!(ThreadId::from_string(&thread.id)?, created_thread_id);
     assert_eq!(recorded_params(&requests, "turn/start").len(), 1);
@@ -4112,7 +4134,12 @@ terminal_visualization_instructions = true
         let attached = server
             .thread_read(replacement, /*include_turns*/ false)
             .await?;
-        assert_eq!(attached.cwd.as_path().canonicalize()?, cwd);
+        assert_eq!(
+            AbsolutePathBuf::try_from(attached.cwd)?
+                .canonicalize()?
+                .as_path(),
+            cwd
+        );
     }
     browser_entries.sort_by(|left, right| left.cwd.cmp(&right.cwd));
     let nested = source.join("browser-only");
@@ -4643,7 +4670,7 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     let found = |id: ThreadId| removed.iter().any(|p| p["threadId"] == id.to_string());
     assert!([original, child].into_iter().all(found));
     let retained = server.thread_read(original, /*include_turns*/ false);
-    assert_eq!(retained.await?.cwd, current.abs().canonicalize()?);
+    assert_eq!(retained.await?.cwd, current.abs().canonicalize()?.into());
     assert_eq!(app.chat_widget.config_ref().cwd, trusted.clone().abs());
     assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("SessionStart"));
     app.chat_widget

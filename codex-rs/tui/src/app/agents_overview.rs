@@ -456,7 +456,7 @@ impl App {
                     pins_supported: host.state.agents_overview.pinned_thread_ids.is_some(),
                     details: super::agents_overview_details::AgentsOverviewDetails {
                         lines: vec![
-                            format!("Project: {}", thread.cwd.display()).into(),
+                            format!("Project: {}", thread.cwd.render_for_ui()).into(),
                             format!("Model: {}", thread.model.as_deref().unwrap_or("Unknown"))
                                 .into(),
                         ],
@@ -793,7 +793,7 @@ impl App {
                 let target_session = SessionTarget {
                     path: target_thread.path.clone(),
                     thread_id: root_thread_id,
-                    cwd: Some(target_thread.cwd.to_path_buf()),
+                    cwd: Some(PathBuf::from(target_thread.cwd.as_str())),
                     history_mode: Some(target_thread.history_mode),
                 };
                 match self
@@ -807,7 +807,7 @@ impl App {
                 let config_cwd = if self.app_server_target.uses_remote_workspace() {
                     self.config.cwd.to_path_buf()
                 } else {
-                    target_thread.cwd.to_path_buf()
+                    PathBuf::from(target_thread.cwd.as_str())
                 };
                 let current_cwd = self.config.cwd.to_path_buf();
                 match self
@@ -829,7 +829,7 @@ impl App {
                         tui,
                         app_server,
                         &mut resume_config,
-                        target_thread.cwd.as_path(),
+                        std::path::Path::new(target_thread.cwd.as_str()),
                         crate::onboarding::DirectoryTrustOptions {
                             resumed_thread: Some(&target_thread),
                             ..Default::default()

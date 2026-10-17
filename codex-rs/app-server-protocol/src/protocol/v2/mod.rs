@@ -89,3 +89,7 @@ pub use windows_sandbox::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "path_compatibility_tests.rs"]
+mod path_compatibility;

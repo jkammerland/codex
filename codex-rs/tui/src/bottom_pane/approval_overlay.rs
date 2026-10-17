@@ -55,7 +55,6 @@ use codex_features::Features;
 use codex_protocol::ThreadId;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -108,7 +107,7 @@ pub(crate) struct ApplyPatchApprovalRequest {
     pub thread_label: Option<String>,
     pub id: String,
     pub reason: Option<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: codex_utils_path_uri::LegacyAppPathString,
     pub changes: HashMap<PathBuf, FileChange>,
 }
 
@@ -1470,7 +1469,7 @@ mod tests {
                 thread_label: None,
                 id: "patch".into(),
                 reason: None,
-                cwd: absolute_path("/tmp"),
+                cwd: absolute_path("/tmp").into(),
                 changes: HashMap::new(),
             }),
         ] {
@@ -2247,7 +2246,7 @@ mod tests {
             thread_label: Some("Banach [worker]".to_string()),
             id: "test".to_string(),
             reason: None,
-            cwd: test_path_buf("/tmp").abs(),
+            cwd: test_path_buf("/tmp").abs().into(),
             changes,
         });
         let keymap = crate::keymap::RuntimeKeymap::defaults();
@@ -2272,6 +2271,31 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_prompt_resolves_relative_windows_paths_on_every_platform() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let request = ApprovalRequest::ApplyPatch(ApplyPatchApprovalRequest {
+            thread_id: ThreadId::new(),
+            thread_label: None,
+            id: "patch".into(),
+            reason: None,
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_string(r"C:\Pilot\project"),
+            changes: HashMap::from([(
+                PathBuf::from(r"src\main.rs"),
+                FileChange::Add {
+                    content: "fn main() {}".into(),
+                },
+            )]),
+        });
+        let view = make_overlay(request, AppEventSender::new(tx), Features::with_defaults());
+        let rendered = render_overlay_lines(&view, /*width*/ 100);
+        assert!(
+            rendered.contains(r"C:\Pilot\project\src\main.rs"),
+            "{rendered}"
+        );
+        assert_snapshot!("approval_overlay_windows_executor_destination", rendered);
+    }
+
+    #[test]
     fn apply_patch_prompt_without_changes_shows_unavailable_destination() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx);
@@ -2280,7 +2304,7 @@ mod tests {
             thread_label: None,
             id: "test".to_string(),
             reason: None,
-            cwd: absolute_path("/tmp"),
+            cwd: absolute_path("/tmp").into(),
             changes: HashMap::new(),
         });
         let view = make_overlay(request, tx, Features::with_defaults());

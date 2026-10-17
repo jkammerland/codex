@@ -37,6 +37,8 @@ mod buffered_replay;
 mod connector_policy;
 #[path = "tests/disconnect_tests.rs"]
 mod disconnect;
+#[path = "tests/executor_path_requests_tests.rs"]
+mod executor_path_requests_tests;
 #[path = "tests/external_writer_fork_tests.rs"]
 mod external_writer_fork_tests;
 #[path = "tests/fork_workspace_roots_tests.rs"]
@@ -4883,7 +4885,7 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
         windows_sandbox_host: WindowsSandboxHost::Local,
         approval_policy: AskForApproval::OnRequest,
         permission_profile: PermissionProfile::workspace_write(),
-        runtime_workspace_roots: vec![primary_cwd.clone(), shared_root.clone()],
+        runtime_workspace_roots: vec![primary_cwd.clone().into(), shared_root.clone().into()],
         ..test_thread_session(main_thread_id, primary_cwd.to_path_buf())
     };
 
@@ -4930,7 +4932,7 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 recency_at: Some(2),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
                 path: Some(rollout_path.clone()),
-                cwd: test_path_buf("/tmp/agent").abs(),
+                cwd: test_path_buf("/tmp/agent").abs().into(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Unknown,
                 can_accept_direct_input: None,
@@ -4962,10 +4964,10 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
     assert_eq!(session.model, "gpt-agent");
     assert_eq!(session.model_provider_id, "agent-provider");
     assert_eq!(session.approval_policy, primary_session.approval_policy);
-    assert_eq!(session.cwd.as_path(), test_path_buf("/tmp/agent").as_path());
+    assert_eq!(session.cwd, test_path_buf("/tmp/agent").abs().into());
     assert_eq!(
         session.runtime_workspace_roots,
-        vec![test_path_buf("/tmp/agent").abs(), shared_root]
+        vec![test_path_buf("/tmp/agent").abs().into(), shared_root.into()]
     );
     assert_eq!(session.rollout_path, Some(rollout_path));
     assert_eq!(
@@ -4994,7 +4996,7 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
     let primary_session = ThreadSessionState {
         approval_policy: AskForApproval::OnRequest,
         permission_profile: PermissionProfile::workspace_write(),
-        runtime_workspace_roots: vec![primary_cwd.clone()],
+        runtime_workspace_roots: vec![primary_cwd.clone().into()],
         ..test_thread_session(main_thread_id, primary_cwd.to_path_buf())
     };
 
@@ -5036,7 +5038,7 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 recency_at: Some(2),
                 status: codex_app_server_protocol::ThreadStatus::Idle,
                 path: None,
-                cwd: test_path_buf("/tmp/agent").abs(),
+                cwd: test_path_buf("/tmp/agent").abs().into(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Unknown,
                 can_accept_direct_input: None,
@@ -5079,7 +5081,7 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
     let primary_session = ThreadSessionState {
         approval_policy: AskForApproval::OnRequest,
         permission_profile: PermissionProfile::workspace_write(),
-        runtime_workspace_roots: vec![primary_cwd.clone()],
+        runtime_workspace_roots: vec![primary_cwd.clone().into()],
         ..test_thread_session(main_thread_id, primary_cwd.to_path_buf())
     };
     app.primary_session_configured = Some(primary_session);
@@ -5107,7 +5109,7 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         recency_at: Some(2),
         status: codex_app_server_protocol::ThreadStatus::Idle,
         path: None,
-        cwd: test_path_buf("/tmp/read").abs(),
+        cwd: test_path_buf("/tmp/read").abs().into(),
         cli_version: "0.0.0".to_string(),
         source: codex_app_server_protocol::SessionSource::Unknown,
         can_accept_direct_input: None,
@@ -5125,10 +5127,10 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
 
     assert_eq!(session.thread_id, read_thread_id);
     assert_eq!(session.model, "server-reported-model");
-    assert_eq!(session.cwd.as_path(), test_path_buf("/tmp/read").as_path());
+    assert_eq!(session.cwd, test_path_buf("/tmp/read").abs().into());
     assert_eq!(
         session.runtime_workspace_roots,
-        vec![test_path_buf("/tmp/read").abs()]
+        vec![test_path_buf("/tmp/read").abs().into()]
     );
     let expected_permission_profile = app
         .chat_widget
@@ -6225,7 +6227,7 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
             approvals_reviewer: ApprovalsReviewer::User,
             permission_profile: PermissionProfile::read_only(),
             active_permission_profile: None,
-            cwd: test_path_buf("/tmp/project").abs(),
+            cwd: test_path_buf("/tmp/project").abs().into(),
             runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -6855,7 +6857,7 @@ pub(super) fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSe
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: cwd.abs(),
+        cwd: cwd.abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
@@ -7956,7 +7958,7 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             approvals_reviewer: ApprovalsReviewer::User,
             permission_profile: PermissionProfile::read_only(),
             active_permission_profile: None,
-            cwd: test_path_buf("/home/user/project").abs(),
+            cwd: test_path_buf("/home/user/project").abs().into(),
             runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
@@ -8029,7 +8031,7 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             approvals_reviewer: ApprovalsReviewer::User,
             permission_profile: PermissionProfile::read_only(),
             active_permission_profile: None,
-            cwd: test_path_buf("/home/user/project").abs(),
+            cwd: test_path_buf("/home/user/project").abs().into(),
             runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
@@ -9264,7 +9266,7 @@ async fn refreshed_snapshot_session_persists_resumed_turns() {
         }],
     )];
     let resumed_session = ThreadSessionState {
-        cwd: test_path_buf("/tmp/refreshed").abs(),
+        cwd: test_path_buf("/tmp/refreshed").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         ..initial_session.clone()
@@ -9333,7 +9335,7 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
             approvals_reviewer: ApprovalsReviewer::User,
             permission_profile: PermissionProfile::read_only(),
             active_permission_profile: None,
-            cwd: test_path_buf("/home/user/project").abs(),
+            cwd: test_path_buf("/home/user/project").abs().into(),
             runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
@@ -10003,7 +10005,7 @@ async fn inactive_thread_settings_notification_updates_cached_collaboration_mode
         thread_id: inactive_thread_id.to_string(),
         thread_settings: ThreadSettings {
             disabled_plugin_ids: Vec::new(),
-            cwd: test_absolute_path("/tmp/thread-settings"),
+            cwd: test_absolute_path("/tmp/thread-settings").into(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
             sandbox_policy: codex_app_server_protocol::SandboxPolicy::ReadOnly {
@@ -10080,7 +10082,7 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
             approvals_reviewer: ApprovalsReviewer::User,
             permission_profile: PermissionProfile::read_only(),
             active_permission_profile: None,
-            cwd: test_path_buf("/tmp/project").abs(),
+            cwd: test_path_buf("/tmp/project").abs().into(),
             runtime_workspace_roots: Vec::new(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,

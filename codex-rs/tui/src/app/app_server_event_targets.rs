@@ -260,7 +260,7 @@ mod tests {
     fn test_thread_settings() -> ThreadSettings {
         ThreadSettings {
             disabled_plugin_ids: Vec::new(),
-            cwd: test_path_buf("/tmp/thread-settings").abs(),
+            cwd: test_path_buf("/tmp/thread-settings").abs().into(),
             approval_policy: codex_app_server_protocol::AskForApproval::Never,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::User,
             sandbox_policy: codex_app_server_protocol::SandboxPolicy::ReadOnly {

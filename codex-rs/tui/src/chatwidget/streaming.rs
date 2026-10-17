@@ -90,7 +90,7 @@ impl ChatWidget {
             self.clear_active_stream_tail();
             let (cell, streamed_source) = controller.finalize();
             let completed_display = completed_message.map(|source| {
-                parse_assistant_markdown(source, self.config.cwd.as_path()).visible_markdown
+                parse_assistant_markdown(source, self.executor_cwd()).visible_markdown
             });
             let completed_message_differs = completed_display.as_deref().is_some_and(|completed| {
                 let Some(streamed) = streamed_source.as_deref() else {
@@ -122,7 +122,7 @@ impl ChatWidget {
             // that can re-render from source on resize.
             let copy_source = completed_message.map(str::to_owned).or(streamed_source);
             let source = copy_source.as_deref().map(|source| {
-                parse_assistant_markdown(source, self.config.cwd.as_path()).visible_markdown
+                parse_assistant_markdown(source, self.executor_cwd()).visible_markdown
             });
             if let Some(source) = source {
                 let inline_visualization_context = self.thread_id.and_then(|thread_id| {
@@ -135,7 +135,7 @@ impl ChatWidget {
                 self.app_event_tx.send(AppEvent::ConsolidateAgentMessage {
                     source,
                     copy_source,
-                    cwd: self.config.cwd.to_path_buf(),
+                    cwd: self.executor_cwd().to_path_buf(),
                     inline_visualization_context,
                     scrollback_reflow,
                     deferred_history_cell,
@@ -192,8 +192,7 @@ impl ChatWidget {
             && let Some(message) = message
             && !message.is_empty()
         {
-            let displayed =
-                parse_assistant_markdown(message, self.config.cwd.as_path()).visible_markdown;
+            let displayed = parse_assistant_markdown(message, self.executor_cwd()).visible_markdown;
             self.handle_streaming_delta(displayed);
         }
         // Item completion is authoritative. Use it for consolidation so any
@@ -223,7 +222,7 @@ impl ChatWidget {
             self.plan_stream_controller = Some(
                 PlanStreamController::new(
                     self.current_stream_width(/*reserved_cols*/ 4),
-                    &self.config.cwd,
+                    self.executor_cwd(),
                     self.history_render_mode(),
                 )
                 .with_list_spacing(
@@ -291,7 +290,10 @@ impl ChatWidget {
                     .send(AppEvent::ConsolidateProposedPlan(source));
             }
         } else if !plan_text.is_empty() {
-            self.add_to_history(history_cell::new_proposed_plan(plan_text, &self.config.cwd));
+            self.add_to_history(history_cell::new_proposed_plan(
+                plan_text,
+                self.executor_cwd(),
+            ));
         } else if let Some(source) = consolidated_plan_source {
             self.note_stream_consolidation_queued();
             self.app_event_tx
@@ -364,7 +366,7 @@ impl ChatWidget {
         if !self.reasoning_summary_parts.is_empty() {
             let reasoning_parts = std::mem::take(&mut self.reasoning_summary_parts);
             let mut cell =
-                history_cell::new_reasoning_summary_block(reasoning_parts, &self.config.cwd);
+                history_cell::new_reasoning_summary_block(reasoning_parts, self.executor_cwd());
             if let Some(id) = &self.status_state.reasoning_item_id {
                 cell.set_source_item_id(id.clone());
             }
@@ -428,7 +430,7 @@ impl ChatWidget {
                 AgentMessageContent::Text { text } => message.push_str(text),
             }
         }
-        let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
+        let parsed = parse_assistant_markdown(&message, self.executor_cwd());
         if from_replay && self.stream_controller.is_none() && !parsed.visible_markdown.is_empty() {
             self.prepare_assistant_message();
             self.mark_safety_buffering_agent_message_started();
@@ -442,7 +444,7 @@ impl ChatWidget {
             self.add_to_history(
                 history_cell::AgentMarkdownCell::new_with_inline_visualizations(
                     parsed.visible_markdown.clone(),
-                    self.config.cwd.as_path(),
+                    self.executor_cwd(),
                     context,
                 )
                 .with_copy_source(Some(message.clone())),
@@ -462,7 +464,7 @@ impl ChatWidget {
             && let Some(runner) = self.workspace_command_runner.clone()
         {
             let branch_cwd = PathBuf::from(cwd);
-            let cwd = self.config.cwd.to_path_buf();
+            let cwd = self.executor_cwd().to_path_buf();
             let tx = self.app_event_tx.clone();
             tokio::spawn(async move {
                 if let Some(branch) =
@@ -591,7 +593,7 @@ impl ChatWidget {
             self.stream_controller = Some(
                 StreamController::new_with_inline_visualizations(
                     self.current_stream_width(/*reserved_cols*/ 2),
-                    &self.config.cwd,
+                    self.executor_cwd(),
                     self.history_render_mode(),
                     inline_visualization_context,
                 )

@@ -206,15 +206,16 @@ impl App {
                 .insert(thread_id, selected.profile_id);
         }
         if let Some((manager, checkout)) = &managed_worktree {
-            let result =
-                if crate::session_resume::cwds_differ(started.session.cwd.as_path(), &checkout.cwd)
-                {
-                    Err(anyhow::anyhow!(
-                        "The server did not apply the worktree directory."
-                    ))
-                } else {
-                    manager.bind_thread(&checkout.root, &thread_id.to_string())
-                };
+            let result = if crate::session_resume::cwds_differ(
+                std::path::Path::new(started.session.cwd.as_str()),
+                &checkout.cwd,
+            ) {
+                Err(anyhow::anyhow!(
+                    "The server did not apply the worktree directory."
+                ))
+            } else {
+                manager.bind_thread(&checkout.root, &thread_id.to_string())
+            };
             if let Err(error) = result {
                 let _ = app_server.thread_unsubscribe(thread_id).await;
                 self.agents_overview_retained_worktree_error(checkout, /*title*/ None, error);

@@ -193,12 +193,12 @@ pub struct ThreadStartResponse {
     /// Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
     #[serde(default)]
     pub disabled_plugin_ids: Vec<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     /// Thread-scoped runtime workspace roots used to materialize
     /// `:workspace_roots`.
     #[experimental("thread/start.runtimeWorkspaceRoots")]
     #[serde(default)]
-    pub runtime_workspace_roots: Vec<AbsolutePathBuf>,
+    pub runtime_workspace_roots: Vec<LegacyAppPathString>,
     /// Environment-native paths to instruction source files currently loaded for this thread.
     #[serde(default)]
     pub instruction_sources: Vec<LegacyAppPathString>,
@@ -312,7 +312,7 @@ pub struct ThreadSettings {
     /// Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
     #[serde(default)]
     pub disabled_plugin_ids: Vec<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     pub approval_policy: AskForApproval,
     pub approvals_reviewer: ApprovalsReviewer,
     pub sandbox_policy: SandboxPolicy,
@@ -448,12 +448,12 @@ pub struct ThreadResumeResponse {
     /// Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
     #[serde(default)]
     pub disabled_plugin_ids: Vec<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     /// Thread-scoped runtime workspace roots used to materialize
     /// `:workspace_roots`.
     #[experimental("thread/resume.runtimeWorkspaceRoots")]
     #[serde(default)]
-    pub runtime_workspace_roots: Vec<AbsolutePathBuf>,
+    pub runtime_workspace_roots: Vec<LegacyAppPathString>,
     /// Environment-native paths to instruction source files currently loaded for this thread.
     #[serde(default)]
     pub instruction_sources: Vec<LegacyAppPathString>,
@@ -653,12 +653,12 @@ pub struct ThreadForkResponse {
     /// Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
     #[serde(default)]
     pub disabled_plugin_ids: Vec<String>,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
     /// Thread-scoped runtime workspace roots used to materialize
     /// `:workspace_roots`.
     #[experimental("thread/fork.runtimeWorkspaceRoots")]
     #[serde(default)]
-    pub runtime_workspace_roots: Vec<AbsolutePathBuf>,
+    pub runtime_workspace_roots: Vec<LegacyAppPathString>,
     /// Environment-native paths to instruction source files currently loaded for this thread.
     #[serde(default)]
     pub instruction_sources: Vec<LegacyAppPathString>,

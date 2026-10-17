@@ -318,7 +318,7 @@ impl ChatWidget {
             id: ev.call_id,
             reason: ev.reason,
             changes: ev.changes,
-            cwd: self.config.cwd.clone(),
+            cwd: codex_utils_path_uri::LegacyAppPathString::from_path(self.executor_cwd()),
         });
         self.bottom_pane
             .push_approval_request(request, &self.config.features);
@@ -328,7 +328,7 @@ impl ChatWidget {
         );
         self.request_redraw();
         self.notify(Notification::EditApprovalRequested {
-            cwd: self.config.cwd.to_path_buf(),
+            cwd: self.executor_cwd().to_path_buf(),
             changes: changed_paths,
         });
     }

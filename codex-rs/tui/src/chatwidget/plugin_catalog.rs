@@ -392,9 +392,9 @@ impl ChatWidget {
         ])
         .wrap(Wrap { trim: false });
 
-        let cwd_for_remove = self.config.cwd.to_path_buf();
-        let cwd_for_cancel = self.config.cwd.to_path_buf();
-        let cwd_for_on_cancel = self.config.cwd.to_path_buf();
+        let cwd_for_remove = self.executor_cwd().to_path_buf();
+        let cwd_for_cancel = self.executor_cwd().to_path_buf();
+        let cwd_for_on_cancel = self.executor_cwd().to_path_buf();
         let plugins_response_for_cancel = plugins_response.clone();
         let plugins_response_for_on_cancel = plugins_response.clone();
 
@@ -588,7 +588,7 @@ impl ChatWidget {
         ];
 
         if let PluginsCacheState::Ready(plugins_response) = self.plugins_cache_for_current_cwd() {
-            let cwd = self.config.cwd.to_path_buf();
+            let cwd = self.executor_cwd().to_path_buf();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
                 description: Some("Return to the plugin list".to_string()),
@@ -642,7 +642,7 @@ impl ChatWidget {
         ];
 
         if let PluginsCacheState::Ready(plugins_response) = self.plugins_cache_for_current_cwd() {
-            let cwd = self.config.cwd.to_path_buf();
+            let cwd = self.executor_cwd().to_path_buf();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
                 description: Some("Return to the plugin list".to_string()),
@@ -679,7 +679,7 @@ impl ChatWidget {
             ..Default::default()
         }];
         if let Some(plugins_response) = plugins_response.cloned() {
-            let cwd = self.config.cwd.to_path_buf();
+            let cwd = self.executor_cwd().to_path_buf();
             items.push(SelectionItem {
                 name: "Back to plugins".to_string(),
                 description: Some("Return to the plugin list".to_string()),
@@ -1008,7 +1008,7 @@ impl ChatWidget {
             );
         }
 
-        let cwd = self.config.cwd.to_path_buf();
+        let cwd = self.executor_cwd().to_path_buf();
         let plugins_response = plugins_response.clone();
         let mut items = vec![SelectionItem {
             name: "Back to plugins".to_string(),
@@ -1034,7 +1034,7 @@ impl ChatWidget {
                     ..Default::default()
                 });
             } else if let Some(plugin_id) = plugin_uninstall_id(&plugin.summary) {
-                let uninstall_cwd = self.config.cwd.to_path_buf();
+                let uninstall_cwd = self.executor_cwd().to_path_buf();
                 let plugin_display_name = display_name;
                 items.push(SelectionItem {
                     name: "Uninstall plugin".to_string(),
@@ -1079,7 +1079,7 @@ impl ChatWidget {
                 ..Default::default()
             });
         } else if let Some(location) = plugin_detail_location(plugin) {
-            let install_cwd = self.config.cwd.to_path_buf();
+            let install_cwd = self.executor_cwd().to_path_buf();
             let plugin_name = plugin_request_name(&plugin.summary);
             let plugin_display_name = display_name;
             items.push(SelectionItem {
@@ -1205,7 +1205,7 @@ impl ChatWidget {
                 plugin_description(plugin).unwrap_or_default(),
                 plugin.keywords.join(" ")
             );
-            let cwd = self.config.cwd.to_path_buf();
+            let cwd = self.executor_cwd().to_path_buf();
             let plugin_display_name = display_name.clone();
             let toggle_cwd = cwd.clone();
             let toggle_plugin_id = plugin.id.clone();

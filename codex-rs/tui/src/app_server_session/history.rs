@@ -426,7 +426,7 @@ fn rendered_history_rows(
     };
     thread_items_to_transcript_cells(
         Some(thread_id),
-        &thread.cwd,
+        std::path::Path::new(thread.cwd.as_str()),
         items,
         visibility,
         Some(config),

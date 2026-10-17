@@ -22,6 +22,7 @@ async fn local_daemon_fork_dispatch_preserves_idle_source_and_children() -> Resu
 async fn check_fork_dispatch(mode: ThreadParamsMode) -> Result<()> {
     let mut app = Box::pin(make_test_app()).await;
     let client_home = tempdir()?;
+    let client_workspace = tempdir()?;
     let server_home = tempdir()?;
     let workspace = tempdir()?;
     let remote_cwd = workspace.path().canonicalize()?.abs();
@@ -35,8 +36,59 @@ async fn check_fork_dispatch(mode: ThreadParamsMode) -> Result<()> {
             ),
         )?;
     }
-    app.config.codex_home = client_home.path().to_path_buf().abs();
-    app.config.sqlite = codex_state::SqliteConfig::new_for_testing(client_home.path().abs());
+    // Reselecting the remote source retains an explicit cwd override, so normal folder consent
+    // applies. Trust this fixture workspace before testing fork state and pending-request replay.
+    crate::legacy_core::config::set_project_trust_level(
+        server_home.path(),
+        remote_cwd.as_path(),
+        codex_protocol::config_types::TrustLevel::Trusted,
+    )
+    .map_err(|error| color_eyre::eyre::eyre!("{error:#}"))?;
+
+    // Load the written client policy before attachment so a later config reload is equivalent.
+    let client_cwd = client_workspace.path().canonicalize()?.abs();
+    let client_root = client_home.path().canonicalize()?.abs();
+    let client_config = ConfigBuilder::default()
+        .codex_home(client_home.path().to_path_buf())
+        .loader_overrides(app.loader_overrides.clone())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(client_cwd.to_path_buf()),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let client_paths = (client_cwd.clone(), vec![client_cwd, client_root]);
+    assert_eq!(
+        (
+            client_config.cwd.clone(),
+            client_config.workspace_roots.clone()
+        ),
+        client_paths
+    );
+    app.config = client_config;
+    app.local_settings = crate::local_settings::LocalSettings::from(&app.config);
+    app.chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        requires_openai_auth: false,
+        local_settings: app.local_settings.clone(),
+        config: app.config.clone(),
+        frame_requester: crate::tui::FrameRequester::test_dummy(),
+        app_event_tx: app.app_event_tx.clone(),
+        workspace_command_runner: None,
+        initial_user_message: None,
+        enhanced_keys_supported: false,
+        has_chatgpt_account: false,
+        has_codex_backend_auth: false,
+        model_catalog: app.model_catalog.clone(),
+        feedback: app.feedback.clone(),
+        is_first_run: false,
+        status_account_display: None,
+        initial_plan_type: None,
+        model: Some(app.chat_widget.current_model().to_string()),
+        startup_tooltip_override: None,
+        status_line_invalid_items_warned: app.status_line_invalid_items_warned.clone(),
+        terminal_title_invalid_items_warned: app.terminal_title_invalid_items_warned.clone(),
+        session_telemetry: app.session_telemetry.clone(),
+    });
     let server_config = ConfigBuilder::default()
         .codex_home(server_home.path().to_path_buf())
         .harness_overrides(ConfigOverrides {
@@ -47,6 +99,18 @@ async fn check_fork_dispatch(mode: ThreadParamsMode) -> Result<()> {
         .await?;
     let (server, requests, proxy) = match mode {
         ThreadParamsMode::Remote => {
+            // Match a real remote attachment; its executor paths must not enter local config.
+            app.app_server_target = AppServerTarget::Remote {
+                endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+                    websocket_url: "ws://127.0.0.1:1".into(),
+                    auth_token: None,
+                },
+            };
+            app.chat_widget.remote_connection =
+                crate::status::remote_connection::remote_connection_status_value(
+                    &app.app_server_target,
+                    /*server_version*/ None,
+                );
             Box::pin(start_recording_remote_app_server(&server_config)).await?
         }
         ThreadParamsMode::Embedded => {
@@ -80,7 +144,13 @@ async fn check_fork_dispatch(mode: ThreadParamsMode) -> Result<()> {
         )
         .await?;
     let expected_roots = vec![remote_cwd, server_root];
-    assert_eq!(started.session.runtime_workspace_roots, expected_roots);
+    assert_eq!(
+        started.session.runtime_workspace_roots,
+        expected_roots
+            .iter()
+            .map(codex_utils_path_uri::LegacyAppPathString::from_abs_path)
+            .collect::<Vec<_>>()
+    );
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
     app.thread_event_listener_tasks
@@ -114,13 +184,45 @@ async fn check_fork_dispatch(mode: ThreadParamsMode) -> Result<()> {
     ))
     .await?;
 
-    assert_ne!(app.chat_widget.thread_id(), Some(source_thread_id));
-    assert_eq!(app.chat_widget.config_ref().workspace_roots, expected_roots);
+    let forked_thread_id = app.chat_widget.thread_id().expect("attached fork");
+    assert_ne!(forked_thread_id, source_thread_id);
+    match mode {
+        ThreadParamsMode::Remote => assert_eq!(
+            (
+                app.chat_widget.config_ref().cwd.clone(),
+                app.chat_widget.config_ref().workspace_roots.clone(),
+            ),
+            client_paths
+        ),
+        ThreadParamsMode::Embedded => {
+            assert_eq!(app.chat_widget.config_ref().workspace_roots, expected_roots);
+        }
+    }
     let fork_roots: Vec<_> = recorded_params(&requests, "thread/fork")
         .into_iter()
         .map(|params| params["runtimeWorkspaceRoots"].clone())
         .collect();
-    assert_eq!(fork_roots, vec![serde_json::json!(expected_roots)]);
+    assert_eq!(
+        fork_roots,
+        vec![match mode {
+            ThreadParamsMode::Remote => serde_json::Value::Null,
+            ThreadParamsMode::Embedded => serde_json::json!(expected_roots),
+        }]
+    );
+    let forked_thread = server
+        .thread_read(forked_thread_id, /*include_turns*/ false)
+        .await?;
+    assert_eq!(
+        forked_thread.environments,
+        Some(vec![codex_app_server_protocol::ThreadEnvironment {
+            environment_id: "local".into(),
+            cwd: expected_roots[0].clone().into(),
+            runtime_workspace_roots: expected_roots
+                .iter()
+                .map(codex_utils_path_uri::LegacyAppPathString::from_abs_path)
+                .collect(),
+        }])
+    );
     assert!(recorded_params(&requests, "thread/unsubscribe").is_empty());
     assert!(!app.thread_event_listener_tasks[&source_thread_id].is_finished());
     assert_eq!(

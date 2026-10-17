@@ -1,0 +1,33 @@
+---
+source: tui/src/app/agents_overview_foreign_paths_tests.rs
+assertion_line: 32
+expression: rendered
+---
+  Agent command center  Group: Project  g
+   All 1   Needs you 0   Working 0   Ready 1   Inactive 0                          tab/⇧tab filter
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+      Tasks                                               │ Task details
+  C:\Pilot\project  1                                     │
+  › ○ Review [the source](C:\Pilot\project\src\main.rs#…  │ Review [the source](C:\Pilot\project\…
+                                                          │ ○ Ready
+                                                          │
+                                                          │ Model: Unknown
+                                                          │ Reasoning: Unknown
+                                                          │
+                                                          │ Project
+                                                          │ C:\Pilot\project
+                                                          │
+                                                          │ Prompt
+                                                          │ Review the source (src/main.rs:12)
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+  ? help  esc back  ↑/↓ move  enter open  n new

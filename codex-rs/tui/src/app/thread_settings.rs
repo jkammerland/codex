@@ -192,19 +192,24 @@ impl App {
         thread_id: ThreadId,
         settings: &ThreadSettings,
     ) {
+        let mode = if self.app_server_target.uses_remote_workspace() {
+            crate::app_server_session::ThreadParamsMode::Remote
+        } else {
+            crate::app_server_session::ThreadParamsMode::Embedded
+        };
         if let Some(blank) = self.agents_overview.blank_sessions.get_mut(&thread_id) {
-            apply_thread_settings_to_session(&mut blank.session, settings);
+            apply_thread_settings_to_session(&mut blank.session, settings, mode);
         }
         if self.primary_thread_id == Some(thread_id)
             && let Some(session) = self.primary_session_configured.as_mut()
         {
-            apply_thread_settings_to_session(session, settings);
+            apply_thread_settings_to_session(session, settings, mode);
         }
 
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
             let mut store = channel.store.lock().await;
             if let Some(session) = store.session.as_mut() {
-                apply_thread_settings_to_session(session, settings);
+                apply_thread_settings_to_session(session, settings, mode);
             }
         }
     }
@@ -250,7 +255,11 @@ impl App {
     }
 }
 
-fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: &ThreadSettings) {
+fn apply_thread_settings_to_session(
+    session: &mut ThreadSessionState,
+    settings: &ThreadSettings,
+    mode: crate::app_server_session::ThreadParamsMode,
+) {
     if settings.collaboration_mode.mode == ModeKind::Default {
         session.model = settings.model.clone();
         session.reasoning_effort = settings.effort.clone();
@@ -259,10 +268,16 @@ fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: 
     session.service_tier = settings.service_tier.clone();
     session.approval_policy = settings.approval_policy;
     session.approvals_reviewer = settings.approvals_reviewer.to_core();
-    session.permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-        &settings.sandbox_policy.to_core(),
-        settings.cwd.as_path(),
-    );
+    match crate::executor_paths::display_permission_profile_from_app_server(
+        &settings.sandbox_policy,
+        &settings.cwd,
+        mode,
+    ) {
+        Ok(profile) => session.permission_profile = profile,
+        Err(error) => {
+            tracing::warn!(%error, "invalid executor permission paths in thread settings")
+        }
+    }
     session.active_permission_profile = settings.active_permission_profile.clone().map(Into::into);
     session.set_cwd_retargeting_implicit_runtime_workspace_root(settings.cwd.clone());
     let mut collaboration_mode = settings.collaboration_mode.clone();
@@ -286,3 +301,7 @@ fn thread_settings_update_has_changes(params: &ThreadSettingsUpdateParams) -> bo
         || params.summary.is_some()
         || params.collaboration_mode.is_some()
 }
+
+#[cfg(test)]
+#[path = "thread_settings_path_tests.rs"]
+mod path_tests;

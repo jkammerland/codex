@@ -310,7 +310,7 @@ pub(crate) enum AppEvent {
     AgentsMachinesMenu,
     NewAgentsHostSession {
         host: crate::app::agents_hosts::HostKey,
-        cwd: Option<codex_utils_absolute_path::AbsolutePathBuf>,
+        cwd: Option<codex_utils_path_uri::LegacyAppPathString>,
     },
     AgentsHostReconnect(crate::app::agents_hosts::HostKey),
     AgentsTeamRetry(String),
@@ -340,7 +340,7 @@ pub(crate) enum AppEvent {
     ShowMoreAgentsOverview,
     /// Create an empty thread from the command center.
     NewAgentsOverviewSession {
-        cwd: Option<AbsolutePathBuf>,
+        cwd: Option<codex_utils_path_uri::LegacyAppPathString>,
     },
     /// Update the daemon-wide overview after a background thread listing finishes.
     AgentsOverviewThreadsLoaded {

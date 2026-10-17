@@ -222,6 +222,9 @@ async fn run_until_thread_start(
     bootstrap: AppServerBootstrap,
     requests: &RecordedRequests,
 ) -> Result<()> {
+    // This helper cancels the UI future at thread/start rather than taking App's normal exit path.
+    // Retain the originating connection so the fixture can explicitly close and drain its proxy.
+    let shutdown = server.request_copy();
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.pause_events();
     let mut run = Box::pin(run_startup_for_test(
@@ -232,7 +235,7 @@ async fn run_until_thread_start(
         SessionSelection::StartFresh,
         AppServerTarget::Embedded,
     ));
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), async {
+    let result = tokio::time::timeout(Duration::from_secs(/*secs*/ 15), async {
         loop {
             if !recorded_params(requests, "thread/start").is_empty() {
                 return Ok::<(), color_eyre::eyre::Report>(());
@@ -246,7 +249,10 @@ async fn run_until_thread_start(
             }
         }
     })
-    .await??;
+    .await;
+    drop(run);
+    shutdown.shutdown().await?;
+    result??;
     Ok(())
 }
 
@@ -529,15 +535,13 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         )
         .await?;
         assert_eq!(started.session.model, selected_model);
+        let started_cwd = AbsolutePathBuf::try_from(started.session.cwd.clone())?;
         assert!(
             !started
                 .session
                 .permission_profile
                 .file_system_sandbox_policy()
-                .can_write_local_path_with_cwd(
-                    started.session.cwd.as_path(),
-                    started.session.cwd.as_path()
-                )
+                .can_write_local_path_with_cwd(started_cwd.as_path(), started_cwd.as_path())
         );
         let starts = recorded_params(&requests, "thread/start");
         assert_eq!(starts.len(), if remote { 1 } else { 2 });

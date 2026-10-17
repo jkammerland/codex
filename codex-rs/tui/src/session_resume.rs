@@ -73,7 +73,7 @@ pub(crate) async fn read_session_cwd(
         .thread_read(thread_id, /*include_turns*/ false)
         .await
     {
-        Ok(thread) => Some(thread.cwd.to_path_buf()),
+        Ok(thread) => Some(PathBuf::from(thread.cwd.as_str())),
         Err(err) => {
             tracing::warn!(%thread_id, %err, "Failed to read session cwd from app server");
             None

@@ -35,7 +35,7 @@ impl App {
                 .as_deref()
                 .unwrap_or_default(),
             /*width*/ None,
-            Some(self.chat_widget.config_ref().cwd.as_path()),
+            Some(self.chat_widget.executor_cwd()),
             &mut lines,
         );
         let _ = tui.enter_alt_screen();
@@ -157,10 +157,12 @@ impl App {
                 request_id: app_server.next_request_id(),
                 params: TurnStartParams {
                     thread_id: review.thread_id.to_string(),
-                    cwd: Some(config.cwd.to_path_buf()),
-                    runtime_workspace_roots: Some(
-                        config.permissions.user_visible_workspace_roots().to_vec(),
-                    ),
+                    cwd: (app_server.thread_params_mode()
+                        == crate::app_server_session::ThreadParamsMode::Embedded)
+                        .then(|| config.cwd.to_path_buf()),
+                    runtime_workspace_roots: (app_server.thread_params_mode()
+                        == crate::app_server_session::ThreadParamsMode::Embedded)
+                        .then(|| config.permissions.user_visible_workspace_roots().to_vec()),
                     approval_policy: Some(config.permissions.approval_policy.value().into()),
                     approvals_reviewer: Some(config.approvals_reviewer.into()),
                     sandbox_policy,

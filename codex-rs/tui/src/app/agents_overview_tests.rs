@@ -1,6 +1,9 @@
 #[path = "agents_overview_discovery_tests.rs"]
 mod discovery;
 
+#[path = "agents_overview_foreign_paths_tests.rs"]
+mod foreign_paths;
+
 use crate::app::app_server_requests::BufferedServerRequest;
 #[path = "agent_center_tests.rs"]
 mod command_center;
@@ -271,7 +274,7 @@ pub(in crate::app) fn overview_thread(
         recency_at: Some(*OVERVIEW_TIMESTAMP),
         status,
         path: None,
-        cwd: test_path_buf("/tmp/project").abs(),
+        cwd: test_path_buf("/tmp/project").abs().into(),
         cli_version: "0.0.0".to_string(),
         source: parent_thread_id.map_or(SessionSource::Cli, |parent_thread_id| {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -1164,7 +1167,7 @@ async fn worktrees_overview_groups_linked_checkouts() {
                 "Task",
                 ThreadStatus::Idle,
             );
-            thread.cwd = AbsolutePathBuf::from_absolute_path(cwd).unwrap();
+            thread.cwd = AbsolutePathBuf::from_absolute_path(cwd).unwrap().into();
             thread
         })
         .collect::<Vec<_>>();
@@ -1380,9 +1383,11 @@ async fn shared_overview_shows_only_root_sessions() {
             }
             candidate.updated_at = index;
             candidate.cwd = if index == 0 {
-                test_path_buf("/tmp/project-selected").abs()
+                test_path_buf("/tmp/project-selected").abs().into()
             } else {
-                test_path_buf(&format!("/tmp/project-{}", index % 3)).abs()
+                test_path_buf(&format!("/tmp/project-{}", index % 3))
+                    .abs()
+                    .into()
             };
             candidate
         })
@@ -2051,7 +2056,7 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
         .session;
         assert_eq!(
             (app.config.cwd.clone(), observed.cwd),
-            (expected_cwd.clone(), expected_cwd),
+            (expected_cwd.clone(), expected_cwd.into()),
         );
         app_server.shutdown().await?;
     }
@@ -3025,7 +3030,7 @@ async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone(
         "Task",
         ThreadStatus::Idle,
     );
-    target.cwd = test_path_buf("/tmp/checkout/subdir").abs();
+    target.cwd = test_path_buf("/tmp/checkout/subdir").abs().into();
     app.agents_overview.pinned_thread_ids = Some(Vec::new());
     let mut view = app.agents_overview_view(vec![target.clone()], Some(id));
     view.handle_key_event(KeyCode::Char('p').into());
@@ -3045,7 +3050,7 @@ async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone(
         );
         view.handle_key_event(KeyCode::Char('w').into());
         assert!(
-            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { cwd: Some(cwd) }) if cwd == target.cwd)
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { cwd: Some(cwd) }) if codex_utils_path_uri::LegacyAppPathString::from_abs_path(&cwd) == target.cwd)
         );
         view.handle_key_event(KeyCode::Char('g').into());
         assert!(matches!(

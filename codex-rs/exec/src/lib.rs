@@ -109,6 +109,7 @@ use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_cli::SharedCliOptions;
 use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_worktree::CreateWorktree;
 use codex_worktree::WorktreeManager;
 use codex_worktree::WorktreeSettings;
@@ -1626,9 +1627,12 @@ fn session_configured_from_thread_response(
     approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,
     permission_profile: PermissionProfile,
     active_permission_profile: Option<codex_protocol::models::ActivePermissionProfile>,
-    cwd: AbsolutePathBuf,
+    cwd: LegacyAppPathString,
     reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
 ) -> Result<SessionConfiguredEvent, String> {
+    // Exec talks to an embedded app-server, so core events must retain native paths.
+    let cwd = AbsolutePathBuf::try_from(cwd)
+        .map_err(|err| format!("embedded app-server returned an invalid native cwd: {err}"))?;
     let session_id = SessionId::from_string(session_id)
         .map_err(|err| format!("session id `{session_id}` is invalid: {err}"))?;
     let thread_id = ThreadId::from_string(thread_id)
@@ -1813,13 +1817,15 @@ fn all_thread_source_kinds() -> Vec<ThreadSourceKind> {
     ]
 }
 
-async fn latest_thread_cwd(thread: &AppServerThread) -> PathBuf {
+async fn latest_thread_cwd(thread: &AppServerThread) -> anyhow::Result<PathBuf> {
     if let Some(path) = thread.path.as_deref()
         && let Some(cwd) = parse_latest_turn_context_cwd(path).await
     {
-        return cwd;
+        return Ok(cwd);
     }
-    thread.cwd.to_path_buf()
+    AbsolutePathBuf::try_from(thread.cwd.clone())
+        .map(AbsolutePathBuf::into_path_buf)
+        .map_err(|err| anyhow::anyhow!("embedded app-server returned an invalid native cwd: {err}"))
 }
 
 async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
@@ -1899,7 +1905,7 @@ async fn resolve_resume_thread_id(
                         continue;
                     }
                 }
-                let latest_cwd = latest_thread_cwd(&thread).await;
+                let latest_cwd = latest_thread_cwd(&thread).await?;
                 if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
                     // A usable SQLite candidate is authoritative. Scanning is reserved for a
                     // complete miss so successful `--last` lookups avoid auditing every rollout.
@@ -1981,7 +1987,7 @@ async fn resolve_resume_thread_id(
             if thread.name.as_deref() != Some(session_id) {
                 continue;
             }
-            let latest_cwd = latest_thread_cwd(&thread).await;
+            let latest_cwd = latest_thread_cwd(&thread).await?;
             if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
                 return Ok(Some(thread.id));
             }

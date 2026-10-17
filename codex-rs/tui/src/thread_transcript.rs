@@ -21,8 +21,8 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::UserMessageItem;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use ratatui::style::Stylize as _;
+use std::path::Path;
 
 mod activity_pages;
 mod computer_groups;
@@ -98,7 +98,8 @@ pub(crate) fn thread_to_transcript_cells(
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
 ) -> TranscriptCells {
-    let cwd = thread.cwd;
+    // Transcript paths are executor-owned text used for rendering, never local filesystem roots.
+    let cwd = std::path::PathBuf::from(thread.cwd.as_str());
     let thread_id = ThreadId::from_string(&thread.id).ok();
     let mut cells = thread
         .turns
@@ -123,7 +124,7 @@ pub(crate) fn thread_to_transcript_cells(
 
 pub(crate) fn thread_items_to_transcript_cells(
     thread_id: Option<ThreadId>,
-    cwd: &AbsolutePathBuf,
+    cwd: &Path,
     items: impl IntoIterator<Item = ThreadItem>,
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
@@ -221,7 +222,7 @@ pub(crate) fn thread_items_to_transcript_cells(
 /// Project one item without changing the active widget or its turn lifecycle.
 fn item_to_cells(
     item: ThreadItem,
-    cwd: &AbsolutePathBuf,
+    cwd: &Path,
     raw_reasoning_visibility: RawReasoningVisibility,
     inline_visualization_context: Option<InlineVisualizationContext>,
 ) -> TranscriptCells {
@@ -267,11 +268,11 @@ fn item_to_cells(
             }));
         }
         ThreadItem::AgentMessage { text, .. } => {
-            let parsed = parse_assistant_markdown(&text, cwd.as_path());
+            let parsed = parse_assistant_markdown(&text, cwd);
             if !parsed.visible_markdown.trim().is_empty() {
                 cells.push(Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
                     parsed.visible_markdown,
-                    cwd.as_path(),
+                    cwd,
                     inline_visualization_context,
                 )));
             }
@@ -298,10 +299,7 @@ fn item_to_cells(
         }
         ThreadItem::Plan { text, .. } => {
             if !text.trim().is_empty() {
-                cells.push(Arc::new(crate::history_cell::new_proposed_plan(
-                    text,
-                    cwd.as_path(),
-                )));
+                cells.push(Arc::new(crate::history_cell::new_proposed_plan(text, cwd)));
             }
         }
         ThreadItem::Reasoning {
@@ -319,12 +317,8 @@ fn item_to_cells(
                 text.push_str(&content.join("\n\n"));
             }
             if !text.trim().is_empty() {
-                let mut cell = ReasoningSummaryCell::new(
-                    header,
-                    text,
-                    cwd.as_path(),
-                    /*transcript_only*/ true,
-                );
+                let mut cell =
+                    ReasoningSummaryCell::new(header, text, cwd, /*transcript_only*/ true);
                 cell.set_source_item_id(id);
                 cells.push(Arc::new(cell));
             }

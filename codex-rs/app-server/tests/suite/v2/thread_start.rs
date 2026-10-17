@@ -566,8 +566,8 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(req_id)).await??;
 
-    assert_eq!(response_cwd, cwd.abs());
-    assert_eq!(runtime_workspace_roots, vec![extra_root.abs()]);
+    assert_eq!(response_cwd, cwd.abs().into());
+    assert_eq!(runtime_workspace_roots, vec![extra_root.abs().into()]);
     #[cfg(windows)]
     let _ = sandbox;
     #[cfg(not(windows))]
@@ -576,7 +576,7 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
             panic!("expected workspace-write sandbox");
         };
         assert!(
-            writable_roots.contains(&extra_root.abs().canonicalize()?),
+            writable_roots.contains(&extra_root.abs().canonicalize()?.into()),
             "legacy sandbox projection should include the runtime workspace root"
         );
     }
@@ -598,7 +598,7 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
         sandbox,
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(req_id)).await??;
-    assert_eq!(runtime_workspace_roots, vec![environment_root.abs()]);
+    assert_eq!(runtime_workspace_roots, vec![environment_root.abs().into()]);
     #[cfg(windows)]
     let _ = sandbox;
     #[cfg(not(windows))]
@@ -607,7 +607,7 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
             panic!("expected workspace-write sandbox");
         };
         assert!(
-            writable_roots.contains(&environment_root.abs().canonicalize()?),
+            writable_roots.contains(&environment_root.abs().canonicalize()?.into()),
             "legacy sandbox projection should include the environment workspace root"
         );
     }
@@ -647,7 +647,7 @@ async fn thread_start_excludes_profile_workspace_roots_from_runtime_workspace_ro
 
     assert_eq!(
         runtime_workspace_roots,
-        vec![cwd.path().to_path_buf().abs()]
+        vec![cwd.path().to_path_buf().abs().into()]
     );
 
     Ok(())

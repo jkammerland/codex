@@ -104,7 +104,11 @@ impl App {
             thread_source: ThreadSource::Feature("thread_title".to_string()),
             model,
             model_provider: config.model_provider_id.clone(),
-            cwd: config.cwd.display().to_string(),
+            cwd: self
+                .chat_widget
+                .executor_cwd()
+                .to_string_lossy()
+                .into_owned(),
             active_permission_profile: config
                 .permissions
                 .active_permission_profile()

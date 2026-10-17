@@ -218,7 +218,7 @@ impl BottomPaneView for BoardView {
             }
             KeyCode::Char('/') => state.searching = true,
             KeyCode::Char('#') => state.editing_topic = true,
-            KeyCode::Char('l') => state.followers = !state.followers,
+            KeyCode::Char('v') => state.followers = !state.followers,
             KeyCode::Char('F') => {
                 if let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) {
                     self.sender.send(AppEvent::AgentsBoardManageFollowers(id));
@@ -273,7 +273,7 @@ impl BottomPaneView for BoardView {
                     .map(|entry| entry.conversation_id.clone());
                 state.feed_scroll = 0;
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if state.opened.is_none() => {
                 state.open_selected();
                 if let Some(id) = state
                     .pending_reads
@@ -289,21 +289,30 @@ impl BottomPaneView for BoardView {
                     self.sender.send(AppEvent::AgentsTeamRetry(id));
                 }
             }
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
                 if state.followers {
                     state.followers = false;
-                } else if state.opened.take().is_none() {
+                } else if state.opened.take().is_none() && key.code == KeyCode::Esc {
                     state.active = false;
                     self.sender.send(AppEvent::OpenAgentsOverview);
                 }
             }
             KeyCode::Home if state.opened.is_some() => {
                 state.scroll = 0;
+                state.scroll_anchor = None;
                 state.at_bottom = false;
             }
-            KeyCode::End if state.opened.is_some() => state.at_bottom = true,
-            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                let up = matches!(key.code, KeyCode::Up | KeyCode::PageUp);
+            KeyCode::End if state.opened.is_some() => {
+                state.scroll_anchor = None;
+                state.at_bottom = true;
+            }
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Char('k')
+            | KeyCode::Char('j')
+            | KeyCode::PageUp
+            | KeyCode::PageDown => {
+                let up = matches!(key.code, KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp);
                 if state.opened.is_some() {
                     let step = if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
                         state.page_height.max(1)
@@ -315,6 +324,7 @@ impl BottomPaneView for BoardView {
                     } else {
                         state.scroll.saturating_add(step)
                     };
+                    state.scroll_anchor = None;
                     state.at_bottom = false;
                 } else {
                     let ids: Vec<_> = state

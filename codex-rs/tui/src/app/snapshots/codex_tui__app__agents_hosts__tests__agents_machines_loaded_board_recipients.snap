@@ -1,0 +1,29 @@
+---
+source: tui/src/app/agents_hosts_tests.rs
+assertion_line: 1169
+expression: render(&view)
+---
+  Agent command center   t Tasks   b Board  Group: Project  g
+   All 3   Needs you 0   Working 1   Ready 1   Inactive 1                          tab/⇧tab filter
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+      Tasks                                               │ Task details
+  Board host                                              │
+  /tmp/project · main  3                                  │ Board builder
+  › ● Board builder                                       │ ● Working
+    ○ Board reviewer                                      │
+    ○ Prompt task                                         │ Model: Unknown
+                                                          │ Reasoning: Unknown
+                                                          │
+                                                          │ Project
+                                                          │ /tmp/project
+                                                          │ Project: /tmp/project
+                                                          │ Model: Unknown
+                                                          │ Server: main
+                                                          │
+                                                          │ Prompt
+                                                          │ No prompt available.
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+  ? help  esc back  ↑/↓ move  enter open  n new

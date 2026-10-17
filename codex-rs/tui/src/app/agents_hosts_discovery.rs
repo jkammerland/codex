@@ -10,6 +10,10 @@ use codex_app_server_client::RemoteAppServerEndpoint;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
+use codex_app_server_protocol::ThreadLoadedListParams;
+use codex_app_server_protocol::ThreadLoadedListResponse;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
 
 impl App {
     pub(super) fn ensure_agents_hosts(&mut self, foreground: &AppServerSession) {
@@ -198,6 +202,14 @@ impl App {
 
     pub(super) fn refresh_other_agents_hosts(&mut self, foreground: &AppServerSession) {
         let keys: Vec<_> = self.agents_hosts.hosts.keys().cloned().collect();
+        self.refresh_agents_hosts(foreground, keys);
+    }
+
+    pub(super) fn refresh_agents_hosts(
+        &mut self,
+        foreground: &AppServerSession,
+        keys: impl IntoIterator<Item = HostKey>,
+    ) {
         for key in keys {
             if key == self.agents_hosts.foreground {
                 continue;
@@ -249,6 +261,39 @@ impl App {
                             },
                         }).await.map_err(|_| "Machine thread listing failed".to_string())?;
                         threads.extend(response.data.into_iter().filter(|thread| !thread.ephemeral));
+                        let Some(next) = response.next_cursor else { break };
+                        cursor = Some(next);
+                    }
+
+                    // Loaded Board recipients can lack the user preview required by thread/list.
+                    let mut seen: HashSet<_> = threads.iter().map(|thread| thread.id.clone()).collect();
+                    let mut cursor = None;
+                    loop {
+                        let response = handle.request_typed::<ThreadLoadedListResponse>(ClientRequest::ThreadLoadedList {
+                            request_id: RequestId::String(uuid::Uuid::new_v4().to_string()),
+                            params: ThreadLoadedListParams { cursor, limit: Some(100) },
+                        }).await;
+                        let response = match response {
+                            Ok(response) => response,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to list loaded machine threads");
+                                break;
+                            }
+                        };
+                        for thread_id in response.data {
+                            if !seen.insert(thread_id.clone()) {
+                                continue;
+                            }
+                            match handle.request_typed::<ThreadReadResponse>(ClientRequest::ThreadRead {
+                                request_id: RequestId::String(uuid::Uuid::new_v4().to_string()),
+                                params: ThreadReadParams { thread_id: thread_id.clone(), include_turns: false },
+                            }).await {
+                                Ok(response) if !response.thread.ephemeral => threads.push(response.thread),
+                                Ok(_) => {},
+                                // A loaded thread may disappear between listing and metadata lookup.
+                                Err(error) => tracing::warn!(%thread_id, %error, "failed to read loaded machine thread"),
+                            }
+                        }
                         let Some(next) = response.next_cursor else { break };
                         cursor = Some(next);
                     }

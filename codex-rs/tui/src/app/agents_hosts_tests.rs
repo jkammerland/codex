@@ -995,6 +995,458 @@ async fn successful_configuration_clears_only_current_startup_notices() -> Resul
 }
 
 #[tokio::test]
+async fn parked_host_discovery_includes_loaded_threads_without_user_previews() -> Result<()> {
+    use crate::app_server_session::ThreadParamsMode;
+    use codex_app_server_protocol::JSONRPCMessage;
+    use futures::SinkExt;
+    use futures::StreamExt;
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
+    let mut foreground = AppServerSession::discovery_placeholder();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let machine = key("board-host");
+    let [listed_id, board_id, other_board_id, ephemeral_id, gone_id] =
+        [101, 102, 103, 104, 105].map(ThreadId::from_u128);
+    let listed = overview_thread(
+        listed_id,
+        /*parent_thread_id*/ None,
+        "Prompt task",
+        ThreadStatus::NotLoaded,
+    );
+    let mut board = overview_thread(
+        board_id,
+        /*parent_thread_id*/ None,
+        "Board reviewer",
+        ThreadStatus::Idle,
+    );
+    board.preview.clear();
+    let mut other_board = overview_thread(
+        other_board_id,
+        /*parent_thread_id*/ None,
+        "Board builder",
+        ThreadStatus::Active {
+            active_flags: Vec::new(),
+        },
+    );
+    other_board.preview.clear();
+    let mut ephemeral = overview_thread(
+        ephemeral_id,
+        /*parent_thread_id*/ None,
+        "Temporary",
+        ThreadStatus::Idle,
+    );
+    ephemeral.ephemeral = true;
+    let expected = vec![listed.clone(), board.clone(), other_board.clone()];
+
+    // The server deliberately omits loaded Board-only sessions from ordinary history.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?;
+    let server_listed = listed.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        let mut round = 0;
+        let mut loaded_cursors = Vec::new();
+        let mut reads = Vec::new();
+        while let Some(Ok(Message::Text(text))) = socket.next().await {
+            let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
+                continue;
+            };
+            let params = request.params.unwrap_or_default();
+            let result = match request.method.as_str() {
+                "initialize" => json!({"userAgent": "host-discovery-test/1.0"}),
+                "thread/list" if params["sectionId"] == codex_state::PINNED_THREAD_SECTION_ID => {
+                    json!({"data": [], "nextCursor": null})
+                }
+                "thread/list" => {
+                    round += 1;
+                    json!({"data": [server_listed], "nextCursor": null})
+                }
+                "thread/loaded/list" => {
+                    let cursor = params["cursor"].as_str().map(str::to_owned);
+                    loaded_cursors.push(cursor.clone());
+                    if round == 2 {
+                        socket.send(Message::Text(json!({
+                            "id": request.id,
+                            "error": {"code": -32603, "message": "loaded listing unavailable"},
+                        }).to_string().into())).await?;
+                        continue;
+                    }
+                    match cursor.as_deref() {
+                        None => json!({
+                            "data": [listed_id, board_id, ephemeral_id],
+                            "nextCursor": "loaded-page-2",
+                        }),
+                        Some("loaded-page-2") => json!({
+                            "data": [board_id, gone_id, other_board_id],
+                            "nextCursor": null,
+                        }),
+                        cursor => panic!("unexpected loaded cursor: {cursor:?}"),
+                    }
+                }
+                "thread/read" => {
+                    let params: codex_app_server_protocol::ThreadReadParams =
+                        serde_json::from_value(params)?;
+                    assert!(!params.include_turns);
+                    let id = ThreadId::from_string(&params.thread_id)?;
+                    reads.push(id);
+                    if id == gone_id {
+                        socket
+                            .send(Message::Text(
+                                json!({
+                                    "id": request.id,
+                                    "error": {"code": -32602, "message": "thread is gone"},
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await?;
+                        continue;
+                    }
+                    let thread = if id == board_id {
+                        &board
+                    } else if id == other_board_id {
+                        &other_board
+                    } else if id == ephemeral_id {
+                        &ephemeral
+                    } else {
+                        panic!("unexpected metadata read: {id}");
+                    };
+                    json!({"thread": thread})
+                }
+                method => panic!("discovery must not mutate or hydrate threads: {method}"),
+            };
+            socket
+                .send(Message::Text(
+                    json!({"id": request.id, "result": result})
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+        }
+        Ok::<_, color_eyre::Report>((loaded_cursors, reads))
+    });
+
+    let session = AppServerSession::new(
+        crate::connect_remote_app_server(endpoint).await?,
+        ThreadParamsMode::Remote,
+    );
+    let mut parked = host("Board host / main");
+    parked.session = Some(session);
+    app.agents_hosts.manifest = Some(PathBuf::from("manifest.toml"));
+    app.agents_hosts.hosts.insert(machine.clone(), parked);
+
+    // Successful discovery unions both sources; optional loaded-list failure retains history.
+    for expected_listing in [&expected, &vec![listed]] {
+        app.refresh_other_agents_hosts(&foreground);
+        let update = loop {
+            if let AppEvent::AgentsHostUpdate(update) = events.recv().await.expect("host listing")
+                && matches!(update.as_ref(), HostUpdate::Listed { .. })
+            {
+                break *update;
+            }
+        };
+        let HostUpdate::Listed { result, .. } = &update else {
+            unreachable!()
+        };
+        assert_eq!(result.as_ref().unwrap(), expected_listing);
+        app.handle_agents_host_update(&mut tui, &mut foreground, update)
+            .await?;
+        assert_eq!(
+            app.agents_hosts.hosts[&machine]
+                .state
+                .agents_overview
+                .threads,
+            expected
+                .iter()
+                .map(|thread| (
+                    ThreadId::from_string(&thread.id).unwrap(),
+                    Some(thread.clone())
+                ))
+                .collect(),
+        );
+    }
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    insta::assert_snapshot!("agents_machines_loaded_board_recipients", render(&view));
+
+    while let Some(completed) = app.agents_hosts.tasks.join_next().await {
+        completed?;
+    }
+    app.agents_hosts
+        .hosts
+        .get_mut(&machine)
+        .unwrap()
+        .session
+        .take()
+        .unwrap()
+        .shutdown()
+        .await?;
+    assert_eq!(
+        server.await??,
+        (
+            vec![None, Some("loaded-page-2".into()), None],
+            vec![board_id, ephemeral_id, gone_id, other_board_id],
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_loaded_status_coalesces_only_its_host_after_in_flight_listings() -> Result<()> {
+    use crate::app_server_session::ThreadParamsMode;
+    use codex_app_server_protocol::JSONRPCMessage;
+    use futures::SinkExt;
+    use futures::StreamExt;
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
+    let mut foreground = AppServerSession::discovery_placeholder();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let machine = key("resuming-host");
+    let other_machine = key("other-host");
+    let id = ThreadId::from_u128(106);
+    let tombstone = ThreadId::from_u128(107);
+    let known_id = ThreadId::from_u128(109);
+    let temporary_id = ThreadId::from_u128(110);
+    let known = overview_thread(
+        known_id,
+        /*parent_thread_id*/ None,
+        "Known task",
+        ThreadStatus::Idle,
+    );
+    let mut thread = overview_thread(
+        id,
+        /*parent_thread_id*/ None,
+        "Resumed Board recipient",
+        ThreadStatus::Idle,
+    );
+    thread.preview.clear();
+    let expected = thread.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?;
+    let (listing_started, first_listing) = tokio::sync::oneshot::channel();
+    let (release_listing, listing_released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        let mut listing_started = Some(listing_started);
+        let mut listing_released = Some(listing_released);
+        let mut loaded_lists = 0;
+        let mut reads = Vec::new();
+        while let Some(Ok(Message::Text(text))) = socket.next().await {
+            let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
+                continue;
+            };
+            let params = request.params.unwrap_or_default();
+            let result = match request.method.as_str() {
+                "initialize" => json!({"userAgent": "host-resume-discovery-test/1.0"}),
+                "thread/list" => json!({"data": [], "nextCursor": null}),
+                "thread/loaded/list" => {
+                    loaded_lists += 1;
+                    if loaded_lists == 1 {
+                        listing_started.take().unwrap().send(()).unwrap();
+                        listing_released.take().unwrap().await?;
+                        json!({"data": [], "nextCursor": null})
+                    } else {
+                        json!({"data": [id], "nextCursor": null})
+                    }
+                }
+                "thread/read" => {
+                    let params: codex_app_server_protocol::ThreadReadParams =
+                        serde_json::from_value(params)?;
+                    assert!(!params.include_turns);
+                    reads.push(params.thread_id);
+                    json!({"thread": thread})
+                }
+                method => panic!("discovery must not mutate or hydrate threads: {method}"),
+            };
+            socket
+                .send(Message::Text(
+                    json!({"id": request.id, "result": result})
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+        }
+        Ok::<_, color_eyre::Report>((loaded_lists, reads))
+    });
+
+    // Keep a second real host refresh in flight throughout the first host's follow-up.
+    let other_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let other_endpoint =
+        crate::resolve_remote_addr(&format!("ws://{}", other_listener.local_addr()?))?;
+    let (other_listing_started, other_first_listing) = tokio::sync::oneshot::channel();
+    let (release_other_listing, other_listing_released) = tokio::sync::oneshot::channel();
+    let other_server = tokio::spawn(async move {
+        let (stream, _) = other_listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        let mut listing_started = Some(other_listing_started);
+        let mut listing_released = Some(other_listing_released);
+        let mut loaded_lists = 0;
+        while let Some(Ok(Message::Text(text))) = socket.next().await {
+            let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
+                continue;
+            };
+            let result = match request.method.as_str() {
+                "initialize" => json!({"userAgent": "other-host-discovery-test/1.0"}),
+                "thread/list" => json!({"data": [], "nextCursor": null}),
+                "thread/loaded/list" => {
+                    loaded_lists += 1;
+                    if loaded_lists == 1 {
+                        listing_started.take().unwrap().send(()).unwrap();
+                        listing_released.take().unwrap().await?;
+                    }
+                    json!({"data": [], "nextCursor": null})
+                }
+                method => panic!("unexpected discovery request: {method}"),
+            };
+            socket
+                .send(Message::Text(
+                    json!({"id": request.id, "result": result})
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+        }
+        Ok::<_, color_eyre::Report>(loaded_lists)
+    });
+    let session = AppServerSession::new(
+        crate::connect_remote_app_server(endpoint).await?,
+        ThreadParamsMode::Remote,
+    );
+    let mut parked = host("Resuming host / main");
+    parked.session = Some(session);
+    parked
+        .state
+        .agents_overview
+        .removed_threads
+        .insert(tombstone);
+    parked
+        .state
+        .agents_overview
+        .threads
+        .insert(known_id, Some(known.clone()));
+    let (temporary_notifications, _temporary_receiver) = tokio::sync::mpsc::unbounded_channel();
+    parked
+        .state
+        .temporary_structured_requests
+        .insert(temporary_id, temporary_notifications);
+    app.agents_hosts.hosts.insert(machine.clone(), parked);
+    let mut other_host = host("Other host / main");
+    other_host.session = Some(AppServerSession::new(
+        crate::connect_remote_app_server(other_endpoint).await?,
+        ThreadParamsMode::Remote,
+    ));
+    app.agents_hosts
+        .hosts
+        .insert(other_machine.clone(), other_host);
+    app.refresh_other_agents_hosts(&foreground);
+    first_listing.await?;
+    other_first_listing.await?;
+
+    // Repeated resume notifications coalesce; unloaded and removed rows are not discovered.
+    for (thread_id, status, pending) in [
+        (tombstone, ThreadStatus::Idle, false),
+        (ThreadId::from_u128(108), ThreadStatus::NotLoaded, false),
+        (known_id, ThreadStatus::Idle, false),
+        (temporary_id, ThreadStatus::Idle, false),
+        (id, ThreadStatus::Idle, true),
+        (id, ThreadStatus::Idle, true),
+    ] {
+        app.handle_agents_host_update(
+            &mut tui,
+            &mut foreground,
+            HostUpdate::Event {
+                scope: ConnectionScope {
+                    host: machine.clone(),
+                    epoch: 1,
+                },
+                event: AppServerEvent::ServerNotification(Box::new(
+                    ServerNotification::ThreadStatusChanged(
+                        codex_app_server_protocol::ThreadStatusChangedNotification {
+                            thread_id: thread_id.to_string(),
+                            status,
+                        },
+                    ),
+                )),
+            },
+        )
+        .await?;
+        let parked = &app.agents_hosts.hosts[&machine];
+        assert_eq!(
+            (
+                parked.refresh_generation,
+                parked.refreshing,
+                parked.state.agents_overview.refresh_pending
+            ),
+            (1, true, pending),
+        );
+        assert!(
+            !app.agents_hosts.hosts[&other_machine]
+                .state
+                .agents_overview
+                .refresh_pending
+        );
+    }
+    release_listing.send(()).unwrap();
+
+    for _ in 0..2 {
+        let update = loop {
+            if let AppEvent::AgentsHostUpdate(update) = events.recv().await.expect("host listing")
+                && matches!(update.as_ref(), HostUpdate::Listed { .. })
+            {
+                break *update;
+            }
+        };
+        app.handle_agents_host_update(&mut tui, &mut foreground, update)
+            .await?;
+        assert!(
+            !app.agents_hosts.hosts[&other_machine]
+                .state
+                .agents_overview
+                .refresh_pending
+        );
+    }
+    assert_eq!(
+        app.agents_hosts.hosts[&machine]
+            .state
+            .agents_overview
+            .threads,
+        HashMap::from([(id, Some(expected)), (known_id, Some(known))]),
+    );
+    release_other_listing.send(()).unwrap();
+    loop {
+        if let AppEvent::AgentsHostUpdate(update) = events.recv().await.expect("other host listing")
+            && matches!(update.as_ref(), HostUpdate::Listed { .. })
+        {
+            app.handle_agents_host_update(&mut tui, &mut foreground, *update)
+                .await?;
+            break;
+        }
+    }
+    while let Some(completed) = app.agents_hosts.tasks.join_next().await {
+        completed?;
+    }
+    for key in [machine, other_machine] {
+        app.agents_hosts
+            .hosts
+            .get_mut(&key)
+            .unwrap()
+            .session
+            .take()
+            .unwrap()
+            .shutdown()
+            .await?;
+    }
+    assert_eq!(server.await??, (2, vec![id.to_string()]));
+    assert_eq!(other_server.await??, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn failed_initial_configuration_can_retry_without_stale_results_replacing_it() -> Result<()> {
     let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
     let mut session = AppServerSession::discovery_placeholder();

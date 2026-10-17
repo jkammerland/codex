@@ -526,8 +526,9 @@ impl App {
                 revision,
                 result,
             } => {
+                let host = scope.host.clone();
                 if self.apply_agents_host_listing(scope, generation, revision, result) {
-                    self.refresh_other_agents_hosts(foreground);
+                    self.refresh_agents_hosts(foreground, [host]);
                 }
             }
             HostUpdate::Event { scope, event } => {
@@ -564,6 +565,16 @@ impl App {
                         .hosts
                         .get_mut(&scope.host)
                         .expect("host exists");
+                    let discover_loaded_thread = matches!(
+                        &event,
+                        AppServerEvent::ServerNotification(notification)
+                            if matches!(notification.as_ref(), ServerNotification::ThreadStatusChanged(status)
+                                if status.status != codex_app_server_protocol::ThreadStatus::NotLoaded
+                                    && ThreadId::from_string(&status.thread_id).is_ok_and(|id| {
+                                        !host.state.agents_overview.removed_threads.contains(&id)
+                                            && host.state.agents_overview.threads.get(&id).is_none_or(Option::is_none)
+                                    }))
+                    );
                     host.revision += 1;
                     if let AppServerEvent::ServerNotification(notification) = &event {
                         if let ServerNotification::ThreadStatusChanged(status) =
@@ -624,6 +635,11 @@ impl App {
                             }
                         }
                         event => host.buffered.push_back(HostBufferedEvent::Event(event)),
+                    }
+
+                    // A coordinator resume can become loaded after the discovery snapshot.
+                    if discover_loaded_thread {
+                        self.refresh_agents_hosts(foreground, [scope.host]);
                     }
                 }
             }

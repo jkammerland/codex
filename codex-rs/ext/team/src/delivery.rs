@@ -1,9 +1,12 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
+use codex_app_server_protocol::TeamAddress;
+use codex_app_server_protocol::TeamBoardSnapshot;
 use codex_app_server_protocol::TeamDeliverParams;
 use codex_app_server_protocol::TeamDeliverResponse;
 use codex_app_server_protocol::TeamDeliveryMode;
+use codex_app_server_protocol::TeamMessageKind;
 use codex_app_server_protocol::TeamReceiptState;
 use codex_history::RolloutItem;
 use codex_protocol::ThreadId;
@@ -67,6 +70,44 @@ impl TeamHostService {
             if receipt.state != TeamReceiptState::Pending {
                 continue;
             }
+            // A notification may arrive before its metadata after reconnect. Keep
+            // it pending until sync commits the complete author and thread context.
+            let board = if delivery.message.kind == TeamMessageKind::Board {
+                let snapshot = store
+                    .get::<TeamBoardSnapshot>("board_cache", "current")
+                    .await?;
+                let entry = snapshot.as_ref().and_then(|snapshot| {
+                    snapshot
+                        .entries
+                        .iter()
+                        .find(|entry| entry.message.id == delivery.message.id)
+                });
+                let Some(entry) = entry else {
+                    receipt.detail =
+                        Some("Waiting for Board conversation metadata to synchronize.".into());
+                    store.update_receipt(&receipt).await?;
+                    continue;
+                };
+                ensure!(
+                    entry.message == delivery.message,
+                    "Board metadata conflicts with the delivered message"
+                );
+                let Some(root) = self.gate.root(thread_id) else {
+                    continue;
+                };
+                let Some(enrollment) = store.enrollment(&root.to_string()).await? else {
+                    continue;
+                };
+                Some(crate::board_context::board_context(
+                    entry,
+                    &TeamAddress {
+                        thread_id: thread_id.to_string(),
+                        ..enrollment.address
+                    },
+                ))
+            } else {
+                None
+            };
             let active = thread.team_active_turn_id().await;
             let mode = match (boundary, active, delivery.mode, delivery.wake) {
                 // The lifecycle callback precedes installing the active task.
@@ -136,6 +177,7 @@ impl TeamHostService {
                         sender: serde_json::to_string(&delivery.message.sender)?,
                         body: delivery.message.body,
                         reply_to: delivery.message.reply_to,
+                        board,
                     },
                     submission_id,
                     mode,

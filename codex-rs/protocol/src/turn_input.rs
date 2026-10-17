@@ -49,6 +49,58 @@ pub struct TeamMessageInput {
     pub sender: String,
     pub body: String,
     pub reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<TeamMessageBoardContext>,
+}
+
+/// Immutable attribution synchronized before a Board entry is dispatched.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamMessageBoardContext {
+    pub conversation_id: String,
+    pub append_seq: i64,
+    pub author: TeamMessageAuthor,
+    pub mentions: Vec<TeamMessageMention>,
+    pub notification_reasons: Vec<TeamMessageNotificationReason>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TeamMessageIdentity {
+    User,
+    Agent {
+        machine_id: String,
+        server_id: String,
+        thread_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamMessageAuthor {
+    pub identity: TeamMessageIdentity,
+    pub name: String,
+    pub machine_name: Option<String>,
+    pub legacy: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamMessageMention {
+    pub identity: TeamMessageIdentity,
+    pub display: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamMessageNotificationReason {
+    Mention,
+    ConversationFollow,
+    TopicSubscription,
 }
 
 /// A Responses API item with caller-supplied, harness-only annotations.

@@ -61,6 +61,7 @@ pub struct TeamSyncParams {
     pub coordinator_id: String,
     pub directory: Vec<TeamEnrollment>,
     pub board: Vec<TeamMessage>,
+    pub board_state: super::TeamBoardSnapshot,
     pub cancellation_adapters: Vec<super::TeamCancellationAdapter>,
 }
 
@@ -83,6 +84,9 @@ pub struct TeamSyncResponse {}
     export_to = "v2/"
 )]
 pub enum TeamAgentAction {
+    BoardAction {
+        request: super::TeamBoardParams,
+    },
     Reply {
         message_id: String,
         body: String,
@@ -126,7 +130,8 @@ pub fn team_agent_tool_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "type": {"type": "string", "enum": ["directory", "inbox", "send", "reply", "post", "board", "subscribe"]},
+            "type": {"type": "string", "enum": ["directory", "inbox", "send", "reply", "post", "board", "subscribe", "boardAction"]},
+            "request": super::team_board_tool_schema(),
             "messageId": {"type": "string", "description": "Message from your inbox to reply to, including its original Gitea conversation."},
             "cursor": {"type": "string", "description": "Cursor from a directory, inbox or board page."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
@@ -142,6 +147,7 @@ pub fn team_agent_tool_schema() -> Value {
         },
         "required": ["type"],
         "oneOf": [
+            {"properties": {"type": {"const": "boardAction"}}, "required": ["request"]},
             {"properties": {"type": {"const": "reply"}}, "required": ["messageId", "body"]},
             {"properties": {"type": {"const": "directory"}}},
             {"properties": {"type": {"const": "inbox"}}},

@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use codex_extension_api::ExtensionRegistryBuilder;
 
+mod board;
+mod board_context;
 mod bridge;
 mod control;
 mod control_worker;
@@ -38,3 +40,7 @@ mod tests;
 #[cfg(test)]
 #[path = "model_tests.rs"]
 mod model_tests;
+
+#[cfg(test)]
+#[path = "board_tests.rs"]
+mod board_tests;

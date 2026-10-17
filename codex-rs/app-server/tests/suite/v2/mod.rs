@@ -133,6 +133,7 @@ mod skills_list;
 mod sleep;
 mod sqlite_recovery;
 mod team;
+mod team_board;
 mod team_boundaries;
 mod team_jobs;
 mod thread_archive;

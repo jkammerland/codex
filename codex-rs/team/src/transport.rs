@@ -31,6 +31,29 @@ pub(crate) struct ResolvedEndpoint {
     _tunnel: Option<Arc<Child>>,
 }
 
+fn ssh_forward_command(destination: &str, local_port: u16, remote_port: u16) -> Command {
+    let mut command = Command::new("ssh");
+    command
+        .args([
+            "-v",
+            "-N",
+            "-o",
+            "BatchMode=yes",
+            // An SSH alias must not erase the forwarding this transport owns.
+            "-o",
+            "ClearAllForwardings=no",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-L",
+        ])
+        .arg(format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"))
+        .arg("--")
+        .arg(destination);
+    command
+}
+
 impl ResolvedEndpoint {
     pub async fn open(endpoint: &Endpoint) -> Result<Self> {
         let (endpoint, tunnel) = match endpoint {
@@ -55,21 +78,7 @@ impl ResolvedEndpoint {
                 let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                 let local_port = reservation.local_addr()?.port();
                 drop(reservation);
-                let mut child = Command::new("ssh")
-                    .args([
-                        "-v",
-                        "-N",
-                        "-o",
-                        "BatchMode=yes",
-                        "-o",
-                        "ExitOnForwardFailure=yes",
-                        "-o",
-                        "ConnectTimeout=10",
-                        "-L",
-                    ])
-                    .arg(format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"))
-                    .arg("--")
-                    .arg(destination)
+                let mut child = ssh_forward_command(destination, local_port, *remote_port)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
@@ -184,3 +193,7 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;

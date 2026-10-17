@@ -5160,6 +5160,45 @@ enabled = true
     }
 
     #[test]
+    fn agents_board_follow_keeps_global_features_and_removal_independent() {
+        for remove in [false, true] {
+            let mut args = vec![
+                "codex",
+                "agents",
+                "--manifest",
+                "team.toml",
+                "board",
+                "follow",
+                "conversation",
+                "--disable",
+                "unified_exec",
+            ];
+            if remove {
+                args.push("--remove");
+            }
+            let cli = MultitoolCli::try_parse_from(args).expect("nested board follow arguments");
+            assert_eq!(cli.feature_toggles.disable, vec!["unified_exec"]);
+            let Some(Subcommand::Agents(options)) = cli.subcommand else {
+                panic!("expected agents command");
+            };
+            let Some(codex_team::TeamAction::Board(board)) = options.action else {
+                panic!("expected board command");
+            };
+            let codex_team::BoardAction::Follow {
+                conversation_id,
+                agent,
+                remove: selected,
+            } = board.action
+            else {
+                panic!("expected board follow action");
+            };
+            assert_eq!(conversation_id, "conversation");
+            assert_eq!(agent, None);
+            assert_eq!(selected, remove);
+        }
+    }
+
+    #[test]
     fn feature_toggles_known_features_generate_overrides() {
         let toggles = FeatureToggles {
             enable: vec!["web_search_request".to_string()],

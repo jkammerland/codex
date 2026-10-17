@@ -48,8 +48,25 @@ impl TeamHostService {
         Ok(TeamOutboxAckResponse {})
     }
 
+    #[allow(
+        clippy::await_holding_invalid_type,
+        reason = "publishes a committed Board snapshot before dispatch observes it"
+    )]
     pub async fn sync(&self, params: TeamSyncParams) -> Result<TeamSyncResponse> {
+        let _operation = self.operations.lock().await;
         let store = self.require_coordinator(&params.coordinator_id).await?;
+        let previous = store
+            .get::<TeamBoardSnapshot>("board_cache", "current")
+            .await?;
+        if let Some(previous) = &previous {
+            ensure!(
+                params.board_state.revision >= previous.revision,
+                "board snapshot revision must not regress"
+            );
+        }
+        let entries_changed = previous
+            .as_ref()
+            .is_none_or(|previous| previous.entries != params.board_state.entries);
         for adapter in &params.cancellation_adapters {
             ensure!(
                 adapter.cancel_arguments.is_object()
@@ -77,6 +94,14 @@ impl TeamHostService {
                     .put(&format!("board:{topic}"), &message.id, &message)
                     .await?;
             }
+        }
+        store
+            .put("board_cache", "current", &params.board_state)
+            .await?;
+        // Sync acknowledges coordinator state; echoing TeamChanged would feed
+        // another sync indefinitely. Only new entry metadata can unblock mail.
+        if entries_changed {
+            let _ = self.events.send(crate::lifecycle::HostEvent::Dispatch);
         }
         Ok(TeamSyncResponse {})
     }
@@ -146,6 +171,10 @@ impl TeamHostService {
             ..enrollment.address
         };
         let result = match action {
+            TeamAgentAction::BoardAction { request } => {
+                self.board_action(sender, request, operation.as_ref())
+                    .await?
+            }
             TeamAgentAction::Reply {
                 message_id,
                 body,

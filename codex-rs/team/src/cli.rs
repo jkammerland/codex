@@ -28,6 +28,8 @@ pub struct TeamCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TeamAction {
+    /// Browse shared conversations, post replies, and manage explicit follows.
+    Board(crate::BoardCommand),
     /// Reply to the original sender, board topic or Gitea conversation.
     Reply {
         message_id: String,
@@ -66,7 +68,7 @@ pub enum TeamAction {
         #[arg(long)]
         safe_boundary: bool,
     },
-    /// Publish to a board topic; only explicit subscribers are woken.
+    /// Publish a root post; explicit topic subscribers are notified.
     Post {
         topic: String,
         body: String,
@@ -174,6 +176,9 @@ pub(crate) async fn run(command: TeamCommand) -> Result<()> {
         return crate::operator_mcp::run(client).await;
     }
     let request = match command.command {
+        TeamAction::Board(board) => TeamRequest::Board {
+            request: board.into_request()?,
+        },
         TeamAction::Reply {
             message_id,
             body,

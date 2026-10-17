@@ -64,10 +64,27 @@ impl TeamClient {
             })?;
         if !response.status().is_success() {
             let status = response.status();
+            let body = response.text().await?;
+            // Only an explicit, matching rejection from the coordinator makes
+            // abandoning this draft's operation identity safe. Legacy errors,
+            // commit failures and incomplete responses remain uncertain.
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && matches!(&operation.request, TeamRequest::Board { .. })
+                && let Ok(error) = serde_json::from_str::<serde_json::Value>(&body)
+                && error["outcome"].as_str() == Some("rejected")
+                && error["operationId"].as_str() == Some(operation.operation_id.as_str())
+                && let Some(reason) = error["error"].as_str()
+            {
+                return Err(crate::TeamOperationRejected {
+                    operation_id: operation.operation_id.clone(),
+                    reason: reason.into(),
+                }
+                .into());
+            }
             anyhow::bail!(
                 "operation {}: coordinator returned {status}: {}",
                 operation.operation_id,
-                response.text().await?
+                body
             );
         }
         response.json().await.with_context(|| {

@@ -89,7 +89,7 @@ impl Coordinator {
                 );
             }
         }
-        Ok(Arc::new(Self {
+        let coordinator = Arc::new(Self {
             _lock: lock,
             manifest,
             store,
@@ -102,7 +102,9 @@ impl Coordinator {
             control_updates: Mutex::new(HashMap::new()),
             model_updates: Mutex::new(HashMap::new()),
             changed: watch::channel(0).0,
-        }))
+        });
+        coordinator.backfill_board().await?;
+        Ok(coordinator)
     }
 
     pub fn notify(&self) {
@@ -157,6 +159,7 @@ impl Coordinator {
             control: self.current_control().await?,
             servers,
             agents: self.agents().await?,
+            board: self.board_snapshot().await?,
             messages: self
                 .store
                 .list::<MessageRecord>("message", "", u32::MAX)
@@ -180,6 +183,7 @@ impl Coordinator {
     )]
     pub async fn execute(&self, request: TeamRequest) -> Result<TeamResponse> {
         match request {
+            TeamRequest::Board { request } => self.execute_board(request, None).await,
             TeamRequest::AgentCredential { address } => {
                 let peer = self.peer(&address.machine_id, &address.server_id).await?;
                 let response: TeamAgentCredentialResponse = peer

@@ -11,9 +11,13 @@ use serde::de::DeserializeOwned;
 use sqlx::SqlitePool;
 use tokio::sync::watch;
 
+mod board;
+mod board_query;
 mod host;
 mod outbox;
 
+pub use board::BoardClock;
+pub use board_query::query_board;
 pub use outbox::OutboxEntry;
 
 #[derive(Clone)]

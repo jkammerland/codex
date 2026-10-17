@@ -98,7 +98,7 @@ async fn control_history_survives_restart_and_coordinator_has_single_owner() -> 
 }
 
 #[tokio::test]
-async fn paused_board_defers_publication_and_freezes_only_explicit_subscribers() -> Result<()> {
+async fn paused_board_is_readable_and_freezes_only_subscribers_at_acceptance() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let coordinator = Coordinator::open(manifest(directory.path())).await?;
     let subscriber = agent(&coordinator, "reviewer").await?;
@@ -129,8 +129,11 @@ async fn paused_board_defers_publication_and_freezes_only_explicit_subscribers()
         .get::<MessageRecord>("message", &message.id)
         .await?
         .unwrap();
-    assert!(!pending.published);
-    assert_eq!(pending.targets, None);
+    assert!(pending.published);
+    assert_eq!(pending.targets, Some(vec![subscriber.clone()]));
+    coordinator
+        .subscribe(later.clone(), "review".into(), true)
+        .await?;
     assert_eq!(
         coordinator
             .ingest(message.clone(), TeamDeliveryMode::NextTurn)

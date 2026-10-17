@@ -5136,6 +5136,193 @@ class SubscribeTeamAgentAction(BaseModel):
     type: Annotated[Literal["subscribe"], Field(title="SubscribeTeamAgentActionType")]
 
 
+class TeamBoardFilter(Enum):
+    all = "all"
+    following = "following"
+    mentions = "mentions"
+
+
+class UserTeamBoardIdentity(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["user"], Field(title="UserTeamBoardIdentityType")]
+
+
+class AgentTeamBoardIdentity(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    address: TeamAddress
+    type: Annotated[Literal["agent"], Field(title="AgentTeamBoardIdentityType")]
+
+
+class TeamBoardIdentity(RootModel[UserTeamBoardIdentity | AgentTeamBoardIdentity]):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: UserTeamBoardIdentity | AgentTeamBoardIdentity
+
+
+class TeamBoardMention(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    display: str
+    end: Annotated[int, Field(ge=0)]
+    identity: TeamBoardIdentity
+    start: Annotated[
+        int,
+        Field(description="UTF-8 byte offsets into the entry body, including the leading @.", ge=0),
+    ]
+
+
+class TeamBoardNotificationReason(Enum):
+    mention = "mention"
+    conversation_follow = "conversationFollow"
+    topic_subscription = "topicSubscription"
+
+
+class ListTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cursor: str | None = None
+    filter: TeamBoardFilter | None = "all"
+    identity: TeamBoardIdentity | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    query: str | None = None
+    topic: str | None = None
+    type: Annotated[Literal["list"], Field(title="ListTeamBoardParamsType")]
+
+
+class ReadTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    conversation_id: Annotated[str, Field(alias="conversationId")]
+    cursor: str | None = None
+    identity: TeamBoardIdentity | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    type: Annotated[Literal["read"], Field(title="ReadTeamBoardParamsType")]
+
+
+class PostTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    body: str
+    mentions: list[TeamBoardMention]
+    topic: str
+    type: Annotated[Literal["post"], Field(title="PostTeamBoardParamsType")]
+
+
+class ReplyTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    body: str
+    conversation_id: Annotated[str, Field(alias="conversationId")]
+    mentions: list[TeamBoardMention]
+    reply_to: Annotated[str | None, Field(alias="replyTo")] = None
+    type: Annotated[Literal["reply"], Field(title="ReplyTeamBoardParamsType")]
+
+
+class FollowTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    conversation_id: Annotated[str, Field(alias="conversationId")]
+    enabled: bool
+    identity: TeamBoardIdentity | None = None
+    type: Annotated[Literal["follow"], Field(title="FollowTeamBoardParamsType")]
+
+
+class FollowersTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    conversation_id: Annotated[str, Field(alias="conversationId")]
+    cursor: str | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    type: Annotated[Literal["followers"], Field(title="FollowersTeamBoardParamsType")]
+
+
+class MarkReadTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    append_seq: Annotated[int, Field(alias="appendSeq")]
+    conversation_id: Annotated[str, Field(alias="conversationId")]
+    identity: TeamBoardIdentity | None = None
+    type: Annotated[Literal["markRead"], Field(title="MarkReadTeamBoardParamsType")]
+
+
+class TopicsTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cursor: str | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    type: Annotated[Literal["topics"], Field(title="TopicsTeamBoardParamsType")]
+
+
+class TopicFollowTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    enabled: bool
+    identity: TeamBoardIdentity | None = None
+    topic: str
+    type: Annotated[Literal["topicFollow"], Field(title="TopicFollowTeamBoardParamsType")]
+
+
+class TeamBoardParams(
+    RootModel[
+        ListTeamBoardParams
+        | ReadTeamBoardParams
+        | PostTeamBoardParams
+        | ReplyTeamBoardParams
+        | FollowTeamBoardParams
+        | FollowersTeamBoardParams
+        | MarkReadTeamBoardParams
+        | TopicsTeamBoardParams
+        | TopicFollowTeamBoardParams
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: (
+        ListTeamBoardParams
+        | ReadTeamBoardParams
+        | PostTeamBoardParams
+        | ReplyTeamBoardParams
+        | FollowTeamBoardParams
+        | FollowersTeamBoardParams
+        | MarkReadTeamBoardParams
+        | TopicsTeamBoardParams
+        | TopicFollowTeamBoardParams
+    )
+
+
+class TeamBoardReadState(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    append_seq: Annotated[int, Field(alias="appendSeq")]
+    conversation_id: Annotated[str, Field(alias="conversationId")]
+    identity: TeamBoardIdentity
+
+
+class TeamBoardTopicSubscription(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    identity: TeamBoardIdentity
+    topic: str
+
+
 class TeamCancellationAdapter(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -10214,6 +10401,14 @@ class SubAgentSource(
     root: SubAgentSourceValue | ThreadSpawnSubAgentSource | OtherSubAgentSource
 
 
+class BoardActionTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    request: TeamBoardParams
+    type: Annotated[Literal["boardAction"], Field(title="BoardActionTeamAgentActionType")]
+
+
 class ReplyTeamAgentAction(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10238,7 +10433,8 @@ class SendTeamAgentAction(BaseModel):
 
 class TeamAgentAction(
     RootModel[
-        ReplyTeamAgentAction
+        BoardActionTeamAgentAction
+        | ReplyTeamAgentAction
         | DirectoryTeamAgentAction
         | InboxTeamAgentAction
         | SendTeamAgentAction
@@ -10251,7 +10447,8 @@ class TeamAgentAction(
         populate_by_name=True,
     )
     root: Annotated[
-        ReplyTeamAgentAction
+        BoardActionTeamAgentAction
+        | ReplyTeamAgentAction
         | DirectoryTeamAgentAction
         | InboxTeamAgentAction
         | SendTeamAgentAction
@@ -10294,6 +10491,46 @@ class TeamAgentRuntime(BaseModel):
     ] = None
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str | None, Field(alias="turnId")] = None
+
+
+class TeamBoardAuthor(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    identity: TeamBoardIdentity
+    legacy: Annotated[
+        bool,
+        Field(
+            description="Historical names that were not recorded must not be presented as original names."
+        ),
+    ]
+    machine_name: Annotated[str | None, Field(alias="machineName")] = None
+    name: str
+
+
+class TeamBoardFollower(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    author: TeamBoardAuthor
+    conversation_id: Annotated[str, Field(alias="conversationId")]
+    identity: TeamBoardIdentity
+
+
+class TeamBoardMember(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    author: TeamBoardAuthor
+    available: bool
+
+
+class TeamBoardNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    identity: TeamBoardIdentity
+    reasons: list[TeamBoardNotificationReason]
 
 
 class TeamControlState(BaseModel):
@@ -12027,6 +12264,32 @@ class SessionSource(RootModel[SessionSourceValue | CustomSessionSource | SubAgen
         populate_by_name=True,
     )
     root: SessionSourceValue | CustomSessionSource | SubAgentSessionSource
+
+
+class TeamBoardEntry(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    append_seq: Annotated[int, Field(alias="appendSeq")]
+    author: TeamBoardAuthor
+    conversation_id: Annotated[str, Field(alias="conversationId")]
+    mentions: list[TeamBoardMention]
+    message: TeamMessage
+    notifications: list[TeamBoardNotification]
+
+
+class TeamBoardSnapshot(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    entries: list[TeamBoardEntry]
+    followers: list[TeamBoardFollower]
+    members: list[TeamBoardMember]
+    reads: list[TeamBoardReadState]
+    revision: int
+    topic_subscriptions: Annotated[
+        list[TeamBoardTopicSubscription], Field(alias="topicSubscriptions")
+    ]
 
 
 class TeamDelivery(BaseModel):

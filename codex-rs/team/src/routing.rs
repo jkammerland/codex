@@ -66,9 +66,11 @@ impl Coordinator {
         delivery: TeamDeliveryMode,
     ) -> Result<MessageRecord> {
         let _mutation = self.mutations.lock().await;
-        let record = self.prepare_message(message, delivery).await?;
+        let (record, writes) = self
+            .prepare_message_effects(message, delivery, Vec::new())
+            .await?;
         self.store
-            .put("message", &record.message.id, &record)
+            .put_records(&crate::board::borrowed_writes(&writes))
             .await?;
         self.notify();
         Ok(record)
@@ -173,7 +175,10 @@ impl Coordinator {
     ) -> Result<()> {
         let _mutation = self.mutations.lock().await;
         let (key, subscription) = self.prepare_subscription(address, topic, enabled).await?;
-        self.store.put("subscription", &key, &subscription).await?;
+        let writes = self.subscription_effects(key, subscription).await?;
+        self.store
+            .put_records(&crate::board::borrowed_writes(&writes))
+            .await?;
         self.notify();
         Ok(())
     }
@@ -240,6 +245,8 @@ impl Coordinator {
                     Vec::new()
                 }
                 Some(recipient) => vec![recipient.clone()],
+                None if record.targets.is_some() => record.targets.clone().unwrap_or_default(),
+                None if record.message.reply_to.is_some() => Vec::new(),
                 None => subscriptions
                     .iter()
                     .filter(|(_, subscription)| {
@@ -263,12 +270,13 @@ impl Coordinator {
         machine_id: &str,
         server_id: &str,
         peer: &Peer,
+        synchronized_board: &std::collections::HashMap<String, i64>,
     ) -> Result<()> {
-        for (id, record) in self
+        let records = self
             .store
             .list::<MessageRecord>("message", "", u32::MAX)
-            .await?
-        {
+            .await?;
+        for (id, record) in ordered_delivery_records(records, synchronized_board) {
             if !record.published || record.error.is_some() {
                 continue;
             }
@@ -395,3 +403,37 @@ impl Coordinator {
         Ok((message_id.to_owned(), record))
     }
 }
+
+/// Preserve direct-mail positions while Board slots use the append order from
+/// the acknowledged worker snapshot. Newer Board messages wait for their sync.
+fn ordered_delivery_records(
+    records: Vec<(String, MessageRecord)>,
+    synchronized_board: &std::collections::HashMap<String, i64>,
+) -> Vec<(String, MessageRecord)> {
+    let mut board = Vec::new();
+    let mut positions = Vec::new();
+    for (id, record) in records {
+        if record.message.kind == TeamMessageKind::Board {
+            if let Some(sequence) = synchronized_board.get(&id) {
+                board.push((*sequence, (id, record)));
+                positions.push(None);
+            }
+        } else {
+            positions.push(Some((id, record)));
+        }
+    }
+    board.sort_by_key(|(sequence, _)| *sequence);
+    // Each accepted Board record allocated exactly one vacant slot above.
+    for (slot, (_, record)) in positions
+        .iter_mut()
+        .filter(|slot| slot.is_none())
+        .zip(board)
+    {
+        *slot = Some(record);
+    }
+    positions.into_iter().flatten().collect()
+}
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod tests;

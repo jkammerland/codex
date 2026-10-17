@@ -198,6 +198,8 @@ pub(crate) fn new_status_output_with_rate_limits(
 ) -> CompositeHistoryCell {
     new_status_output_with_rate_limits_handle(
         config,
+        &PathUri::from_abs_path(&config.cwd),
+        &config.effective_workspace_roots(),
         config.model_provider.requires_openai_auth,
         /*model_provider_id*/ None,
         /*remote_connection*/ None,
@@ -222,6 +224,8 @@ pub(crate) fn new_status_output_with_rate_limits(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new_status_output_with_rate_limits_handle(
     config: &Config,
+    cwd: &PathUri,
+    workspace_roots: &[PathUri],
     requires_openai_auth: bool,
     model_provider_id: Option<&str>,
     remote_connection: Option<&RemoteConnectionStatus>,
@@ -243,6 +247,8 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let card = Arc::new(StatusHistoryCell::new(
         config,
+        cwd,
+        workspace_roots,
         requires_openai_auth,
         model_provider_id,
         remote_connection,
@@ -275,6 +281,8 @@ impl StatusHistoryCell {
     #[allow(clippy::too_many_arguments)]
     fn new(
         config: &Config,
+        cwd: &PathUri,
+        workspace_roots: &[PathUri],
         requires_openai_auth: bool,
         model_provider_id: Option<&str>,
         remote_connection: Option<&RemoteConnectionStatus>,
@@ -295,13 +303,11 @@ impl StatusHistoryCell {
     ) -> Self {
         let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
         let permission_profile = config.permissions.effective_permission_profile();
-        let workspace_roots = config.effective_workspace_roots();
-        let cwd = PathUri::from_abs_path(&config.cwd);
         let model_provider = model_provider_id
             .filter(|id| !id.trim().is_empty())
             .map(str::to_string);
         let mut config_entries = vec![
-            ("workdir", config.cwd.display().to_string()),
+            ("workdir", cwd.inferred_native_path_string()),
             ("model", model_name.to_string()),
             (
                 "approval",
@@ -309,7 +315,7 @@ impl StatusHistoryCell {
             ),
             (
                 "sandbox",
-                summarize_permission_profile(&permission_profile, &cwd, &workspace_roots),
+                summarize_permission_profile(&permission_profile, cwd, workspace_roots),
             ),
         ];
         if let Some(provider_id) = &model_provider {
@@ -338,8 +344,8 @@ impl StatusHistoryCell {
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "<unknown>".to_string());
         let active_permission_profile = config.permissions.active_permission_profile();
-        let sandbox = status_permission_summary(&permission_profile, &cwd, &workspace_roots);
-        let workspace_root_suffix = workspace_root_suffix(&workspace_roots, &cwd);
+        let sandbox = status_permission_summary(&permission_profile, cwd, workspace_roots);
+        let workspace_root_suffix = workspace_root_suffix(workspace_roots, cwd);
         let approval = status_approval_label(approval_policy, config.approvals_reviewer, &approval);
         let permissions = status_permissions_label(
             active_permission_profile.as_ref(),
@@ -385,7 +391,7 @@ impl StatusHistoryCell {
         Self {
             model_name,
             model_details,
-            directory: config.cwd.to_path_buf(),
+            directory: PathBuf::from(cwd.inferred_native_path_string()),
             permissions,
             collaboration_mode: collaboration_mode.map(ToString::to_string),
             model_provider,

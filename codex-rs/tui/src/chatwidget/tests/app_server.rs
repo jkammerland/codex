@@ -15,7 +15,7 @@ fn thread_settings_for_test(
         thread_id: thread_id.to_string(),
         thread_settings: codex_app_server_protocol::ThreadSettings {
             disabled_plugin_ids: Vec::new(),
-            cwd: test_path_buf("/tmp/thread-settings").abs(),
+            cwd: test_path_buf("/tmp/thread-settings").abs().into(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
             sandbox_policy: codex_app_server_protocol::SandboxPolicy::ReadOnly {
@@ -58,8 +58,8 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/tmp/thread-settings").abs(),
-        runtime_workspace_roots: vec![test_path_buf("/tmp/thread-settings").abs()],
+        cwd: test_path_buf("/tmp/thread-settings").abs().into(),
+        runtime_workspace_roots: vec![test_path_buf("/tmp/thread-settings").abs().into()],
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
@@ -624,7 +624,7 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     chat.set_feature_enabled(Feature::Apps, /*enabled*/ true);
     let thread_id = ThreadId::new();
     let mut session = configured_thread_session(thread_id);
-    session.cwd = test_path_buf("/tmp/original-workspace").abs();
+    session.cwd = test_path_buf("/tmp/original-workspace").abs().into();
     chat.handle_thread_session(session);
     chat.config.permissions.approval_policy =
         Constrained::allow_only(AskForApproval::Never.to_core());

@@ -279,7 +279,8 @@ stream_max_retries = 0
             crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
         )
         .await?;
-    for cwd in [&app.config.cwd, &other.session.cwd] {
+    let other_cwd = AbsolutePathBuf::try_from(other.session.cwd.clone())?;
+    for cwd in [&app.config.cwd, &other_cwd] {
         crate::legacy_core::config::set_project_trust_level(
             app.config.codex_home.as_path(),
             cwd.as_path(),

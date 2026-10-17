@@ -453,7 +453,7 @@ impl ChatWidget {
         let op = AppCommand::user_turn(
             client_user_message_id.clone(),
             items,
-            self.config.cwd.to_path_buf(),
+            self.executor_cwd().to_path_buf(),
             AskForApproval::from(self.config.permissions.approval_policy.value()),
             active_permission_profile,
             effective_mode.model().to_string(),

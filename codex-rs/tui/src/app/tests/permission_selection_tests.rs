@@ -272,9 +272,10 @@ async fn custom_permission_selection_scenario() -> Result<()> {
         before
     );
     let settings = next_thread_settings_updated(&mut server, thread_id).await;
+    let settings_cwd = AbsolutePathBuf::try_from(settings.thread_settings.cwd.clone())?;
     let expected = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-        &settings.thread_settings.sandbox_policy.to_core(),
-        settings.thread_settings.cwd.as_path(),
+        &settings.thread_settings.sandbox_policy.to_core()?,
+        settings_cwd.as_path(),
     );
     assert!(matches!(
         settings.thread_settings.sandbox_policy,

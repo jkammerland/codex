@@ -98,7 +98,7 @@ impl ChatWidget {
             self.plugins_fetch_state.in_flight_cwd = None;
         }
 
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -167,7 +167,7 @@ impl ChatWidget {
         marketplaces: Vec<PluginMarketplaceEntry>,
         section_errors: Vec<PluginRemoteSectionError>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -200,7 +200,7 @@ impl ChatWidget {
     }
 
     fn prefetch_plugins(&mut self) {
-        let cwd = self.config.cwd.to_path_buf();
+        let cwd = self.executor_cwd().to_path_buf();
         if self.plugins_fetch_state.in_flight_cwd.as_deref() == Some(cwd.as_path()) {
             return;
         }
@@ -210,7 +210,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn on_plugins_list_fetch_started(&mut self, cwd: PathBuf) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -223,7 +223,7 @@ impl ChatWidget {
     }
 
     pub(super) fn plugins_cache_for_current_cwd(&self) -> PluginsCacheState {
-        if self.plugins_fetch_state.cache_cwd.as_deref() == Some(self.config.cwd.as_path()) {
+        if self.plugins_fetch_state.cache_cwd.as_deref() == Some(self.executor_cwd()) {
             self.plugins_cache.clone()
         } else {
             PluginsCacheState::Uninitialized
@@ -251,7 +251,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_plugins_list(&mut self, cwd: PathBuf, response: PluginListResponse) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -283,7 +283,7 @@ impl ChatWidget {
     pub(crate) fn open_marketplace_add_prompt(&mut self) {
         self.plugins_active_tab_id = Some(ADD_MARKETPLACE_TAB_ID.to_string());
         let tx = self.app_event_tx.clone();
-        let cwd = self.config.cwd.to_path_buf();
+        let cwd = self.executor_cwd().to_path_buf();
         let view = CustomPromptView::new(
             "Add marketplace".to_string(),
             "owner/repo, git URL, or local marketplace path".to_string(),
@@ -416,7 +416,7 @@ impl ChatWidget {
         cwd: PathBuf,
         result: Result<PluginReadResponse, String>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -451,7 +451,7 @@ impl ChatWidget {
         plugin_display_name: String,
         result: Result<PluginInstallResponse, String>,
     ) -> bool {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return true;
         }
 
@@ -509,7 +509,7 @@ impl ChatWidget {
         _source: String,
         result: Result<MarketplaceAddResponse, String>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -556,7 +556,7 @@ impl ChatWidget {
         marketplace_display_name: String,
         result: Result<MarketplaceRemoveResponse, String>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -601,7 +601,7 @@ impl ChatWidget {
         cwd: PathBuf,
         result: Result<MarketplaceUpgradeResponse, String>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -727,7 +727,7 @@ impl ChatWidget {
             return true;
         }
 
-        let cwd = self.config.cwd.to_path_buf();
+        let cwd = self.executor_cwd().to_path_buf();
         let marketplace_name = Some(marketplace.name.clone());
         self.open_marketplace_upgrade_loading_popup(marketplace_name.as_deref());
         self.app_event_tx
@@ -748,7 +748,7 @@ impl ChatWidget {
         enabled: bool,
         result: Result<(), String>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 
@@ -790,7 +790,7 @@ impl ChatWidget {
         plugin_display_name: String,
         result: Result<PluginUninstallResponse, String>,
     ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
+        if self.executor_cwd() != cwd.as_path() {
             return;
         }
 

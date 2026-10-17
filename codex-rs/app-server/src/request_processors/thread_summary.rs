@@ -177,7 +177,7 @@ pub(crate) fn thread_settings_from_config_snapshot(
 ) -> ThreadSettings {
     ThreadSettings {
         disabled_plugin_ids: config_snapshot.disabled_plugin_ids.clone(),
-        cwd: config_snapshot.cwd().clone(),
+        cwd: config_snapshot.cwd().clone().into(),
         approval_policy: config_snapshot.approval_policy.into(),
         approvals_reviewer: config_snapshot.approvals_reviewer.into(),
         sandbox_policy: config_snapshot.sandbox_policy().into(),
@@ -281,7 +281,7 @@ pub(crate) fn summary_to_thread(
         recency_at: updated_at.map(|dt| dt.timestamp()),
         status: ThreadStatus::NotLoaded,
         path: (!path.as_os_str().is_empty()).then_some(path),
-        cwd,
+        cwd: cwd.into(),
         cli_version,
         agent_nickname: source.get_nickname(),
         agent_role: source.get_agent_role(),

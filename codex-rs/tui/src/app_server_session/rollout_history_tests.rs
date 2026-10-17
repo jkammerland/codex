@@ -222,7 +222,11 @@ async fn remote_resume_restores_saved_server_profile_without_permission_override
         .await?;
     assert_eq!(
         resumed.session.runtime_workspace_roots,
-        config.workspace_roots
+        config
+            .workspace_roots
+            .iter()
+            .map(codex_utils_path_uri::LegacyAppPathString::from_abs_path)
+            .collect::<Vec<_>>()
     );
     assert!(
         resumed

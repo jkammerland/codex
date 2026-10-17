@@ -7,6 +7,40 @@ use crate::history_cell::ForkedThreadHistoryCell;
 use crate::style::accent_color;
 
 impl ChatWidget {
+    /// Executor-owned path text for rendering and remote RPCs, never local filesystem access.
+    pub(crate) fn executor_cwd(&self) -> &std::path::Path {
+        if self
+            .remote_connection
+            .as_ref()
+            .is_some_and(|connection| !connection.is_local_daemon)
+        {
+            self.current_cwd
+                .as_deref()
+                .unwrap_or_else(|| self.config.cwd.as_path())
+        } else {
+            self.config.cwd.as_path()
+        }
+    }
+
+    /// Raw executor roots used by display surfaces, separate from native client configuration.
+    pub(crate) fn executor_workspace_roots(
+        &self,
+    ) -> Vec<codex_utils_path_uri::LegacyAppPathString> {
+        if self
+            .remote_connection
+            .as_ref()
+            .is_some_and(|connection| !connection.is_local_daemon)
+        {
+            self.executor_workspace_roots.clone()
+        } else {
+            self.config
+                .workspace_roots
+                .iter()
+                .map(codex_utils_path_uri::LegacyAppPathString::from_abs_path)
+                .collect()
+        }
+    }
+
     /// Offer the flourish only for a successful primary thread/start without initial work.
     pub(crate) fn mark_fresh_task_for_sparkle(
         &mut self,
@@ -71,7 +105,7 @@ impl ChatWidget {
         self.session_network_proxy = session.network_proxy.clone();
         let previous_thread_id = self.thread_id;
         let connector_scope_changed = previous_thread_id != Some(session.thread_id)
-            || self.config.cwd.as_path() != session.cwd.as_path();
+            || self.current_cwd.as_deref() != Some(std::path::Path::new(session.cwd.as_str()));
         self.thread_id = Some(session.thread_id);
         self.daybreak_enabled = self.config.features.enabled(Feature::CliDaybreak)
             && session.daybreak_enabled
@@ -94,7 +128,9 @@ impl ChatWidget {
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
             if (previous_thread_id.is_some()
-                || (self.remote_connection.is_some() && self.config.cwd != session.cwd))
+                || (self.remote_connection.is_some()
+                    && self.current_cwd.as_deref()
+                        != Some(std::path::Path::new(session.cwd.as_str()))))
                 && self.status_account_display == Some(StatusAccountDisplay::ApiKey)
             {
                 self.refresh_account_scoped_models();
@@ -113,18 +149,27 @@ impl ChatWidget {
         self.update_collaboration_mode_indicator();
         self.forked_from = session.forked_from_id;
         self.current_rollout_path = session.rollout_path.clone();
-        self.current_cwd = Some(session.cwd.to_path_buf());
-        self.config.cwd = session.cwd.clone();
+        self.current_cwd = Some(std::path::PathBuf::from(session.cwd.as_str()));
+        self.executor_workspace_roots = session.runtime_workspace_roots.clone();
+        // Server paths remain authoritative for display. Only a local session may update the
+        // native config used by local filesystem integrations.
+        if self
+            .remote_connection
+            .as_ref()
+            .is_none_or(|connection| connection.is_local_daemon)
+            && let Err(error) = crate::executor_paths::sync_local_config_paths(
+                &mut self.config,
+                &session.cwd,
+                &session.runtime_workspace_roots,
+            )
+        {
+            tracing::warn!(%error, "invalid local session paths");
+        }
         self.config.model_provider_id = session.model_provider_id.clone();
         self.set_daybreak_enabled(self.daybreak_enabled);
         if connector_scope_changed {
             self.invalidate_connector_scope();
         }
-        let runtime_workspace_roots = session.runtime_workspace_roots.clone();
-        self.config.workspace_roots = runtime_workspace_roots.clone();
-        self.config
-            .permissions
-            .set_workspace_roots(runtime_workspace_roots);
         self.config.service_tier = session.service_tier.clone();
         self.effective_service_tier = session.service_tier.clone();
         if let Err(err) = self
@@ -347,7 +392,7 @@ impl ChatWidget {
                 }
                 let (markdown, source) = match item {
                     ThreadItem::AgentMessage { text, .. } => (
-                        parse_assistant_markdown(text, self.config.cwd.as_path()).visible_markdown,
+                        parse_assistant_markdown(text, self.executor_cwd()).visible_markdown,
                         text,
                     ),
                     ThreadItem::Plan { text, .. } => (text.clone(), text),

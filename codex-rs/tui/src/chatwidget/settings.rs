@@ -493,8 +493,29 @@ impl ChatWidget {
     }
 
     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
+        let permission_profile =
+            match crate::executor_paths::display_permission_profile_from_app_server(
+                &settings.sandbox_policy,
+                &settings.cwd,
+                if self
+                    .remote_connection
+                    .as_ref()
+                    .is_some_and(|connection| !connection.is_local_daemon)
+                {
+                    crate::app_server_session::ThreadParamsMode::Remote
+                } else {
+                    crate::app_server_session::ThreadParamsMode::Embedded
+                },
+            ) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    self.add_error_message(format!("Invalid executor permission paths: {error}"));
+                    return;
+                }
+            };
         self.invalidate_permission_discovery();
-        let cwd_changed = self.config.cwd != settings.cwd;
+        let cwd_changed =
+            self.current_cwd.as_deref() != Some(std::path::Path::new(settings.cwd.as_str()));
         self.apply_thread_settings_cwd(settings.cwd.clone());
         self.config.model_provider_id = settings.model_provider.clone();
         self.set_service_tier(settings.service_tier.clone());
@@ -510,10 +531,6 @@ impl ChatWidget {
         }
         self.set_approvals_reviewer(settings.approvals_reviewer.to_core());
 
-        let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
-            &settings.sandbox_policy.to_core(),
-            settings.cwd.as_path(),
-        );
         let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
             permission_profile,
             settings.active_permission_profile.take().map(Into::into),
@@ -560,14 +577,39 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn apply_thread_settings_cwd(&mut self, cwd: AbsolutePathBuf) {
+    fn apply_thread_settings_cwd(&mut self, cwd: codex_utils_path_uri::LegacyAppPathString) {
+        let previous_executor_cwd =
+            codex_utils_path_uri::LegacyAppPathString::from_path(self.executor_cwd());
+        if self
+            .executor_workspace_roots
+            .contains(&previous_executor_cwd)
+        {
+            let previous_roots = std::mem::take(&mut self.executor_workspace_roots);
+            self.executor_workspace_roots.push(cwd.clone());
+            for root in previous_roots {
+                if root != previous_executor_cwd && !self.executor_workspace_roots.contains(&root) {
+                    self.executor_workspace_roots.push(root);
+                }
+            }
+        }
+        self.current_cwd = Some(std::path::PathBuf::from(cwd.as_str()));
+        self.status_line_project_root_name_cache = None;
+        // A native-looking remote path still belongs to a different filesystem.
+        if self
+            .remote_connection
+            .as_ref()
+            .is_some_and(|connection| !connection.is_local_daemon)
+        {
+            return;
+        }
+        let Some(cwd) = cwd.to_inferred_abs_path() else {
+            tracing::warn!("local thread settings contained a non-native cwd");
+            return;
+        };
         let previous_cwd = std::mem::replace(&mut self.config.cwd, cwd.clone());
         if previous_cwd != cwd {
             self.permission_discovery = None;
         }
-        self.current_cwd = Some(cwd.to_path_buf());
-        self.status_line_project_root_name_cache = None;
-
         if !self.config.workspace_roots.contains(&previous_cwd) {
             return;
         }

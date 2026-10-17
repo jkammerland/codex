@@ -157,7 +157,7 @@ pub(crate) fn spawn_search(
                 Some(TaskMention {
                     thread_id: thread.id,
                     title,
-                    cwd: thread.cwd.to_string_lossy().into_owned(),
+                    cwd: thread.cwd.as_str().to_owned(),
                     snippet: result.snippet,
                 })
             })

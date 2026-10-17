@@ -246,8 +246,27 @@ impl ChatWidget {
             .collect();
         let agents_summary =
             crate::status::compose_agents_summary(&self.config, &self.instruction_source_paths);
+        let paths = codex_utils_path_uri::PathUri::try_from(
+            codex_utils_path_uri::LegacyAppPathString::from_path(self.executor_cwd()),
+        )
+        .and_then(|cwd| {
+            self.executor_workspace_roots()
+                .into_iter()
+                .map(codex_utils_path_uri::PathUri::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map(|roots| (cwd, roots))
+        });
+        let (cwd, workspace_roots) = match paths {
+            Ok(paths) => paths,
+            Err(error) => {
+                self.add_error_message(format!("Could not display executor paths: {error}"));
+                return;
+            }
+        };
         let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
             &self.config,
+            &cwd,
+            &workspace_roots,
             self.requires_openai_auth,
             self.thread_id
                 .map(|_| self.config.model_provider_id.as_str()),
@@ -284,7 +303,7 @@ impl ChatWidget {
             ("Model".to_string(), Arc::<str>::from(model)),
             (
                 "Directory".to_string(),
-                Arc::from(self.config.cwd.display().to_string()),
+                Arc::from(self.executor_cwd().display().to_string()),
             ),
         ];
         if let Some(name) = self.thread_name.as_deref().filter(|name| !name.is_empty()) {

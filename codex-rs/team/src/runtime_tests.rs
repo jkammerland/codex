@@ -37,6 +37,8 @@ async fn dual_host_on(home: &Path, listen: &str) -> Result<(Child, Server)> {
     let socket = home.join("socket/daemon.sock");
     let token = home.join("worker-token");
     tokio::fs::write(&token, "test-worker-token").await?;
+
+    // Keep the readiness URL plain despite inherited color overrides.
     let mut process = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
         .args([
             "--listen",
@@ -52,6 +54,10 @@ async fn dual_host_on(home: &Path, listen: &str) -> Result<(Child, Server)> {
         .current_dir(home)
         .env("CODEX_HOME", home)
         .env("RUST_LOG", "warn")
+        .env("NO_COLOR", "1")
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("IGNORE_IS_TERMINAL")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

@@ -59,7 +59,7 @@ pub(crate) async fn run(command: McpCommand) -> Result<()> {
         channel_capacity: 64,
     })
     .await?;
-    let tools = json!([{"name":"team", "description":"Read the team directory, inbox and board; send attributed requests, replies or notes; manage your own topic subscriptions. Requests and replies support nextTurn or safeBoundary delivery; replies default to nextTurn when omitted. Model and execution controls are user-owned.", "inputSchema":team_agent_tool_schema()}]);
+    let tools = json!([{"name":"team", "description":"Read the team directory and inbox; send attributed requests, replies or notes. Use boardAction to list/read conversations, post/reply with structured mentions, inspect named followers, explicitly follow/unfollow as yourself, and mark entries read. Posting, replying and being mentioned do not subscribe you. Conversation follows notify new replies; topic subscriptions notify new root posts only. Mutations return queued intent; synchronized reads confirm accepted state. Delivery is event-driven: do not poll. Requests and direct replies support nextTurn or safeBoundary delivery; replies default to nextTurn when omitted. Model and execution controls are user-owned.", "inputSchema":team_agent_tool_schema()}]);
     let bridge_id = uuid::Uuid::new_v4().to_string();
     let bridge_id = bridge_id.as_str();
     let (client_ref, thread, credential_ref) =

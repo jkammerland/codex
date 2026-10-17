@@ -258,6 +258,7 @@ impl Coordinator {
         &self,
         departed: &std::collections::HashSet<String>,
     ) -> Result<()> {
+        self.retain_departed_board_names(departed).await?;
         // Remove pending selection intent first. A crash during cleanup may
         // leave a stale directory row, but cannot replay old settings on rejoin.
         for key in departed {

@@ -175,11 +175,15 @@ async fn rpc(
     };
     match result {
         Ok(response) => Json(response).into_response(),
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": error.to_string()})),
-        )
-            .into_response(),
+        Err(error) => {
+            let body = if let Some(rejected) = error.downcast_ref::<crate::TeamOperationRejected>()
+            {
+                json!({"error": rejected.reason, "outcome": "rejected", "operationId": rejected.operation_id})
+            } else {
+                json!({"error": error.to_string()})
+            };
+            (StatusCode::BAD_REQUEST, Json(body)).into_response()
+        }
     }
 }
 

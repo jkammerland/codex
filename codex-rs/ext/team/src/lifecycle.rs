@@ -138,6 +138,8 @@ impl TeamHostService {
         let Some(store) = self.store.get() else {
             return Ok(());
         };
+        let lifecycle_changed = !matches!(event, HostEvent::Dispatch);
+        let previous_store_revision = store.revision();
         match event {
             HostEvent::Dispatch => {}
             HostEvent::Ready(thread_id) => self.reconcile_delivery(&thread_id).await?,
@@ -200,15 +202,12 @@ impl TeamHostService {
             }
         }
         self.cancel_jobs().await?;
-        self.notify();
         if store
             .control()
             .await?
             .is_some_and(|control| control.mode == TeamExecutionMode::Running)
+            && let Some(manager) = self.manager.upgrade()
         {
-            let Some(manager) = self.manager.upgrade() else {
-                return Ok(());
-            };
             for thread_id in manager.list_thread_ids().await {
                 let Some(root) = self.gate.root(thread_id) else {
                     continue;
@@ -237,6 +236,11 @@ impl TeamHostService {
                     tracing::warn!(%thread_id, %error, "team member requires reconciliation");
                 }
             }
+        }
+        // Publish after receipt transitions commit so an event-driven reader
+        // can observe them. A no-op dispatch must not echo coordinator sync.
+        if lifecycle_changed || store.revision() != previous_store_revision {
+            self.notify();
         }
         Ok(())
     }
@@ -384,3 +388,7 @@ impl TurnLifecycleContributor for TeamHostService {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "board_lifecycle_tests.rs"]
+mod board_lifecycle_tests;

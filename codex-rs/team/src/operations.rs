@@ -35,6 +35,9 @@ impl Coordinator {
             return Ok(response);
         }
         match operation.request {
+            TeamRequest::Board { request } => {
+                self.execute_board(request, Some((&id, &digest))).await
+            }
             TeamRequest::Send {
                 recipient,
                 body,
@@ -101,19 +104,18 @@ impl Coordinator {
                 }
                 let (key, subscription) =
                     self.prepare_subscription(address, topic, enabled).await?;
+                let mut writes = self.subscription_effects(key, subscription).await?;
+                writes.push((
+                    "operator_result",
+                    id.clone(),
+                    serde_json::to_value(TeamResponse::Done)?,
+                ));
                 self.store
                     .put_record_once(
                         "operator_operation",
                         &id,
                         &digest,
-                        &[
-                            ("subscription", &key, serde_json::to_value(subscription)?),
-                            (
-                                "operator_result",
-                                &id,
-                                serde_json::to_value(TeamResponse::Done)?,
-                            ),
-                        ],
+                        &crate::board::borrowed_writes(&writes),
                     )
                     .await?;
                 self.notify();
@@ -244,6 +246,13 @@ impl Coordinator {
                 serde_json::to_string(&previous)? == digest,
                 "operation identity has conflicting content"
             );
+            if let Some(rejection) = self
+                .store
+                .get::<crate::TeamOperationRejected>("operator_rejection", id)
+                .await?
+            {
+                return Err(rejection.into());
+            }
             return Ok(Some(
                 self.store
                     .get("operator_result", id)
@@ -269,23 +278,23 @@ impl Coordinator {
         if let Some(response) = self.operation_result(id, digest).await? {
             return Ok(response);
         }
-        let record = self.prepare_message(message, delivery).await?;
+        let (record, mut writes) = self
+            .prepare_message_effects(message, delivery, Vec::new())
+            .await?;
         let response = TeamResponse::Message {
-            message: Box::new(record.clone()),
+            message: Box::new(record),
         };
+        writes.push((
+            "operator_result",
+            id.into(),
+            serde_json::to_value(&response)?,
+        ));
         self.store
             .put_record_once(
                 "operator_operation",
                 id,
                 digest,
-                &[
-                    (
-                        "message",
-                        &record.message.id,
-                        serde_json::to_value(&record)?,
-                    ),
-                    ("operator_result", id, serde_json::to_value(&response)?),
-                ],
+                &crate::board::borrowed_writes(&writes),
             )
             .await?;
         self.notify();

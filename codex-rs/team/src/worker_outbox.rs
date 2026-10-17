@@ -85,7 +85,7 @@ impl Coordinator {
             );
             return Ok(());
         }
-        let prepared: Result<(&str, String, serde_json::Value)> = async {
+        let prepared: Result<crate::board::BoardWrites> = async {
             match entry.kind.as_str() {
                 "message" => {
                     let outbound: OutboundMessage = serde_json::from_value(entry.payload.clone())?;
@@ -94,14 +94,10 @@ impl Coordinator {
                             && outbound.message.sender.server_id == server.id,
                         "message sender belongs to another worker"
                     );
-                    let record = self
-                        .prepare_message(outbound.message, outbound.delivery)
+                    let (_, writes) = self
+                        .prepare_message_effects(outbound.message, outbound.delivery, Vec::new())
                         .await?;
-                    Ok((
-                        "message",
-                        record.message.id.clone(),
-                        serde_json::to_value(record)?,
-                    ))
+                    Ok(writes)
                 }
                 "subscription" => {
                     let subscription: Subscription = serde_json::from_value(entry.payload.clone())?;
@@ -117,7 +113,28 @@ impl Coordinator {
                             subscription.enabled,
                         )
                         .await?;
-                    Ok(("subscription", key, serde_json::to_value(subscription)?))
+                    self.subscription_effects(key, subscription).await
+                }
+                "board" => {
+                    #[derive(serde::Deserialize)]
+                    struct BoardOutbox {
+                        sender: TeamAddress,
+                        request: TeamBoardParams,
+                    }
+                    let outbound: BoardOutbox = serde_json::from_value(entry.payload.clone())?;
+                    ensure!(
+                        outbound.sender.machine_id == machine.id
+                            && outbound.sender.server_id == server.id,
+                        "board sender belongs to another worker"
+                    );
+                    let identity = TeamBoardIdentity::Agent {
+                        address: crate::model::canonical_address(outbound.sender)?,
+                    };
+                    self.board_author(&identity, false).await?;
+                    let (_, writes) = self
+                        .prepare_board_request(outbound.request, identity, &entry.id)
+                        .await?;
+                    Ok(writes)
                 }
                 "receipt" => {
                     let (key, record) = self
@@ -127,15 +144,15 @@ impl Coordinator {
                             serde_json::from_value(entry.payload.clone())?,
                         )
                         .await?;
-                    Ok(("message", key, serde_json::to_value(record)?))
+                    Ok(vec![("message", key, serde_json::to_value(record)?)])
                 }
                 kind => anyhow::bail!("unknown host outbox entry kind: {kind}"),
             }
         }
         .await;
-        let (namespace, key, value) = match prepared {
-            Ok(effect) => effect,
-            Err(error) => (
+        let writes = match prepared {
+            Ok(effects) => effects,
+            Err(error) => vec![(
                 "rejected_outbox",
                 id.clone(),
                 serde_json::to_value(RejectedOutbox {
@@ -144,10 +161,15 @@ impl Coordinator {
                     entry: entry.clone(),
                     reason: error.to_string(),
                 })?,
-            ),
+            )],
         };
         self.store
-            .put_record_once("outbox_intake", &id, &digest, &[(namespace, &key, value)])
+            .put_record_once(
+                "outbox_intake",
+                &id,
+                &digest,
+                &crate::board::borrowed_writes(&writes),
+            )
             .await?;
         self.notify();
         Ok(())

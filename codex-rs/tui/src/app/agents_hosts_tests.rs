@@ -275,6 +275,7 @@ fn team_snapshot(id: ThreadId) -> TeamSnapshot {
         thread_id: id.to_string(),
     };
     TeamSnapshot {
+        board: Default::default(),
         control: TeamControlState {
             coordinator_id: "coordinator".into(),
             revision: 4,

@@ -31,8 +31,9 @@ impl Coordinator {
             })
             .await?;
         ensure!(
-            host.protocol_version == 2,
-            "unsupported worker team protocol"
+            host.protocol_version == 3,
+            "worker team protocol {} is incompatible with coordinator protocol 3; install matching coordinator and worker builds",
+            host.protocol_version
         );
         if let Some(expected) = self.store.get::<String>("installation", &key).await? {
             ensure!(
@@ -232,15 +233,16 @@ impl Coordinator {
         self.drain_outbox(machine, server, peer).await?;
         self.publish().await?;
         {
-            let board = self
-                .store
-                .list::<MessageRecord>("message", "", u32::MAX)
-                .await?
-                .into_iter()
-                .filter(|(_, record)| {
-                    record.published && record.message.kind == TeamMessageKind::Board
-                })
-                .map(|(_, record)| record.message)
+            let board_state = self.board_snapshot().await?;
+            let synchronized_board = board_state
+                .entries
+                .iter()
+                .map(|entry| (entry.message.id.clone(), entry.append_seq))
+                .collect::<std::collections::HashMap<_, _>>();
+            let board = board_state
+                .entries
+                .iter()
+                .map(|entry| entry.message.clone())
                 .collect();
             let _: TeamSyncResponse = peer
                 .handle
@@ -255,12 +257,14 @@ impl Coordinator {
                             .map(|agent| agent.enrollment)
                             .collect(),
                         board,
+                        board_state,
                         cancellation_adapters: server.cancellation_adapters.clone(),
                     },
                 })
                 .await?;
             if self.current_control().await?.mode == TeamExecutionMode::Running {
-                self.deliver_to(&machine.id, &server.id, peer).await?;
+                self.deliver_to(&machine.id, &server.id, peer, &synchronized_board)
+                    .await?;
             }
         }
         Ok(())

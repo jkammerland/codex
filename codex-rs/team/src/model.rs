@@ -49,6 +49,8 @@ pub struct TeamSnapshot {
     pub agents: Vec<Agent>,
     pub messages: Vec<MessageRecord>,
     #[serde(default)]
+    pub board: codex_app_server_protocol::TeamBoardSnapshot,
+    #[serde(default)]
     pub rejected_outbox: Vec<RejectedOutbox>,
 }
 
@@ -99,6 +101,9 @@ impl TeamOperation {
     rename_all_fields = "camelCase"
 )]
 pub enum TeamRequest {
+    Board {
+        request: codex_app_server_protocol::TeamBoardParams,
+    },
     Reply {
         message_id: String,
         body: String,
@@ -164,13 +169,30 @@ pub enum TeamRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum TeamResponse {
-    AgentCredential { credential: String },
-    Gitea { result: serde_json::Value },
-    Snapshot { snapshot: TeamSnapshot },
-    Control { control: TeamControlState },
-    Agent { agent: Box<Agent> },
-    Message { message: Box<MessageRecord> },
-    Models { data: Vec<Model> },
+    Board {
+        response: codex_app_server_protocol::TeamBoardResponse,
+    },
+    AgentCredential {
+        credential: String,
+    },
+    Gitea {
+        result: serde_json::Value,
+    },
+    Snapshot {
+        snapshot: TeamSnapshot,
+    },
+    Control {
+        control: TeamControlState,
+    },
+    Agent {
+        agent: Box<Agent>,
+    },
+    Message {
+        message: Box<MessageRecord>,
+    },
+    Models {
+        data: Vec<Model>,
+    },
     Done,
 }
 

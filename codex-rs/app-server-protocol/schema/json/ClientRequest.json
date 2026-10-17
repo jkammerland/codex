@@ -4377,6 +4377,26 @@
       "oneOf": [
         {
           "properties": {
+            "request": {
+              "$ref": "#/definitions/TeamBoardParams"
+            },
+            "type": {
+              "enum": [
+                "boardAction"
+              ],
+              "title": "BoardActionTeamAgentActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "request",
+            "type"
+          ],
+          "title": "BoardActionTeamAgentAction",
+          "type": "object"
+        },
+        {
+          "properties": {
             "body": {
               "type": "string"
             },
@@ -4594,6 +4614,631 @@
           "type": "object"
         }
       ]
+    },
+    "TeamBoardAuthor": {
+      "properties": {
+        "identity": {
+          "$ref": "#/definitions/TeamBoardIdentity"
+        },
+        "legacy": {
+          "description": "Historical names that were not recorded must not be presented as original names.",
+          "type": "boolean"
+        },
+        "machineName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "legacy",
+        "name"
+      ],
+      "type": "object"
+    },
+    "TeamBoardEntry": {
+      "properties": {
+        "appendSeq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "author": {
+          "$ref": "#/definitions/TeamBoardAuthor"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "mentions": {
+          "items": {
+            "$ref": "#/definitions/TeamBoardMention"
+          },
+          "type": "array"
+        },
+        "message": {
+          "$ref": "#/definitions/TeamMessage"
+        },
+        "notifications": {
+          "items": {
+            "$ref": "#/definitions/TeamBoardNotification"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "appendSeq",
+        "author",
+        "conversationId",
+        "mentions",
+        "message",
+        "notifications"
+      ],
+      "type": "object"
+    },
+    "TeamBoardFilter": {
+      "enum": [
+        "all",
+        "following",
+        "mentions"
+      ],
+      "type": "string"
+    },
+    "TeamBoardFollower": {
+      "properties": {
+        "author": {
+          "$ref": "#/definitions/TeamBoardAuthor"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/definitions/TeamBoardIdentity"
+        }
+      },
+      "required": [
+        "author",
+        "conversationId",
+        "identity"
+      ],
+      "type": "object"
+    },
+    "TeamBoardIdentity": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "user"
+              ],
+              "title": "UserTeamBoardIdentityType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UserTeamBoardIdentity",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "address": {
+              "$ref": "#/definitions/TeamAddress"
+            },
+            "type": {
+              "enum": [
+                "agent"
+              ],
+              "title": "AgentTeamBoardIdentityType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "address",
+            "type"
+          ],
+          "title": "AgentTeamBoardIdentity",
+          "type": "object"
+        }
+      ]
+    },
+    "TeamBoardMember": {
+      "properties": {
+        "author": {
+          "$ref": "#/definitions/TeamBoardAuthor"
+        },
+        "available": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "author",
+        "available"
+      ],
+      "type": "object"
+    },
+    "TeamBoardMention": {
+      "properties": {
+        "display": {
+          "type": "string"
+        },
+        "end": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "identity": {
+          "$ref": "#/definitions/TeamBoardIdentity"
+        },
+        "start": {
+          "description": "UTF-8 byte offsets into the entry body, including the leading @.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "display",
+        "end",
+        "identity",
+        "start"
+      ],
+      "type": "object"
+    },
+    "TeamBoardNotification": {
+      "properties": {
+        "identity": {
+          "$ref": "#/definitions/TeamBoardIdentity"
+        },
+        "reasons": {
+          "items": {
+            "$ref": "#/definitions/TeamBoardNotificationReason"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "reasons"
+      ],
+      "type": "object"
+    },
+    "TeamBoardNotificationReason": {
+      "enum": [
+        "mention",
+        "conversationFollow",
+        "topicSubscription"
+      ],
+      "type": "string"
+    },
+    "TeamBoardParams": {
+      "oneOf": [
+        {
+          "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "filter": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardFilter"
+                }
+              ],
+              "default": "all"
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "query": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "topic": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "list"
+              ],
+              "title": "ListTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ListTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "conversationId": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "read"
+              ],
+              "title": "ReadTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversationId",
+            "type"
+          ],
+          "title": "ReadTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "mentions": {
+              "items": {
+                "$ref": "#/definitions/TeamBoardMention"
+              },
+              "type": "array"
+            },
+            "topic": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "post"
+              ],
+              "title": "PostTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "mentions",
+            "topic",
+            "type"
+          ],
+          "title": "PostTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "mentions": {
+              "items": {
+                "$ref": "#/definitions/TeamBoardMention"
+              },
+              "type": "array"
+            },
+            "replyTo": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "reply"
+              ],
+              "title": "ReplyTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "conversationId",
+            "mentions",
+            "type"
+          ],
+          "title": "ReplyTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "conversationId": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "enum": [
+                "follow"
+              ],
+              "title": "FollowTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversationId",
+            "enabled",
+            "type"
+          ],
+          "title": "FollowTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "conversationId": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "limit": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "followers"
+              ],
+              "title": "FollowersTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversationId",
+            "type"
+          ],
+          "title": "FollowersTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "appendSeq": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "enum": [
+                "markRead"
+              ],
+              "title": "MarkReadTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "appendSeq",
+            "conversationId",
+            "type"
+          ],
+          "title": "MarkReadTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "limit": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "topics"
+              ],
+              "title": "TopicsTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "TopicsTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "topic": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "topicFollow"
+              ],
+              "title": "TopicFollowTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "enabled",
+            "topic",
+            "type"
+          ],
+          "title": "TopicFollowTeamBoardParams",
+          "type": "object"
+        }
+      ]
+    },
+    "TeamBoardReadState": {
+      "properties": {
+        "appendSeq": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/definitions/TeamBoardIdentity"
+        }
+      },
+      "required": [
+        "appendSeq",
+        "conversationId",
+        "identity"
+      ],
+      "type": "object"
+    },
+    "TeamBoardSnapshot": {
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/TeamBoardEntry"
+          },
+          "type": "array"
+        },
+        "followers": {
+          "items": {
+            "$ref": "#/definitions/TeamBoardFollower"
+          },
+          "type": "array"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/definitions/TeamBoardMember"
+          },
+          "type": "array"
+        },
+        "reads": {
+          "items": {
+            "$ref": "#/definitions/TeamBoardReadState"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "topicSubscriptions": {
+          "items": {
+            "$ref": "#/definitions/TeamBoardTopicSubscription"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries",
+        "followers",
+        "members",
+        "reads",
+        "revision",
+        "topicSubscriptions"
+      ],
+      "type": "object"
+    },
+    "TeamBoardTopicSubscription": {
+      "properties": {
+        "identity": {
+          "$ref": "#/definitions/TeamBoardIdentity"
+        },
+        "topic": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "topic"
+      ],
+      "type": "object"
     },
     "TeamCancellationAdapter": {
       "additionalProperties": false,

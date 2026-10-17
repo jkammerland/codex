@@ -1,7 +1,8 @@
 use super::*;
 use crate::bottom_pane::render_filled_tab_bar;
+use crate::render::line_utils::line_to_static;
 use crate::render::renderable::Renderable;
-use crate::wrapping::word_wrap_lines;
+use crate::wrapping::word_wrap_line_with_source;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
@@ -44,6 +45,22 @@ fn time(timestamp: i64) -> String {
         || timestamp.to_string(),
         |time| time.format("%b %d %H:%M").to_string(),
     )
+}
+
+fn key_hints(items: &[(&str, &str)]) -> Line<'static> {
+    let mut line = Line::default();
+    for (key, label) in items {
+        if !line.spans.is_empty() {
+            line.spans
+                .push(" · ".set_style(crate::style::secondary_text_style()));
+        }
+        line.spans.extend(crate::key_hint::key_label_spans(key));
+        if !label.is_empty() {
+            line.spans
+                .push(format!(" {label}").set_style(crate::style::secondary_text_style()));
+        }
+    }
+    line
 }
 
 impl BoardView {
@@ -134,16 +151,39 @@ impl Renderable for BoardView {
             row(area, 1, 1),
             buffer,
         );
-        let subtitle = if state.editing_topic {
-            format!("New post topic › #{}", state.topic)
+        let subtitle: Line = if state.editing_topic {
+            format!("New post topic › #{}", state.topic).dim().into()
         } else if state.searching {
-            format!("Search › {}", state.query)
-        } else if !state.query.is_empty() {
+            format!("Search › {}", state.query).dim().into()
+        } else if state.composing.is_some() && !state.query.is_empty() {
             format!("Search: {}  · / edit · #topic filters topics", state.query)
+                .dim()
+                .into()
+        } else if state.composing.is_some() {
+            "Posts and conversations · / search · #topic in search · # set post topic"
+                .dim()
+                .into()
+        } else if state.followers {
+            key_hints(&[("v/h/←/Esc", "close"), ("F", "manage agents")])
+        } else if state.opened.is_some() {
+            key_hints(&[("j/k ↑/↓", "scroll"), ("PgUp/PgDn", ""), ("Home/End", "")])
+        } else if area.width < 80 {
+            key_hints(&[("j/k ↑/↓", "move"), ("l/→/Enter", "open")])
         } else {
-            "Posts and conversations · / search · #topic in search · # set post topic".into()
+            let search = if state.query.is_empty() {
+                "search".into()
+            } else {
+                format!("search: {}", state.query)
+            };
+            key_hints(&[
+                ("j/k ↑/↓", "move"),
+                ("l/→/Enter", "open"),
+                ("Tab", "filter"),
+                ("/", &search),
+                ("#", "set post topic"),
+            ])
         };
-        Paragraph::new(subtitle.dim()).render(row(area, 2, 1), buffer);
+        Paragraph::new(subtitle).render(row(area, 2, 1), buffer);
         let composer_area = self.composer_area(&state, area);
         let body_end = if composer_area.height > 0 {
             composer_area.y
@@ -179,27 +219,61 @@ impl Renderable for BoardView {
         {
             composer.render(composer_area, buffer);
         }
-        let footer = if state.composing.is_some() {
-            state.notice.clone().unwrap_or_else(|| {
-                "@ mention · Enter send · Esc keep draft · F6 pause · F7 resume · F8 stop".into()
-            })
+        let footer: Line = if state.composing.is_some() {
+            state
+                .notice
+                .clone()
+                .unwrap_or_else(|| {
+                    "@ mention · Enter send · Esc keep draft · F6 pause · F7 resume · F8 stop"
+                        .into()
+                })
+                .dim()
+                .into()
         } else if state.followers {
-            "Named followers · l/Esc close · t Tasks".into()
+            key_hints(&[("v/Esc", "close followers"), ("t", "Tasks")])
+        } else if area.width < 80 && state.opened.is_none() && !state.query.is_empty() {
+            format!("Search: {} · / edit", state.query).dim().into()
         } else if let Some(notice) = &state.notice {
-            format!("{notice} · n post · r reply · f follow · l followers · t Tasks")
+            format!("{notice} · n post · r reply · f follow · v followers · t Tasks")
+                .dim()
+                .into()
+        } else if area.width < 80 && state.opened.is_some() {
+            key_hints(&[("h/←/Esc", "feed"), ("r", "reply"), ("v", "followers")])
+        } else if area.width < 80 {
+            key_hints(&[
+                ("n", "post"),
+                ("f", "follow"),
+                ("v", "followers"),
+                ("/", "find"),
+            ])
         } else {
-            "n post · r reply · f follow · l followers · d details · F9 deliveries · Tab filter · t Tasks".into()
+            let mut items = vec![
+                ("n", "post"),
+                ("r", "reply"),
+                ("f", "follow"),
+                ("v", "followers"),
+                ("F", "manage"),
+                ("d", "details"),
+                ("F9", "deliveries"),
+            ];
+            if state.opened.is_some() {
+                items.insert(0, ("h/←/Esc", "feed"));
+                items.push(("[/]", "entry"));
+            }
+            key_hints(&items)
         };
-        Paragraph::new(footer.dim()).render(row(area, area.height - 1, 1), buffer);
+        Paragraph::new(footer).render(row(area, area.height - 1, 1), buffer);
     }
 }
 
 fn render_feed(state: &mut BoardState, area: Rect, buffer: &mut Buffer) {
     let roots = state.roots();
     if roots.is_empty() {
-        Paragraph::new(
-            "No conversations here yet.\nPress n to make a post; @ mentions invite an agent.",
-        )
+        Paragraph::new(if state.query.is_empty() {
+            "No conversations here yet.\nPress n to make a post; @ mentions invite an agent."
+        } else {
+            "No matching conversations.\nPress / to change the search."
+        })
         .render(area, buffer);
         return;
     }
@@ -207,7 +281,9 @@ fn render_feed(state: &mut BoardState, area: Rect, buffer: &mut Buffer) {
         .iter()
         .position(|entry| Some(&entry.conversation_id) == state.selected.as_ref())
         .unwrap_or_default();
-    let page = usize::from(area.height / 4).max(1);
+    let total = roots.len();
+    let overflow = total.saturating_mul(4) > usize::from(area.height);
+    let page = usize::from(area.height.saturating_sub(u16::from(overflow)) / 4).max(1);
     let mut start = state.feed_scroll;
     if selected < start {
         start = selected;
@@ -264,6 +340,17 @@ fn render_feed(state: &mut BoardState, area: Rect, buffer: &mut Buffer) {
     }
     state.feed_scroll = start;
     Paragraph::new(lines).render(area, buffer);
+    if overflow {
+        Paragraph::new(
+            format!(
+                "Posts {}-{}/{total} · j/k ↑/↓ move",
+                start + 1,
+                (start + page).min(total)
+            )
+            .dim(),
+        )
+        .render(row(area, area.height.saturating_sub(1), 1), buffer);
+    }
 }
 
 fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) {
@@ -323,7 +410,7 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
             if focused {
                 "Conversation"
             } else {
-                "Preview · Enter to read"
+                "Preview · l/Enter to read"
             },
             if state.following(&id) {
                 "Following"
@@ -345,6 +432,7 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
         .unwrap_or_else(|| state.read_seq(&id));
     let entries = state.entries(&id);
     let mut lines = Vec::new();
+    let mut sources = Vec::new();
     let mut positions = Vec::new();
     let mut divider = false;
     for entry in &entries {
@@ -354,6 +442,7 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
             && entry.author.identity != TeamBoardIdentity::User
         {
             lines.push(Line::from("── Unread replies ──".cyan()));
+            sources.push((0, 0));
             divider = true;
         }
         let start = lines.len();
@@ -366,21 +455,23 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
             author(entry).bold(),
             format!("  {}", time(entry.message.created_at)).dim(),
         ]));
+        sources.push((0, 0));
         if let Some(reply_to) = &entry.message.reply_to {
             let name = entries
                 .iter()
                 .find(|target| &target.message.id == reply_to)
                 .map_or("earlier entry", |target| target.author.name.as_str());
             lines.push(format!("↳ replying to {name}").dim().into());
+            sources.push((1, 0));
         }
-        lines.extend(word_wrap_lines(
-            entry
-                .message
-                .body
-                .split('\n')
-                .map(|line| Line::from(line.to_owned())),
-            usize::from(content.width),
-        ));
+        // Keep source positions so rewrapping retains the text at the top of the viewport.
+        for (index, text) in entry.message.body.split('\n').enumerate() {
+            let line = Line::from(text);
+            for wrapped in word_wrap_line_with_source(&line, usize::from(content.width)) {
+                sources.push((index + 2, wrapped.range.start));
+                lines.push(line_to_static(&wrapped.line));
+            }
+        }
         positions.push((
             entry.message.id.clone(),
             entry.append_seq,
@@ -388,15 +479,21 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
             lines.len(),
         ));
         lines.push(Line::default());
+        sources.push((usize::MAX, 0));
     }
     let latest = entries.last().map_or(0, |entry| entry.append_seq);
     let line_count = lines.len();
     let max_scroll = line_count.saturating_sub(usize::from(content.height));
-    let anchored = state.scroll_anchor.as_ref().and_then(|(id, offset)| {
+    let anchored = state.scroll_anchor.as_ref().and_then(|anchor| {
         positions
             .iter()
-            .find(|(entry_id, _, _, _)| entry_id == id)
-            .map(|(_, _, start, end)| start + offset.min(&end.saturating_sub(*start)))
+            .find(|(entry_id, _, _, _)| entry_id == &anchor.entry)
+            .and_then(|(_, _, start, end)| {
+                sources[*start..=*end]
+                    .iter()
+                    .rposition(|(line, byte)| *line == anchor.source_line && *byte <= anchor.byte)
+                    .map(|offset| start + offset)
+            })
     });
     let scroll = if focused {
         if state.at_bottom {
@@ -421,10 +518,18 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
     if focused {
         state.scroll = scroll;
         state.scroll_width = content.width;
-        state.scroll_anchor = positions
-            .iter()
-            .find(|(_, _, start, end)| *start <= scroll && *end > scroll)
-            .map(|(id, _, start, _)| (id.clone(), scroll - start));
+        // Reflow may start earlier on the same source line. Retain the original byte until
+        // navigation changes it, so repeated width changes cannot drift toward the beginning.
+        if state.at_bottom || anchored.is_none() {
+            state.scroll_anchor = positions
+                .iter()
+                .find(|(_, _, start, end)| *start <= scroll && *end >= scroll)
+                .map(|(id, _, _, _)| ScrollAnchor {
+                    entry: id.clone(),
+                    source_line: sources[scroll].0,
+                    byte: sources[scroll].1,
+                });
+        }
         state.at_bottom = scroll == max_scroll;
         let seen = state.latest_seen.entry(id.clone()).or_insert(latest);
         if state.at_bottom {
@@ -445,16 +550,21 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
                 .collect(),
         });
     }
-    let status = if focused && scroll < max_scroll {
+    let status = if focused {
+        let above = if scroll > 0 { " ↑" } else { "" };
+        let below = if scroll < max_scroll { " ↓" } else { "" };
+        let position = format!(
+            "Lines {}-{}/{line_count}{above}{below}",
+            scroll + 1,
+            (scroll + usize::from(content.height)).min(line_count)
+        );
         if new_replies > 0 {
-            format!("{new_replies} new replies · End goes to latest")
+            format!("{position} · {new_replies} new")
         } else {
-            "More replies below · End goes to latest".into()
+            position
         }
-    } else if focused {
-        "r Reply · [/] select entry · Esc feed · l Followers · d Details".into()
     } else {
-        "Preview does not mark replies read · Enter opens conversation".into()
+        "Preview does not mark replies read · l/Enter opens conversation".into()
     };
     Paragraph::new(status.dim()).render(row(area, area.height.saturating_sub(1), 1), buffer);
 }

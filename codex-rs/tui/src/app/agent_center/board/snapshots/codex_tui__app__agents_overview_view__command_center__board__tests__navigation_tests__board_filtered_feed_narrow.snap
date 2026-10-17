@@ -1,0 +1,17 @@
+---
+source: tui/src/app/agent_center/board/navigation_tests.rs
+assertion_line: 79
+expression: filtered
+---
+Agent command center   t Tasks   b Board
+ All posts   Following   Mentions
+j/k ↑/↓ move · l/→/Enter open
+No matching conversations.
+Press / to change the search.
+
+
+
+
+
+
+Search: hjkl · / edit

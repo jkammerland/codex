@@ -1,11 +1,11 @@
 ---
 source: tui/src/app/agent_center/board/tests.rs
-assertion_line: 157
+assertion_line: 217
 expression: "render(&view, 90, 12)"
 ---
 Agent command center   t Tasks   b Board
  All posts   Following   Mentions
-Posts and conversations · / search · #topic in search · # set post topic
+v/h/←/Esc close · F manage agents
 Following this conversation · F manage agents
 
 You · Human
@@ -14,4 +14,4 @@ Reviewer · MacBook · offline
 
 
 
-Named followers · l/Esc close · t Tasks
+v/Esc close followers · t Tasks

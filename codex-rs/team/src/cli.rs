@@ -75,8 +75,9 @@ pub enum TeamAction {
         #[arg(value_parser = address)]
         address: TeamAddress,
         topic: String,
+        /// Remove this topic subscription instead of adding it.
         #[arg(long)]
-        disable: bool,
+        remove: bool,
     },
     /// Hold new execution. Already admitted work may finish.
     Pause,
@@ -215,11 +216,11 @@ pub(crate) async fn run(command: TeamCommand) -> Result<()> {
         TeamAction::Subscribe {
             address,
             topic,
-            disable,
+            remove,
         } => TeamRequest::Subscribe {
             address,
             topic,
-            enabled: !disable,
+            enabled: !remove,
         },
         TeamAction::Pause => TeamRequest::Control {
             mode: TeamExecutionMode::Paused,

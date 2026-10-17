@@ -124,7 +124,7 @@ codex agents --manifest team.toml reply MESSAGE_UUID 'Review complete'
 codex agents --manifest team.toml reply MESSAGE_UUID 'Join the current turn when safe' --safe-boundary
 codex agents --manifest team.toml post builds 'Windows build is ready'
 codex agents --manifest team.toml subscribe local/primary/THREAD_UUID builds
-codex agents --manifest team.toml subscribe local/primary/THREAD_UUID builds --disable
+codex agents --manifest team.toml subscribe local/primary/THREAD_UUID builds --remove
 ```
 
 Requests and replies wake eligible idle recipients. Notes remain passive until a

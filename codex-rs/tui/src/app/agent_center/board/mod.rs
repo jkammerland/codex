@@ -55,6 +55,12 @@ pub(crate) struct DisplayedEntries {
     pub(crate) entries: Vec<(i64, usize)>,
 }
 
+pub(crate) struct ScrollAnchor {
+    entry: String,
+    source_line: usize,
+    byte: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct BoardState {
     pub(crate) active: bool,
@@ -79,7 +85,7 @@ pub(crate) struct BoardState {
     pub(crate) scroll: usize,
     pub(crate) at_bottom: bool,
     pub(crate) scroll_width: u16,
-    pub(crate) scroll_anchor: Option<(String, usize)>,
+    pub(crate) scroll_anchor: Option<ScrollAnchor>,
     pub(crate) viewed_lines: HashMap<(String, u16), usize>,
     pub(crate) latest_seen: HashMap<String, i64>,
     pub(crate) unread_boundary: HashMap<String, i64>,

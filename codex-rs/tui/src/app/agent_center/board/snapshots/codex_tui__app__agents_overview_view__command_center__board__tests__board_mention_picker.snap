@@ -1,12 +1,12 @@
 ---
 source: tui/src/app/agent_center/board/tests.rs
-assertion_line: 169
+assertion_line: 229
 expression: "render(&view, 100, 20)"
 ---
 Agent command center   t Tasks   b Board
  All posts   Following   Mentions
 Posts and conversations · / search · #topic in search · # set post topic
-› ● Ready for the release review?         Preview · Enter to read · 2 followers · Following
+› ● Ready for the release review?         Preview · l/Enter to read · 2 followers · Following
   You · Human · #release                  You · Human  Nov 14 22:13
   1 replies · Nov 14 22:13 · Following    Ready for the release review?
                                           Please check the native build and share any blockers here.
@@ -14,7 +14,7 @@ Posts and conversations · / search · #topic in search · # set post topic
                                           Reviewer · MacBook  Nov 14 22:13
                                           ↳ replying to User
                                           The Mac build passes. I am reviewing the asynchronous
-                                          Preview does not mark replies read · Enter opens conversat
+                                          Preview does not mark replies read · l/Enter opens convers
 
 › Reviewer  Agent MacBook · offline
 

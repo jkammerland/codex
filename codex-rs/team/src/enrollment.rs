@@ -11,6 +11,8 @@ use crate::coordinator::Coordinator;
 use crate::coordinator::request_id;
 use crate::coordinator::status_text;
 use crate::model::*;
+use crate::thread_metadata::ThreadReadMetadata;
+use crate::thread_metadata::ThreadResumeMetadata;
 
 #[derive(Default)]
 pub(crate) struct AliasReservations(Mutex<HashSet<String>>);
@@ -85,7 +87,7 @@ impl Coordinator {
             cursor = Some(next);
         };
         if !loaded {
-            let _: ThreadResumeResponse = peer
+            let _: ThreadResumeMetadata = peer
                 .handle
                 .request_typed(ClientRequest::ThreadResume {
                     request_id: request_id(),
@@ -109,7 +111,7 @@ impl Coordinator {
             })
             .await?;
         let key = address_key(&address);
-        let read: ThreadReadResponse = peer
+        let read: ThreadReadMetadata = peer
             .handle
             .request_typed(ClientRequest::ThreadRead {
                 request_id: request_id(),

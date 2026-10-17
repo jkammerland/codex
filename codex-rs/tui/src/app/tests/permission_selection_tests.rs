@@ -438,10 +438,12 @@ async fn custom_permission_selection_scenario() -> Result<()> {
         "permissions.other.extends".into(),
         TomlValue::String(":danger-full-access".into()),
     ));
+
+    // Match the production loop's boxed dispatcher without embedding it in this test future.
     // Both the accepted request and its confirmed descendant remain server-owned.
     for _ in 0..2 {
         let previous_thread_id = app.chat_widget.thread_id();
-        Box::pin(app.handle_event(
+        boxed_future!(app.handle_event(
             &mut tui,
             &mut server,
             AppEvent::ForkCurrentSession { name: None },

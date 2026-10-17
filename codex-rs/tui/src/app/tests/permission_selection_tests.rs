@@ -244,6 +244,7 @@ async fn inline_server_permission_selection_holds_queued_prompt_until_confirmati
 #[tokio::test]
 async fn custom_permission_selection_uses_server_definition_and_preserves_state_on_rejection()
 -> Result<()> {
+    // Construct the whole scenario outside Tokio's test poll frame.
     boxed_future!(custom_permission_selection_scenario()).await
 }
 

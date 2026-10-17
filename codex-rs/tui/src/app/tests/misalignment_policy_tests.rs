@@ -56,6 +56,12 @@ async fn remote_misalignment_continuation_preserves_executor_paths() -> Result<(
         );
     let started = server.start_thread(&app.config).await?;
     let thread_id = started.session.thread_id;
+
+    // A real policy violation follows a persisted turn; save this synthetic conversation first.
+    server
+        .thread_set_name(thread_id, "Remote continuation".into())
+        .await?;
+
     let environments = server
         .thread_read(thread_id, /*include_turns*/ false)
         .await?

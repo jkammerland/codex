@@ -16,6 +16,7 @@ mod operations;
 mod operator_mcp;
 mod routing;
 mod startup;
+mod thread_metadata;
 mod transport;
 mod worker;
 mod worker_outbox;

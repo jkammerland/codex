@@ -18,6 +18,7 @@ mod selection;
 use super::agents_overview_view::AgentsOverviewGroup;
 use super::agents_overview_view::AgentsOverviewRow;
 use super::agents_overview_view::AgentsOverviewView;
+use super::agents_overview_view::command_center::TeamControlSummary;
 use super::app_server_requests::BufferedServerRequest;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
@@ -658,10 +659,14 @@ impl App {
                 })
                 .collect();
         }
-        let team_notice = self.agents_hosts.notice.clone().or_else(|| self.agents_hosts.snapshot.as_ref().map(|snapshot| {
-            let applied = snapshot.servers.iter().filter(|server| server.applied_revision == Some(snapshot.control.revision)).count();
-            format!("Team {:?} · {applied}/{} hosts applied · F6 pause · F7 resume · F8 stop · F9 team", snapshot.control.mode, snapshot.servers.len())
-        }));
+        let team_notice = self.agents_hosts.notice.clone().or_else(|| {
+            self.agents_hosts.snapshot.as_ref().map(|snapshot| {
+                format!(
+                    "{} · F6 pause · F7 resume · F8 stop · F9 team",
+                    TeamControlSummary::from(snapshot)
+                )
+            })
+        });
         self.agents_overview
             .view_state
             .lock()

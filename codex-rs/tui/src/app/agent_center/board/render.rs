@@ -6,6 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
@@ -88,12 +89,38 @@ impl Renderable for BoardView {
         }
         let mut state = self.state();
         state.displayed = None;
-        Paragraph::new(Line::from(vec![
-            "Agent command center".bold(),
-            "   t Tasks   ".dim(),
+        let compact = state.team_control.is_some() && area.width < 80;
+        let mut title = vec![
+            if compact {
+                "Agents"
+            } else {
+                "Agent command center"
+            }
+            .bold(),
+            if compact {
+                "  t Tasks  "
+            } else {
+                "   t Tasks   "
+            }
+            .dim(),
             "b Board".cyan().bold(),
-        ]))
-        .render(row(area, 0, 1), buffer);
+        ];
+        if let Some(control) = state.team_control {
+            let summary = if compact {
+                format!("  {:?} {}/{}", control.mode, control.applied, control.total)
+            } else {
+                format!("  {control}")
+            };
+            title.push(summary.set_style(crate::style::secondary_text_style()));
+        }
+        let mut title = Line::from(title);
+        if compact && title.width() > usize::from(area.width) {
+            title.spans.remove(0);
+            if let Some(tasks) = title.spans.first_mut() {
+                *tasks = "t Tasks  ".dim();
+            }
+        }
+        Paragraph::new(title).render(row(area, 0, 1), buffer);
         if area.height < 4 {
             return;
         }

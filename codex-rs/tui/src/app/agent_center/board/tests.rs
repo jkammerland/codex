@@ -143,6 +143,63 @@ fn render(view: &BoardView, width: u16, height: u16) -> String {
 }
 
 #[test]
+fn board_team_control_status_updates_preserve_composer_and_geometry() {
+    let (mut view, _) = fixture();
+    key(&mut view, KeyCode::Char('n'));
+    view.handle_paste("Keep this draft".into());
+    let draft = view.state().composer.as_ref().unwrap().snapshot_draft();
+    let mut snapshot = codex_team::TeamSnapshot {
+        control: TeamControlState {
+            coordinator_id: "coordinator".into(),
+            revision: 10,
+            mode: TeamExecutionMode::Running,
+        },
+        servers: vec![],
+        agents: vec![],
+        messages: vec![],
+        board: view.state().snapshot.clone(),
+        rejected_outbox: vec![],
+    };
+    let mut frames = Vec::new();
+    for (mode, revision, applied, total) in [
+        (TeamExecutionMode::Running, 10, 3, 3),
+        (TeamExecutionMode::Paused, 11, 1, 3),
+        (TeamExecutionMode::Paused, 11, 3, 3),
+        (TeamExecutionMode::Stopped, 12, 3, 3),
+        (TeamExecutionMode::Stopped, 12, 100, 100),
+    ] {
+        snapshot.control.mode = mode;
+        snapshot.control.revision = revision;
+        snapshot.servers = (0..total)
+            .map(|index| codex_team::ServerStatus {
+                machine_id: format!("machine-{index}"),
+                machine_label: format!("Machine {index}"),
+                server_id: "primary".into(),
+                server_label: "Primary".into(),
+                installation_id: None,
+                connected: true,
+                applied_revision: Some(if index < applied {
+                    revision
+                } else {
+                    revision - 1
+                }),
+                error: None,
+            })
+            .collect();
+        view.state().update_team(&snapshot);
+        let frame = render(&view, 40, 12);
+        assert_eq!(
+            view.state().composer.as_ref().unwrap().snapshot_draft(),
+            draft,
+            "control-only updates must retain the exact draft"
+        );
+        frames.push(frame);
+    }
+    insta::assert_snapshot!("board_control_modes_narrow", frames.join("\n\n"));
+    insta::assert_snapshot!("board_control_stopped_wide", render(&view, 120, 12));
+}
+
+#[test]
 fn board_feed_conversation_followers_and_short_terminal() {
     let (mut view, _) = fixture();
     insta::assert_snapshot!("board_feed_wide", render(&view, 120, 22));

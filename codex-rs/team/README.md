@@ -83,9 +83,10 @@ or using an unavailable model. **Resumable** means an unloaded durable task can
 be loaded by the existing request-delivery path. Readiness is an observation,
 not a reservation. Busy, disconnected, or held teammates can still receive queued mail.
 
-Execution environment facts come from cached observations, with current-turn
-and next-turn selections distinguished. Missing OS or shell information remains
-unknown. Discovery does not start environments, probe tools, or load tasks.
+Execution environment facts come from the resolved local session or cached remote
+observations, with current-turn and next-turn selections distinguished. Missing OS
+or shell information remains unknown. Discovery does not start environments, probe
+tools, or load tasks.
 Optional manifest capabilities are operator declarations, shown as **Declared**:
 
 ```toml

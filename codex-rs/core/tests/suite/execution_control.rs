@@ -18,6 +18,57 @@ use pretty_assertions::assert_eq;
 use tokio::sync::oneshot;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_local_shell_observation_preserves_thread_overrides_without_execution()
+-> anyhow::Result<()> {
+    let server = responses::start_mock_server().await;
+    let mut threads = Vec::new();
+    for shell_type in [
+        codex_shell_command::shell_detect::ShellType::Zsh,
+        codex_shell_command::shell_detect::ShellType::Cmd,
+    ] {
+        let shell = codex_shell_command::shell_detect::DetectedShell {
+            shell_type,
+            // Metadata inspection must succeed even when the configured shell cannot run.
+            shell_path: std::path::PathBuf::from(format!("unavailable-test-{}", shell_type.name())),
+        };
+        let thread = test_codex()
+            .with_user_shell(shell.into())
+            .with_config(|config| {
+                config
+                    .features
+                    .disable(codex_features::Feature::ShellSnapshot)
+                    .unwrap();
+                config
+                    .features
+                    .disable(codex_features::Feature::ShellSnapshotV2)
+                    .unwrap();
+            })
+            .build(&server)
+            .await?;
+        threads.push(thread);
+    }
+
+    assert_eq!(
+        threads
+            .iter()
+            .map(|thread| thread.codex.team_local_shell_name())
+            .collect::<Vec<_>>(),
+        vec!["zsh", "cmd"],
+    );
+    for thread in &threads {
+        assert_eq!(thread.codex.team_active_turn_id().await, None);
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enrolled_agent_cannot_override_child_model_or_effort() -> anyhow::Result<()> {
     let server = responses::start_mock_server().await;
     let recorded = responses::mount_sse_sequence(&server, vec![

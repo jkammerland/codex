@@ -30,7 +30,14 @@ pub struct ExecutionControlSnapshot {
 struct State {
     parents: HashMap<ThreadId, ThreadId>,
     roots: HashMap<ThreadId, ExecutionControlSnapshot>,
+    turn_starts: HashMap<ThreadId, usize>,
     manual_holds: HashSet<ThreadId>,
+}
+
+#[derive(Clone, Copy)]
+enum ExecutionPermitKind {
+    Operation,
+    TurnStart,
 }
 
 impl State {
@@ -194,6 +201,7 @@ impl ExecutionControl {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.roots.remove(&root);
+        state.turn_starts.remove(&root);
         self.changed.send_replace(());
     }
 
@@ -217,6 +225,33 @@ impl ExecutionControl {
 
     /// Return immediately when held. Session input loops must never await a hold.
     pub fn try_enter(&self, thread_id: ThreadId) -> Option<ExecutionPermit> {
+        self.try_enter_kind(thread_id, ExecutionPermitKind::Operation)
+    }
+
+    /// Count admitted startup through task registration separately from external calls.
+    /// Stop must settle these starts before its final interruption scan; retained tool
+    /// results can outlive that scan and remain ordinary execution permits.
+    pub fn try_start_turn(&self, thread_id: ThreadId) -> Option<ExecutionPermit> {
+        self.try_enter_kind(thread_id, ExecutionPermitKind::TurnStart)
+    }
+
+    /// Number of admitted startups still able to register a task in this family.
+    pub fn pending_turn_starts(&self, thread_id: ThreadId) -> usize {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .root(thread_id)
+            .and_then(|root| state.turn_starts.get(&root).copied())
+            .unwrap_or_default()
+    }
+
+    fn try_enter_kind(
+        &self,
+        thread_id: ThreadId,
+        kind: ExecutionPermitKind,
+    ) -> Option<ExecutionPermit> {
         let mut state = self
             .state
             .lock()
@@ -231,6 +266,9 @@ impl ExecutionControl {
                 return None;
             }
             entry.in_flight += 1;
+            if matches!(kind, ExecutionPermitKind::TurnStart) {
+                *state.turn_starts.entry(root).or_default() += 1;
+            }
             self.changed.send_replace(());
         }
         let revision = root.and_then(|root| state.roots.get(&root).map(|entry| entry.revision));
@@ -238,6 +276,7 @@ impl ExecutionControl {
             control: self.clone(),
             root,
             revision,
+            kind,
         })
     }
 
@@ -264,6 +303,7 @@ pub struct ExecutionPermit {
     control: ExecutionControl,
     root: Option<ThreadId>,
     revision: Option<u64>,
+    kind: ExecutionPermitKind,
 }
 
 impl ExecutionPermit {
@@ -360,6 +400,14 @@ impl Drop for ExecutionPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = state.roots.get_mut(&root) {
             entry.in_flight = entry.in_flight.saturating_sub(1);
+        }
+        if matches!(self.kind, ExecutionPermitKind::TurnStart)
+            && let Some(starting) = state.turn_starts.get_mut(&root)
+        {
+            *starting = starting.saturating_sub(1);
+            if *starting == 0 {
+                state.turn_starts.remove(&root);
+            }
         }
         self.control.changed.send_replace(());
     }

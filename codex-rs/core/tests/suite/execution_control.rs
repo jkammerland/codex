@@ -69,6 +69,48 @@ async fn team_local_shell_observation_preserves_thread_overrides_without_executi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopped_team_rejects_auxiliary_task_startup_without_installing_a_task()
+-> anyhow::Result<()> {
+    let server = responses::start_mock_server().await;
+    let gate = ExecutionControl::default();
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.execution_control(gate.clone());
+    let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_auto_env(&server)
+        .await?;
+    let thread_id = test.session_configured.thread_id;
+    gate.apply(thread_id, 1, ExecutionMode::Stopped);
+
+    for operation in [
+        Op::RunUserShellCommand {
+            command: "must-not-run".into(),
+            timeout_ms: None,
+        },
+        Op::Compact,
+        Op::Review {
+            review_request: codex_protocol::protocol::ReviewRequest {
+                target: codex_protocol::protocol::ReviewTarget::Custom {
+                    instructions: "Do not review while stopped".into(),
+                },
+                user_facing_hint: None,
+            },
+        },
+    ] {
+        test.codex.submit(operation).await?;
+        let event = wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+        let EventMsg::Error(error) = event else {
+            unreachable!("filtered error event");
+        };
+        assert_eq!(error.message, "session execution is held by team control");
+        assert_eq!(test.codex.team_active_turn_id().await, None);
+        assert_eq!(gate.pending_turn_starts(thread_id), 0);
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enrolled_agent_cannot_override_child_model_or_effort() -> anyhow::Result<()> {
     let server = responses::start_mock_server().await;
     let recorded = responses::mount_sse_sequence(&server, vec![

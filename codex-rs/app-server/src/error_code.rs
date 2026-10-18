@@ -13,6 +13,12 @@ pub(crate) fn server_draining_error() -> JSONRPCErrorError {
     error
 }
 
+pub(crate) fn team_execution_held_error() -> JSONRPCErrorError {
+    let mut error = invalid_request("session execution is held by team control");
+    error.data = Some(serde_json::json!({ "reason": "teamExecutionHeld" }));
+    error
+}
+
 pub(crate) fn invalid_request(message: impl Into<String>) -> JSONRPCErrorError {
     error(INVALID_REQUEST_ERROR_CODE, message)
 }

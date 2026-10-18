@@ -151,6 +151,9 @@ pub enum CodexErrorDetails {
     /// Invalid request.
     #[error("{0}")]
     InvalidRequest(String),
+    /// Team control currently prevents admission of new turn input.
+    #[error("session execution is held by team control")]
+    TeamExecutionHeld,
     #[error("{message}")]
     ModelNotFound {
         message: String,
@@ -426,6 +429,7 @@ impl CodexErr {
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::InvalidImageRequest()
             | CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::TeamExecutionHeld
             | CodexErrorDetails::ResponseIncomplete(_)
             | CodexErrorDetails::ModelNotFound { .. }
             | CodexErrorDetails::InvalidPrompt { .. }
@@ -529,6 +533,7 @@ impl CodexErr {
             | CodexErrorDetails::InternalServerError
             | CodexErrorDetails::InternalAgentDied => CodexErrorInfo::InternalServerError,
             CodexErrorDetails::UnsupportedOperation(_)
+            | CodexErrorDetails::TeamExecutionHeld
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. } => CodexErrorInfo::BadRequest,
             CodexErrorDetails::Sandbox(_) => CodexErrorInfo::SandboxError,

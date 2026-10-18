@@ -32,6 +32,7 @@ use codex_history::SenderUserMessages;
 use codex_history::UserInputOrigin;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AdditionalContextEntry;
@@ -253,9 +254,7 @@ pub(super) async fn handle(
             .resume_for_user(session.thread_id);
     }
     let Some(_execution) = session.try_enter_execution() else {
-        return Err(CodexErr::InvalidRequest(
-            "session execution is held by team control".to_string(),
-        ));
+        return Err(CodexErrorDetails::TeamExecutionHeld.into());
     };
     let result = match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
@@ -485,9 +484,7 @@ async fn start_if_idle(
     expected_previous_turn_id: Option<String>,
 ) -> CodexResult<TurnInputSubmission> {
     let Some(_execution) = session.try_enter_execution() else {
-        return Err(CodexErr::InvalidRequest(
-            "session execution is held by team control".to_string(),
-        ));
+        return Err(CodexErrorDetails::TeamExecutionHeld.into());
     };
     let WithTurnExtensionData {
         request,

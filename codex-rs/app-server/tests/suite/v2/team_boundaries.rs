@@ -100,6 +100,91 @@ async fn user_turn(app: &mut TestAppServer, thread_id: &str) -> Result<TurnStart
     .await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_team_rejects_start_and_steer_without_consuming_input() -> Result<()> {
+    let (model, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
+        gate: None,
+        body: create_final_assistant_message_sse_response("explicitly resumed")?,
+    }]])
+    .await;
+    let home = tempfile::tempdir()?;
+    MockResponsesConfig::new(model.uri()).write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_managed_config()
+        .build_initialized()
+        .await?;
+    let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
+    enroll(&mut app, &thread.id).await?;
+
+    // Both entry points must reject input before it reaches history or inference.
+    for (revision, mode) in [
+        (2, TeamExecutionMode::Paused),
+        (3, TeamExecutionMode::Stopped),
+    ] {
+        let _: TeamControlResponse = app
+            .request(|request_id| ClientRequest::TeamControl {
+                request_id,
+                params: TeamControlParams {
+                    control: control(revision, mode),
+                },
+            })
+            .await?;
+        for method in ["turn/start", "turn/steer"] {
+            let mut params = serde_json::json!({
+                "threadId": thread.id,
+                "clientUserMessageId": format!("rejected-{revision}-{method}"),
+                "input": [{ "type": "text", "text": "rejected held input", "textElements": [] }],
+            });
+            if method == "turn/steer" {
+                params["expectedTurnId"] = "unstarted-turn".into();
+            }
+            let request_id = app.send_request(method, Some(params)).await?;
+            let error = app
+                .read_stream_until_error_message(RequestId::Integer(request_id))
+                .await?;
+            assert_eq!(
+                error,
+                JSONRPCError {
+                    id: RequestId::Integer(request_id),
+                    error: JSONRPCErrorError {
+                        code: -32600,
+                        message: "session execution is held by team control".into(),
+                        data: Some(serde_json::json!({ "reason": "teamExecutionHeld" })),
+                    },
+                }
+            );
+        }
+        assert!(model.requests().await.is_empty());
+        assert_eq!(host(&mut app).await?.runtime[0].turn_id, None);
+    }
+
+    // Resume alone cannot replay rejected input; explicitly submit a fresh turn.
+    let _: TeamControlResponse = app
+        .request(|request_id| ClientRequest::TeamControl {
+            request_id,
+            params: TeamControlParams {
+                control: control(4, TeamExecutionMode::Running),
+            },
+        })
+        .await?;
+    let started = user_turn(&mut app, &thread.id).await?;
+    let completed: TurnCompletedNotification = app.read_notification("turn/completed").await?;
+    assert_eq!(completed.turn.id, started.turn.id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    let requests = model.requests().await;
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0])?;
+    assert!(!body["input"].to_string().contains("rejected held input"));
+    assert!(
+        body["input"]
+            .to_string()
+            .contains("Continue with my request")
+    );
+    model.shutdown().await;
+    Ok(())
+}
+
 async fn accepted(app: &mut TestAppServer) -> Result<TeamReceipt> {
     loop {
         let outbox: TeamOutboxListResponse = app

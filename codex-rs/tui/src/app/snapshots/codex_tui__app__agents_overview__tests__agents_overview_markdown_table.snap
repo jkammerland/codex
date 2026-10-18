@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agents_overview_tests.rs
-assertion_line: 974
+assertion_line: 977
 expression: "normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widget, 96))"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
@@ -11,8 +11,8 @@ expression: "normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widge
   › ○ Review parser                                   │ Review parser
                                                       │ ○ Idle
                                                       │
-                                                      │ Model: Unknown
-                                                      │ Reasoning: Unknown
+                                                      │ Model:  Unknown
+                                                      │ Effort: Unknown
                                                       │
                                                       │ Project
                                                       │ /tmp/project

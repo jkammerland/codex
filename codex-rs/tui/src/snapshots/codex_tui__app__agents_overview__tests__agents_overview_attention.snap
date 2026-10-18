@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agents_overview_tests.rs
-assertion_line: 858
+assertion_line: 861
 expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{project}  2\"),\n&normalized_group).replace(&project, \"/tmp/project\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
@@ -11,17 +11,17 @@ expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{proj
   › ● Repair authentication                           │ Repair authentication
     ○ Investigate parser                              │ ● Needs input
                                                       │
-                                                      │ Model: Unknown
-                                                      │ Reasoning: Unknown
-                                                      │
-                                                      │ Project
-                                                      │ /tmp/project
+                                                      │ Model:  Unknown
+                                                      │ Effort: Unknown
                                                       │
                                                       │ Agent: Check dependencies
                                                       │ Which dependency version should I use?
                                                       │ Open task to review.
                                                       │ Waiting for approval.
                                                       │ Waiting for your response.
+                                                      │
+                                                      │ Project
+                                                      │ /tmp/project
                                                       │
                                                       │ Prompt
                                                       │ Repair authentication

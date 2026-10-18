@@ -11,17 +11,17 @@ expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{proj
   › ● Review parser                                   │ Review parser
     ○ Other task                                      │ ● Needs input
                                                       │
-                                                      │ Model: Unknown
-                                                      │ Reasoning: Unknown
-                                                      │
-                                                      │ Project
-                                                      │ /tmp/project
+                                                      │ Model:  Unknown
+                                                      │ Effort: Unknown
                                                       │ Tokens: 13K in · 4K out
                                                       │ Est. usage: 5 credits · ~$0.20
                                                       │
                                                       │ Needs attention
                                                       │ Which dependency version should I use?
                                                       │ Open task to review.
+                                                      │
+                                                      │ Project
+                                                      │ /tmp/project
                                                       │
                                                       │ Prompt
                                                       │ Review parser

@@ -11,19 +11,19 @@ expression: render(&view)
   Unknown · main  1                                       │ release leader
   › ○ release leader                                      │ ○ Inactive
                                                           │
-                                                          │ Model: host-applied-model
-                                                          │ Reasoning: Unknown
-                                                          │
-                                                          │ Project
-                                                          │ Unknown
+                                                          │ Model:  host-applied-model
+                                                          │ Effort: Unknown
                                                           │ History metadata: unknown (enrollment
                                                           │ only)
-                                                          │ Server: main
-                                                          │ Team control: applied 4
-                                                          │ Team alias: release leader
-                                                          │ Synchronization: Unconfirmed
-                                                          │ …
                                                           │
-                                                          │ Prompt
-                                                          │ No prompt available.
+                                                          │ Team · release leader
+                                                          │ Readiness Unknown · Activity  Unknown
+                                                          │ Sync      Unconfirmed
+                                                          │ Hold      Manually held
+                                                          │ Server    main · Control  applied 4
+                                                          │
+                                                          │ Execution
+                                                          │ Current   previous-model / medium
+                                                          │ Next      host-applied-model / default
+                                                          │ …
   Team Stopped · 1/1 hosts applied · F6 pause · F7 resume · F8 stop · F9 team

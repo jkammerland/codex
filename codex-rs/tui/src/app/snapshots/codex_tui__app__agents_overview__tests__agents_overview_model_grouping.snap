@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agents_overview_tests.rs
-assertion_line: 1252
+assertion_line: 1255
 expression: "render_bottom_popup(&app.chat_widget,\n100).replace(&test_path_display(\"/tmp/project\"),\n\"/tmp/project\").replace(\"fwd del\", \"del\")"
 ---
   Agent command center   t Tasks   b Board  Group: Model  g
@@ -11,8 +11,8 @@ expression: "render_bottom_popup(&app.chat_widget,\n100).replace(&test_path_disp
   › ○ Legacy task                                         │ Legacy task
                                                           │ ○ Idle
   model-a  2                                              │
-    ○ Recent task                                         │ Model: Unknown
-    ○ Older task                                          │ Reasoning: Unknown
+    ○ Recent task                                         │ Model:  Unknown
+    ○ Older task                                          │ Effort: Unknown
                                                           │
   model-b  1                                              │ Project
     ○ Other model                                         │ /tmp/project

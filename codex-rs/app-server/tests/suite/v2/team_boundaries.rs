@@ -101,6 +101,56 @@ async fn user_turn(app: &mut TestAppServer, thread_id: &str) -> Result<TurnStart
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_discovery_reports_local_executor_before_any_turn() -> Result<()> {
+    let model = responses::start_mock_server().await;
+    let home = tempfile::tempdir()?;
+    MockResponsesConfig::new(&model.uri()).write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_managed_config()
+        // The usual test environment is a remote executor and cannot cover native discovery.
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = app
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams::default(),
+        })
+        .await?;
+    enroll(&mut app, &thread.id).await?;
+
+    let snapshot = host(&mut app).await?;
+    let member = snapshot
+        .runtime
+        .iter()
+        .find(|member| member.thread_id == thread.id)
+        .expect("enrolled local runtime");
+    assert_eq!(member.activity, TeamActivity::Idle);
+    assert_eq!(member.turn_id, None);
+    assert_eq!(member.environments.len(), 1);
+    let environment = &member.environments[0];
+    assert_eq!(environment.id, "local");
+    assert_eq!(environment.os.as_deref(), Some(std::env::consts::OS));
+    assert!(
+        environment
+            .shell
+            .as_ref()
+            .is_some_and(|shell| !shell.is_empty())
+    );
+    assert!(!environment.current);
+    assert!(environment.next);
+    assert!(
+        model
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_team_rejects_start_and_steer_without_consuming_input() -> Result<()> {
     let (model, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
         gate: None,

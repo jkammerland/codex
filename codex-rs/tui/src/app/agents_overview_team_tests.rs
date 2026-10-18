@@ -1,6 +1,239 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+fn styled_task_fixture() -> (AgentsOverviewRow, codex_team::TeamSnapshot) {
+    let snapshot: codex_team::TeamSnapshot = serde_json::from_value(serde_json::json!({
+        "control": {"coordinatorId":"coordinator","revision":8,"mode":"stopped"},
+        "servers": [{"machineId":"machine","machineLabel":"Machine","serverId":"primary","serverLabel":"Primary","installationId":null,"connected":true,"appliedRevision":8,"error":null}],
+        "agents": [{
+            "enrollment":{"address":{"machineId":"machine","serverId":"primary","threadId":"00000000-0000-7000-8000-000000000001"},"alias":"Reviewer","manuallyHeld":false,"continuationTurnId":null},
+            "status":"idle","currentModel":null,"currentEffort":null,"nextModel":"gpt-6.1-sol","nextEffort":"medium","project":null,
+            "discovery": {
+                "availability":{"synchronization":"current","activity":"idle","readiness":"held","holds":["stopped","continuation"],"reasons":["Team is stopped","An interrupted turn has priority over new work"]},
+                "environments":[{"id":"local","current":false,"next":true,"os":"linux","shell":"bash","declaredCapabilities":["compiler"]}]
+            },
+            "runtime":null
+        }],
+        "messages":[]
+    })).unwrap();
+    let mut rows = Vec::new();
+    append_enrolled_rows(&snapshot, &mut rows);
+    let mut row = rows.remove(0);
+    row.metadata_known = true;
+    row.thread.reasoning_effort = Some(codex_protocol::openai_models::ReasoningEffort::Medium);
+    (row, snapshot)
+}
+
+fn assert_span_style(lines: &[Line<'_>], text: &str, style: Style) {
+    let span = lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content == text)
+        .unwrap_or_else(|| panic!("missing span {text:?}"));
+    assert_eq!(span.style, style, "style for {text:?}");
+}
+
+#[test]
+fn held_task_details_have_compact_groups_and_semantic_styles() {
+    let (row, snapshot) = styled_task_fixture();
+    let details = task_lines(&row, Some(&snapshot));
+    assert_eq!(
+        details
+            .status
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![
+            "",
+            "Team · Reviewer",
+            "Readiness Held · Activity  Idle",
+            "Sync      Current",
+            "  ↳ Team is stopped",
+            "  ↳ An interrupted turn has priority over new work",
+            "Server    primary · Control  applied 8",
+        ]
+    );
+    assert_eq!(
+        details
+            .environment
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![
+            "",
+            "Environment",
+            "local · next",
+            "OS  linux · Shell  bash (cached)",
+            "Declared  compiler",
+        ]
+    );
+    assert_span_style(&details.status, "Team", Style::default().bold());
+    assert_span_style(&details.status, "Readiness ", secondary_text_style());
+    assert_span_style(&details.status, "Held", status_style(StatusTone::Attention));
+    assert_span_style(
+        &details.status,
+        "Current",
+        status_style(StatusTone::Success),
+    );
+    assert_span_style(&details.environment, " (cached)", secondary_text_style());
+}
+
+#[test]
+fn task_details_retain_distinct_current_and_next_model_choices() {
+    let (mut row, mut snapshot) = styled_task_fixture();
+    let agent = &mut snapshot.agents[0];
+    agent.current_model = Some("gpt-6.1-sol".into());
+    agent.current_effort = Some("medium".into());
+    assert!(execution_lines(&row, agent).is_empty());
+
+    agent.next_effort = Some("high".into());
+    assert_eq!(
+        execution_lines(&row, agent)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["Next      gpt-6.1-sol / high"]
+    );
+    agent.current_model = Some("gpt-6-astra".into());
+    assert_eq!(
+        execution_lines(&row, agent)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![
+            "Current   gpt-6-astra / medium",
+            "Next      gpt-6.1-sol / high"
+        ]
+    );
+
+    // An enrollment-only row does not establish historical model settings.
+    row.metadata_known = false;
+    agent.next_effort = Some("medium".into());
+    assert!(
+        execution_lines(&row, agent)
+            .iter()
+            .any(|line| line.to_string() == "Next      gpt-6.1-sol / medium")
+    );
+}
+
+#[test]
+fn task_details_preserve_default_choices_when_header_effort_is_unknown() {
+    let (mut row, mut snapshot) = styled_task_fixture();
+    row.thread.reasoning_effort = None;
+    let agent = &mut snapshot.agents[0];
+    agent.current_model = row.thread.model.clone();
+    agent.current_effort = None;
+    agent.next_effort = None;
+    assert_eq!(
+        execution_lines(&row, agent)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![
+            "Current   gpt-6.1-sol / default",
+            "Next      gpt-6.1-sol / default",
+        ]
+    );
+}
+
+#[test]
+fn task_details_keep_control_errors_and_unconfirmed_jobs_in_status() {
+    let (row, mut snapshot) = styled_task_fixture();
+    snapshot.servers[0].error = Some("Host disconnected".into());
+    snapshot.servers[0].connected = false;
+    let agent = &mut snapshot.agents[0];
+    agent.discovery.availability.activity = TeamActivity::WaitingForApproval;
+    agent.discovery.availability.synchronization = TeamSynchronization::Disconnected;
+    agent.enrollment.manually_held = true;
+    agent.requested_selection = Some(TeamModelSelection {
+        revision: 9,
+        model: TeamSelection::Value {
+            value: "queued-model".into(),
+        },
+        effort: TeamSelection::Default,
+    });
+    agent.runtime = Some(serde_json::from_value(serde_json::json!({
+        "threadId":row.thread.id,"rootThreadId":row.thread.id,"parentThreadId":null,
+        "alias":"Reviewer","loaded":true,"archived":false,"turnId":null,
+        "currentModel":null,"currentEffort":null,"nextModel":null,"nextEffort":null,
+        "modelError":"Model unavailable","appliedSelectionRevision":8,
+        "inFlight":2,"reconciling":true,"manuallyHeld":true,"continuationTurnId":null,
+        "jobs":[{"id":"job","threadId":row.thread.id,"server":"worker","tool":"launch","handle":null,"status":"unconfirmed","detail":"Cancellation has not been confirmed."}]
+    })).unwrap());
+
+    let details = task_lines(&row, Some(&snapshot));
+    let lines = details.status;
+    let text = lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "Hold      Manually held",
+        "Queued: queued-model / model default · revision 9",
+        "Admitted  2 family operation(s)",
+        "Settling  Previously admitted work",
+        "launch: Unconfirmed · Cancellation has not been confirmed.",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?}");
+    }
+    assert!(text.contains("Host disconnected"));
+    assert!(!text.contains("Environment"));
+    assert!(
+        details
+            .environment
+            .iter()
+            .any(|line| line.to_string() == "Environment")
+    );
+    assert_span_style(
+        &lines,
+        "Host disconnected",
+        status_style(StatusTone::Failure),
+    );
+    assert_span_style(
+        &lines,
+        "Model unavailable",
+        status_style(StatusTone::Failure),
+    );
+    assert_span_style(
+        &lines,
+        "Waiting for approval",
+        status_style(StatusTone::Attention),
+    );
+    assert_span_style(&lines, "Unconfirmed", status_style(StatusTone::Attention));
+    assert_span_style(&lines, "Queued: ", status_style(StatusTone::Attention));
+}
+
+#[test]
+fn task_details_preserve_unknowns_and_plain_tasks_without_hosts() {
+    let (mut row, mut snapshot) = styled_task_fixture();
+    snapshot.agents[0].discovery = TeamAgentDiscovery::default();
+    let details = task_lines(&row, Some(&snapshot));
+    assert!(
+        details
+            .status
+            .iter()
+            .any(|line| line.to_string() == "Readiness Unknown · Activity  Unknown")
+    );
+    assert!(
+        details
+            .status
+            .iter()
+            .any(|line| line.to_string() == "Sync      Unconfirmed")
+    );
+    assert!(
+        details
+            .environment
+            .iter()
+            .any(|line| line.to_string() == "Unknown")
+    );
+
+    row.host = None;
+    let details = task_lines(&row, Some(&snapshot));
+    assert!(details.status.is_empty());
+    assert!(details.environment.is_empty());
+}
+
 #[test]
 fn enrolled_unloaded_thread_remains_visible_without_fabricating_history() {
     let agent: codex_team::Agent = serde_json::from_value(serde_json::json!({
@@ -33,9 +266,12 @@ fn enrolled_unloaded_thread_remains_visible_without_fabricating_history() {
     append_enrolled_rows(&snapshot, &mut archived_rows);
     assert!(archived_rows.is_empty());
     insta::assert_snapshot!(discovery_lines(&TeamAgentDiscovery::default()).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"), @r###"
-    Synchronization: Unconfirmed
-    Activity: Unknown · Readiness: Unknown
-    Environments: unknown
+    Team
+    Readiness Unknown · Activity  Unknown
+    Sync      Unconfirmed
+
+    Environment
+    Unknown
     "###);
 }
 

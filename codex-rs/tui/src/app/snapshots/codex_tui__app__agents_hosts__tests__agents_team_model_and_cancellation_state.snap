@@ -11,33 +11,33 @@ expression: output
   /tmp/project · main  1                                  │ Saved task title
   › ○ Saved task title                                    │ ○ Idle
                                                           │
-                                                          │ Model: Unknown
-                                                          │ Reasoning: Unknown
+                                                          │ Model:  Unknown
+                                                          │ Effort: Unknown
                                                           │
-                                                          │ Project
-                                                          │ /tmp/project
-                                                          │ Server: main
-                                                          │ Team control: applied 4
-                                                          │ Team alias: release leader
-                                                          │ Synchronization: Unconfirmed
-                                                          │ Activity: Unknown · Readiness: Unknown
-                                                          │ Environments: unknown
-                                                          │ Manually held
-                                                          │ Current: previous-model / medium
-                                                          │ Next: host-applied-model / default
+                                                          │ Team · release leader
+                                                          │ Readiness Unknown · Activity  Unknown
+                                                          │ Sync      Unconfirmed
+                                                          │ Hold      Manually held
+                                                          │ Server    main · Control  applied 4
+                                                          │
+                                                          │ Execution
+                                                          │ Current   previous-model / medium
+                                                          │ Next      host-applied-model / default
                                                           │ Queued: queued-model / model default ·
                                                           │ revision 9
-                                                          │ 1 admitted family operation(s)
-                                                          │ Settling previously admitted work
+                                                          │ Admitted  1 family operation(s)
+                                                          │ Settling  Previously admitted work
                                                           │ launch: Unconfirmed · Cancellation has
                                                           │ not been confirmed.
                                                           │
+                                                          │ Project
+                                                          │ /tmp/project
+                                                          │
+                                                          │ Environment
+                                                          │ Unknown
+                                                          │
                                                           │ Prompt
                                                           │ Saved task title
-                                                          │
-                                                          │
-                                                          │
-                                                          │
                                                           │
                                                           │
                                                           │

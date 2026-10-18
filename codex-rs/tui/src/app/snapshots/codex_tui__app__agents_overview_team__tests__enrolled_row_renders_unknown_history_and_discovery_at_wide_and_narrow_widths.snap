@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agents_overview_team_tests.rs
-assertion_line: 106
+assertion_line: 250
 expression: "screens.join(\"\\n---\\n\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
@@ -11,15 +11,15 @@ expression: "screens.join(\"\\n---\\n\")"
   Unknown · server  1                                     │ Board reviewer
   › ○ Board reviewer                                      │ ○ Inactive
                                                           │
-                                                          │ Model: Unknown
-                                                          │ Reasoning: Unknown
+                                                          │ Model:  Unknown
+                                                          │ Effort: Unknown
+                                                          │ History metadata: unknown (enrollment
+                                                          │ only)
+                                                          │ Team
+                                                          │ Readiness Unknown · Activity  Unknown
+                                                          │ Sync      Unconfirmed
                                                           │
-                                                          │ Project
-                                                          │ Unknown
                                                           │ …
-                                                          │
-                                                          │ Prompt
-                                                          │ No prompt available.
   History metadata is unavailable · open this task to load it before creating, forking or renaming
 ---
   Agents   t Tasks   b Board

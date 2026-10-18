@@ -4,6 +4,9 @@ mod discovery;
 #[path = "agents_overview_foreign_paths_tests.rs"]
 mod foreign_paths;
 
+#[path = "agents_overview_panel_tests.rs"]
+mod panel;
+
 use crate::app::app_server_requests::BufferedServerRequest;
 #[path = "agent_center_tests.rs"]
 mod command_center;

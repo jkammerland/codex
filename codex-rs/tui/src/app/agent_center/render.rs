@@ -58,10 +58,12 @@ impl AgentsOverviewView {
         let body = row(area, header_height, footer.y - header.bottom())
             .inner(Margin::new(/*horizontal*/ 2, /*vertical*/ 0));
         let [list, gap, details] = if body.width >= 90 {
+            // Give details room to breathe on wide terminals while keeping the task list usable.
+            let details_width = (body.width / 5 * 2).clamp(38, 64);
             Layout::horizontal([
                 Constraint::Min(46),
                 Constraint::Length(3),
-                Constraint::Length(38),
+                Constraint::Length(details_width),
             ])
             .areas(body)
         } else {

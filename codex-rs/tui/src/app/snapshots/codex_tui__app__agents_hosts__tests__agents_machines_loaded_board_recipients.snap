@@ -11,14 +11,14 @@ expression: render(&view)
   /tmp/project · main  3                                  │ Board builder
   › ● Board builder                                       │ ● Working
     ○ Board reviewer                                      │
-    ○ Prompt task                                         │ Model: Unknown
-                                                          │ Reasoning: Unknown
+    ○ Prompt task                                         │ Model:  Unknown
+                                                          │ Effort: Unknown
+                                                          │
+                                                          │ Connection
+                                                          │ Server    main
                                                           │
                                                           │ Project
                                                           │ /tmp/project
-                                                          │ Project: /tmp/project
-                                                          │ Model: Unknown
-                                                          │ Server: main
                                                           │
                                                           │ Prompt
                                                           │ No prompt available.

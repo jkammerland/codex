@@ -482,11 +482,8 @@ impl App {
                         .and_then(|ids| ids.iter().position(|candidate| candidate == id)),
                     pins_supported: host.state.agents_overview.pinned_thread_ids.is_some(),
                     details: super::agents_overview_details::AgentsOverviewDetails {
-                        lines: vec![
-                            format!("Project: {}", thread.cwd.render_for_ui()).into(),
-                            format!("Model: {}", thread.model.as_deref().unwrap_or("Unknown"))
-                                .into(),
-                        ],
+                        lines: Vec::new(),
+                        environment_lines: Vec::new(),
                         usage_lines: host
                             .state
                             .agents_overview
@@ -543,126 +540,10 @@ impl App {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .vim_enabled = self.chat_widget.composer_is_vim_enabled();
         for row in &mut rows {
-            let Some(host) = &row.host else { continue };
-            row.details
-                .lines
-                .push(format!("Server: {}", host.server_id).into());
-            if let Some(snapshot) = &self.agents_hosts.snapshot
-                && let Some(server) = snapshot.servers.iter().find(|server| {
-                    server.machine_id == host.machine_id && server.server_id == host.server_id
-                })
-            {
-                let applied = server.applied_revision.map_or_else(
-                    || "unconfirmed".into(),
-                    |revision| format!("applied {revision}"),
-                );
-                row.details
-                    .lines
-                    .push(format!("Team control: {applied}").into());
-                if let Some(error) = &server.error {
-                    row.details.lines.push(error.clone().into());
-                }
-            }
-            if let Some(snapshot) = &self.agents_hosts.snapshot
-                && let Some(agent) = snapshot.agents.iter().find(|agent| {
-                    agent.enrollment.address.machine_id == host.machine_id
-                        && agent.enrollment.address.server_id == host.server_id
-                        && agent.enrollment.address.thread_id == row.thread.id
-                })
-            {
-                row.details
-                    .lines
-                    .push(format!("Team alias: {}", agent.enrollment.alias).into());
-                row.details
-                    .lines
-                    .extend(super::agents_overview_team::discovery_lines(
-                        &agent.discovery,
-                    ));
-                if agent.enrollment.manually_held {
-                    row.details.lines.push("Manually held".into());
-                }
-                if let Some(model) = &agent.current_model {
-                    row.details.lines.push(
-                        format!(
-                            "Current: {model} / {}",
-                            agent.current_effort.as_deref().unwrap_or("default")
-                        )
-                        .into(),
-                    );
-                }
-                if let Some(model) = &agent.next_model {
-                    row.details.lines.push(
-                        format!(
-                            "Next: {model} / {}",
-                            agent.next_effort.as_deref().unwrap_or("default")
-                        )
-                        .into(),
-                    );
-                }
-                if let Some(selection) = &agent.requested_selection {
-                    let applied = agent
-                        .runtime
-                        .as_ref()
-                        .and_then(|runtime| runtime.applied_selection_revision);
-                    let state = if applied.is_some_and(|revision| revision >= selection.revision) {
-                        "Applied"
-                    } else {
-                        "Queued"
-                    };
-                    let selection_text =
-                        |selection: &codex_app_server_protocol::TeamSelection| match selection {
-                            codex_app_server_protocol::TeamSelection::Keep => {
-                                "unchanged".to_owned()
-                            }
-                            codex_app_server_protocol::TeamSelection::Default => {
-                                "model default".to_owned()
-                            }
-                            codex_app_server_protocol::TeamSelection::Inherit => {
-                                "parent".to_owned()
-                            }
-                            codex_app_server_protocol::TeamSelection::Value { value } => {
-                                value.clone()
-                            }
-                        };
-                    row.details.lines.push(
-                        format!(
-                            "{state}: {} / {} · revision {}",
-                            selection_text(&selection.model),
-                            selection_text(&selection.effort),
-                            selection.revision
-                        )
-                        .into(),
-                    );
-                }
-                if let Some(runtime) = &agent.runtime {
-                    if runtime.in_flight > 0 {
-                        row.details.lines.push(
-                            format!("{} admitted family operation(s)", runtime.in_flight).into(),
-                        );
-                    }
-                    if runtime.reconciling {
-                        row.details
-                            .lines
-                            .push("Settling previously admitted work".into());
-                    }
-                    if let Some(error) = &runtime.model_error {
-                        row.details.lines.push(error.clone().into());
-                    }
-                    for job in &runtime.jobs {
-                        row.details.lines.push(
-                            format!(
-                                "{}: {:?}{}",
-                                job.tool,
-                                job.status,
-                                job.detail
-                                    .as_ref()
-                                    .map_or(String::new(), |detail| format!(" · {detail}"))
-                            )
-                            .into(),
-                        );
-                    }
-                }
-            }
+            let team_lines =
+                super::agents_overview_team::task_lines(row, self.agents_hosts.snapshot.as_ref());
+            row.details.lines.extend(team_lines.status);
+            row.details.environment_lines = team_lines.environment;
         }
         {
             let mut state = self

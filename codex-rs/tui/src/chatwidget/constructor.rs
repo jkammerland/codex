@@ -250,6 +250,7 @@ impl ChatWidget {
             forked_from: None,
             interrupted_turn_notice_mode: InterruptedTurnNoticeMode::Default,
             input_queue: InputQueueState::default(),
+            team_execution: None,
             safety_buffering_prompt: None,
             safety_buffering_source: UserMessageSource::Prompt,
             chat_keymap,

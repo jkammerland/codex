@@ -75,6 +75,7 @@ pub(super) struct AgentsHosts {
         Arc<std::sync::Mutex<super::agents_overview_view::command_center::board::BoardState>>,
     pub(super) team_read_generation: Arc<std::sync::atomic::AtomicU64>,
     pub(super) applied_team_read: u64,
+    pub(super) held_rejections: HashMap<ThreadTarget, u64>,
     pub(super) notice: Option<String>,
     pub(super) team_operations: BTreeMap<String, codex_team::TeamOperation>,
     pub(super) failed_team_operations: std::collections::BTreeSet<String>,
@@ -100,6 +101,7 @@ impl Default for AgentsHosts {
             configuration_generation: 0,
             team_read_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             applied_team_read: 0,
+            held_rejections: HashMap::new(),
             tasks: tokio::task::JoinSet::new(),
             team_operations: BTreeMap::new(),
             failed_team_operations: std::collections::BTreeSet::new(),
@@ -395,6 +397,20 @@ impl App {
                         &key.machine_id,
                         &key.server_id,
                     );
+                    // Discovery gives the existing foreground connection its canonical address.
+                    // Preserve any rejection observed before that identity was available.
+                    let previous = &self.agents_hosts.foreground;
+                    for (mut target, read) in std::mem::take(&mut self.agents_hosts.held_rejections)
+                    {
+                        if &target.host == previous {
+                            target.host = key.clone();
+                        }
+                        self.agents_hosts
+                            .held_rejections
+                            .entry(target)
+                            .and_modify(|existing| *existing = (*existing).max(read))
+                            .or_insert(read);
+                    }
                     self.agents_hosts.initial_host = key.clone();
                     self.agents_hosts.foreground = key.clone();
                     self.agents_hosts.hosts.insert(key, host);
@@ -717,6 +733,9 @@ impl App {
             } => {
                 if generation >= self.agents_hosts.applied_team_read {
                     self.agents_hosts.applied_team_read = generation;
+                    self.agents_hosts
+                        .held_rejections
+                        .retain(|_, read| *read >= generation);
                     let settled = {
                         let mut board = self
                             .agents_hosts
@@ -731,6 +750,7 @@ impl App {
                         self.agents_hosts.failed_team_operations.remove(&id);
                     }
                     self.agents_hosts.snapshot = Some(snapshot);
+                    self.sync_chat_team_execution();
                 }
             }
             HostUpdate::Error(error) => self.agents_hosts.notice = Some(error),

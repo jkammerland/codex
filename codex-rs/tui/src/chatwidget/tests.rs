@@ -330,3 +330,6 @@ mod question_notifications_tests;
 
 #[path = "tests/security_setup_tests.rs"]
 mod security_setup_tests;
+
+#[path = "team_execution_tests.rs"]
+mod team_execution_tests;

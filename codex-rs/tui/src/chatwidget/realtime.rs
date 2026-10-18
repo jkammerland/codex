@@ -274,6 +274,14 @@ impl ChatWidget {
             return;
         }
 
+        if self.team_execution_held() {
+            self.add_info_message(
+                "Team held; resume the team before starting voice".into(),
+                None,
+            );
+            return;
+        }
+
         if self.has_misalignment_policy_violation() {
             self.show_misalignment_policy_precaution();
             return;

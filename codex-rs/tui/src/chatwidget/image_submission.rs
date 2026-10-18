@@ -78,7 +78,7 @@ impl ChatWidget {
                     pending.source,
                     Some(images),
                 );
-                if !accepted {
+                if !accepted && !self.team_execution_held() {
                     self.input_queue.recovered_queue |=
                         self.input_queue.has_queued_follow_up_messages();
                 }

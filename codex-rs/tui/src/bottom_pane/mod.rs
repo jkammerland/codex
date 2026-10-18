@@ -83,6 +83,7 @@ mod empty_state_policy;
 mod hook_status;
 mod mcp_server_elicitation;
 mod multi_select_picker;
+mod team_execution;
 pub(crate) use multi_select_picker::MultiSelectItem;
 pub(crate) use multi_select_picker::MultiSelectPicker;
 #[cfg(test)]
@@ -322,6 +323,7 @@ pub(crate) struct BottomPane {
     /// Running-hook summary supplied by the lifecycle owner after its reveal delay.
     hook_status_message: Option<String>,
     inline_banner: Option<actionable_banner::InlineBanner>,
+    team_execution_status: Option<&'static str>,
     /// Streaming may drop the row without losing its elapsed time or modal pause.
     status_timer: crate::status_indicator_widget::StatusTimer,
     /// Unified exec session summary source.
@@ -403,6 +405,7 @@ impl BottomPane {
             status: None,
             hook_status_message: None,
             inline_banner: None,
+            team_execution_status: None,
             status_timer: crate::status_indicator_widget::StatusTimer::default(),
             unified_exec_footer: UnifiedExecFooter::new(),
             pending_input_preview: PendingInputPreview::new(),
@@ -2414,6 +2417,12 @@ impl BottomPane {
             }
         } else {
             let mut flex = FlexRenderable::new();
+            if let Some(status) = self.team_execution_status {
+                flex.push(
+                    /*flex*/ 0,
+                    RenderableItem::Owned(Box::new(team_execution::TeamExecutionStatus(status))),
+                );
+            }
             if let Some(banner) = self
                 .inline_banner
                 .as_ref()

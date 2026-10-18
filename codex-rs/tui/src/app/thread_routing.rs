@@ -1414,6 +1414,7 @@ impl App {
             store.set_session(session.clone(), turns.clone());
         }
         self.activate_thread_channel(thread_id).await;
+        self.sync_chat_team_execution();
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ true);
         if !turns.is_empty() {
@@ -1752,6 +1753,7 @@ impl App {
             })
             .then(|| snapshot.input_state.take())
             .flatten();
+        self.sync_chat_team_execution();
         self.chat_widget.restore_thread_input_state(
             snapshot.input_state,
             ThreadInputStateRestoreMode {

@@ -20446,7 +20446,7 @@
           "iconLarge": {
             "anyOf": [
               {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               },
               {
                 "type": "null"
@@ -20463,7 +20463,7 @@
           "iconSmall": {
             "anyOf": [
               {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               },
               {
                 "type": "null"

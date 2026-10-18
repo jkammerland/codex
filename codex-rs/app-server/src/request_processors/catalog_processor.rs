@@ -36,8 +36,8 @@ fn skills_to_info(
                     codex_app_server_protocol::SkillInterface {
                         display_name: interface.display_name,
                         short_description: interface.short_description,
-                        icon_small: interface.icon_small,
-                        icon_large: interface.icon_large,
+                        icon_small: interface.icon_small.map(Into::into),
+                        icon_large: interface.icon_large.map(Into::into),
                         icon_small_url: None,
                         icon_large_url: None,
                         brand_color: interface.brand_color,

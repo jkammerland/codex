@@ -11,17 +11,17 @@ expression: render(&view)
   Idle · main  1                                          │ Local task
   › ○ Local task                                          │ ○ Idle
   Beta                                                    │
-                                                          │ Model: Unknown
-  Needs input · main  1                                   │ Reasoning: Unknown
+                                                          │ Model:  Unknown
+  Needs input · main  1                                   │ Effort: Unknown
     ! Remote task                                         │
+                                                          │ Connection
+                                                          │ Server    main
+                                                          │
                                                           │ Project
                                                           │ /tmp/project
-                                                          │ Server: main
                                                           │
                                                           │ Prompt
                                                           │ Local task
-                                                          │
-                                                          │
                                                           │
                                                           │
                                                           │

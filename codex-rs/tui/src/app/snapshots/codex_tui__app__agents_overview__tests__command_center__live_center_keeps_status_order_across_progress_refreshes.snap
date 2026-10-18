@@ -12,8 +12,8 @@ Initial display:
     ! Needs input                                         │ Alpha
                                                           │ ● Working
   Working  3                                              │
-    ● Bravo                                               │ Model: Unknown
-    ● Charlie                                             │ Reasoning: Unknown
+    ● Bravo                                               │ Model:  Unknown
+    ● Charlie                                             │ Effort: Unknown
   › ● Alpha                                               │
                                                           │ Project
   Idle  1                                                 │ /tmp/project
@@ -32,8 +32,8 @@ After progress updates:
     ! Needs input                                         │ Alpha
                                                           │ ● Working
   Working  3                                              │
-    ● Bravo                                               │ Model: Unknown
-    ● Charlie                                             │ Reasoning: Unknown
+    ● Bravo                                               │ Model:  Unknown
+    ● Charlie                                             │ Effort: Unknown
   › ● Alpha                                               │
                                                           │ Project
   Idle  1                                                 │ /tmp/project

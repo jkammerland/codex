@@ -50,6 +50,7 @@ use ratatui::layout::Layout;
 use ratatui::layout::Margin;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -503,18 +504,32 @@ impl AgentsOverviewView {
         let Some(row) = self.selected_row() else {
             return;
         };
-        let (status, dot) = Self::status(row);
+        let (status, mut dot) = Self::status(row);
+        let secondary = crate::style::secondary_text_style();
+        let status_style = match row.group {
+            AgentsOverviewGroup::NeedsYou if row.thread.status == ThreadStatus::SystemError => {
+                crate::style::status_style(crate::style::StatusTone::Failure)
+            }
+            AgentsOverviewGroup::NeedsYou => {
+                crate::style::status_style(crate::style::StatusTone::Attention)
+            }
+            AgentsOverviewGroup::Working => crate::style::accent_style().bold(),
+            AgentsOverviewGroup::Ready | AgentsOverviewGroup::Finished => secondary,
+        };
+        dot.style = status_style;
         let width = usize::from(area.width);
         let model = crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
             Line::from(vec![
-                "Model: ".dim(),
-                model_name(&row.thread).to_string().into(),
+                "Model:  ".set_style(secondary),
+                model_name(&row.thread)
+                    .to_string()
+                    .set_style(crate::style::accent_style()),
             ]),
             width,
         );
         let reasoning = crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
             Line::from(vec![
-                "Reasoning: ".dim(),
+                "Effort: ".set_style(secondary),
                 row.thread
                     .reasoning_effort
                     .as_ref()
@@ -534,15 +549,21 @@ impl AgentsOverviewView {
                 )),
                 width,
             ),
-            Line::from(vec![dot, " ".into(), status.into()]),
+            Line::from(vec![dot, " ".into(), status.set_style(status_style)]),
             Line::default(),
             model,
             reasoning,
-            Line::default(),
-            Line::from("Project".dim()),
-            Line::from(row.thread.cwd.render_for_ui()),
         ];
         lines.extend(row.details.usage_lines.clone());
+        // Availability and holds should be visible before potentially long project paths.
+        if self.state().connection_notice.is_none() {
+            lines.extend(row.details.lines.clone());
+        }
+        lines.extend([
+            Line::default(),
+            Line::from("Project".bold()),
+            Line::from(row.thread.cwd.render_for_ui()),
+        ]);
         if let Some(branch) = row
             .thread
             .git_info
@@ -550,8 +571,11 @@ impl AgentsOverviewView {
             .and_then(|git| git.branch.as_ref())
         {
             lines.push(Line::default());
-            lines.push("Branch".dim().into());
+            lines.push("Branch".bold().into());
             lines.push(branch.clone().into());
+        }
+        if self.state().connection_notice.is_none() {
+            lines.extend(row.details.environment_lines.clone());
         }
         // Keep destinations attached to their text through wrapping and clipping.
         let wrap = |lines: Vec<HyperlinkLine>| {
@@ -565,7 +589,7 @@ impl AgentsOverviewView {
         };
         let preview = super::agents_overview_details::preview_markdown(&row.thread.preview);
         let prompt_start = crate::wrapping::word_wrap_lines(lines.clone(), width).len();
-        lines.extend([Line::default(), Line::from("Prompt".dim())]);
+        lines.extend([Line::default(), Line::from("Prompt".bold())]);
         let prompt = crate::markdown_render::render_markdown_lines_with_width_and_cwd(
             match preview.as_str() {
                 "" => "No prompt available.",
@@ -583,11 +607,11 @@ impl AgentsOverviewView {
         let mut lines = wrap(plain_hyperlink_lines(lines));
         lines.extend(prompt);
         if self.state().connection_notice.is_none() {
-            let mut details = plain_hyperlink_lines(row.details.lines.clone());
+            let mut details = Vec::new();
             if let Some((message, cwd)) = &row.details.last_message {
                 details.extend(plain_hyperlink_lines(vec![
                     Line::default(),
-                    "Last message".dim().into(),
+                    "Last message".bold().into(),
                 ]));
                 details.extend(
                     crate::markdown_render::render_markdown_lines_with_width_and_cwd(
@@ -598,10 +622,8 @@ impl AgentsOverviewView {
                 );
             }
             let mut details = wrap(details);
-            if !row.details.usage_lines.is_empty()
-                && details.len() > usize::from(area.height).saturating_sub(lines.len())
-            {
-                // Activity and usage take precedence over repeating the original prompt.
+            if details.len() > usize::from(area.height).saturating_sub(lines.len()) {
+                // Recent activity takes precedence over repeating the original prompt.
                 lines.truncate(prompt_start);
             }
             let available = usize::from(area.height).saturating_sub(lines.len());
@@ -612,6 +634,13 @@ impl AgentsOverviewView {
                 }
             }
             lines.splice(details_start..details_start, details);
+        }
+        // Dense team details can fill the pane even before the message preview is added.
+        if lines.len() > usize::from(area.height) {
+            lines.truncate(usize::from(area.height));
+            if let Some(last) = lines.last_mut() {
+                *last = HyperlinkLine::new("…".set_style(secondary).into());
+            }
         }
         Paragraph::new(visible_lines(lines.clone())).render(area, buf);
         mark_buffer_hyperlinks(buf, area, &lines, /*scroll_rows*/ 0);

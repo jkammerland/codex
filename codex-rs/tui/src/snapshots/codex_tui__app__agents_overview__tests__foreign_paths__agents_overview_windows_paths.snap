@@ -11,8 +11,8 @@ expression: rendered
   › ○ Review [the source](C:\Pilot\project\src\main.rs#…  │ Review [the source](C:\Pilot\project\…
                                                           │ ○ Idle
                                                           │
-                                                          │ Model: Unknown
-                                                          │ Reasoning: Unknown
+                                                          │ Model:  Unknown
+                                                          │ Effort: Unknown
                                                           │
                                                           │ Project
                                                           │ C:\Pilot\project

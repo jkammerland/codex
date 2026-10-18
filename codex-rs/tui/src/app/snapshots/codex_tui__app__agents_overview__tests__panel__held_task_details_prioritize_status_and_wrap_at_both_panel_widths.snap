@@ -1,0 +1,118 @@
+---
+source: tui/src/app/agents_overview_panel_tests.rs
+assertion_line: 110
+expression: "snapshots.join(\"\\n---\\n\")"
+---
+100x40
+Task details
+
+Review the parser
+○ Idle
+
+Model:  gpt-6.1-sol
+Effort: medium
+
+Team · Reviewer
+Readiness Held · Activity  Idle
+Sync      Current
+↳ Team is stopped
+↳ An interrupted turn has priority
+over new work
+Server    @current
+
+Project
+/workspace/project-with-a-long-name/
+components/parser
+
+Environment
+local · next
+OS  linux · Shell  bash (cached)
+Declared  native-tests, code-review
+
+Prompt
+Review the parser
+
+
+
+
+
+
+
+
+
+---
+160x40
+Task details
+
+Review the parser
+○ Idle
+
+Model:  gpt-6.1-sol
+Effort: medium
+
+Team · Reviewer
+Readiness Held · Activity  Idle
+Sync      Current
+↳ Team is stopped
+↳ An interrupted turn has priority over new work
+Server    @current
+
+Project
+/workspace/project-with-a-long-name/components/parser
+
+Environment
+local · next
+OS  linux · Shell  bash (cached)
+Declared  native-tests, code-review
+
+Prompt
+Review the parser
+
+
+
+
+
+
+
+
+
+
+
+---
+100x24
+Task details
+
+Review the parser
+○ Idle
+
+Model:  gpt-6.1-sol
+Effort: medium
+
+Team · Reviewer
+Readiness Held · Activity  Idle
+Sync      Current
+↳ Team is stopped
+↳ An interrupted turn has priority
+over new work
+Server    @current
+
+Project
+/workspace/project-with-a-long-name/
+components/parser
+…
+---
+100x18
+Task details
+
+Review the parser
+○ Idle
+
+Model:  gpt-6.1-sol
+Effort: medium
+
+Team · Reviewer
+Readiness Held · Activity  Idle
+Sync      Current
+↳ Team is stopped
+↳ An interrupted turn has priority
+…

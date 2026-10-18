@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agents_overview_tests.rs
-assertion_line: 1069
+assertion_line: 1072
 expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{project}  1\"),\n&normalized_group).replace(&project, \"/tmp/project\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
@@ -11,14 +11,14 @@ expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{proj
   › ● Check startup performance                       │ Check startup performance
                                                       │ ● Working
                                                       │
-                                                      │ Model: Unknown
-                                                      │ Reasoning: Unknown
-                                                      │
-                                                      │ Project
-                                                      │ /tmp/project
+                                                      │ Model:  Unknown
+                                                      │ Effort: Unknown
                                                       │
                                                       │ Latest activity
                                                       │ Checking cold-start regressions
+                                                      │
+                                                      │ Project
+                                                      │ /tmp/project
                                                       │
                                                       │ Prompt
                                                       │ No prompt available.

@@ -207,6 +207,7 @@ mod agents_hosts_actions;
 mod agents_hosts_attachment;
 mod agents_hosts_completions;
 mod agents_hosts_discovery;
+mod agents_hosts_execution;
 mod agents_hosts_lifecycle;
 pub(crate) mod agents_hosts_models;
 mod agents_hosts_revert;

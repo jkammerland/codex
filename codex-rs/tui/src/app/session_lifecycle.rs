@@ -537,6 +537,7 @@ impl App {
             self.background_voice = Some(Box::new(previous));
         }
         self.sync_active_agent_label();
+        self.sync_chat_team_execution();
     }
 
     pub(super) async fn select_agent_thread(

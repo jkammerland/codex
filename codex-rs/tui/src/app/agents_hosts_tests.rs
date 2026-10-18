@@ -1670,3 +1670,6 @@ async fn queued_safe_completion_cannot_be_reauthorized_after_host_reconnect() ->
     server.shutdown().await?;
     Ok(())
 }
+
+#[path = "agents_hosts_execution_tests.rs"]
+mod execution;

@@ -27,6 +27,15 @@ pub(super) async fn try_submit_user_turn(
     else {
         return Ok(false);
     };
+    // Stop can arrive after the composer emitted this request but before dispatch.
+    if app
+        .team_execution_for_thread(thread_id)
+        .is_some_and(crate::chatwidget::team_execution::TeamExecution::held)
+    {
+        app.restore_team_held_submission(thread_id, client_user_message_id)
+            .await;
+        return Ok(true);
+    }
     if let Some(turn_id) = app.active_turn_id_for_thread(thread_id).await {
         let mut steer_turn_id = turn_id;
         let mut retried_after_turn_mismatch = false;
@@ -49,6 +58,11 @@ pub(super) async fn try_submit_user_turn(
                     return Ok(true);
                 }
                 Err(error) => {
+                    if super::agents_hosts_execution::team_execution_held_error(&error) {
+                        app.restore_team_held_submission(thread_id, client_user_message_id)
+                            .await;
+                        return Ok(true);
+                    }
                     if let Some(turn_error) = active_turn_not_steerable_turn_error(&error) {
                         if !app.chat_widget.enqueue_rejected_steer() {
                             app.chat_widget.add_error_message(turn_error.message);
@@ -170,7 +184,20 @@ pub(super) async fn try_submit_user_turn(
             final_output_json_schema.clone(),
             cyber_access_program.map(Into::into),
         )
-        .await?;
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error)
+            if error
+                .downcast_ref::<TypedRequestError>()
+                .is_some_and(super::agents_hosts_execution::team_execution_held_error) =>
+        {
+            app.restore_team_held_submission(thread_id, client_user_message_id)
+                .await;
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
     if app.active_thread_id == Some(thread_id) && app.chat_widget.thread_id() == Some(thread_id) {
         crate::startup_recovery::acknowledged(client_user_message_id);
         app.chat_widget

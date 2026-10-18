@@ -297,6 +297,11 @@ impl ChatComposer {
                     if selected_command_dispatches_immediately_on_tab(&selected_cmd)
                         && let CommandItem::Builtin(cmd) = &selected_cmd
                     {
+                        if self.team_execution_held
+                            && !self.team_popup_command_allowed(&selected_cmd)
+                        {
+                            return (InputResult::None, true);
+                        }
                         self.stage_selected_slash_command_history(&selected_cmd);
                         self.draft.textarea.set_text_clearing_elements("");
                         self.draft.is_bash_mode = false;
@@ -378,6 +383,9 @@ impl ChatComposer {
                 ..
             } => {
                 if let Some(sel) = popup.selected_item() {
+                    if self.team_execution_held && !self.team_popup_command_allowed(&sel) {
+                        return (InputResult::None, true);
+                    }
                     if self.blocks_direct_input {
                         let command_is_allowed = match &sel {
                             CommandItem::Builtin(cmd) => {

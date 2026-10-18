@@ -173,6 +173,22 @@ impl ChatWidget {
         pending_pastes: Vec<(String, String)>,
         source: UserMessageSource,
     ) -> bool {
+        if self.team_execution_held() {
+            let mut pastes = self.bottom_pane.composer_pending_pastes();
+            let mut used = pastes
+                .iter()
+                .map(|(placeholder, _)| placeholder.clone())
+                .collect();
+            let (user_message, pending_pastes) = user_messages::remap_colliding_paste_placeholders(
+                user_message,
+                pending_pastes,
+                &mut used,
+            );
+            self.restore_user_message_to_composer(user_message);
+            pastes.extend(pending_pastes);
+            self.bottom_pane.set_composer_pending_pastes(pastes);
+            return false;
+        }
         if self.has_misalignment_policy_violation() {
             return false;
         }
@@ -242,7 +258,8 @@ impl ChatWidget {
 
     /// If idle and there are queued inputs, submit exactly one to start the next turn.
     pub(crate) fn maybe_send_next_queued_input(&mut self) -> bool {
-        if !self.is_session_configured()
+        if self.team_execution_held()
+            || !self.is_session_configured()
             || self.fork_in_progress
             || self.has_misalignment_policy_violation()
             || self.input_queue.submissions_paused()

@@ -335,3 +335,6 @@ mod security_setup_tests;
 
 #[path = "tests/quick_dials_tests.rs"]
 mod quick_dials_tests;
+
+#[path = "team_execution_tests.rs"]
+mod team_execution_tests;

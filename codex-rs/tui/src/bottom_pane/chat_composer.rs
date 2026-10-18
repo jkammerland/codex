@@ -138,6 +138,11 @@
 //! Token markers added during Replace are removed when restoring overwritten characters.
 //! `Tab` does not submit when entering a `!` shell command.
 //!
+//! A coordinator team hold keeps editing, attachments, mentions, navigation, and local commands
+//! available. Submit/queue preparation and slash-popup dispatch check the hold before consuming
+//! the draft or recording history, including custom submit bindings. Running confirmation clears
+//! the guard; it never submits the retained draft itself.
+//!
 //! On submit/queue paths, the composer:
 //!
 //! - Expands pending paste placeholders so element ranges align with the final text.
@@ -399,6 +404,7 @@ pub(crate) use mouse::ClipboardPasteTarget;
 mod paste_input;
 mod popup_state;
 mod reconnect;
+mod team_execution;
 pub(crate) use reconnect::RestrictedInputMode;
 mod slash_input;
 mod sparkle;
@@ -635,6 +641,7 @@ pub(crate) struct ChatComposer {
     attachments: AttachmentState,
     placeholder_text: String,
     blocks_direct_input: bool,
+    team_execution_held: bool,
     is_task_running: bool,
     queue_submissions: bool,
     /// Slash-command draft staged for local recall after application-level dispatch.
@@ -814,6 +821,7 @@ impl ChatComposer {
             attachments: AttachmentState::default(),
             placeholder_text,
             blocks_direct_input: false,
+            team_execution_held: false,
             is_task_running: false,
             queue_submissions: false,
             pending_slash_command_history: None,
@@ -3126,6 +3134,9 @@ impl ChatComposer {
         slash_validation: SlashValidation,
         pending_paste_handling: PendingPasteHandling,
     ) -> Option<(String, Vec<TextElement>)> {
+        if self.team_execution_held && !self.team_command_allowed() {
+            return None;
+        }
         let mut text = self.current_text();
         let original_input = text.clone();
         let original_text_elements = self.current_text_elements();
@@ -3289,6 +3300,9 @@ impl ChatComposer {
             return (InputResult::None, true);
         }
 
+        if self.team_execution_held && !self.team_command_allowed() {
+            return (InputResult::None, true);
+        }
         if let Some(result) = self.handle_parent_owned_submission() {
             return result;
         }
@@ -3443,6 +3457,9 @@ impl ChatComposer {
         let command = self
             .slash_input()
             .bare_command(self.draft.textarea.text())?;
+        if self.team_execution_held && !self.team_command_allowed() {
+            return Some(InputResult::None);
+        }
         if self.reject_slash_command_if_unavailable(&command) {
             self.stage_slash_command_history(&command);
             self.record_pending_slash_command_history();
@@ -3466,6 +3483,9 @@ impl ChatComposer {
         let text = self.draft.textarea.text().to_string();
         let inline_command = self.slash_input().inline_command(&text)?;
         let command = inline_command.command;
+        if self.team_execution_held && !self.team_command_allowed() {
+            return Some(InputResult::None);
+        }
         if self.reject_slash_command_if_unavailable(&command) {
             self.stage_slash_command_history(&command);
             self.record_pending_slash_command_history();

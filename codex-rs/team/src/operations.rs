@@ -20,6 +20,8 @@ impl Coordinator {
         if matches!(
             &operation.request,
             TeamRequest::Snapshot
+                | TeamRequest::MessageStatus { .. }
+                | TeamRequest::ExplainAction { .. }
                 | TeamRequest::Models { .. }
                 | TeamRequest::GiteaInspect { .. }
                 | TeamRequest::AgentCredential { .. }
@@ -228,6 +230,8 @@ impl Coordinator {
                 Ok(response)
             }
             TeamRequest::Snapshot
+            | TeamRequest::MessageStatus { .. }
+            | TeamRequest::ExplainAction { .. }
             | TeamRequest::Models { .. }
             | TeamRequest::GiteaInspect { .. }
             | TeamRequest::AgentCredential { .. } => {

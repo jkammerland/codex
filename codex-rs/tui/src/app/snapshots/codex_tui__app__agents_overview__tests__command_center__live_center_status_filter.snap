@@ -4,7 +4,7 @@ assertion_line: 549
 expression: "screen(&view, 40, 12)"
 ---
   Agents   t Tasks   b Board
-  ‹  Working 0   Ready 1   Inactive 1
+  ‹  Working 0   Idle 1   Inactive 1
   ────────────────────────────────────
       Tasks
   /tmp/project  1 of 3

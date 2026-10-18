@@ -56,6 +56,7 @@ impl AgentsOverviewView {
     }
 
     pub(super) fn center_help_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let selected_metadata_known = self.selected_row().is_none_or(|row| row.metadata_known);
         let mut navigate = Group {
             title: "Navigate",
             entries: Vec::new(),
@@ -94,6 +95,8 @@ impl AgentsOverviewView {
         ] {
             if (action != "new_worktree" || self.worktrees_enabled)
                 && (action != "toggle_pin" || self.can_toggle_selected_pin())
+                && (!matches!(action, "new_task" | "new_worktree" | "fork" | "rename")
+                    || selected_metadata_known)
             {
                 tasks.push(self.agents_keymap.primary_hint(action, bindings), label);
             }
@@ -128,6 +131,8 @@ impl AgentsOverviewView {
     }
 
     pub(super) fn center_footer_hints(&self) -> Vec<(String, String)> {
+        // Selection reads the view state, so resolve it before holding the footer's guard.
+        let selected_metadata_known = self.selected_row().is_none_or(|row| row.metadata_known);
         let state = self.state();
         if let Some(items) = &state.key_chord_hint {
             return items.clone();
@@ -178,6 +183,7 @@ impl AgentsOverviewView {
             ));
         }
         if !state.editing_metadata()
+            && selected_metadata_known
             && let Some(hint) = self
                 .agents_keymap
                 .primary_hint("new_task", &self.agents_keymap.new_task)

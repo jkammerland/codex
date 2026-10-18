@@ -4,12 +4,12 @@ assertion_line: 83
 expression: render(&view)
 ---
   Agent command center   t Tasks   b Board  Group: Status  g
-   All 2   Needs you 1   Working 0   Ready 1   Inactive 0                          tab/⇧tab filter
+   All 2   Needs you 1   Working 0   Idle 1   Inactive 0                           tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                               │ Task details
   Alpha                                                   │
-  Ready · main  1                                         │ Local task
-  › ○ Local task                                          │ ○ Ready
+  Idle · main  1                                          │ Local task
+  › ○ Local task                                          │ ○ Idle
   Beta                                                    │
                                                           │ Model: Unknown
   Needs input · main  1                                   │ Reasoning: Unknown

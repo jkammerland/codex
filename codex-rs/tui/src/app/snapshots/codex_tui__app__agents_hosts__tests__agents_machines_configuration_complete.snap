@@ -1,29 +1,29 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 990
+assertion_line: 993
 expression: render(&view)
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 0   Needs you 0   Working 0   Ready 0   Inactive 0                          tab/⇧tab filter
+   All 1   Needs you 0   Working 0   Idle 0   Inactive 1                           tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
-  Alpha / main · Connected                                │
-  No tasks available · F9 machines and connections        │
+      Tasks                                               │ Task details
+  Alpha                                                   │
+  Unknown · main  1                                       │ release leader
+  › ○ release leader                                      │ ○ Inactive
                                                           │
+                                                          │ Model: host-applied-model
+                                                          │ Reasoning: Unknown
                                                           │
+                                                          │ Project
+                                                          │ Unknown
+                                                          │ History metadata: unknown (enrollment
+                                                          │ only)
+                                                          │ Server: main
+                                                          │ Team control: applied 4
+                                                          │ Team alias: release leader
+                                                          │ Synchronization: Unconfirmed
+                                                          │ …
                                                           │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
-                                                          │
+                                                          │ Prompt
+                                                          │ No prompt available.
   Team Stopped · 1/1 hosts applied · F6 pause · F7 resume · F8 stop · F9 team

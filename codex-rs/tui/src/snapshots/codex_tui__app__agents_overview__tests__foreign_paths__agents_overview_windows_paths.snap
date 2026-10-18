@@ -4,12 +4,12 @@ assertion_line: 45
 expression: rendered
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 1   Needs you 0   Working 0   Ready 1   Inactive 0                          tab/⇧tab filter
+   All 1   Needs you 0   Working 0   Idle 1   Inactive 0                           tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                               │ Task details
   C:\Pilot\project  1                                     │
   › ○ Review [the source](C:\Pilot\project\src\main.rs#…  │ Review [the source](C:\Pilot\project\…
-                                                          │ ○ Ready
+                                                          │ ○ Idle
                                                           │
                                                           │ Model: Unknown
                                                           │ Reasoning: Unknown

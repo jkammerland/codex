@@ -8,6 +8,7 @@ fn agent(
     effort_origin: TeamSelectionOrigin,
 ) -> Agent {
     Agent {
+        discovery: Default::default(),
         enrollment: TeamEnrollment {
             address: TeamAddress {
                 machine_id: "worker".into(),
@@ -19,6 +20,8 @@ fn agent(
             continuation_turn_id: None,
         },
         runtime: Some(TeamAgentRuntime {
+            activity: Default::default(),
+            environments: Vec::new(),
             thread_id: id.into(),
             root_thread_id: "parent".into(),
             parent_thread_id: parent.map(str::to_owned),

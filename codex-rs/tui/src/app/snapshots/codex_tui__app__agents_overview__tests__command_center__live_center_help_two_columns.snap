@@ -4,7 +4,7 @@ assertion_line: 565
 expression: "screen(&view, width, height)"
 ---
   Agents   t Tasks   b Board
-   All 3   Needs you 1   Working 0   Ready 1   Inactive 1
+   All 3   Needs you 1   Working 0   Idle 1   Inactive 1
   ────────────────────────────────────────────────────────
   Task shortcuts
 

@@ -42,6 +42,7 @@ async fn agent_board(
         servers: Vec::new(),
     };
     let server = crate::Server {
+        environment_capabilities: Default::default(),
         id: sender.server_id.clone(),
         label: "Account".into(),
         endpoint: crate::Endpoint::Local {
@@ -513,6 +514,7 @@ async fn board_agent_cannot_follow_another_identity_and_rejection_is_durable() -
         servers: Vec::new(),
     };
     let server = crate::Server {
+        environment_capabilities: Default::default(),
         id: sender.server_id.clone(),
         label: "Account".into(),
         endpoint: crate::Endpoint::Local {
@@ -551,3 +553,6 @@ async fn board_agent_cannot_follow_another_identity_and_rejection_is_durable() -
     );
     Ok(())
 }
+
+#[path = "board_subscription_tests.rs"]
+mod subscriptions;

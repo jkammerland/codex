@@ -75,6 +75,10 @@ pub struct TeamHostReadResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct TeamAgentRuntime {
+    #[serde(default)]
+    pub activity: super::TeamActivity,
+    #[serde(default)]
+    pub environments: Vec<super::TeamExecutionEnvironment>,
     pub thread_id: String,
     pub root_thread_id: String,
     pub parent_thread_id: Option<String>,

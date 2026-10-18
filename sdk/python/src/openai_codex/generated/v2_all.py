@@ -5080,6 +5080,17 @@ class SubagentMigration(BaseModel):
     name: str
 
 
+class TeamActivity(Enum):
+    unknown = "unknown"
+    idle = "idle"
+    working = "working"
+    waiting_for_approval = "waitingForApproval"
+    waiting_for_input = "waitingForInput"
+    unloaded = "unloaded"
+    error = "error"
+    archived = "archived"
+
+
 class TeamAddress(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -5267,6 +5278,16 @@ class TopicsTeamBoardParams(BaseModel):
     type: Annotated[Literal["topics"], Field(title="TopicsTeamBoardParamsType")]
 
 
+class TopicOverviewTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cursor: str | None = None
+    identity: TeamBoardIdentity | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    type: Annotated[Literal["topicOverview"], Field(title="TopicOverviewTeamBoardParamsType")]
+
+
 class TopicFollowTeamBoardParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -5275,35 +5296,6 @@ class TopicFollowTeamBoardParams(BaseModel):
     identity: TeamBoardIdentity | None = None
     topic: str
     type: Annotated[Literal["topicFollow"], Field(title="TopicFollowTeamBoardParamsType")]
-
-
-class TeamBoardParams(
-    RootModel[
-        ListTeamBoardParams
-        | ReadTeamBoardParams
-        | PostTeamBoardParams
-        | ReplyTeamBoardParams
-        | FollowTeamBoardParams
-        | FollowersTeamBoardParams
-        | MarkReadTeamBoardParams
-        | TopicsTeamBoardParams
-        | TopicFollowTeamBoardParams
-    ]
-):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    root: (
-        ListTeamBoardParams
-        | ReadTeamBoardParams
-        | PostTeamBoardParams
-        | ReplyTeamBoardParams
-        | FollowTeamBoardParams
-        | FollowersTeamBoardParams
-        | MarkReadTeamBoardParams
-        | TopicsTeamBoardParams
-        | TopicFollowTeamBoardParams
-    )
 
 
 class TeamBoardReadState(BaseModel):
@@ -5315,11 +5307,45 @@ class TeamBoardReadState(BaseModel):
     identity: TeamBoardIdentity
 
 
+class TeamBoardSubscriptionMode(Enum):
+    off = "off"
+    watch = "watch"
+    wake = "wake"
+
+
+class ConversationTeamBoardSubscriptionTarget(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    conversation_id: str
+    type: Annotated[
+        Literal["conversation"], Field(title="ConversationTeamBoardSubscriptionTargetType")
+    ]
+
+
+class TopicTeamBoardSubscriptionTarget(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    topic: str
+    type: Annotated[Literal["topic"], Field(title="TopicTeamBoardSubscriptionTargetType")]
+
+
+class TeamBoardSubscriptionTarget(
+    RootModel[ConversationTeamBoardSubscriptionTarget | TopicTeamBoardSubscriptionTarget]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: ConversationTeamBoardSubscriptionTarget | TopicTeamBoardSubscriptionTarget
+
+
 class TeamBoardTopicSubscription(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     identity: TeamBoardIdentity
+    mode: TeamBoardSubscriptionMode
     topic: str
 
 
@@ -5373,10 +5399,55 @@ class TeamEnrollment(BaseModel):
     manually_held: Annotated[bool, Field(alias="manuallyHeld")]
 
 
+class TeamExecutionEnvironment(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    current: bool
+    declared_capabilities: Annotated[
+        list[str],
+        Field(
+            alias="declaredCapabilities",
+            description="Operator declarations for this exact server/environment pair; not verified.",
+        ),
+    ]
+    id: str
+    next: bool
+    os: Annotated[
+        str | None,
+        Field(
+            description="Cached executor observations; absent means unknown, never a failed probe."
+        ),
+    ] = None
+    shell: str | None = None
+
+
+class TeamExecutionHold(Enum):
+    paused = "paused"
+    stopped = "stopped"
+    manual = "manual"
+    reconciliation = "reconciliation"
+    continuation = "continuation"
+    model_error = "modelError"
+
+
 class TeamExecutionMode(Enum):
     running = "running"
     paused = "paused"
     stopped = "stopped"
+
+
+class TeamExplainableAction(Enum):
+    enroll = "enroll"
+    queue_message = "queueMessage"
+    process_messages = "processMessages"
+    post = "post"
+    subscribe = "subscribe"
+    select_model = "selectModel"
+    pause = "pause"
+    resume = "resume"
+    stop = "stop"
+    leave = "leave"
 
 
 class TeamJobStatus(Enum):
@@ -5386,11 +5457,43 @@ class TeamJobStatus(Enum):
     unconfirmed = "unconfirmed"
 
 
+class TeamMessageIntake(Enum):
+    queued_on_sender_host = "queuedOnSenderHost"
+    accepted_at_coordinator = "acceptedAtCoordinator"
+    rejected = "rejected"
+
+
 class TeamMessageKind(Enum):
     request = "request"
     reply = "reply"
     note = "note"
     board = "board"
+
+
+class TeamMessageProgress(Enum):
+    queued_on_sender_host = "queuedOnSenderHost"
+    queued_at_coordinator = "queuedAtCoordinator"
+    received_by_recipient_host = "receivedByRecipientHost"
+    admitted_to_turn = "admittedToTurn"
+    turn_ended = "turnEnded"
+    turn_interrupted = "turnInterrupted"
+    delivery_rejected = "deliveryRejected"
+    processing_uncertain = "processingUncertain"
+
+
+class TeamMessageStatusParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cursor: str | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    message_id: Annotated[str | None, Field(alias="messageId")] = None
+
+
+class TeamObservationFreshness(Enum):
+    current = "current"
+    last_synchronized = "lastSynchronized"
+    unconfirmed = "unconfirmed"
 
 
 class TeamOutboxEntry(BaseModel):
@@ -5401,6 +5504,14 @@ class TeamOutboxEntry(BaseModel):
     kind: str
     payload: Any
     sequence: int
+
+
+class TeamReadiness(Enum):
+    ready = "ready"
+    resumable = "resumable"
+    busy = "busy"
+    held = "held"
+    unknown = "unknown"
 
 
 class TeamReceiptState(Enum):
@@ -5463,6 +5574,12 @@ class TeamSelectionOrigin(RootModel[TeamSelectionOriginValue | Literal["legacy"]
         populate_by_name=True,
     )
     root: TeamSelectionOriginValue | Literal["legacy"]
+
+
+class TeamSynchronization(Enum):
+    current = "current"
+    disconnected = "disconnected"
+    unconfirmed = "unconfirmed"
 
 
 class TeamTrackedJob(BaseModel):
@@ -10401,12 +10518,12 @@ class SubAgentSource(
     root: SubAgentSourceValue | ThreadSpawnSubAgentSource | OtherSubAgentSource
 
 
-class BoardActionTeamAgentAction(BaseModel):
+class MessageStatusTeamAgentAction(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    request: TeamBoardParams
-    type: Annotated[Literal["boardAction"], Field(title="BoardActionTeamAgentActionType")]
+    query: TeamMessageStatusParams
+    type: Annotated[Literal["messageStatus"], Field(title="MessageStatusTeamAgentActionType")]
 
 
 class ReplyTeamAgentAction(BaseModel):
@@ -10431,38 +10548,11 @@ class SendTeamAgentAction(BaseModel):
     type: Annotated[Literal["send"], Field(title="SendTeamAgentActionType")]
 
 
-class TeamAgentAction(
-    RootModel[
-        BoardActionTeamAgentAction
-        | ReplyTeamAgentAction
-        | DirectoryTeamAgentAction
-        | InboxTeamAgentAction
-        | SendTeamAgentAction
-        | PostTeamAgentAction
-        | BoardTeamAgentAction
-        | SubscribeTeamAgentAction
-    ]
-):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    root: Annotated[
-        BoardActionTeamAgentAction
-        | ReplyTeamAgentAction
-        | DirectoryTeamAgentAction
-        | InboxTeamAgentAction
-        | SendTeamAgentAction
-        | PostTeamAgentAction
-        | BoardTeamAgentAction
-        | SubscribeTeamAgentAction,
-        Field(description="Agent actions deliberately omit execution controls and model settings."),
-    ]
-
-
 class TeamAgentRuntime(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    activity: TeamActivity | None = "unknown"
     alias: str
     applied_selection_revision: Annotated[int | None, Field(alias="appliedSelectionRevision")] = (
         None
@@ -10472,6 +10562,7 @@ class TeamAgentRuntime(BaseModel):
     current_effort: Annotated[str | None, Field(alias="currentEffort")] = None
     current_model: Annotated[str | None, Field(alias="currentModel")] = None
     effort_origin: Annotated[TeamSelectionOrigin | None, Field(alias="effortOrigin")] = "legacy"
+    environments: list[TeamExecutionEnvironment] | None = []
     in_flight: Annotated[int, Field(alias="inFlight", ge=0)]
     jobs: list[TeamTrackedJob]
     loaded: bool
@@ -10491,6 +10582,17 @@ class TeamAgentRuntime(BaseModel):
     ] = None
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str | None, Field(alias="turnId")] = None
+
+
+class TeamAvailability(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    activity: TeamActivity
+    holds: list[TeamExecutionHold]
+    readiness: TeamReadiness
+    reasons: list[str]
+    synchronization: TeamSynchronization
 
 
 class TeamBoardAuthor(BaseModel):
@@ -10515,6 +10617,7 @@ class TeamBoardFollower(BaseModel):
     author: TeamBoardAuthor
     conversation_id: Annotated[str, Field(alias="conversationId")]
     identity: TeamBoardIdentity
+    mode: TeamBoardSubscriptionMode
 
 
 class TeamBoardMember(BaseModel):
@@ -10533,6 +10636,49 @@ class TeamBoardNotification(BaseModel):
     reasons: list[TeamBoardNotificationReason]
 
 
+class SubscriptionSetTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    identity: TeamBoardIdentity | None = None
+    mode: TeamBoardSubscriptionMode
+    target: TeamBoardSubscriptionTarget
+    type: Annotated[Literal["subscriptionSet"], Field(title="SubscriptionSetTeamBoardParamsType")]
+
+
+class TeamBoardParams(
+    RootModel[
+        ListTeamBoardParams
+        | ReadTeamBoardParams
+        | PostTeamBoardParams
+        | ReplyTeamBoardParams
+        | FollowTeamBoardParams
+        | FollowersTeamBoardParams
+        | MarkReadTeamBoardParams
+        | TopicsTeamBoardParams
+        | TopicOverviewTeamBoardParams
+        | SubscriptionSetTeamBoardParams
+        | TopicFollowTeamBoardParams
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: (
+        ListTeamBoardParams
+        | ReadTeamBoardParams
+        | PostTeamBoardParams
+        | ReplyTeamBoardParams
+        | FollowTeamBoardParams
+        | FollowersTeamBoardParams
+        | MarkReadTeamBoardParams
+        | TopicsTeamBoardParams
+        | TopicOverviewTeamBoardParams
+        | SubscriptionSetTeamBoardParams
+        | TopicFollowTeamBoardParams
+    )
+
+
 class TeamControlState(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10540,6 +10686,14 @@ class TeamControlState(BaseModel):
     coordinator_id: Annotated[str, Field(alias="coordinatorId")]
     mode: TeamExecutionMode
     revision: int
+
+
+class TeamExplainActionParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    action: TeamExplainableAction
+    target: TeamAddress | None = None
 
 
 class TeamMessage(BaseModel):
@@ -10574,6 +10728,17 @@ class TeamReceipt(BaseModel):
     state: TeamReceiptState
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str | None, Field(alias="turnId")] = None
+
+
+class TeamRecipientMessageStatus(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    address: TeamAddress
+    freshness: TeamObservationFreshness
+    name: str
+    progress: TeamMessageProgress
+    receipt: TeamReceipt | None = None
 
 
 class ThreadForkParams(BaseModel):
@@ -12266,6 +12431,62 @@ class SessionSource(RootModel[SessionSourceValue | CustomSessionSource | SubAgen
     root: SessionSourceValue | CustomSessionSource | SubAgentSessionSource
 
 
+class ExplainActionTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    query: TeamExplainActionParams
+    type: Annotated[Literal["explainAction"], Field(title="ExplainActionTeamAgentActionType")]
+
+
+class BoardActionTeamAgentAction(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    request: TeamBoardParams
+    type: Annotated[Literal["boardAction"], Field(title="BoardActionTeamAgentActionType")]
+
+
+class TeamAgentAction(
+    RootModel[
+        MessageStatusTeamAgentAction
+        | ExplainActionTeamAgentAction
+        | BoardActionTeamAgentAction
+        | ReplyTeamAgentAction
+        | DirectoryTeamAgentAction
+        | InboxTeamAgentAction
+        | SendTeamAgentAction
+        | PostTeamAgentAction
+        | BoardTeamAgentAction
+        | SubscribeTeamAgentAction
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: Annotated[
+        MessageStatusTeamAgentAction
+        | ExplainActionTeamAgentAction
+        | BoardActionTeamAgentAction
+        | ReplyTeamAgentAction
+        | DirectoryTeamAgentAction
+        | InboxTeamAgentAction
+        | SendTeamAgentAction
+        | PostTeamAgentAction
+        | BoardTeamAgentAction
+        | SubscribeTeamAgentAction,
+        Field(description="Agent actions deliberately omit execution controls and model settings."),
+    ]
+
+
+class TeamAgentDiscovery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    availability: TeamAvailability
+    environments: list[TeamExecutionEnvironment]
+
+
 class TeamBoardEntry(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -12301,6 +12522,58 @@ class TeamDelivery(BaseModel):
     mode: TeamDeliveryMode
     thread_id: Annotated[str, Field(alias="threadId")]
     wake: bool
+
+
+class TeamDirectoryEntry(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    address: TeamAddress
+    alias: str
+    continuation_turn_id: Annotated[str | None, Field(alias="continuationTurnId")] = None
+    current_effort: Annotated[str | None, Field(alias="currentEffort")] = None
+    current_model: Annotated[str | None, Field(alias="currentModel")] = None
+    discovery: TeamAgentDiscovery
+    manually_held: Annotated[bool, Field(alias="manuallyHeld")]
+    next_effort: Annotated[str | None, Field(alias="nextEffort")] = None
+    next_model: Annotated[str | None, Field(alias="nextModel")] = None
+
+
+class TeamDirectorySnapshot(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    data: list[TeamDirectoryEntry]
+    revision: int
+
+
+class TeamMessageStatus(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    created_at: Annotated[int | None, Field(alias="createdAt")] = None
+    detail: str | None = None
+    freshness: TeamObservationFreshness
+    intake: TeamMessageIntake
+    message_id: Annotated[str, Field(alias="messageId")]
+    recipients: list[TeamRecipientMessageStatus]
+    related_replies: Annotated[
+        list[str],
+        Field(
+            alias="relatedReplies",
+            description="Replies are optional evidence of conversation, not completion receipts.",
+        ),
+    ]
+    sender: TeamAddress
+    sender_name: Annotated[str, Field(alias="senderName")]
+
+
+class TeamMessageStatusSnapshot(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    data: list[TeamMessageStatus]
+    revision: int
 
 
 class FunctionCallOutputThreadItem(BaseModel):

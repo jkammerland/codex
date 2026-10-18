@@ -13,6 +13,9 @@ use crate::delivery_evidence::runtime_attempt;
 use crate::service::PreparedTeamHost;
 use crate::service::TeamHostService;
 
+#[path = "message_status_tests.rs"]
+mod message_status_tests;
+
 async fn host() -> anyhow::Result<(tempfile::TempDir, std::sync::Arc<TeamHostService>)> {
     let home = tempfile::tempdir()?;
     let config = core_test_support::load_default_config_for_test(&home).await;

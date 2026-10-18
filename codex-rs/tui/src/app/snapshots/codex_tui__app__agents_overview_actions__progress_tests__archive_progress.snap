@@ -4,7 +4,7 @@ assertion_line: 115
 expression: "age.replace_all(&text, \" [age]\")"
 ---
 "  Agent command center   t Tasks   b Board  Group: Project  g                   "
-"   All 2   Needs you 0   Working 0   Ready 0   Inactive 2                       "
+"   All 2   Needs you 0   Working 0   Idle 0   Inactive 2                        "
 "  ────────────────────────────────────────────────────────────────────────────  "
 "      Tasks                                            Status         Updated   "
 "  /tmp/project  2                                                               "

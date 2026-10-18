@@ -1,18 +1,22 @@
 //! Opt-in team coordinator and operator clients. Worker history stays on its host.
 
+mod action_explanation;
 mod board;
 mod board_backfill;
 mod board_cli;
+mod board_subscriptions;
 mod cli;
 mod client;
 mod config;
 mod coordinator;
+mod discovery;
 mod enrollment;
 mod gitea;
 mod gitea_publish;
 mod http;
 mod mcp;
 mod mcp_stdio;
+mod message_status;
 mod model;
 mod model_policy;
 mod operation_error;
@@ -26,15 +30,18 @@ mod worker;
 mod worker_outbox;
 mod worker_sync;
 
+pub use action_explanation::explain_action;
 pub use board_cli::BoardAction;
 pub use board_cli::BoardCommand;
 pub use cli::TeamAction;
 pub use cli::TeamCommand;
 pub use client::TeamClient;
+pub use codex_team_store::topic_overviews;
 pub use config::Endpoint;
 pub use config::Machine;
 pub use config::Manifest;
 pub use config::Server;
+pub use message_status::message_statuses;
 pub use model::*;
 pub use operation_error::TeamOperationRejected;
 pub use startup::ensure_coordinator;

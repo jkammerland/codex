@@ -47,6 +47,13 @@ impl BottomPaneView for BoardView {
                 .map(|pending| pending.operation_id.clone())
                 .or_else(|| {
                     state
+                        .pending_subscriptions
+                        .iter()
+                        .find(|(_, pending)| pending.failed)
+                        .map(|(id, _)| id.clone())
+                })
+                .or_else(|| {
+                    state
                         .pending_reads
                         .iter()
                         .find(|(_, pending)| pending.failed)
@@ -195,6 +202,7 @@ impl BottomPaneView for BoardView {
                 }
                 _ => {}
             }
+            state.reconcile_topic_selection();
             let roots = state.roots();
             if !roots
                 .iter()
@@ -205,12 +213,23 @@ impl BottomPaneView for BoardView {
             }
             return;
         }
+        if state.topics_open && self.handle_topics_key(&mut state, key) {
+            return;
+        }
         match key.code {
             KeyCode::Char('t') => {
                 state.active = false;
                 self.sender.send(AppEvent::OpenAgentsOverview);
             }
-            KeyCode::Char('n') => state.compose(String::new()),
+            KeyCode::Char('o') => state.show_topics(),
+            KeyCode::Char('n') => {
+                if state.topics_open
+                    && let Some(topic) = state.selected_topic.clone()
+                {
+                    state.topic = topic;
+                }
+                state.compose(String::new());
+            }
             KeyCode::Char('r') => {
                 if let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) {
                     state.compose(id);
@@ -245,10 +264,16 @@ impl BottomPaneView for BoardView {
                 if let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) {
                     let enabled = !state.following(&id);
                     drop(state);
-                    self.request(TeamBoardParams::Follow {
-                        conversation_id: id,
+                    self.request(TeamBoardParams::SubscriptionSet {
+                        target: TeamBoardSubscriptionTarget::Conversation {
+                            conversation_id: id,
+                        },
                         identity: None,
-                        enabled,
+                        mode: if enabled {
+                            TeamBoardSubscriptionMode::Watch
+                        } else {
+                            TeamBoardSubscriptionMode::Off
+                        },
                     });
                 }
             }
@@ -292,9 +317,13 @@ impl BottomPaneView for BoardView {
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
                 if state.followers {
                     state.followers = false;
-                } else if state.opened.take().is_none() && key.code == KeyCode::Esc {
-                    state.active = false;
-                    self.sender.send(AppEvent::OpenAgentsOverview);
+                } else if state.opened.take().is_none() {
+                    if state.topic_filter.is_some() {
+                        state.show_topics();
+                    } else if key.code == KeyCode::Esc {
+                        state.active = false;
+                        self.sender.send(AppEvent::OpenAgentsOverview);
+                    }
                 }
             }
             KeyCode::Home if state.opened.is_some() => {

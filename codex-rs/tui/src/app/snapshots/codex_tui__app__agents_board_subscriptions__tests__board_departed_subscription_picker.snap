@@ -1,0 +1,27 @@
+---
+source: tui/src/app/agents_board_subscriptions_tests.rs
+assertion_line: 205
+expression: "format!(\"Members\\n{members}\\n\\nModes\\n{modes}\")"
+---
+Members
+  Subscriptions · #release
+  Watch is passive · Wake delivers updates · select an identity to change
+
+
+› 1. You · Off                    Human · connected
+  2. worker/main/departed · Wake  worker · no longer enrolled · Off remains available
+
+  enter select · esc back
+
+Modes
+  Subscription · worker/main/departed · Wake
+  Explicit mentions deliver independently of Watch · changes affect future messages
+
+
+     Watch (disabled)  Following and unread only; never inserts turn input (disabled: Agent is no
+                       longer enrolled; only Off is available)
+     Wake (disabled)   Deliver new root posts; replies require a conversation follow (disabled:
+                       Agent is no longer enrolled; only Off is available)
+› 1. Off               Remove this subscription; accepted deliveries remain queued
+
+  enter select · esc back

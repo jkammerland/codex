@@ -148,12 +148,8 @@ async fn connect(
                 dirty.send_modify(|revision| *revision += 1);
             }
             event = client.next_event() => match event {
-                Some(AppServerEvent::ServerNotification(notification)) => match *notification {
-                    ServerNotification::TeamChanged(_) => {
-                        observe_team_changed(coordinator, &key).await;
-                        dirty.send_modify(|revision| *revision += 1);
-                    },
-                    notification => coordinator.observe(machine, server, notification).await?,
+                Some(AppServerEvent::ServerNotification(notification)) => {
+                    observe_notification(coordinator, machine, server, *notification, &dirty).await?;
                 },
                 // Approval requests stay with the owning human connection.
                 // An operator relay has an independent connection and can answer.
@@ -164,6 +160,39 @@ async fn connect(
             },
         }
     }
+}
+
+async fn observe_notification(
+    coordinator: &Coordinator,
+    machine: &Machine,
+    server: &Server,
+    notification: ServerNotification,
+    dirty: &tokio::sync::watch::Sender<u64>,
+) -> Result<()> {
+    // Changes to executor facts, selections and approval flags can leave the
+    // legacy status/model strings unchanged. Refresh through the existing lane.
+    let refresh = matches!(
+        &notification,
+        ServerNotification::TeamChanged(_)
+            | ServerNotification::EnvironmentConnected(_)
+            | ServerNotification::EnvironmentDisconnected(_)
+            | ServerNotification::ThreadSettingsUpdated(_)
+            | ServerNotification::ThreadStatusChanged(_)
+    );
+    if matches!(
+        &notification,
+        ServerNotification::TeamChanged(_)
+            | ServerNotification::EnvironmentConnected(_)
+            | ServerNotification::EnvironmentDisconnected(_)
+    ) {
+        observe_team_changed(coordinator, &server_key(&machine.id, &server.id)).await;
+    } else {
+        coordinator.observe(machine, server, notification).await?;
+    }
+    if refresh {
+        dirty.send_modify(|revision| *revision += 1);
+    }
+    Ok(())
 }
 
 fn spawn_connection_work(
@@ -258,3 +287,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "worker_discovery_tests.rs"]
+mod discovery_tests;

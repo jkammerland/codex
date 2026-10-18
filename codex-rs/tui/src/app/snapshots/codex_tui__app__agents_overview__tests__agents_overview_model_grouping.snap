@@ -4,12 +4,12 @@ assertion_line: 1252
 expression: "render_bottom_popup(&app.chat_widget,\n100).replace(&test_path_display(\"/tmp/project\"),\n\"/tmp/project\").replace(\"fwd del\", \"del\")"
 ---
   Agent command center   t Tasks   b Board  Group: Model  g
-   All 4   Needs you 0   Working 0   Ready 4   Inactive 0                          tab/⇧tab filter
+   All 4   Needs you 0   Working 0   Idle 4   Inactive 0                           tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                               │ Task details
   Unknown  1                                              │
   › ○ Legacy task                                         │ Legacy task
-                                                          │ ○ Ready
+                                                          │ ○ Idle
   model-a  2                                              │
     ○ Recent task                                         │ Model: Unknown
     ○ Older task                                          │ Reasoning: Unknown

@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agent_center/board/tests.rs
-assertion_line: 217
+assertion_line: 222
 expression: "render(&view, 90, 12)"
 ---
 Agent command center   t Tasks   b Board
@@ -8,8 +8,8 @@ Agent command center   t Tasks   b Board
 v/h/←/Esc close · F manage agents
 Following this conversation · F manage agents
 
-You · Human
-Reviewer · MacBook · offline
+You · Human · Watch
+Reviewer · MacBook · unavailable · Wake
 
 
 

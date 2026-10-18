@@ -4,7 +4,7 @@ assertion_line: 300
 expression: "render_bottom_popup(&app.chat_widget, 100)"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 2   Needs you 0   Working 1   Ready 1   Inactive 0
+   All 2   Needs you 0   Working 1   Idle 1   Inactive 0
   ────────────────────────────────────────────────────────────────────────────────────────────────
   Rename › Keep this task draft!                          │ Task details
       Tasks                                               │

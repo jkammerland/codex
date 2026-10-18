@@ -1,0 +1,17 @@
+---
+source: tui/src/app/agent_center/board/topics_tests.rs
+assertion_line: 42
+expression: bottom
+---
+Agent command center   t Tasks   b Board
+Topics · conversations and recent activity
+j/k PgUp/PgDn scroll · Home/End · Tab/h topic
+
+Recent conversations
+Ready for the release review?
+28 replies · participant-29
+
+Subscriptions
+You · Watch
+36-42/42 · j/k scroll · Tab topics
+f watch/unwatch · F agent subscriptions · n p

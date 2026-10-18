@@ -691,6 +691,7 @@ fn optional_environment_value(name: &str) -> Option<String> {
 /// paths used by filesystem helpers.
 #[derive(Clone)]
 pub struct Environment {
+    local_info: Arc<ArcSwapOption<EnvironmentInfo>>,
     skills: ScopedSkillsConfig,
     remote_client: Option<LazyRemoteExecServerClient>,
     ready_info: Arc<ArcSwapOption<EnvironmentReadyInfo>>,
@@ -709,6 +710,7 @@ impl Environment {
     /// Builds a test-only local environment without configured sandbox helper paths.
     pub fn default_for_tests() -> Self {
         Self {
+            local_info: Arc::new(ArcSwapOption::empty()),
             remote_client: None,
             skills: ScopedSkillsConfig::default(),
             ready_info: Arc::new(ArcSwapOption::empty()),
@@ -790,6 +792,7 @@ impl Environment {
         http_client_factory: HttpClientFactory,
     ) -> Self {
         Self {
+            local_info: Arc::new(ArcSwapOption::empty()),
             remote_client: None,
             skills: ScopedSkillsConfig::default(),
             ready_info: Arc::new(ArcSwapOption::empty()),
@@ -826,6 +829,7 @@ impl Environment {
             Arc::new(RemoteFileSystem::new(client.clone()));
 
         Self {
+            local_info: Arc::new(ArcSwapOption::empty()),
             remote_client: Some(client.clone()),
             skills,
             ready_info: Arc::new(ArcSwapOption::empty()),
@@ -953,7 +957,19 @@ impl Environment {
     pub async fn info(&self) -> Result<EnvironmentInfo, ExecServerError> {
         match &self.remote_client {
             Some(client) => client.environment_info().await,
-            None => Ok(EnvironmentInfo::local()),
+            None => {
+                let info = EnvironmentInfo::local();
+                self.local_info.store(Some(Arc::new(info.clone())));
+                Ok(info)
+            }
+        }
+    }
+
+    /// Inspect known executor facts without connecting, waiting, probing or running commands.
+    pub fn cached_info(&self) -> Option<EnvironmentInfo> {
+        match &self.remote_client {
+            Some(client) => client.cached_environment_info().map(|info| (*info).clone()),
+            None => self.local_info.load_full().map(|info| (*info).clone()),
         }
     }
 

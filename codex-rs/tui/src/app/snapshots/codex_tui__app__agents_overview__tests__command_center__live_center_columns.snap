@@ -4,15 +4,15 @@ assertion_line: 287
 expression: "screen(&view, 160, 22)"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 6   Needs you 2   Working 1   Ready 2   Inactive 1                                                                                      tab/⇧tab filter
+   All 6   Needs you 2   Working 1   Idle 2   Inactive 1                                                                                       tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                                                                   Status         Updated  │ Task details
   Pinned  2                                                                                                           │
-  › ○ Current task                                                                            Ready              now  │ Current task
-    ● Needs an answer                                                                         Needs input     2h ago  │ ○ Ready
+  › ○ Current task                                                                            Idle               now  │ Current task
+    ● Needs an answer                                                                         Needs input     2h ago  │ ○ Idle
                                                                                                                       │
   /tmp/project  4                                                                                                     │ Model: Unknown
-    ○ A longer task title that uses the available column                              voice   Ready           5m ago  │ Reasoning: Unknown
+    ○ A longer task title that uses the available column                              voice   Idle            5m ago  │ Reasoning: Unknown
     ! Failed task                                                                             Error           1h ago  │
     ● Working task                                                                            Working         1d ago  │ Project
     ○ Unloaded task                                                                           Inactive        2d ago  │ /tmp/project

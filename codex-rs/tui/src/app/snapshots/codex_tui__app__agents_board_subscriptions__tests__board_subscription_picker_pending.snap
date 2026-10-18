@@ -1,0 +1,18 @@
+---
+source: tui/src/app/agents_board_subscriptions_tests.rs
+assertion_line: 74
+expression: "crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, 80)"
+---
+  Subscription · You · Off · Watch pending
+  Explicit mentions deliver independently of Watch · changes affect future
+  messages
+
+
+›    Watch (disabled)  Following and unread only; never inserts turn input
+                       (disabled: A change is pending; return to Board and use
+                       Ctrl+R if unconfirmed)
+     Off (disabled)    Remove this subscription; accepted deliveries remain
+                       queued (disabled: A change is pending; return to Board
+                       and use Ctrl+R if unconfirmed)
+
+  enter select · esc back

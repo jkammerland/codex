@@ -13,7 +13,6 @@ use uuid::Uuid;
 
 use crate::coordinator::Coordinator;
 use crate::model::*;
-use crate::routing::Subscription;
 
 pub(crate) type BoardWrites = Vec<(&'static str, String, Value)>;
 
@@ -39,6 +38,7 @@ pub(crate) fn is_board_query(request: &TeamBoardParams) -> bool {
             | TeamBoardParams::Read { .. }
             | TeamBoardParams::Followers { .. }
             | TeamBoardParams::Topics { .. }
+            | TeamBoardParams::TopicOverview { .. }
     )
 }
 
@@ -282,21 +282,15 @@ impl Coordinator {
                 enabled,
             } => {
                 let identity = requested_identity(&actor, identity)?;
-                self.require_conversation(&conversation).await?;
-                let follower = if enabled {
-                    Some(TeamBoardFollower {
-                        conversation_id: conversation.clone(),
-                        author: self.board_author(&identity, false).await?,
-                        identity: identity.clone(),
-                    })
-                } else {
-                    None
-                };
-                writes.push((
-                    "board_follower",
-                    subscription_key(&conversation, &identity)?,
-                    serde_json::to_value(follower)?,
-                ));
+                writes = self
+                    .prepare_board_subscription(
+                        TeamBoardSubscriptionTarget::Conversation {
+                            conversation_id: conversation.clone(),
+                        },
+                        identity,
+                        crate::board_subscriptions::SubscriptionChange::Legacy(enabled),
+                    )
+                    .await?;
                 conversation_id = Some(conversation);
             }
             TeamBoardParams::MarkRead {
@@ -342,28 +336,39 @@ impl Coordinator {
                 enabled,
             } => {
                 let identity = requested_identity(&actor, identity)?;
-                ensure!(!topic.trim().is_empty(), "board topic is required");
-                self.board_author(&identity, false).await?;
-                if let TeamBoardIdentity::Agent { address } = &identity {
-                    let (key, subscription) = self
-                        .prepare_subscription(address.clone(), topic.clone(), enabled)
-                        .await?;
-                    writes.push(("subscription", key, serde_json::to_value(subscription)?));
+                writes = self
+                    .prepare_board_subscription(
+                        TeamBoardSubscriptionTarget::Topic { topic },
+                        identity,
+                        crate::board_subscriptions::SubscriptionChange::Legacy(enabled),
+                    )
+                    .await?;
+            }
+            TeamBoardParams::SubscriptionSet {
+                target,
+                identity,
+                mode,
+            } => {
+                let identity = requested_identity(&actor, identity)?;
+                if let TeamBoardSubscriptionTarget::Conversation {
+                    conversation_id: conversation,
+                } = &target
+                {
+                    conversation_id = Some(conversation.clone());
                 }
-                let subscription = enabled.then(|| TeamBoardTopicSubscription {
-                    topic: topic.clone(),
-                    identity: identity.clone(),
-                });
-                writes.push((
-                    "board_topic",
-                    subscription_key(&topic, &identity)?,
-                    serde_json::to_value(subscription)?,
-                ));
+                writes = self
+                    .prepare_board_subscription(
+                        target,
+                        identity,
+                        crate::board_subscriptions::SubscriptionChange::Explicit(mode),
+                    )
+                    .await?;
             }
             TeamBoardParams::List { .. }
             | TeamBoardParams::Read { .. }
             | TeamBoardParams::Followers { .. }
-            | TeamBoardParams::Topics { .. } => {
+            | TeamBoardParams::Topics { .. }
+            | TeamBoardParams::TopicOverview { .. } => {
                 anyhow::bail!("read queries cannot enter the board outbox")
             }
         }
@@ -395,7 +400,7 @@ impl Coordinator {
         ))
     }
 
-    async fn require_conversation(&self, conversation: &str) -> Result<()> {
+    pub(crate) async fn require_conversation(&self, conversation: &str) -> Result<()> {
         let root = self
             .store
             .get::<TeamBoardEntry>("board_entry", conversation)
@@ -501,6 +506,7 @@ impl Coordinator {
                     "board_follower",
                     subscription_key(&conversation_id, &identity)?,
                     serde_json::to_value(TeamBoardFollower {
+                        mode: TeamBoardSubscriptionMode::Watch,
                         conversation_id,
                         identity,
                         author,
@@ -545,7 +551,10 @@ impl Coordinator {
             for subscription in snapshot
                 .topic_subscriptions
                 .into_iter()
-                .filter(|subscription| Some(&subscription.topic) == message.topic.as_ref())
+                .filter(|subscription| {
+                    subscription.mode == TeamBoardSubscriptionMode::Wake
+                        && Some(&subscription.topic) == message.topic.as_ref()
+                })
             {
                 add(
                     subscription.identity,
@@ -553,11 +562,10 @@ impl Coordinator {
                 )?;
             }
         } else {
-            for follower in snapshot
-                .followers
-                .into_iter()
-                .filter(|follower| follower.conversation_id == conversation)
-            {
+            for follower in snapshot.followers.into_iter().filter(|follower| {
+                follower.mode == TeamBoardSubscriptionMode::Wake
+                    && follower.conversation_id == conversation
+            }) {
                 add(
                     follower.identity,
                     TeamBoardNotificationReason::ConversationFollow,
@@ -629,35 +637,6 @@ impl Coordinator {
             self.store.put_records(&borrowed_writes(&writes)).await?;
         }
         Ok(())
-    }
-
-    pub(crate) async fn subscription_effects(
-        &self,
-        key: String,
-        subscription: Subscription,
-    ) -> Result<BoardWrites> {
-        let identity = TeamBoardIdentity::Agent {
-            address: subscription.sender.clone(),
-        };
-        let board_key = subscription_key(&subscription.topic, &identity)?;
-        let board_value = subscription.enabled.then(|| TeamBoardTopicSubscription {
-            topic: subscription.topic.clone(),
-            identity,
-        });
-        let mut clock = self.store.board_clock().await?;
-        clock.revision = clock
-            .revision
-            .checked_add(1)
-            .context("board revision exhausted")?;
-        Ok(vec![
-            ("subscription", key, serde_json::to_value(subscription)?),
-            ("board_topic", board_key, serde_json::to_value(board_value)?),
-            (
-                "board_clock",
-                "current".into(),
-                serde_json::to_value(clock)?,
-            ),
-        ])
     }
 }
 

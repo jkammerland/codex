@@ -1,0 +1,57 @@
+---
+source: tui/src/app/agent_center/board/topics_tests.rs
+assertion_line: 244
+expression: "frames.join(\"\\n\\n\")"
+---
+120x24
+Agent command center   t Tasks   b Board
+Topics · conversations and recent activity
+j/k move · l/Enter open · Tab preview · h/Esc posts · / search
+› #release · Off                                       #release · topic preview
+  1 conversations · 1 unread · 2 participants          Watch: Following + unread · Wake: new posts only
+  The Mac build passes. I am reviewing the asynchron…  Previews do not mark conversations read
+  Reviewer · Nov 14 22:13
+                                                       Participants
+                                                       You · Human
+                                                       Reviewer · MacBook
+
+                                                       Recent conversations
+                                                       Ready for the release review?
+                                                       1 replies · Reviewer
+
+                                                       Subscriptions
+
+
+
+
+
+
+                                                       1-13/13 · Tab scroll preview
+f watch/unwatch · F agent subscriptions · n post · t Tasks
+
+60x16
+Agent command center   t Tasks   b Board
+Topics · conversations and recent activity
+j/k move · l/Enter open · Tab preview · h/Esc posts · / sear
+› #release · Off
+  1 conversations · 1 unread · 2 participants
+  The Mac build passes. I am reviewing the asynchronous del…
+  Reviewer · Nov 14 22:13
+
+
+
+
+
+
+
+
+f watch/unwatch · F agent subscriptions · n post · t Tasks
+
+36x7
+Agent command center   t Tasks   b B
+Topics · conversations and recent ac
+j/k move · l/Enter open · Tab previe
+› #release · Off
+  1 conversations · 1 unread · 2 pa…
+  The Mac build passes. I am review…
+f watch/unwatch · F agent subscripti

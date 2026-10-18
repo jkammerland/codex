@@ -1,7 +1,10 @@
 //! Exercises origin-bound approval replies through real WebSocket workers.
 
 use super::*;
+use crate::AppServerTarget;
+use crate::app::agents_hosts;
 use crate::app::app_server_requests::BufferedServerRequest;
+use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::ThreadParamsMode;
 use codex_app_server_client::AppServerEvent;
@@ -206,5 +209,66 @@ async fn closed_origin_consumes_reply_without_falling_through() -> color_eyre::R
             .pending_replay_requests()
             .is_empty()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn team_approval_navigation_rechecks_request_target_and_connection_epoch()
+-> color_eyre::Result<()> {
+    let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
+    let (original, mut replies, task) = connection().await?;
+    let thread_id = ThreadId::new();
+    let host_key = agents_hosts::HostKey::default();
+    app.agents_hosts.hosts.insert(
+        host_key.clone(),
+        agents_hosts::AgentHost {
+            label: "Worker".into(),
+            machine_label: "Worker".into(),
+            target: AppServerTarget::Embedded,
+            session: None,
+            epoch: 1,
+            connected: true,
+            state: Default::default(),
+            buffered: VecDeque::new(),
+            revision: 0,
+            refresh_generation: 0,
+            refreshing: false,
+            refresh_metadata: Vec::new(),
+        },
+    );
+    let target = agents_hosts::ThreadTarget {
+        host: host_key.clone(),
+        thread_id,
+    };
+    let request = BufferedServerRequest::new(patch_request(thread_id), &original.request_handle());
+    app.pending_app_server_requests
+        .note_buffered_request(&request);
+    while events.try_recv().is_ok() {}
+
+    app.open_agents_team_pending_approval(target.clone(), AppServerRequestId::Integer(7), 0);
+    app.open_agents_team_pending_approval(
+        agents_hosts::ThreadTarget {
+            thread_id: ThreadId::new(),
+            ..target.clone()
+        },
+        AppServerRequestId::Integer(7),
+        1,
+    );
+    assert!(events.try_recv().is_err());
+    app.open_agents_team_pending_approval(target.clone(), AppServerRequestId::Integer(7), 1);
+    assert!(
+        matches!(events.try_recv()?, AppEvent::AgentsHostAction { target: actual, .. } if actual == target)
+    );
+    assert!(
+        replies.try_recv().is_err(),
+        "navigation must not grant permissions"
+    );
+
+    app.pending_app_server_requests
+        .resolve_notification(&thread_id.to_string(), &AppServerRequestId::Integer(7));
+    app.open_agents_team_pending_approval(target, AppServerRequestId::Integer(7), 1);
+    assert!(events.try_recv().is_err());
+    original.shutdown().await?;
+    task.await??;
     Ok(())
 }

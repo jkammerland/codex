@@ -18646,6 +18646,19 @@
       ],
       "type": "object"
     },
+    "TeamActivity": {
+      "enum": [
+        "unknown",
+        "idle",
+        "working",
+        "waitingForApproval",
+        "waitingForInput",
+        "unloaded",
+        "error",
+        "archived"
+      ],
+      "type": "string"
+    },
     "TeamAddress": {
       "properties": {
         "machineId": {
@@ -18668,6 +18681,46 @@
     "TeamAgentAction": {
       "description": "Agent actions deliberately omit execution controls and model settings.",
       "oneOf": [
+        {
+          "properties": {
+            "query": {
+              "$ref": "#/definitions/TeamMessageStatusParams"
+            },
+            "type": {
+              "enum": [
+                "messageStatus"
+              ],
+              "title": "MessageStatusTeamAgentActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query",
+            "type"
+          ],
+          "title": "MessageStatusTeamAgentAction",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "query": {
+              "$ref": "#/definitions/TeamExplainActionParams"
+            },
+            "type": {
+              "enum": [
+                "explainAction"
+              ],
+              "title": "ExplainActionTeamAgentActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query",
+            "type"
+          ],
+          "title": "ExplainActionTeamAgentAction",
+          "type": "object"
+        },
         {
           "properties": {
             "request": {
@@ -18908,8 +18961,34 @@
         }
       ]
     },
+    "TeamAgentDiscovery": {
+      "properties": {
+        "availability": {
+          "$ref": "#/definitions/TeamAvailability"
+        },
+        "environments": {
+          "items": {
+            "$ref": "#/definitions/TeamExecutionEnvironment"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "availability",
+        "environments"
+      ],
+      "type": "object"
+    },
     "TeamAgentRuntime": {
       "properties": {
+        "activity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TeamActivity"
+            }
+          ],
+          "default": "unknown"
+        },
         "alias": {
           "type": "string"
         },
@@ -18949,6 +19028,13 @@
             }
           ],
           "default": "legacy"
+        },
+        "environments": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/TeamExecutionEnvironment"
+          },
+          "type": "array"
         },
         "inFlight": {
           "format": "uint32",
@@ -19044,6 +19130,39 @@
       ],
       "type": "object"
     },
+    "TeamAvailability": {
+      "properties": {
+        "activity": {
+          "$ref": "#/definitions/TeamActivity"
+        },
+        "holds": {
+          "items": {
+            "$ref": "#/definitions/TeamExecutionHold"
+          },
+          "type": "array"
+        },
+        "readiness": {
+          "$ref": "#/definitions/TeamReadiness"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "synchronization": {
+          "$ref": "#/definitions/TeamSynchronization"
+        }
+      },
+      "required": [
+        "activity",
+        "holds",
+        "readiness",
+        "reasons",
+        "synchronization"
+      ],
+      "type": "object"
+    },
     "TeamBoardAuthor": {
       "properties": {
         "identity": {
@@ -19126,12 +19245,16 @@
         },
         "identity": {
           "$ref": "#/definitions/TeamBoardIdentity"
+        },
+        "mode": {
+          "$ref": "#/definitions/TeamBoardSubscriptionMode"
         }
       },
       "required": [
         "author",
         "conversationId",
-        "identity"
+        "identity",
+        "mode"
       ],
       "type": "object"
     },
@@ -19553,6 +19676,80 @@
         },
         {
           "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "topicOverview"
+              ],
+              "title": "TopicOverviewTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "TopicOverviewTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "$ref": "#/definitions/TeamBoardSubscriptionMode"
+            },
+            "target": {
+              "$ref": "#/definitions/TeamBoardSubscriptionTarget"
+            },
+            "type": {
+              "enum": [
+                "subscriptionSet"
+              ],
+              "title": "SubscriptionSetTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "target",
+            "type"
+          ],
+          "title": "SubscriptionSetTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
             "enabled": {
               "type": "boolean"
             },
@@ -19654,10 +19851,66 @@
       ],
       "type": "object"
     },
+    "TeamBoardSubscriptionMode": {
+      "description": "Watch is passive visibility. Only Wake participates in delivery routing.",
+      "enum": [
+        "off",
+        "watch",
+        "wake"
+      ],
+      "type": "string"
+    },
+    "TeamBoardSubscriptionTarget": {
+      "oneOf": [
+        {
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "conversation"
+              ],
+              "title": "ConversationTeamBoardSubscriptionTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversation_id",
+            "type"
+          ],
+          "title": "ConversationTeamBoardSubscriptionTarget",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "topic": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "topic"
+              ],
+              "title": "TopicTeamBoardSubscriptionTargetType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "topic",
+            "type"
+          ],
+          "title": "TopicTeamBoardSubscriptionTarget",
+          "type": "object"
+        }
+      ]
+    },
     "TeamBoardTopicSubscription": {
       "properties": {
         "identity": {
           "$ref": "#/definitions/TeamBoardIdentity"
+        },
+        "mode": {
+          "$ref": "#/definitions/TeamBoardSubscriptionMode"
         },
         "topic": {
           "type": "string"
@@ -19665,6 +19918,7 @@
       },
       "required": [
         "identity",
+        "mode",
         "topic"
       ],
       "type": "object"
@@ -19781,6 +20035,78 @@
       ],
       "type": "string"
     },
+    "TeamDirectoryEntry": {
+      "properties": {
+        "address": {
+          "$ref": "#/definitions/TeamAddress"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "continuationTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currentEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currentModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discovery": {
+          "$ref": "#/definitions/TeamAgentDiscovery"
+        },
+        "manuallyHeld": {
+          "type": "boolean"
+        },
+        "nextEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "alias",
+        "discovery",
+        "manuallyHeld"
+      ],
+      "type": "object"
+    },
+    "TeamDirectorySnapshot": {
+      "properties": {
+        "data": {
+          "items": {
+            "$ref": "#/definitions/TeamDirectoryEntry"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "data",
+        "revision"
+      ],
+      "type": "object"
+    },
     "TeamEnrollment": {
       "properties": {
         "address": {
@@ -19807,11 +20133,98 @@
       ],
       "type": "object"
     },
+    "TeamExecutionEnvironment": {
+      "properties": {
+        "current": {
+          "type": "boolean"
+        },
+        "declaredCapabilities": {
+          "description": "Operator declarations for this exact server/environment pair; not verified.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "next": {
+          "type": "boolean"
+        },
+        "os": {
+          "description": "Cached executor observations; absent means unknown, never a failed probe.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shell": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "current",
+        "declaredCapabilities",
+        "id",
+        "next"
+      ],
+      "type": "object"
+    },
+    "TeamExecutionHold": {
+      "enum": [
+        "paused",
+        "stopped",
+        "manual",
+        "reconciliation",
+        "continuation",
+        "modelError"
+      ],
+      "type": "string"
+    },
     "TeamExecutionMode": {
       "enum": [
         "running",
         "paused",
         "stopped"
+      ],
+      "type": "string"
+    },
+    "TeamExplainActionParams": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/TeamExplainableAction"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TeamAddress"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "TeamExplainableAction": {
+      "enum": [
+        "enroll",
+        "queueMessage",
+        "processMessages",
+        "post",
+        "subscribe",
+        "selectModel",
+        "pause",
+        "resume",
+        "stop",
+        "leave"
       ],
       "type": "string"
     },
@@ -19874,6 +20287,15 @@
       ],
       "type": "object"
     },
+    "TeamMessageIntake": {
+      "description": "Historical intake evidence, independent of every recipient's processing.",
+      "enum": [
+        "queuedOnSenderHost",
+        "acceptedAtCoordinator",
+        "rejected"
+      ],
+      "type": "string"
+    },
     "TeamMessageKind": {
       "enum": [
         "request",
@@ -19882,6 +20304,119 @@
         "board"
       ],
       "type": "string"
+    },
+    "TeamMessageProgress": {
+      "description": "Delivery evidence describes transport and turn processing, never fulfillment.",
+      "enum": [
+        "queuedOnSenderHost",
+        "queuedAtCoordinator",
+        "receivedByRecipientHost",
+        "admittedToTurn",
+        "turnEnded",
+        "turnInterrupted",
+        "deliveryRejected",
+        "processingUncertain"
+      ],
+      "type": "string"
+    },
+    "TeamMessageStatus": {
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "freshness": {
+          "$ref": "#/definitions/TeamObservationFreshness"
+        },
+        "intake": {
+          "$ref": "#/definitions/TeamMessageIntake"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "recipients": {
+          "items": {
+            "$ref": "#/definitions/TeamRecipientMessageStatus"
+          },
+          "type": "array"
+        },
+        "relatedReplies": {
+          "description": "Replies are optional evidence of conversation, not completion receipts.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sender": {
+          "$ref": "#/definitions/TeamAddress"
+        },
+        "senderName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "freshness",
+        "intake",
+        "messageId",
+        "recipients",
+        "relatedReplies",
+        "sender",
+        "senderName"
+      ],
+      "type": "object"
+    },
+    "TeamMessageStatusParams": {
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "messageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TeamMessageStatusSnapshot": {
+      "properties": {
+        "data": {
+          "items": {
+            "$ref": "#/definitions/TeamMessageStatus"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "data",
+        "revision"
+      ],
+      "type": "object"
     },
     "TeamModelSelection": {
       "properties": {
@@ -19902,6 +20437,14 @@
         "revision"
       ],
       "type": "object"
+    },
+    "TeamObservationFreshness": {
+      "enum": [
+        "current",
+        "lastSynchronized",
+        "unconfirmed"
+      ],
+      "type": "string"
     },
     "TeamOutboxEntry": {
       "properties": {
@@ -19924,6 +20467,16 @@
         "sequence"
       ],
       "type": "object"
+    },
+    "TeamReadiness": {
+      "enum": [
+        "ready",
+        "resumable",
+        "busy",
+        "held",
+        "unknown"
+      ],
+      "type": "string"
     },
     "TeamReceipt": {
       "properties": {
@@ -19966,6 +20519,39 @@
         "needsReconciliation"
       ],
       "type": "string"
+    },
+    "TeamRecipientMessageStatus": {
+      "properties": {
+        "address": {
+          "$ref": "#/definitions/TeamAddress"
+        },
+        "freshness": {
+          "$ref": "#/definitions/TeamObservationFreshness"
+        },
+        "name": {
+          "type": "string"
+        },
+        "progress": {
+          "$ref": "#/definitions/TeamMessageProgress"
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TeamReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "freshness",
+        "name",
+        "progress"
+      ],
+      "type": "object"
     },
     "TeamSelection": {
       "oneOf": [
@@ -20059,6 +20645,14 @@
           "type": "string"
         }
       ]
+    },
+    "TeamSynchronization": {
+      "enum": [
+        "current",
+        "disconnected",
+        "unconfirmed"
+      ],
+      "type": "string"
     },
     "TeamTrackedJob": {
       "properties": {

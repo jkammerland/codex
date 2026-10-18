@@ -12,7 +12,6 @@ use crate::coordinator::request_id;
 use crate::coordinator::status_text;
 use crate::model::*;
 use crate::thread_metadata::ThreadReadMetadata;
-use crate::thread_metadata::ThreadResumeMetadata;
 
 #[derive(Default)]
 pub(crate) struct AliasReservations(Mutex<HashSet<String>>);
@@ -87,7 +86,7 @@ impl Coordinator {
             cursor = Some(next);
         };
         if !loaded {
-            let _: ThreadResumeMetadata = peer
+            let _: serde_json::Value = peer
                 .handle
                 .request_typed(ClientRequest::ThreadResume {
                     request_id: request_id(),
@@ -122,6 +121,7 @@ impl Coordinator {
             })
             .await?;
         let agent = Agent {
+            discovery: Default::default(),
             enrollment: enrolled.enrollment,
             requested_selection: None,
             runtime: None,

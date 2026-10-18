@@ -15,6 +15,8 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
+    #[serde(default)]
+    pub discovery: codex_app_server_protocol::TeamAgentDiscovery,
     pub enrollment: TeamEnrollment,
     #[serde(default)]
     pub runtime: Option<codex_app_server_protocol::TeamAgentRuntime>,
@@ -101,6 +103,12 @@ impl TeamOperation {
     rename_all_fields = "camelCase"
 )]
 pub enum TeamRequest {
+    MessageStatus {
+        query: codex_app_server_protocol::TeamMessageStatusParams,
+    },
+    ExplainAction {
+        query: codex_app_server_protocol::TeamExplainActionParams,
+    },
     Board {
         request: codex_app_server_protocol::TeamBoardParams,
     },
@@ -169,6 +177,12 @@ pub enum TeamRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum TeamResponse {
+    MessageStatus {
+        response: codex_app_server_protocol::TeamMessageStatusResponse,
+    },
+    ActionExplanation {
+        explanation: codex_app_server_protocol::TeamActionExplanation,
+    },
     Board {
         response: codex_app_server_protocol::TeamBoardResponse,
     },

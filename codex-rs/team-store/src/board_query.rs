@@ -1,5 +1,6 @@
 //! Shared read projection for coordinator queries and committed worker caches.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use anyhow::Context;
@@ -7,6 +8,10 @@ use anyhow::Result;
 use anyhow::bail;
 use anyhow::ensure;
 use codex_app_server_protocol::*;
+
+#[path = "board_topics.rs"]
+mod topics;
+pub use topics::topic_overviews;
 
 pub fn query_board(
     snapshot: &TeamBoardSnapshot,
@@ -30,7 +35,11 @@ pub fn query_board(
                 .filter(|conversation| {
                     let matches_filter = match filter {
                         TeamBoardFilter::All => true,
-                        TeamBoardFilter::Following => conversation.following,
+                        TeamBoardFilter::Following => {
+                            conversation.following
+                                || conversation.topic_subscription_mode
+                                    != TeamBoardSubscriptionMode::Off
+                        }
                         TeamBoardFilter::Mentions => conversation.mentioned,
                     };
                     matches_filter
@@ -177,11 +186,22 @@ pub fn query_board(
                 next_cursor,
             })
         }
+        TeamBoardParams::TopicOverview {
+            cursor,
+            limit,
+            identity,
+        } => topics::query_topic_overviews(
+            snapshot,
+            identity.as_ref().unwrap_or(viewer),
+            cursor.as_deref(),
+            *limit,
+        ),
         TeamBoardParams::Post { .. }
         | TeamBoardParams::Reply { .. }
         | TeamBoardParams::Follow { .. }
         | TeamBoardParams::MarkRead { .. }
-        | TeamBoardParams::TopicFollow { .. } => {
+        | TeamBoardParams::TopicFollow { .. }
+        | TeamBoardParams::SubscriptionSet { .. } => {
             bail!("board mutation requires coordinator acceptance")
         }
     }
@@ -197,42 +217,71 @@ fn conversations(
     snapshot: &TeamBoardSnapshot,
     viewer: &TeamBoardIdentity,
 ) -> Vec<TeamBoardConversation> {
+    let mut grouped = BTreeMap::<&str, Vec<&TeamBoardEntry>>::new();
+    for entry in &snapshot.entries {
+        grouped
+            .entry(&entry.conversation_id)
+            .or_default()
+            .push(entry);
+    }
+    let mut followers_by_conversation = BTreeMap::<&str, Vec<&TeamBoardFollower>>::new();
+    for follower in &snapshot.followers {
+        followers_by_conversation
+            .entry(&follower.conversation_id)
+            .or_default()
+            .push(follower);
+    }
+    let read_markers = snapshot
+        .reads
+        .iter()
+        .filter(|read| &read.identity == viewer)
+        .map(|read| (read.conversation_id.as_str(), read.append_seq))
+        .collect::<BTreeMap<_, _>>();
+    let topic_modes = snapshot
+        .topic_subscriptions
+        .iter()
+        .filter(|subscription| &subscription.identity == viewer)
+        .map(|subscription| (subscription.topic.as_str(), subscription.mode))
+        .collect::<BTreeMap<_, _>>();
     snapshot
         .entries
         .iter()
         .filter(|entry| entry.message.id == entry.conversation_id)
         .map(|root| {
-            let entries = snapshot
-                .entries
-                .iter()
-                .filter(|entry| entry.conversation_id == root.conversation_id)
-                .collect::<Vec<_>>();
+            let entries = &grouped[root.conversation_id.as_str()];
             let latest = entries
                 .iter()
                 .max_by_key(|entry| entry.append_seq)
                 .copied()
                 .unwrap_or(root);
-            let followers = snapshot
-                .followers
+            let followers = followers_by_conversation
+                .get(root.conversation_id.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let read_seq = read_markers
+                .get(root.conversation_id.as_str())
+                .copied()
+                .unwrap_or_default();
+            let subscription_mode = followers
                 .iter()
-                .filter(|follower| follower.conversation_id == root.conversation_id)
-                .collect::<Vec<_>>();
-            let read_seq = snapshot
-                .reads
-                .iter()
-                .find(|read| {
-                    read.conversation_id == root.conversation_id && &read.identity == viewer
-                })
-                .map_or(0, |read| read.append_seq);
+                .find(|follower| &follower.identity == viewer)
+                .map_or(TeamBoardSubscriptionMode::Off, |follower| follower.mode);
+            let topic_subscription_mode = root
+                .message
+                .topic
+                .as_deref()
+                .and_then(|topic| topic_modes.get(topic))
+                .copied()
+                .unwrap_or_default();
             TeamBoardConversation {
                 id: root.conversation_id.clone(),
                 root: root.clone(),
                 latest: latest.clone(),
                 reply_count: entries.len().saturating_sub(1) as u32,
                 follower_count: followers.len() as u32,
-                following: followers
-                    .iter()
-                    .any(|follower| &follower.identity == viewer),
+                following: subscription_mode != TeamBoardSubscriptionMode::Off,
+                subscription_mode,
+                topic_subscription_mode,
                 unread: entries
                     .iter()
                     .any(|entry| entry.append_seq > read_seq && &entry.author.identity != viewer),

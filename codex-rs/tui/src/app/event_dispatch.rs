@@ -221,11 +221,19 @@ impl App {
         match event {
             AppEvent::Scoped { .. } | AppEvent::AgentsHostUpdate(_) | AppEvent::AgentsHostAction { .. } | AppEvent::AgentsHostModel(_) | AppEvent::NewAgentsHostSession { .. } => {},
             AppEvent::AgentsTeamMenu(target) => self.open_agents_team_menu(target),
+            AppEvent::AgentsTeamExplain(target) => self.open_agents_team_explanations(target),
+            AppEvent::AgentsTeamOpenApproval { target, request_id, epoch } => self.open_agents_team_pending_approval(target, request_id, epoch),
             AppEvent::AgentsTeamCompose(kind) => self.open_agents_team_compose(kind),
             AppEvent::AgentsTeamRequest(request) => self.submit_agents_team_request(request),
             AppEvent::AgentsTeamBoard => self.open_agents_team_board(),
             AppEvent::AgentsBoardDiagnostics => self.open_agents_team_deliveries(),
             AppEvent::AgentsBoardManageFollowers(id) => self.open_agents_board_followers(id),
+            AppEvent::AgentsBoardManageTopic(topic) => self.open_agents_board_subscriptions(codex_app_server_protocol::TeamBoardSubscriptionTarget::Topic { topic }),
+            AppEvent::AgentsBoardSubscriptionMode { target, identity, name } => self.open_agents_board_subscription_mode(target, identity, name),
+            AppEvent::AgentsBoardSubscriptionAccepted { operation_id, revision } => {
+                self.agents_hosts.board.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .subscription_accepted(&operation_id, revision);
+            }
             AppEvent::AgentsBoardOperation(operation) => {
                 let id = operation.operation_id.clone();
                 self.agents_hosts.team_operations.insert(id.clone(), operation);

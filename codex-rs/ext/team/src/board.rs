@@ -36,7 +36,9 @@ impl TeamHostService {
             | TeamBoardParams::Read { identity, .. }
             | TeamBoardParams::Follow { identity, .. }
             | TeamBoardParams::MarkRead { identity, .. }
-            | TeamBoardParams::TopicFollow { identity, .. } => identity.as_ref(),
+            | TeamBoardParams::TopicFollow { identity, .. }
+            | TeamBoardParams::TopicOverview { identity, .. }
+            | TeamBoardParams::SubscriptionSet { identity, .. } => identity.as_ref(),
             TeamBoardParams::Post { .. }
             | TeamBoardParams::Reply { .. }
             | TeamBoardParams::Followers { .. }
@@ -51,7 +53,8 @@ impl TeamHostService {
             TeamBoardParams::List { .. }
             | TeamBoardParams::Read { .. }
             | TeamBoardParams::Followers { .. }
-            | TeamBoardParams::Topics { .. } => {
+            | TeamBoardParams::Topics { .. }
+            | TeamBoardParams::TopicOverview { .. } => {
                 return Ok(serde_json::to_value(codex_team_store::query_board(
                     &snapshot, &identity, &request,
                 )?)?);
@@ -72,6 +75,11 @@ impl TeamHostService {
                 ensure!(*append_seq >= 0, "read sequence must not be negative")
             }
             TeamBoardParams::Follow { .. } => {}
+            TeamBoardParams::SubscriptionSet { target, .. } => {
+                if let TeamBoardSubscriptionTarget::Topic { topic } = target {
+                    ensure!(!topic.trim().is_empty(), "board topic is required");
+                }
+            }
         }
 
         let conversation_id = match &request {
@@ -83,6 +91,10 @@ impl TeamHostService {
             }
             | TeamBoardParams::MarkRead {
                 conversation_id, ..
+            } => Some(conversation_id.clone()),
+            TeamBoardParams::SubscriptionSet {
+                target: TeamBoardSubscriptionTarget::Conversation { conversation_id },
+                ..
             } => Some(conversation_id.clone()),
             _ => None,
         };

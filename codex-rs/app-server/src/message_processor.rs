@@ -515,6 +515,7 @@ impl MessageProcessor {
         let team_processor = super::request_processors::TeamRequestProcessor::new(
             team_service.expect("team host initialized"),
             outgoing.clone(),
+            thread_watch_manager.clone(),
         );
         let thread_queue_processor = ThreadQueueRequestProcessor::new(
             Arc::clone(&thread_manager),

@@ -38,6 +38,9 @@ pub struct Machine {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
+    /// Declared capabilities keyed by exact execution-environment ID on this server.
+    #[serde(default)]
+    pub environment_capabilities: std::collections::BTreeMap<String, Vec<String>>,
     pub id: String,
     pub label: String,
     pub endpoint: Endpoint,
@@ -83,6 +86,13 @@ impl Manifest {
         resolve_path(base, &mut manifest.coordinator.state_dir);
         for machine in &mut manifest.machines {
             for server in &mut machine.servers {
+                for capabilities in server.environment_capabilities.values_mut() {
+                    let mut seen = HashSet::new();
+                    for capability in capabilities.iter_mut() {
+                        *capability = capability.trim().to_owned();
+                    }
+                    capabilities.retain(|capability| seen.insert(capability.clone()));
+                }
                 match &mut server.endpoint {
                     Endpoint::Local { socket } => resolve_path(base, socket),
                     Endpoint::Websocket { token_file, .. } | Endpoint::Ssh { token_file, .. } => {
@@ -125,6 +135,18 @@ impl Manifest {
             );
             let mut server_ids = HashSet::new();
             for server in &machine.servers {
+                for (environment, capabilities) in &server.environment_capabilities {
+                    ensure!(
+                        !environment.trim().is_empty(),
+                        "capability declaration environment ID must not be blank"
+                    );
+                    ensure!(
+                        capabilities
+                            .iter()
+                            .all(|capability| !capability.trim().is_empty()),
+                        "declared capability tags must not be blank"
+                    );
+                }
                 validate_id(&server.id)?;
                 ensure!(
                     server_ids.insert(&server.id),
@@ -216,3 +238,7 @@ pub(crate) fn validate_url(value: &str, schemes: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "config_capabilities_tests.rs"]
+mod capabilities_tests;

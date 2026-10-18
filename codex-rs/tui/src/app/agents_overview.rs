@@ -421,6 +421,7 @@ impl App {
                 continue;
             }
             rows.push(AgentsOverviewRow {
+                metadata_known: true,
                 host: self
                     .agents_hosts
                     .enabled()
@@ -466,11 +467,12 @@ impl App {
                     continue;
                 }
                 rows.push(AgentsOverviewRow {
+                    metadata_known: true,
                     host: Some(key.clone()),
                     machine_label: Some(if host.connected {
                         host.machine_label.clone()
                     } else {
-                        format!("{} · offline", host.machine_label)
+                        format!("{} · disconnected", host.machine_label)
                     }),
                     pin_rank: host
                         .state
@@ -506,6 +508,34 @@ impl App {
                     has_voice: false,
                 });
             }
+        }
+        if let Some(snapshot) = &self.agents_hosts.snapshot {
+            super::agents_overview_team::append_enrolled_rows(snapshot, &mut rows);
+            rows.retain(|row| {
+                if row.host.as_ref() == Some(&self.agents_hosts.foreground) {
+                    !self.agents_overview.hidden_threads.contains(&row.thread_id)
+                        && !self
+                            .agents_overview
+                            .removed_threads
+                            .contains(&row.thread_id)
+                } else {
+                    row.host
+                        .as_ref()
+                        .and_then(|host| self.agents_hosts.hosts.get(host))
+                        .is_none_or(|host| {
+                            !host
+                                .state
+                                .agents_overview
+                                .hidden_threads
+                                .contains(&row.thread_id)
+                                && !host
+                                    .state
+                                    .agents_overview
+                                    .removed_threads
+                                    .contains(&row.thread_id)
+                        })
+                }
+            });
         }
         self.agents_overview
             .view_state
@@ -543,6 +573,11 @@ impl App {
                 row.details
                     .lines
                     .push(format!("Team alias: {}", agent.enrollment.alias).into());
+                row.details
+                    .lines
+                    .extend(super::agents_overview_team::discovery_lines(
+                        &agent.discovery,
+                    ));
                 if agent.enrollment.manually_held {
                     row.details.lines.push("Manually held".into());
                 }

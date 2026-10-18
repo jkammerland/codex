@@ -13,6 +13,9 @@ use ratatui::layout::Rect;
 #[path = "navigation_tests.rs"]
 mod navigation_tests;
 
+#[path = "topics_tests.rs"]
+mod topics_tests;
+
 fn address() -> TeamAddress {
     TeamAddress {
         machine_id: "laptop".into(),
@@ -99,11 +102,13 @@ fn fixture() -> (BoardView, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
             entries: vec![root.clone(), reply.clone()],
             followers: vec![
                 TeamBoardFollower {
+                    mode: TeamBoardSubscriptionMode::Watch,
                     conversation_id: "root".into(),
                     identity: TeamBoardIdentity::User,
                     author: root.author,
                 },
                 TeamBoardFollower {
+                    mode: TeamBoardSubscriptionMode::Wake,
                     conversation_id: "root".into(),
                     identity: reply.author.identity.clone(),
                     author: reply.author,
@@ -441,7 +446,7 @@ fn human_follow_and_reply_to_entry_use_explicit_identities() {
     let (mut view, mut events) = fixture();
     key(&mut view, KeyCode::Char('f'));
     assert!(
-        matches!(events.try_recv().unwrap(), AppEvent::AgentsTeamRequest(TeamRequest::Board { request: TeamBoardParams::Follow { conversation_id, identity: None, enabled: false } }) if conversation_id == "root")
+        matches!(events.try_recv().unwrap(), AppEvent::AgentsTeamRequest(TeamRequest::Board { request: TeamBoardParams::SubscriptionSet { target: TeamBoardSubscriptionTarget::Conversation { conversation_id }, identity: None, mode: TeamBoardSubscriptionMode::Off } }) if conversation_id == "root")
     );
     key(&mut view, KeyCode::Enter);
     key(&mut view, KeyCode::Char(']'));

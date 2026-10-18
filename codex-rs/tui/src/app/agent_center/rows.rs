@@ -276,10 +276,14 @@ impl AgentsOverviewView {
             );
             line(Line::from(status).style(style), status_area, buf);
             if !updated.is_empty() {
-                let age = format_relative_time(
-                    reference,
-                    chrono::DateTime::from_timestamp(task.thread.updated_at, /*nsecs*/ 0),
-                );
+                let age = if task.thread.updated_at == 0 {
+                    "Unknown".into()
+                } else {
+                    format_relative_time(
+                        reference,
+                        chrono::DateTime::from_timestamp(task.thread.updated_at, /*nsecs*/ 0),
+                    )
+                };
                 Line::from(age)
                     .style(if index == self.selected {
                         style

@@ -4,11 +4,11 @@ assertion_line: 979
 expression: "normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widget, 80))"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 1   Needs you 0   Working 0   Ready 1   Inactive 0
+   All 1   Needs you 0   Working 0   Idle 1   Inactive 0
   ────────────────────────────────────────────────────────────────────────────
       Tasks                                            Status         Updated
   /tmp/project  1
-  › ○ Current task                                     Ready           2m ago
+  › ○ Current task                                     Idle            2m ago
 
 
       Archive “Current task”?

@@ -59,6 +59,7 @@ async fn pending_stop_cleanup_keeps_the_same_connection_for_ordered_resume() -> 
         Ok::<_, anyhow::Error>(admitted)
     });
     let server = Server {
+        environment_capabilities: Default::default(),
         id: "primary".into(),
         label: "Primary".into(),
         endpoint: crate::Endpoint::Websocket {

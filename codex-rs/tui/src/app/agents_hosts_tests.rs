@@ -292,6 +292,7 @@ fn team_snapshot(id: ThreadId) -> TeamSnapshot {
             error: None,
         }],
         agents: vec![codex_team::Agent {
+            discovery: Default::default(),
             enrollment: TeamEnrollment {
                 address: address.clone(),
                 alias: "release leader".into(),
@@ -312,6 +313,8 @@ fn team_snapshot(id: ThreadId) -> TeamSnapshot {
                 effort: TeamSelection::Default,
             }),
             runtime: Some(TeamAgentRuntime {
+                activity: Default::default(),
+                environments: Vec::new(),
                 thread_id: id.to_string(),
                 root_thread_id: id.to_string(),
                 parent_thread_id: None,
@@ -356,15 +359,15 @@ fn team_snapshot(id: ThreadId) -> TeamSnapshot {
                 created_at: 1,
             },
             delivery: TeamDeliveryMode::NextTurn,
-            targets: Some(vec![address]),
+            targets: Some(vec![address.clone()]),
             published: true,
             error: None,
             external_url: None,
             receipts: BTreeMap::from([(
-                "delivery-one".into(),
+                format!("request-one:alpha/main/{id}"),
                 TeamReceipt {
-                    delivery_id: "delivery-one".into(),
-                    thread_id: "reviewer".into(),
+                    delivery_id: format!("request-one:alpha/main/{id}"),
+                    thread_id: address.thread_id,
                     state: TeamReceiptState::NeedsReconciliation,
                     turn_id: Some("original-turn".into()),
                     detail: Some(

@@ -88,11 +88,19 @@ impl ComposeView {
                 body,
                 delivery: *delivery,
             },
-            TeamCompose::Subscribe(target) => TeamRequest::Subscribe {
-                address: target.team_address(),
-                topic: body,
-                enabled: true,
-            },
+            TeamCompose::Subscribe(target) => {
+                self.sender.send(AppEvent::AgentsBoardSubscriptionMode {
+                    target: codex_app_server_protocol::TeamBoardSubscriptionTarget::Topic {
+                        topic: body.clone(),
+                    },
+                    identity: codex_app_server_protocol::TeamBoardIdentity::Agent {
+                        address: target.team_address(),
+                    },
+                    name: body,
+                });
+                self.completion = Some(ViewCompletion::Accepted);
+                return;
+            }
         };
         self.sender.send(AppEvent::AgentsTeamRequest(request));
         self.completion = Some(ViewCompletion::Accepted);
@@ -189,6 +197,18 @@ impl App {
                 .any(|agent| agent.enrollment.address == target.team_address())
         });
         let mut items = Vec::new();
+        let explain_target = target.clone();
+        items.push(SelectionItem {
+            name: "Action availability and restrictions".into(),
+            description: Some("Inspect holds, authority, and actual pending approvals".into()),
+            actions: vec![Box::new(move |sender| {
+                sender
+                    .unscoped()
+                    .send(AppEvent::AgentsTeamExplain(explain_target.clone()))
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
         let target_alias = target.clone();
         items.push(SelectionItem {
             name: if enrolled {
@@ -415,7 +435,32 @@ impl App {
     }
 
     pub(super) fn submit_agents_team_request(&mut self, request: TeamRequest) {
-        let operation = codex_team::TeamOperation::new(request);
+        let operation = if let TeamRequest::Board {
+            request:
+                codex_app_server_protocol::TeamBoardParams::SubscriptionSet {
+                    target,
+                    identity,
+                    mode,
+                },
+        } = request
+        {
+            let Some(operation) = self
+                .agents_hosts
+                .board
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .begin_subscription(
+                    target,
+                    identity.unwrap_or(codex_app_server_protocol::TeamBoardIdentity::User),
+                    mode,
+                )
+            else {
+                return;
+            };
+            operation
+        } else {
+            codex_team::TeamOperation::new(request)
+        };
         let id = operation.operation_id.clone();
         self.agents_hosts
             .team_operations
@@ -461,7 +506,14 @@ impl App {
         let generations = self.agents_hosts.team_read_generation.clone();
         self.agents_hosts.spawn(async move {
             let result = match client.request_operation(&operation).await {
-                Ok(_) => {
+                Ok(response) => {
+                    if let codex_team::TeamResponse::Board {
+                        response: codex_app_server_protocol::TeamBoardResponse::Mutation {
+                            revision, state: codex_app_server_protocol::TeamBoardMutationState::Applied, ..
+                        }
+                    } = response {
+                        sender.send(AppEvent::AgentsBoardSubscriptionAccepted { operation_id: operation.operation_id.clone(), revision });
+                    }
                     let generation =
                         generations.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     if let Ok(snapshot) = client.snapshot().await {

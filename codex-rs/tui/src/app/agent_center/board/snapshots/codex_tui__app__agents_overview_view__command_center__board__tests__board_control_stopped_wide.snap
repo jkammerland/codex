@@ -1,12 +1,12 @@
 ---
 source: tui/src/app/agent_center/board/tests.rs
-assertion_line: 202
+assertion_line: 207
 expression: "render(&view, 120, 12)"
 ---
 Agent command center   t Tasks   b Board  Team Stopped · 100/100 hosts applied
  All posts   Following   Mentions
 Posts and conversations · / search · #topic in search · # set post topic
-› ● Ready for the release review?                 Preview · l/Enter to read · 2 followers · Following
+› ● Ready for the release review?                 Preview · Watch · 2 followers
   You · Human · #release                          You · Human  Nov 14 22:13
   1 replies · Nov 14 22:13 · Following            Ready for the release review?
                                                   Please check the native build and share any blockers here.

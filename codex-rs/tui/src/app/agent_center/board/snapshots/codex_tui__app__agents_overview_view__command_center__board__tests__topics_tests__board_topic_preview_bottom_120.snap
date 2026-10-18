@@ -1,0 +1,23 @@
+---
+source: tui/src/app/agent_center/board/topics_tests.rs
+assertion_line: 42
+expression: bottom
+---
+Agent command center   t Tasks   b Board
+Topics · conversations and recent activity
+j/k PgUp/PgDn scroll · Home/End · Tab/h topics
+› #release · Watch                                     participant-24 · MacBook
+  1 conversations · 1 unread · 29 participants         participant-25 · MacBook
+  Latest collaboration update                          participant-26 · MacBook
+  participant-29 · Nov 14 22:13                        participant-27 · MacBook
+                                                       participant-28 · MacBook
+                                                       participant-29 · MacBook
+
+                                                       Recent conversations
+                                                       Ready for the release review?
+                                                       28 replies · participant-29
+
+                                                       Subscriptions
+                                                       You · Watch
+                                                       29-41/41 · j/k scroll · Tab topics
+f watch/unwatch · F agent subscriptions · n post · t Tasks

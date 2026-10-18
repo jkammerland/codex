@@ -10,7 +10,7 @@ use crate::coordinator::Peer;
 use crate::coordinator::request_id;
 use crate::coordinator::status_text;
 use crate::model::*;
-use crate::thread_metadata::ThreadResumeMetadata;
+use crate::thread_metadata::ThreadReadMetadata;
 
 impl Coordinator {
     pub(crate) async fn reconcile(
@@ -31,8 +31,8 @@ impl Coordinator {
             })
             .await?;
         ensure!(
-            host.protocol_version == 3,
-            "worker team protocol {} is incompatible with coordinator protocol 3; install matching coordinator and worker builds",
+            host.protocol_version == 4,
+            "worker team protocol {} is incompatible with coordinator protocol 4; install matching coordinator and worker builds",
             host.protocol_version
         );
         if let Some(expected) = self.store.get::<String>("installation", &key).await? {
@@ -244,21 +244,25 @@ impl Coordinator {
                 .iter()
                 .map(|entry| entry.message.clone())
                 .collect();
+            let mut message_status = self.message_status_snapshot().await?;
+            message_status.data.retain(|status| {
+                (status.sender.machine_id == machine.id && status.sender.server_id == server.id)
+                    || status.recipients.iter().any(|recipient| {
+                        recipient.address.machine_id == machine.id
+                            && recipient.address.server_id == server.id
+                    })
+            });
             let _: TeamSyncResponse = peer
                 .handle
                 .request_typed(ClientRequest::TeamSync {
                     request_id: request_id(),
                     params: TeamSyncParams {
                         coordinator_id: self.current_control().await?.coordinator_id,
-                        directory: self
-                            .agents()
-                            .await?
-                            .into_iter()
-                            .map(|agent| agent.enrollment)
-                            .collect(),
+                        directory: self.directory_snapshot().await?,
                         board,
                         board_state,
                         cancellation_adapters: server.cancellation_adapters.clone(),
+                        message_status,
                     },
                 })
                 .await?;
@@ -319,6 +323,7 @@ impl Coordinator {
                 present.insert(key.clone());
                 let previous = self.store.get::<Agent>("agent", &key).await?;
                 let mut agent = previous.clone().unwrap_or_else(|| Agent {
+                    discovery: Default::default(),
                     enrollment: enrollment.clone(),
                     requested_selection: None,
                     runtime: None,
@@ -330,28 +335,20 @@ impl Coordinator {
                     project: None,
                 });
                 agent.enrollment = enrollment;
-                let archived = host.runtime.iter().any(|member| {
-                    member.thread_id == agent.enrollment.address.thread_id && member.archived
-                });
-                if (rejoin || previous.is_none()) && !archived {
-                    let resumed: ThreadResumeMetadata = peer
+                // Read stored metadata without loading an idle or archived teammate.
+                if rejoin || previous.is_none() {
+                    let read: ThreadReadMetadata = peer
                         .handle
-                        .request_typed(ClientRequest::ThreadResume {
+                        .request_typed(ClientRequest::ThreadRead {
                             request_id: request_id(),
-                            params: ThreadResumeParams {
+                            params: ThreadReadParams {
                                 thread_id: agent.enrollment.address.thread_id.clone(),
-                                ..Default::default()
+                                include_turns: false,
                             },
                         })
                         .await?;
-                    agent.status = status_text(&resumed.thread.status);
-                    agent.next_model = Some(resumed.model);
-                    agent.next_effort = resumed.reasoning_effort;
-                    agent.project = resumed.thread.project_id;
-                    // A reconnect does not know which settings an active turn
-                    // captured. Never present its next model as the current one.
-                    agent.current_model = None;
-                    agent.current_effort = None;
+                    agent.status = status_text(&read.thread.status);
+                    agent.project = read.thread.project_id;
                 }
                 let _mutation = self.mutations.lock().await;
                 if self
@@ -380,6 +377,7 @@ impl Coordinator {
                 present.insert(key.clone());
                 let previous = self.store.get::<Agent>("agent", &key).await?;
                 let mut agent = previous.clone().unwrap_or_else(|| Agent {
+                    discovery: Default::default(),
                     enrollment: TeamEnrollment {
                         address,
                         alias: runtime.alias.clone(),
@@ -505,10 +503,42 @@ impl Coordinator {
         };
         let previous = agent.clone();
         match notification {
-            ServerNotification::ThreadArchived(_) => agent.status = "archived".into(),
-            ServerNotification::ThreadUnarchived(_) => agent.status = "unloaded".into(),
+            ServerNotification::ThreadArchived(_) => {
+                agent.status = "archived".into();
+                if let Some(runtime) = agent.runtime.as_mut() {
+                    runtime.archived = true;
+                    runtime.loaded = false;
+                    runtime.activity = TeamActivity::Archived;
+                    runtime.turn_id = None;
+                    runtime.current_model = None;
+                    runtime.current_effort = None;
+                    for environment in &mut runtime.environments {
+                        environment.current = false;
+                    }
+                }
+            }
+            ServerNotification::ThreadUnarchived(_) => {
+                agent.status = "unloaded".into();
+                if let Some(runtime) = agent.runtime.as_mut() {
+                    runtime.archived = false;
+                    runtime.loaded = false;
+                    runtime.activity = TeamActivity::Unloaded;
+                }
+            }
             ServerNotification::ThreadStatusChanged(value) => {
-                agent.status = status_text(&value.status)
+                agent.status = status_text(&value.status);
+                if let Some(runtime) = agent.runtime.as_mut() {
+                    runtime.activity = (&value.status).into();
+                    runtime.loaded = value.status != ThreadStatus::NotLoaded;
+                    if !runtime.loaded {
+                        runtime.turn_id = None;
+                        runtime.current_model = None;
+                        runtime.current_effort = None;
+                        for environment in &mut runtime.environments {
+                            environment.current = false;
+                        }
+                    }
+                }
             }
             ServerNotification::ThreadSettingsUpdated(value) => {
                 agent.next_model = Some(value.thread_settings.model);
@@ -517,8 +547,17 @@ impl Coordinator {
                     .effort
                     .map(|effort| effort.to_string());
             }
-            ServerNotification::TurnStarted(_) => {
+            ServerNotification::TurnStarted(value) => {
                 agent.status = "working".into();
+                agent.current_model = None;
+                agent.current_effort = None;
+                if let Some(runtime) = agent.runtime.as_mut() {
+                    runtime.loaded = true;
+                    runtime.activity = TeamActivity::Working;
+                    runtime.turn_id = Some(value.turn.id);
+                    runtime.current_model = None;
+                    runtime.current_effort = None;
+                }
                 // team/hostRead reports the settings actually captured by the
                 // turn; next-turn settings may have changed concurrently.
             }
@@ -526,6 +565,15 @@ impl Coordinator {
                 agent.status = "idle".into();
                 agent.current_model = None;
                 agent.current_effort = None;
+                if let Some(runtime) = agent.runtime.as_mut() {
+                    runtime.activity = TeamActivity::Idle;
+                    for environment in &mut runtime.environments {
+                        environment.current = false;
+                    }
+                    runtime.turn_id = None;
+                    runtime.current_model = None;
+                    runtime.current_effort = None;
+                }
             }
             _ => unreachable!("notification was filtered above"),
         }
@@ -547,3 +595,7 @@ mod tests;
 #[cfg(test)]
 #[path = "worker_metadata_tests.rs"]
 mod metadata_tests;
+
+#[cfg(test)]
+#[path = "worker_protocol_tests.rs"]
+mod protocol_tests;

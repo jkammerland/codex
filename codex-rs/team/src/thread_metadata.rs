@@ -14,11 +14,3 @@ pub(crate) struct ThreadMetadata {
 pub(crate) struct ThreadReadMetadata {
     pub thread: ThreadMetadata,
 }
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ThreadResumeMetadata {
-    pub thread: ThreadMetadata,
-    pub model: String,
-    pub reasoning_effort: Option<String>,
-}

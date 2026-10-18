@@ -494,9 +494,9 @@ pub struct SkillInterface {
     #[ts(optional)]
     pub short_description: Option<String>,
     #[ts(optional)]
-    pub icon_small: Option<AbsolutePathBuf>,
+    pub icon_small: Option<LegacyAppPathString>,
     #[ts(optional)]
-    pub icon_large: Option<AbsolutePathBuf>,
+    pub icon_large: Option<LegacyAppPathString>,
     /// Remote small icon URL from the plugin catalog.
     pub icon_small_url: Option<String>,
     /// Remote large icon URL from the plugin catalog.
@@ -1005,8 +1005,8 @@ impl From<CoreSkillInterface> for SkillInterface {
             short_description: value.short_description,
             brand_color: value.brand_color,
             default_prompt: value.default_prompt,
-            icon_small: value.icon_small,
-            icon_large: value.icon_large,
+            icon_small: value.icon_small.map(Into::into),
+            icon_large: value.icon_large.map(Into::into),
             icon_small_url: None,
             icon_large_url: None,
         }

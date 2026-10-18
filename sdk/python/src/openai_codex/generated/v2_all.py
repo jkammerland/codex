@@ -4917,12 +4917,12 @@ class SkillInterface(BaseModel):
     brand_color: Annotated[str | None, Field(alias="brandColor")] = None
     default_prompt: Annotated[str | None, Field(alias="defaultPrompt")] = None
     display_name: Annotated[str | None, Field(alias="displayName")] = None
-    icon_large: Annotated[AbsolutePathBuf | None, Field(alias="iconLarge")] = None
+    icon_large: Annotated[LegacyAppPathString | None, Field(alias="iconLarge")] = None
     icon_large_url: Annotated[
         str | None,
         Field(alias="iconLargeUrl", description="Remote large icon URL from the plugin catalog."),
     ] = None
-    icon_small: Annotated[AbsolutePathBuf | None, Field(alias="iconSmall")] = None
+    icon_small: Annotated[LegacyAppPathString | None, Field(alias="iconSmall")] = None
     icon_small_url: Annotated[
         str | None,
         Field(alias="iconSmallUrl", description="Remote small icon URL from the plugin catalog."),

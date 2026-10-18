@@ -253,7 +253,7 @@ pub(super) async fn handle(
             .execution_control()
             .resume_for_user(session.thread_id);
     }
-    let Some(_execution) = session.try_enter_execution() else {
+    let Some(_startup) = session.try_enter_turn_start() else {
         return Err(CodexErrorDetails::TeamExecutionHeld.into());
     };
     let result = match mode {
@@ -486,7 +486,7 @@ async fn start_if_idle(
     kind: TurnStartKind,
     expected_previous_turn_id: Option<String>,
 ) -> CodexResult<TurnInputSubmission> {
-    let Some(_execution) = session.try_enter_execution() else {
+    let Some(_startup) = session.try_enter_turn_start() else {
         return Err(CodexErrorDetails::TeamExecutionHeld.into());
     };
     let WithTurnExtensionData {

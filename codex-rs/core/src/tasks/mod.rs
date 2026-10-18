@@ -480,7 +480,7 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        let Some(_execution) = self.try_enter_execution() else {
+        let Some(_startup) = self.try_enter_turn_start() else {
             return;
         };
         if self

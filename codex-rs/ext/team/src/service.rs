@@ -332,3 +332,7 @@ impl TeamHostService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "control_worker_tests.rs"]
+mod control_worker_tests;

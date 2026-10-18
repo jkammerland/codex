@@ -113,10 +113,30 @@ impl Session {
             .await
     }
 
-    pub(crate) fn try_enter_execution(&self) -> Option<ExecutionPermit> {
+    pub(crate) fn try_enter_turn_start(&self) -> Option<ExecutionPermit> {
         self.services
             .extensions
             .execution_control()
-            .try_enter(self.thread_id)
+            .try_start_turn(self.thread_id)
+    }
+
+    /// Auxiliary input-loop operations report a held start through their normal event path.
+    pub(crate) async fn try_enter_turn_start_or_report(
+        &self,
+        submission_id: &str,
+    ) -> Option<ExecutionPermit> {
+        let permit = self.try_enter_turn_start();
+        if permit.is_none() {
+            let error: codex_protocol::error::CodexErr =
+                codex_protocol::error::CodexErrorDetails::TeamExecutionHeld.into();
+            self.send_event_raw(codex_protocol::protocol::Event {
+                id: submission_id.to_owned(),
+                msg: codex_protocol::protocol::EventMsg::Error(
+                    error.to_error_event(/*message_prefix*/ None),
+                ),
+            })
+            .await;
+        }
+        permit
     }
 }

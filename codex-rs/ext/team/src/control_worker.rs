@@ -59,6 +59,25 @@ impl TeamHostService {
                     service
                         .request_job_cancellation(stop.revision, &scope)
                         .await?;
+
+                    // Startup can pass admission before Stop and register its task
+                    // after the first scan. Drain only that registration window:
+                    // detached external calls retain their independent cancellation.
+                    let roots = scope
+                        .iter()
+                        .map(|root| codex_protocol::ThreadId::from_string(root))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut startup_changes = service.gate.subscribe();
+                    while roots
+                        .iter()
+                        .any(|root| service.gate.pending_turn_starts(*root) != 0)
+                    {
+                        startup_changes.changed().await?;
+                    }
+                    service.stop_family(stop.revision, &scope).await?;
+                    service
+                        .request_job_cancellation(stop.revision, &scope)
+                        .await?;
                     let _update = service.control_updates.lock().await;
                     let Some(store) = service.store.get() else {
                         continue;

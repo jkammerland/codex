@@ -179,3 +179,33 @@ fn dispatch_claim_retains_the_original_external_effect_through_cancellation() {
     assert!(calls.retain_after_cancellation("original"));
     assert!(!calls.retain_after_cancellation("untracked"));
 }
+
+#[test]
+fn stop_tracks_startup_separately_from_retained_external_calls() {
+    let gate = ExecutionControl::default();
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    gate.inherit(child, root);
+    gate.apply(root, 1, ExecutionMode::Running);
+    let external = gate.try_enter(child).unwrap();
+    let startup = gate.try_start_turn(child).unwrap();
+
+    gate.apply_reconciling(root, 2, ExecutionMode::Stopped, true);
+    gate.apply_reconciling(root, 3, ExecutionMode::Running, true);
+    assert_eq!(gate.pending_turn_starts(root), 1);
+    assert_eq!(gate.pending_turn_starts(child), 1);
+    assert!(gate.try_start_turn(child).is_none());
+
+    // An original external launch can remain unresolved after task registration
+    // settles. It must not prevent the host from finishing Stop and later Resume.
+    let changes = gate.subscribe();
+    drop(startup);
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(gate.pending_turn_starts(root), 0);
+    assert_eq!(gate.snapshot(root).unwrap().in_flight, 1);
+    gate.apply_reconciling(root, 3, ExecutionMode::Running, false);
+    assert_eq!(gate.try_start_turn(child).unwrap().revision(), Some(3));
+    assert_eq!(external.revision(), Some(1));
+    drop(external);
+    assert_eq!(gate.snapshot(root).unwrap().in_flight, 0);
+}

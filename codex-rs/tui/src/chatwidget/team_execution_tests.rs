@@ -8,6 +8,10 @@ async fn team_hold_status_snapshots_and_draft_never_auto_submits() {
     let (mut chat, _, mut operations) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
     chat.apply_external_edit("Continue after the team resumes".into());
+
+    // Keep the unrelated workspace footer independent of the host's path syntax.
+    chat.set_status_line(Some("Test model · project".into()));
+
     for (name, execution) in [
         ("stopped", TeamExecution::Stopped),
         ("paused", TeamExecution::Paused),

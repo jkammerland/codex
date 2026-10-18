@@ -137,13 +137,37 @@ impl Coordinator {
     }
 
     pub async fn agents(&self) -> Result<Vec<Agent>> {
-        Ok(self
+        let control = self.current_control().await?;
+        let mut agents = self
             .store
             .list::<Agent>("agent", "", u32::MAX)
             .await?
             .into_iter()
             .map(|(_, agent)| agent)
-            .collect())
+            .collect::<Vec<_>>();
+        let statuses = self.statuses.read().await;
+        for agent in &mut agents {
+            let address = &agent.enrollment.address;
+            let declarations = self
+                .manifest
+                .machines
+                .iter()
+                .find(|machine| machine.id == address.machine_id)
+                .and_then(|machine| {
+                    machine
+                        .servers
+                        .iter()
+                        .find(|server| server.id == address.server_id)
+                })
+                .map(|server| &server.environment_capabilities);
+            agent.discovery = crate::discovery::project_discovery(
+                agent,
+                statuses.get(&server_key(&address.machine_id, &address.server_id)),
+                &control,
+                declarations,
+            );
+        }
+        Ok(agents)
     }
 
     pub async fn snapshot(&self) -> Result<TeamSnapshot> {
@@ -183,6 +207,15 @@ impl Coordinator {
     )]
     pub async fn execute(&self, request: TeamRequest) -> Result<TeamResponse> {
         match request {
+            TeamRequest::MessageStatus { query } => Ok(TeamResponse::MessageStatus {
+                response: self.message_status(query).await?,
+            }),
+            TeamRequest::ExplainAction { query } => Ok(TeamResponse::ActionExplanation {
+                explanation: crate::action_explanation::explain_action(
+                    &self.snapshot().await?,
+                    query,
+                ),
+            }),
             TeamRequest::Board { request } => self.execute_board(request, None).await,
             TeamRequest::AgentCredential { address } => {
                 let peer = self.peer(&address.machine_id, &address.server_id).await?;

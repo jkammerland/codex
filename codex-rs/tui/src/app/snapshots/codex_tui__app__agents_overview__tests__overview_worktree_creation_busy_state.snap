@@ -4,7 +4,7 @@ assertion_line: 36
 expression: "normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widget, 80,))"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 0   Needs you 0   Working 0   Ready 0   Inactive 0
+   All 0   Needs you 0   Working 0   Idle 0   Inactive 0
   ────────────────────────────────────────────────────────────────────────────
   No tasks yet
 

@@ -67,3 +67,7 @@ impl TeamStore {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "board_migration_tests.rs"]
+mod migration_tests;

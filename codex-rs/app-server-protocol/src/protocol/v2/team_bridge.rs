@@ -6,7 +6,6 @@ use serde_json::Value;
 
 use super::TeamAddress;
 use super::TeamDeliveryMode;
-use super::TeamEnrollment;
 use super::TeamMessage;
 use super::TeamMessageKind;
 
@@ -59,10 +58,11 @@ pub struct TeamOutboxAckResponse {}
 #[ts(export_to = "v2/")]
 pub struct TeamSyncParams {
     pub coordinator_id: String,
-    pub directory: Vec<TeamEnrollment>,
+    pub directory: super::TeamDirectorySnapshot,
     pub board: Vec<TeamMessage>,
     pub board_state: super::TeamBoardSnapshot,
     pub cancellation_adapters: Vec<super::TeamCancellationAdapter>,
+    pub message_status: super::TeamMessageStatusSnapshot,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -84,6 +84,12 @@ pub struct TeamSyncResponse {}
     export_to = "v2/"
 )]
 pub enum TeamAgentAction {
+    MessageStatus {
+        query: super::TeamMessageStatusParams,
+    },
+    ExplainAction {
+        query: super::TeamExplainActionParams,
+    },
     BoardAction {
         request: super::TeamBoardParams,
     },
@@ -130,7 +136,12 @@ pub fn team_agent_tool_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "type": {"type": "string", "enum": ["directory", "inbox", "send", "reply", "post", "board", "subscribe", "boardAction"]},
+            "type": {"type": "string", "enum": ["directory", "inbox", "send", "reply", "post", "board", "subscribe", "boardAction", "messageStatus", "explainAction"]},
+            "query": {"type":"object", "description":"messageStatus: messageId, cursor, limit. explainAction: action and optional target address.", "properties": {
+                "messageId":{"type":"string"}, "cursor":{"type":"string"}, "limit":{"type":"integer", "minimum":1,"maximum":1000},
+                "action":{"type":"string","enum":["enroll","queueMessage","processMessages","post","subscribe","selectModel","pause","resume","stop","leave"]},
+                "target":{"type":"object","properties":{"machineId":{"type":"string"},"serverId":{"type":"string"},"threadId":{"type":"string"}},"required":["machineId","serverId","threadId"],"additionalProperties":false}
+            },"additionalProperties":false},
             "request": super::team_board_tool_schema(),
             "messageId": {"type": "string", "description": "Message from your inbox to reply to, including its original Gitea conversation."},
             "cursor": {"type": "string", "description": "Cursor from a directory, inbox or board page."},
@@ -147,6 +158,8 @@ pub fn team_agent_tool_schema() -> Value {
         },
         "required": ["type"],
         "oneOf": [
+            {"properties":{"type":{"const":"messageStatus"}},"required":["query"]},
+            {"properties":{"type":{"const":"explainAction"},"query":{"required":["action"]}},"required":["query"]},
             {"properties": {"type": {"const": "boardAction"}}, "required": ["request"]},
             {"properties": {"type": {"const": "reply"}}, "required": ["messageId", "body"]},
             {"properties": {"type": {"const": "directory"}}},

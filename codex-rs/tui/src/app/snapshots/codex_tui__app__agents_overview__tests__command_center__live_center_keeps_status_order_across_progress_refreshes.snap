@@ -5,7 +5,7 @@ expression: "format!(\"Initial display:\\n{before}\\n\\nAfter progress updates:\
 ---
 Initial display:
   Agent command center   t Tasks   b Board  Group: Status  g
-   All 5   Needs you 1   Working 3   Ready 1   Inactive 0                          tab/⇧tab filter
+   All 5   Needs you 1   Working 3   Idle 1   Inactive 0                           tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                               │ Task details
   Needs input  1                                          │
@@ -16,7 +16,7 @@ Initial display:
     ● Charlie                                             │ Reasoning: Unknown
   › ● Alpha                                               │
                                                           │ Project
-  Ready  1                                                │ /tmp/project
+  Idle  1                                                 │ /tmp/project
     ○ Ready task                                          │
                                                           │ Prompt
                                                           │ Alpha
@@ -25,7 +25,7 @@ Initial display:
 
 After progress updates:
   Agent command center   t Tasks   b Board  Group: Status  g
-   All 5   Needs you 1   Working 3   Ready 1   Inactive 0                          tab/⇧tab filter
+   All 5   Needs you 1   Working 3   Idle 1   Inactive 0                           tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                               │ Task details
   Needs input  1                                          │
@@ -36,7 +36,7 @@ After progress updates:
     ● Charlie                                             │ Reasoning: Unknown
   › ● Alpha                                               │
                                                           │ Project
-  Ready  1                                                │ /tmp/project
+  Idle  1                                                 │ /tmp/project
     ○ Ready task                                          │
                                                           │ Prompt
                                                           │ Progress update 3

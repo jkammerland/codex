@@ -18,6 +18,7 @@ mod outbox;
 
 pub use board::BoardClock;
 pub use board_query::query_board;
+pub use board_query::topic_overviews;
 pub use outbox::OutboxEntry;
 
 #[derive(Clone)]

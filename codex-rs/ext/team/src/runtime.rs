@@ -23,6 +23,8 @@ impl TeamHostService {
             members.insert(
                 id.clone(),
                 TeamAgentRuntime {
+                    activity: Default::default(),
+                    environments: Vec::new(),
                     thread_id: id.clone(),
                     root_thread_id: id,
                     parent_thread_id: None,
@@ -61,6 +63,10 @@ impl TeamHostService {
                 member.current_model = None;
                 member.current_effort = None;
                 member.in_flight = 0;
+                member.activity = codex_app_server_protocol::TeamActivity::Unloaded;
+                for environment in &mut member.environments {
+                    environment.current = false;
+                }
                 members.insert(id, member);
             }
         }
@@ -94,7 +100,47 @@ impl TeamHostService {
                         .unwrap_or_else(|| thread_id.to_string())
                 )
             };
+            let mut environments = BTreeMap::new();
+            for selection in config.environment_selections() {
+                environments.insert(
+                    selection.environment_id.clone(),
+                    codex_app_server_protocol::TeamExecutionEnvironment {
+                        id: selection.environment_id.clone(),
+                        next: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            for selection in thread
+                .active_turn_environment_selections()
+                .await
+                .unwrap_or_default()
+            {
+                environments
+                    .entry(selection.environment_id.clone())
+                    .or_insert_with(|| codex_app_server_protocol::TeamExecutionEnvironment {
+                        id: selection.environment_id,
+                        ..Default::default()
+                    })
+                    .current = true;
+            }
+            for environment in environments.values_mut() {
+                if let Some(info) = manager
+                    .environment_manager()
+                    .get_environment(&environment.id)
+                    .and_then(|environment| environment.cached_info())
+                {
+                    environment.os = info.platform_os;
+                    environment.shell = Some(info.shell.name);
+                }
+            }
             let member = TeamAgentRuntime {
+                activity: if active.is_some() {
+                    codex_app_server_protocol::TeamActivity::Working
+                } else {
+                    codex_app_server_protocol::TeamActivity::Idle
+                },
+                environments: environments.into_values().collect(),
                 thread_id: thread_id.to_string(),
                 root_thread_id: root_id.to_string(),
                 parent_thread_id: config.parent_thread_id.map(|id| id.to_string()),

@@ -93,7 +93,7 @@ impl AgentsOverviewGroup {
         match self {
             Self::NeedsYou => "Needs input",
             Self::Working => "Working",
-            Self::Ready => "Ready",
+            Self::Ready => "Idle",
             Self::Finished => "Inactive",
         }
     }
@@ -101,6 +101,8 @@ impl AgentsOverviewGroup {
 
 #[derive(Clone)]
 pub(super) struct AgentsOverviewRow {
+    /// False for enrollment-only rows; paths and history are presentation placeholders.
+    pub(super) metadata_known: bool,
     pub(super) host: Option<super::agents_hosts::HostKey>,
     pub(super) machine_label: Option<String>,
     pub(super) pin_rank: Option<usize>,
@@ -506,7 +508,7 @@ impl AgentsOverviewView {
             }
             AgentsOverviewGroup::NeedsYou => ("Needs input", "●".red()),
             AgentsOverviewGroup::Working => ("Working", "●".green()),
-            AgentsOverviewGroup::Ready => ("Ready", "○".cyan()),
+            AgentsOverviewGroup::Ready => ("Idle", "○".cyan()),
             AgentsOverviewGroup::Finished => ("Inactive", "○".dim()),
         }
     }
@@ -823,6 +825,19 @@ impl BottomPaneView for AgentsOverviewView {
                 self.pin_action_pending = true;
                 self.send_row_action(AppEvent::ToggleAgentsOverviewPin { thread_id, pinned });
             }
+            return;
+        }
+        if self.selected_row().is_some_and(|row| !row.metadata_known)
+            && [
+                &self.agents_keymap.new_task,
+                &self.agents_keymap.new_worktree,
+                &self.agents_keymap.fork,
+                &self.agents_keymap.rename,
+            ]
+            .iter()
+            .any(|bindings| bindings.is_pressed(key))
+        {
+            self.state().team_notice = Some("History metadata is unavailable · open this task to load it before creating, forking or renaming".into());
             return;
         }
         if self.agents_keymap.new_task.is_pressed(key) {

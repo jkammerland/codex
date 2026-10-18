@@ -34,6 +34,7 @@ pub(crate) async fn agent(coordinator: &Coordinator, name: &str) -> Result<TeamA
             "agent",
             &address_key(&address),
             &Agent {
+                discovery: Default::default(),
                 enrollment: TeamEnrollment {
                     address: address.clone(),
                     alias: name.into(),
@@ -254,6 +255,7 @@ async fn replayed_outbox_subscription_cannot_overwrite_a_newer_unsubscribe() -> 
         servers: Vec::new(),
     };
     let server = crate::Server {
+        environment_capabilities: Default::default(),
         id: "account".into(),
         label: "Account".into(),
         endpoint: crate::config::Endpoint::Local {

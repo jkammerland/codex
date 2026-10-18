@@ -1,0 +1,11 @@
+---
+source: tui/src/app/agents_hosts_team_details_tests.rs
+assertion_line: 50
+expression: text
+---
+From Author · Current observation
+Reviewer: Turn ended · Unconfirmed
+Turn review-turn
+0 related replies · replying is optional
+Admitted input may not have reached the model.
+Turn ended does not mean task fulfilled.

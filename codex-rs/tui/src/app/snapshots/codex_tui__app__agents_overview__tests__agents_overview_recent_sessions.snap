@@ -4,7 +4,7 @@ assertion_line: 641
 expression: "age.replace_all(&rendered, \" [age]\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 10   Needs you 0   Working 0   Ready 0   Inactive 10
+   All 10   Needs you 0   Working 0   Idle 0   Inactive 10
   ────────────────────────────────────────────────────────────────────────────
       Tasks                                            Status         Updated
   /  10

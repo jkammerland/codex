@@ -3,9 +3,11 @@
 
 mod input;
 mod render;
+mod subscriptions;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+mod topics;
 
 use crate::app::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 use crate::app::agents_overview_view::command_center::TeamControlSummary;
@@ -18,6 +20,8 @@ use codex_app_server_protocol::TeamBoardEntry;
 use codex_app_server_protocol::TeamBoardIdentity;
 use codex_app_server_protocol::TeamBoardParams;
 use codex_app_server_protocol::TeamBoardSnapshot;
+use codex_app_server_protocol::TeamBoardSubscriptionMode;
+use codex_app_server_protocol::TeamBoardSubscriptionTarget;
 use codex_team::TeamOperation;
 use codex_team::TeamRequest;
 use std::collections::HashMap;
@@ -79,6 +83,16 @@ pub(crate) struct BoardState {
     pub(crate) draft_revisions: HashMap<String, u64>,
     pub(crate) pending: HashMap<String, PendingDraft>,
     pub(crate) pending_reads: HashMap<String, PendingRead>,
+    pub(crate) pending_subscriptions: HashMap<String, subscriptions::PendingSubscription>,
+    pub(crate) topics_open: bool,
+    pub(crate) selected_topic: Option<String>,
+    pub(crate) topic_filter: Option<String>,
+    pub(crate) topics_scroll: usize,
+    pub(crate) topic_preview_focused: bool,
+    pub(crate) topic_preview_scroll: usize,
+    pub(crate) topic_preview_max_scroll: usize,
+    pub(crate) topic_preview_page_height: usize,
+    pub(crate) feed_positions: HashMap<Option<String>, (Option<String>, usize)>,
     pub(crate) followers: bool,
     pub(crate) reply_targets: HashMap<String, String>,
     pub(crate) feed_scroll: usize,
@@ -112,6 +126,8 @@ impl BoardState {
             composer.set_board_mentions(&snapshot.members);
         }
         self.snapshot = snapshot;
+        self.confirm_subscriptions();
+        self.reconcile_topic_selection();
         for pending in self.pending_reads.values_mut() {
             if self.snapshot.reads.iter().any(|read| {
                 read.conversation_id == pending.conversation
@@ -174,7 +190,17 @@ impl BoardState {
                 let entries = self.entries(&root.conversation_id);
                 let filter = match self.filter {
                     Filter::All => true,
-                    Filter::Following => self.following(&root.conversation_id),
+                    Filter::Following => {
+                        self.following(&root.conversation_id)
+                            || root.message.topic.as_ref().is_some_and(|topic| {
+                                self.subscription_mode(
+                                    &TeamBoardSubscriptionTarget::Topic {
+                                        topic: topic.clone(),
+                                    },
+                                    &TeamBoardIdentity::User,
+                                ) != TeamBoardSubscriptionMode::Off
+                            })
+                    }
                     Filter::Mentions => entries.iter().any(|entry| {
                         entry
                             .mentions
@@ -183,6 +209,10 @@ impl BoardState {
                     }),
                 };
                 filter
+                    && self
+                        .topic_filter
+                        .as_ref()
+                        .is_none_or(|topic| root.message.topic.as_ref() == Some(topic))
                     && self.query.split_whitespace().all(|word| {
                         if let Some(topic) = word.strip_prefix('#') {
                             root.message.topic.as_deref().is_some_and(|value| {
@@ -299,6 +329,10 @@ impl BoardState {
     /// A coordinator pre-write rejection releases only an editable draft's operation lock.
     /// Read markers remain explicitly retryable so invalid state cannot spin on every redraw.
     pub(crate) fn operation_rejected(&mut self, operation_id: &str, reason: &str) -> bool {
+        if self.pending_subscriptions.remove(operation_id).is_some() {
+            self.notice = Some(format!("Subscription rejected: {reason}"));
+            return false;
+        }
         if self.pending_reads.contains_key(operation_id) {
             self.operation_finished(operation_id, false);
             self.notice = Some(format!("Read state rejected: {reason} · Ctrl+R retries"));
@@ -320,6 +354,15 @@ impl BoardState {
     }
 
     pub(crate) fn operation_finished(&mut self, operation_id: &str, succeeded: bool) -> bool {
+        if let Some(pending) = self.pending_subscriptions.get_mut(operation_id) {
+            pending.failed = !succeeded;
+            if !succeeded {
+                self.notice =
+                    Some("Subscription outcome unknown · Ctrl+R retries the same change".into());
+            }
+            self.confirm_subscriptions();
+            return succeeded;
+        }
         if let Some(pending) = self.pending_reads.get_mut(operation_id) {
             if succeeded || pending.confirmed {
                 let requested = self

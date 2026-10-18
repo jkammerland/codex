@@ -24,7 +24,7 @@ fn row(area: Rect, offset: u16, height: u16) -> Rect {
     )
 }
 
-fn author(entry: &TeamBoardEntry) -> String {
+pub(super) fn author(entry: &TeamBoardEntry) -> String {
     if entry.author.identity == TeamBoardIdentity::User {
         return "You · Human".into();
     }
@@ -40,7 +40,7 @@ fn author(entry: &TeamBoardEntry) -> String {
     )
 }
 
-fn time(timestamp: i64) -> String {
+pub(super) fn time(timestamp: i64) -> String {
     chrono::DateTime::from_timestamp(timestamp, 0).map_or_else(
         || timestamp.to_string(),
         |time| time.format("%b %d %H:%M").to_string(),
@@ -141,16 +141,21 @@ impl Renderable for BoardView {
         if area.height < 4 {
             return;
         }
-        render_filled_tab_bar(
-            &["All posts", "Following", "Mentions"],
-            match state.filter {
-                Filter::All => 0,
-                Filter::Following => 1,
-                Filter::Mentions => 2,
-            },
-            row(area, 1, 1),
-            buffer,
-        );
+        if state.topics_open {
+            Paragraph::new("Topics · conversations and recent activity".bold())
+                .render(row(area, 1, 1), buffer);
+        } else {
+            render_filled_tab_bar(
+                &["All posts", "Following", "Mentions"],
+                match state.filter {
+                    Filter::All => 0,
+                    Filter::Following => 1,
+                    Filter::Mentions => 2,
+                },
+                row(area, 1, 1),
+                buffer,
+            );
+        }
         let subtitle: Line = if state.editing_topic {
             format!("New post topic › #{}", state.topic).dim().into()
         } else if state.searching {
@@ -163,10 +168,30 @@ impl Renderable for BoardView {
             "Posts and conversations · / search · #topic in search · # set post topic"
                 .dim()
                 .into()
+        } else if state.topics_open {
+            if state.topic_preview_focused {
+                key_hints(&[
+                    ("j/k PgUp/PgDn", "scroll"),
+                    ("Home/End", ""),
+                    ("Tab/h", "topics"),
+                ])
+            } else {
+                key_hints(&[
+                    ("j/k", "move"),
+                    ("l/Enter", "open"),
+                    ("Tab", "preview"),
+                    ("h/Esc", "posts"),
+                    ("/", "search"),
+                ])
+            }
         } else if state.followers {
             key_hints(&[("v/h/←/Esc", "close"), ("F", "manage agents")])
         } else if state.opened.is_some() {
             key_hints(&[("j/k ↑/↓", "scroll"), ("PgUp/PgDn", ""), ("Home/End", "")])
+        } else if let Some(topic) = &state.topic_filter {
+            format!("#{topic} · h back to topics · l/Enter read · j/k move")
+                .dim()
+                .into()
         } else if area.width < 80 {
             key_hints(&[("j/k ↑/↓", "move"), ("l/→/Enter", "open")])
         } else {
@@ -181,6 +206,7 @@ impl Renderable for BoardView {
                 ("Tab", "filter"),
                 ("/", &search),
                 ("#", "set post topic"),
+                ("o", "topics"),
             ])
         };
         Paragraph::new(subtitle).render(row(area, 2, 1), buffer);
@@ -191,26 +217,30 @@ impl Renderable for BoardView {
             area.bottom().saturating_sub(1)
         };
         let body = row(area, 3, body_end.saturating_sub(area.y + 3));
-        let wide = body.width >= 100;
-        let (feed, conversation) = if wide {
-            let [feed, _, conversation] = Layout::horizontal([
-                Constraint::Percentage(40),
-                Constraint::Length(2),
-                Constraint::Min(0),
-            ])
-            .areas(body);
-            (feed, conversation)
-        } else if state.opened.is_some() || state.followers {
-            (Rect::default(), body)
+        if state.topics_open {
+            super::topics::render_topics(&mut state, body, buffer);
         } else {
-            (body, Rect::default())
-        };
-        state.page_height = usize::from(conversation.height.saturating_sub(2)).max(1);
-        if !feed.is_empty() {
-            render_feed(&mut state, feed, buffer);
-        }
-        if !conversation.is_empty() {
-            render_conversation(&mut state, conversation, buffer);
+            let wide = body.width >= 100;
+            let (feed, conversation) = if wide {
+                let [feed, _, conversation] = Layout::horizontal([
+                    Constraint::Percentage(40),
+                    Constraint::Length(2),
+                    Constraint::Min(0),
+                ])
+                .areas(body);
+                (feed, conversation)
+            } else if state.opened.is_some() || state.followers {
+                (Rect::default(), body)
+            } else {
+                (body, Rect::default())
+            };
+            state.page_height = usize::from(conversation.height.saturating_sub(2)).max(1);
+            if !feed.is_empty() {
+                render_feed(&mut state, feed, buffer);
+            }
+            if !conversation.is_empty() {
+                render_conversation(&mut state, conversation, buffer);
+            }
         }
         if let Some(composer) = state
             .composer
@@ -229,6 +259,18 @@ impl Renderable for BoardView {
                 })
                 .dim()
                 .into()
+        } else if state.topics_open {
+            state.notice.as_ref().map_or_else(
+                || {
+                    key_hints(&[
+                        ("f", "watch/unwatch"),
+                        ("F", "agent subscriptions"),
+                        ("n", "post"),
+                        ("t", "Tasks"),
+                    ])
+                },
+                |notice| Line::from(notice.clone().dim()),
+            )
         } else if state.followers {
             key_hints(&[("v/Esc", "close followers"), ("t", "Tasks")])
         } else if area.width < 80 && state.opened.is_none() && !state.query.is_empty() {
@@ -245,6 +287,7 @@ impl Renderable for BoardView {
                 ("f", "follow"),
                 ("v", "followers"),
                 ("/", "find"),
+                ("o", "topics"),
             ])
         } else {
             let mut items = vec![
@@ -255,6 +298,7 @@ impl Renderable for BoardView {
                 ("F", "manage"),
                 ("d", "details"),
                 ("F9", "deliveries"),
+                ("o", "topics"),
             ];
             if state.opened.is_some() {
                 items.insert(0, ("h/←/Esc", "feed"));
@@ -381,7 +425,7 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
                         if member.available {
                             "available"
                         } else {
-                            "offline"
+                            "unavailable"
                         }
                     });
                 format!(
@@ -390,7 +434,13 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
                     follower.author.machine_name.as_deref().unwrap_or("Agent")
                 )
             };
-            lines.push(name.into());
+            lines.push(
+                format!(
+                    "{name} · {}",
+                    super::subscriptions::mode_label(follower.mode)
+                )
+                .into(),
+            );
         }
         if lines.len() == 2 {
             lines.push("No followers yet · f follows as You".dim().into());
@@ -404,19 +454,31 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
         .iter()
         .filter(|follower| follower.conversation_id == id)
         .count();
+    let direct = state.subscription_status(
+        &TeamBoardSubscriptionTarget::Conversation {
+            conversation_id: id.clone(),
+        },
+        &TeamBoardIdentity::User,
+    );
+    let topic_status = state
+        .snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.message.id == id)
+        .and_then(|entry| entry.message.topic.as_ref())
+        .filter(|topic| {
+            state.subscription_mode(
+                &TeamBoardSubscriptionTarget::Topic {
+                    topic: (*topic).clone(),
+                },
+                &TeamBoardIdentity::User,
+            ) != TeamBoardSubscriptionMode::Off
+        })
+        .map_or(String::new(), |topic| format!(" · Watching #{topic}"));
     Paragraph::new(
         format!(
-            "{} · {followers} followers · {}",
-            if focused {
-                "Conversation"
-            } else {
-                "Preview · l/Enter to read"
-            },
-            if state.following(&id) {
-                "Following"
-            } else {
-                "f Follow conversation"
-            }
+            "{} · {direct}{topic_status} · {followers} followers",
+            if focused { "Conversation" } else { "Preview" }
         )
         .cyan(),
     )

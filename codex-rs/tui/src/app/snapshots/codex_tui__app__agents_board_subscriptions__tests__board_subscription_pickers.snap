@@ -1,0 +1,25 @@
+---
+source: tui/src/app/agents_board_subscriptions_tests.rs
+assertion_line: 45
+expression: "format!(\"Members\\n{members}\\n\\nModes\\n{modes}\")"
+---
+Members
+  Subscriptions · #release
+  Watch is passive · Wake delivers updates · select an identity to change
+
+
+› 1. You · Off        Human · connected
+  2. Reviewer · Wake  Build machine · connected
+
+  enter select · esc back
+
+Modes
+  Subscription · Reviewer · Wake
+  Explicit mentions deliver independently of Watch · changes affect future messages
+
+
+› 1. Watch  Following and unread only; never inserts turn input
+  2. Wake   Deliver new root posts; replies require a conversation follow
+  3. Off    Remove this subscription; accepted deliveries remain queued
+
+  enter select · esc back

@@ -1,0 +1,42 @@
+---
+source: tui/src/app/agents_overview_team_tests.rs
+assertion_line: 106
+expression: "screens.join(\"\\n---\\n\")"
+---
+  Agent command center   t Tasks   b Board  Group: Project  g
+   All 1   Needs you 0   Working 0   Idle 0   Inactive 1                           tab/⇧tab filter
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+      Tasks                                               │ Task details
+  Machine                                                 │
+  Unknown · server  1                                     │ Board reviewer
+  › ○ Board reviewer                                      │ ○ Inactive
+                                                          │
+                                                          │ Model: Unknown
+                                                          │ Reasoning: Unknown
+                                                          │
+                                                          │ Project
+                                                          │ Unknown
+                                                          │ …
+                                                          │
+                                                          │ Prompt
+                                                          │ No prompt available.
+  History metadata is unavailable · open this task to load it before creating, forking or renaming
+---
+  Agents   t Tasks   b Board
+   All 1   Needs you 0   Working 0   Idle 0  ›
+  ────────────────────────────────────────────
+      Tasks
+  Machine
+  Unknown · server  1
+  › ○ Board reviewer
+
+
+
+
+
+
+
+
+
+
+  History metadata is unavailable · open this…

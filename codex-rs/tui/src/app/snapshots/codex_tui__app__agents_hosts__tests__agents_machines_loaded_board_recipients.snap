@@ -1,10 +1,10 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 1169
+assertion_line: 1175
 expression: render(&view)
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 3   Needs you 0   Working 1   Ready 1   Inactive 1                          tab/⇧tab filter
+   All 3   Needs you 0   Working 1   Idle 1   Inactive 1                           tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                               │ Task details
   Board host                                              │

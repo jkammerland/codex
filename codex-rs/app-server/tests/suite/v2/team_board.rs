@@ -113,8 +113,22 @@ async fn board_delivery_waits_for_synced_named_conversation_context() -> Result<
         .request(|request_id| ClientRequest::TeamSync {
             request_id,
             params: TeamSyncParams {
+                message_status: Default::default(),
                 coordinator_id: control.coordinator_id.clone(),
-                directory: vec![enrollment.enrollment.clone()],
+                directory: codex_app_server_protocol::TeamDirectorySnapshot {
+                    revision: 1,
+                    data: vec![codex_app_server_protocol::TeamDirectoryEntry {
+                        address: enrollment.enrollment.address.clone(),
+                        alias: enrollment.enrollment.alias.clone(),
+                        manually_held: false,
+                        continuation_turn_id: None,
+                        discovery: Default::default(),
+                        current_model: None,
+                        current_effort: None,
+                        next_model: None,
+                        next_effort: None,
+                    }],
+                },
                 board: vec![message.clone()],
                 cancellation_adapters: Vec::new(),
                 board_state: TeamBoardSnapshot {
@@ -221,5 +235,173 @@ async fn board_delivery_waits_for_synced_named_conversation_context() -> Result<
         })
         .await?;
     assert_eq!(repeated.receipt.state, TeamReceiptState::Completed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn watch_board_sync_stays_passive_during_a_later_ordinary_turn() -> Result<()> {
+    let server =
+        create_mock_responses_server_sequence(vec![create_final_assistant_message_sse_response(
+            "Ordinary task complete",
+        )?])
+        .await;
+    let home = tempfile::tempdir()?;
+    MockResponsesConfig::new(&server.uri()).write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_managed_config()
+        .build_initialized()
+        .await?;
+    let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
+    let address = TeamAddress {
+        machine_id: "worker".into(),
+        server_id: "primary".into(),
+        thread_id: thread.id.clone(),
+    };
+    let identity = TeamBoardIdentity::Agent {
+        address: address.clone(),
+    };
+    let control = TeamControlState {
+        coordinator_id: "coordinator".into(),
+        revision: 1,
+        mode: TeamExecutionMode::Running,
+    };
+    let _: TeamEnrollResponse = app
+        .request(|request_id| ClientRequest::TeamEnroll {
+            request_id,
+            params: TeamEnrollParams {
+                operation_id: None,
+                address: address.clone(),
+                alias: "Watcher".into(),
+                control: control.clone(),
+            },
+        })
+        .await?;
+    let author = TeamBoardAuthor {
+        identity: TeamBoardIdentity::User,
+        name: "User".into(),
+        machine_name: None,
+        legacy: false,
+    };
+    let root = TeamMessage {
+        id: "passive-root".into(),
+        sender: TeamAddress {
+            machine_id: "operator".into(),
+            server_id: "operator".into(),
+            thread_id: "operator".into(),
+        },
+        recipient: None,
+        kind: TeamMessageKind::Board,
+        body: "WATCH_ONLY_ROOT_BODY".into(),
+        reply_to: None,
+        topic: Some("review".into()),
+        created_at: 10,
+    };
+    let reply = TeamMessage {
+        id: "passive-reply".into(),
+        reply_to: Some(root.id.clone()),
+        body: "WATCH_ONLY_REPLY_BODY".into(),
+        created_at: 11,
+        ..root.clone()
+    };
+    let _: TeamSyncResponse = app
+        .request(|request_id| ClientRequest::TeamSync {
+            request_id,
+            params: TeamSyncParams {
+                coordinator_id: control.coordinator_id.clone(),
+                directory: Default::default(),
+                message_status: Default::default(),
+                board: vec![root.clone(), reply.clone()],
+                cancellation_adapters: Vec::new(),
+                board_state: TeamBoardSnapshot {
+                    revision: 2,
+                    entries: vec![
+                        TeamBoardEntry {
+                            message: root.clone(),
+                            conversation_id: root.id.clone(),
+                            append_seq: 1,
+                            author: author.clone(),
+                            mentions: Vec::new(),
+                            notifications: Vec::new(),
+                        },
+                        TeamBoardEntry {
+                            message: reply.clone(),
+                            conversation_id: root.id.clone(),
+                            append_seq: 2,
+                            author: author.clone(),
+                            mentions: Vec::new(),
+                            notifications: Vec::new(),
+                        },
+                    ],
+                    followers: vec![TeamBoardFollower {
+                        mode: TeamBoardSubscriptionMode::Watch,
+                        conversation_id: root.id.clone(),
+                        identity: identity.clone(),
+                        author: TeamBoardAuthor {
+                            identity: identity.clone(),
+                            name: "Watcher".into(),
+                            machine_name: Some("Worker".into()),
+                            legacy: false,
+                        },
+                    }],
+                    topic_subscriptions: vec![TeamBoardTopicSubscription {
+                        mode: TeamBoardSubscriptionMode::Watch,
+                        topic: "review".into(),
+                        identity,
+                    }],
+                    ..Default::default()
+                },
+            },
+        })
+        .await?;
+
+    // Exercise the normal admission boundary after sync. A Watch implemented
+    // as wake:false delivery would leak peer input into this explicit turn.
+    let started: TurnStartResponse = app
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                input: vec![UserInput::Text {
+                    text: "Do the ordinary task".into(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+    let completed: TurnCompletedNotification = app.read_notification("turn/completed").await?;
+    assert_eq!(
+        (
+            completed.thread_id,
+            completed.turn.id,
+            completed.turn.status
+        ),
+        (thread.id, started.turn.id, TurnStatus::Completed)
+    );
+    let requests = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body)?;
+    let input = body["input"].to_string();
+    assert!(input.contains("Do the ordinary task"));
+    assert!(!input.contains("WATCH_ONLY_ROOT_BODY"));
+    assert!(!input.contains("WATCH_ONLY_REPLY_BODY"));
+    let outbox: TeamOutboxListResponse = app
+        .request(|request_id| ClientRequest::TeamOutboxList {
+            request_id,
+            params: TeamOutboxListParams {
+                coordinator_id: control.coordinator_id,
+                cursor: None,
+                limit: None,
+            },
+        })
+        .await?;
+    assert!(outbox.data.iter().all(|entry| entry.kind != "receipt"));
     Ok(())
 }

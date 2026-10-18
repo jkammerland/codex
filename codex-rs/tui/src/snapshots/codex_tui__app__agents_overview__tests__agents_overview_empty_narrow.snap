@@ -4,7 +4,7 @@ assertion_line: 2257
 expression: rendered
 ---
   Agents   t Tasks   b Board
-   All 0   Needs you 0   Working 0           ›
+   All 0   Needs you 0   Working 0   Idle 0  ›
   ────────────────────────────────────────────
   No tasks yet
 

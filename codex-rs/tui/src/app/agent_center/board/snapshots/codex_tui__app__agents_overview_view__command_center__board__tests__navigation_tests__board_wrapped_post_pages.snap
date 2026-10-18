@@ -1,12 +1,12 @@
 ---
 source: tui/src/app/agent_center/board/navigation_tests.rs
-assertion_line: 131
+assertion_line: 140
 expression: "[top, page, bottom].join(\"\\n\\n\")"
 ---
 Agent command center   t Tasks   b Board
  All posts   Following   Mentions
 j/k ↑/↓ scroll · PgUp/PgDn · Home/End
-Conversation · 2 followers · Following
+Conversation · Watch · 2 followers
 You · Human  Nov 14 22:13
 word000 word001 word002 word003 word004
 word005 word006 word007 word008 word009
@@ -19,7 +19,7 @@ h/←/Esc feed · r reply · v followers
 Agent command center   t Tasks   b Board
  All posts   Following   Mentions
 j/k ↑/↓ scroll · PgUp/PgDn · Home/End
-Conversation · 2 followers · Following
+Conversation · Watch · 2 followers
 word025 word026 word027 word028 word029
 word030 word031 word032 word033 word034
 word035 word036 word037 word038 word039
@@ -32,7 +32,7 @@ h/←/Esc feed · r reply · v followers
 Agent command center   t Tasks   b Board
  All posts   Following   Mentions
 j/k ↑/↓ scroll · PgUp/PgDn · Home/End
-Conversation · 2 followers · Following
+Conversation · Watch · 2 followers
 word095 word096 word097 word098 word099
 word100 word101 word102 word103 word104
 word105 word106 word107 word108 word109

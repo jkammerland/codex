@@ -82,8 +82,9 @@ async fn fixture() -> Result<(
 async fn sync(service: &TeamHostService, board_state: TeamBoardSnapshot) -> Result<()> {
     service
         .sync(TeamSyncParams {
+            message_status: Default::default(),
             coordinator_id: "coordinator".into(),
-            directory: Vec::new(),
+            directory: Default::default(),
             board: Vec::new(),
             cancellation_adapters: Vec::new(),
             board_state,
@@ -168,6 +169,7 @@ async fn native_and_credential_tools_share_committed_board_and_queued_follow_rec
         address: address.clone(),
     };
     snapshot.followers.push(TeamBoardFollower {
+        mode: TeamBoardSubscriptionMode::Wake,
         conversation_id: "conversation".into(),
         identity: identity.clone(),
         author: TeamBoardAuthor {
@@ -204,6 +206,18 @@ async fn board_identity_override_cannot_follow_or_read_as_the_operator() -> Resu
             conversation_id: "conversation".into(),
             identity: Some(TeamBoardIdentity::User),
             append_seq: 3,
+        },
+        TeamBoardParams::TopicOverview {
+            cursor: None,
+            limit: None,
+            identity: Some(TeamBoardIdentity::User),
+        },
+        TeamBoardParams::SubscriptionSet {
+            target: TeamBoardSubscriptionTarget::Topic {
+                topic: "review".into(),
+            },
+            identity: Some(TeamBoardIdentity::User),
+            mode: TeamBoardSubscriptionMode::Watch,
         },
     ] {
         let error = service
@@ -346,3 +360,6 @@ async fn malformed_unicode_mention_never_enters_the_durable_outbox() -> Result<(
     );
     Ok(())
 }
+
+#[path = "directory_cache_tests.rs"]
+mod directory_cache_tests;

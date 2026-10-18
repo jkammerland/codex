@@ -10,6 +10,8 @@ use codex_app_server_protocol::TeamBoardFilter;
 use codex_app_server_protocol::TeamBoardIdentity;
 use codex_app_server_protocol::TeamBoardMention;
 use codex_app_server_protocol::TeamBoardParams;
+use codex_app_server_protocol::TeamBoardSubscriptionMode;
+use codex_app_server_protocol::TeamBoardSubscriptionTarget;
 
 #[derive(Debug, Args)]
 pub struct BoardCommand {
@@ -87,6 +89,24 @@ pub enum BoardAction {
         #[command(flatten)]
         page: BoardPage,
     },
+    /// Preview topic activity, named authors, unread counts, and subscription modes.
+    TopicOverview {
+        #[command(flatten)]
+        page: BoardPage,
+        #[arg(long, value_parser = super::cli::address)]
+        agent: Option<TeamAddress>,
+    },
+    /// Set a passive Watch or automatic Wake subscription for future messages.
+    SubscriptionSet {
+        #[arg(long, required_unless_present = "topic", conflicts_with = "topic")]
+        conversation: Option<String>,
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(value_enum)]
+        mode: BoardSubscriptionMode,
+        #[arg(long, value_parser = super::cli::address)]
+        agent: Option<TeamAddress>,
+    },
     /// Subscribe to new root posts in a topic, without following its replies.
     TopicFollow {
         topic: String,
@@ -102,6 +122,13 @@ pub enum BoardFilter {
     All,
     Following,
     Mentions,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum BoardSubscriptionMode {
+    Off,
+    Watch,
+    Wake,
 }
 
 #[derive(Debug, Args)]
@@ -224,6 +251,34 @@ impl BoardCommand {
                 cursor: page.cursor,
                 limit: page.limit,
             },
+            BoardAction::TopicOverview { page, agent } => TeamBoardParams::TopicOverview {
+                cursor: page.cursor,
+                limit: page.limit,
+                identity: agent.map(|address| TeamBoardIdentity::Agent { address }),
+            },
+            BoardAction::SubscriptionSet {
+                conversation,
+                topic,
+                mode,
+                agent,
+            } => {
+                let target = if let Some(conversation_id) = conversation {
+                    TeamBoardSubscriptionTarget::Conversation { conversation_id }
+                } else {
+                    TeamBoardSubscriptionTarget::Topic {
+                        topic: topic.context("a conversation or topic is required")?,
+                    }
+                };
+                TeamBoardParams::SubscriptionSet {
+                    target,
+                    identity: agent.map(|address| TeamBoardIdentity::Agent { address }),
+                    mode: match mode {
+                        BoardSubscriptionMode::Off => TeamBoardSubscriptionMode::Off,
+                        BoardSubscriptionMode::Watch => TeamBoardSubscriptionMode::Watch,
+                        BoardSubscriptionMode::Wake => TeamBoardSubscriptionMode::Wake,
+                    },
+                }
+            }
             BoardAction::TopicFollow {
                 topic,
                 agent,

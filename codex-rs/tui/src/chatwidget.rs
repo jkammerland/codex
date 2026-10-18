@@ -290,6 +290,7 @@ mod input_submission;
 mod interrupts;
 mod questions;
 mod startup_submission;
+pub(crate) mod team_execution;
 use self::interrupts::InterruptManager;
 mod keymap_picker;
 mod mcp_startup;
@@ -704,6 +705,7 @@ pub(crate) struct ChatWidget {
     // order.
     suppress_initial_user_message_submit: bool,
     input_queue: InputQueueState,
+    team_execution: Option<team_execution::TeamExecution>,
     safety_buffering_prompt: Option<UserMessage>,
     safety_buffering_source: UserMessageSource,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.

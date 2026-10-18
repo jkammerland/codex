@@ -16,6 +16,11 @@ use tokio::sync::oneshot;
 use super::CodexThread;
 
 impl CodexThread {
+    /// Inspect the thread's resolved local shell without detecting or launching it again.
+    pub fn team_local_shell_name(&self) -> &'static str {
+        self.session.user_shell().name()
+    }
+
     /// Journal model intent with the host before acknowledging its queue admission.
     pub async fn prepare_team_model_selection(
         &self,

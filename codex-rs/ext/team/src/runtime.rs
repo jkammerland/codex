@@ -125,11 +125,18 @@ impl TeamHostService {
                     .current = true;
             }
             for environment in environments.values_mut() {
-                if let Some(info) = manager
+                let Some(executor) = manager
                     .environment_manager()
                     .get_environment(&environment.id)
-                    .and_then(|environment| environment.cached_info())
-                {
+                else {
+                    continue;
+                };
+                if !executor.is_remote() {
+                    // Normal startup already resolved this thread's local shell. Local turns
+                    // need not call environment/info, and thread overrides are not host-global.
+                    environment.os = Some(std::env::consts::OS.to_owned());
+                    environment.shell = Some(thread.team_local_shell_name().to_owned());
+                } else if let Some(info) = executor.cached_info() {
                     environment.os = info.platform_os;
                     environment.shell = Some(info.shell.name);
                 }

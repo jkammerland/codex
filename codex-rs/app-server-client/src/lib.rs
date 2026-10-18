@@ -837,6 +837,9 @@ impl AppServerClient {
 mod tests {
     #[path = "reply_tests.rs"]
     mod replies;
+    #[path = "skills_tests.rs"]
+    mod skills;
+
     use super::*;
     use codex_app_server_protocol::AccountUpdatedNotification;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;

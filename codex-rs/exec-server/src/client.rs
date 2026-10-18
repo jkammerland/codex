@@ -620,6 +620,11 @@ impl LazyRemoteExecServerClient {
             .filter(|client| !client.is_disconnected())
     }
 
+    pub(crate) fn cached_environment_info(&self) -> Option<Arc<EnvironmentInfo>> {
+        self.cached_client()
+            .and_then(|client| client.inner.environment_info.get().cloned())
+    }
+
     pub(crate) fn cached_executor_registration_id(&self) -> Option<String> {
         self.cached_client()
             .and_then(|client| client.executor_registration_id())
@@ -2713,6 +2718,25 @@ mod tests {
 
         drop(client);
         server.await.expect("server task should finish");
+    }
+
+    #[test]
+    fn passive_environment_info_does_not_start_lazy_executor() {
+        let client = LazyRemoteExecServerClient::new(
+            ExecServerTransportParams::StdioCommand {
+                command: StdioExecServerCommand {
+                    program: "must-not-be-executed".into(),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                initialize_timeout:
+                    crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
+            },
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        );
+        assert_eq!(client.cached_environment_info(), None);
+        assert!(!client.startup_finished());
     }
 
     #[test_case::test_case(Some(EnvironmentInfo::local()); "from_initialize")]

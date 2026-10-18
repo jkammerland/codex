@@ -82,6 +82,7 @@ async fn dual_host_on(home: &Path, listen: &str) -> Result<(Child, Server)> {
     Ok((
         process,
         Server {
+            environment_capabilities: Default::default(),
             id: "primary".into(),
             label: "Primary".into(),
             cancellation_adapters: Vec::new(),

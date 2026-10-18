@@ -28,6 +28,22 @@ pub struct TeamCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TeamAction {
+    /// Inspect message transport and turn receipts; replies are optional.
+    MessageStatus {
+        #[arg(long)]
+        message_id: Option<String>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Explain an existing action without performing it or granting permissions.
+    ExplainAction {
+        #[arg(value_enum)]
+        action: ExplainAction,
+        #[arg(long, value_parser = address)]
+        target: Option<TeamAddress>,
+    },
     /// Browse shared conversations, post replies, and manage explicit follows.
     Board(crate::BoardCommand),
     /// Reply to the original sender, board topic or Gitea conversation.
@@ -130,6 +146,37 @@ pub enum MessageKind {
     Note,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ExplainAction {
+    Enroll,
+    QueueMessage,
+    ProcessMessages,
+    Post,
+    Subscribe,
+    SelectModel,
+    Pause,
+    Resume,
+    Stop,
+    Leave,
+}
+
+impl From<ExplainAction> for codex_app_server_protocol::TeamExplainableAction {
+    fn from(action: ExplainAction) -> Self {
+        match action {
+            ExplainAction::Enroll => Self::Enroll,
+            ExplainAction::QueueMessage => Self::QueueMessage,
+            ExplainAction::ProcessMessages => Self::ProcessMessages,
+            ExplainAction::Post => Self::Post,
+            ExplainAction::Subscribe => Self::Subscribe,
+            ExplainAction::SelectModel => Self::SelectModel,
+            ExplainAction::Pause => Self::Pause,
+            ExplainAction::Resume => Self::Resume,
+            ExplainAction::Stop => Self::Stop,
+            ExplainAction::Leave => Self::Leave,
+        }
+    }
+}
+
 pub(crate) fn address(value: &str) -> std::result::Result<TeamAddress, String> {
     let parts = value.split('/').collect::<Vec<_>>();
     if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
@@ -176,6 +223,23 @@ pub(crate) async fn run(command: TeamCommand) -> Result<()> {
         return crate::operator_mcp::run(client).await;
     }
     let request = match command.command {
+        TeamAction::MessageStatus {
+            message_id,
+            cursor,
+            limit,
+        } => TeamRequest::MessageStatus {
+            query: codex_app_server_protocol::TeamMessageStatusParams {
+                message_id,
+                cursor,
+                limit,
+            },
+        },
+        TeamAction::ExplainAction { action, target } => TeamRequest::ExplainAction {
+            query: codex_app_server_protocol::TeamExplainActionParams {
+                action: action.into(),
+                target,
+            },
+        },
         TeamAction::Board(board) => TeamRequest::Board {
             request: board.into_request()?,
         },

@@ -81,6 +81,7 @@ pub struct TeamBoardNotification {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct TeamBoardFollower {
+    pub mode: TeamBoardSubscriptionMode,
     pub conversation_id: String,
     pub identity: TeamBoardIdentity,
     pub author: TeamBoardAuthor,
@@ -100,6 +101,7 @@ pub struct TeamBoardReadState {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct TeamBoardTopicSubscription {
+    pub mode: TeamBoardSubscriptionMode,
     pub topic: String,
     pub identity: TeamBoardIdentity,
 }
@@ -135,10 +137,80 @@ pub struct TeamBoardConversation {
     pub reply_count: u32,
     pub follower_count: u32,
     pub following: bool,
+    pub subscription_mode: TeamBoardSubscriptionMode,
+    pub topic_subscription_mode: TeamBoardSubscriptionMode,
     pub unread: bool,
     pub mentioned: bool,
     #[ts(type = "number")]
     pub read_seq: i64,
+}
+
+/// Watch is passive visibility. Only Wake participates in delivery routing.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum TeamBoardSubscriptionMode {
+    #[default]
+    Off,
+    Watch,
+    Wake,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    export_to = "v2/"
+)]
+pub enum TeamBoardSubscriptionTarget {
+    Conversation { conversation_id: String },
+    Topic { topic: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamBoardEntryPreview {
+    pub message_id: String,
+    pub conversation_id: String,
+    #[ts(type = "number")]
+    pub append_seq: i64,
+    pub author: TeamBoardAuthor,
+    #[ts(type = "number")]
+    pub created_at: i64,
+    pub excerpt: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamBoardConversationPreview {
+    pub id: String,
+    pub root: TeamBoardEntryPreview,
+    pub latest: TeamBoardEntryPreview,
+    pub reply_count: u32,
+    pub unread: bool,
+}
+
+/// Deterministic activity preview; authors are actual participants, not subscribers.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamBoardTopicOverview {
+    pub topic: String,
+    pub recent_conversations: Vec<TeamBoardConversationPreview>,
+    pub conversation_count: u32,
+    pub message_count: u32,
+    pub participants: Vec<TeamBoardAuthor>,
+    pub latest: Option<TeamBoardEntryPreview>,
+    pub unread_count: u32,
+    pub subscription_mode: TeamBoardSubscriptionMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -234,6 +306,22 @@ pub enum TeamBoardParams {
         limit: Option<u32>,
     },
     #[serde(rename_all = "camelCase")]
+    TopicOverview {
+        #[ts(optional = nullable)]
+        cursor: Option<String>,
+        #[ts(optional = nullable)]
+        limit: Option<u32>,
+        #[ts(optional = nullable)]
+        identity: Option<TeamBoardIdentity>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SubscriptionSet {
+        target: TeamBoardSubscriptionTarget,
+        #[ts(optional = nullable)]
+        identity: Option<TeamBoardIdentity>,
+        mode: TeamBoardSubscriptionMode,
+    },
+    #[serde(rename_all = "camelCase")]
     TopicFollow {
         topic: String,
         #[ts(optional = nullable)]
@@ -293,6 +381,13 @@ pub enum TeamBoardResponse {
         next_cursor: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    TopicOverview {
+        #[ts(type = "number")]
+        revision: i64,
+        data: Vec<TeamBoardTopicOverview>,
+        next_cursor: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
     Mutation {
         #[ts(type = "number")]
         revision: i64,
@@ -322,11 +417,19 @@ pub fn team_board_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "type": {"type": "string", "enum": ["list", "read", "post", "reply", "follow", "followers", "markRead", "topics", "topicFollow"]},
+            "type": {"type": "string", "enum": ["list", "read", "post", "reply", "follow", "followers", "markRead", "topics", "topicFollow", "topicOverview", "subscriptionSet"]},
             "filter": {"type": "string", "enum": ["all", "following", "mentions"]},
             "query": {"type": "string"}, "topic": {"type": "string"},
             "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1},
             "identity": identity,
+            "mode": {"type": "string", "enum": ["off", "watch", "wake"]},
+            "target": {"type": "object", "properties": {
+                "type": {"type": "string", "enum": ["conversation", "topic"]},
+                "conversationId": {"type": "string"}, "topic": {"type": "string"}
+            }, "required": ["type"], "oneOf": [
+                {"properties": {"type": {"const": "conversation"}}, "required": ["conversationId"]},
+                {"properties": {"type": {"const": "topic"}}, "required": ["topic"]}
+            ], "additionalProperties": false},
             "conversationId": {"type": "string"}, "replyTo": {"type": "string"},
             "body": {"type": "string"}, "enabled": {"type": "boolean"},
             "appendSeq": {"type": "integer", "minimum": 0},
@@ -347,7 +450,9 @@ pub fn team_board_tool_schema() -> serde_json::Value {
             {"properties": {"type": {"const": "followers"}}, "required": ["conversationId"]},
             {"properties": {"type": {"const": "markRead"}}, "required": ["conversationId", "appendSeq"]},
             {"properties": {"type": {"const": "topics"}}},
-            {"properties": {"type": {"const": "topicFollow"}}, "required": ["topic", "enabled"]}
+            {"properties": {"type": {"const": "topicFollow"}}, "required": ["topic", "enabled"]},
+            {"properties": {"type": {"const": "topicOverview"}}},
+            {"properties": {"type": {"const": "subscriptionSet"}}, "required": ["target", "mode"]}
         ],
         "additionalProperties": false
     })

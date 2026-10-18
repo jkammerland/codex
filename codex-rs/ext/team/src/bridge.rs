@@ -11,6 +11,15 @@ use uuid::Uuid;
 
 use crate::TeamHostService;
 
+/// A single cached record keeps directory content and its freshness observation atomic.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct CachedDirectory {
+    #[serde(flatten)]
+    directory: TeamDirectorySnapshot,
+    #[serde(default, rename = "lastSynchronizedAt")]
+    last_synchronized_at: Option<i64>,
+}
+
 impl TeamHostService {
     pub async fn outbox_list(
         &self,
@@ -55,6 +64,20 @@ impl TeamHostService {
     pub async fn sync(&self, params: TeamSyncParams) -> Result<TeamSyncResponse> {
         let _operation = self.operations.lock().await;
         let store = self.require_coordinator(&params.coordinator_id).await?;
+        if let Some(previous) = store
+            .get::<TeamMessageStatusSnapshot>("message_status_cache", "current")
+            .await?
+        {
+            ensure!(
+                params.message_status.revision >= previous.revision,
+                "message status snapshot revision must not regress"
+            );
+            ensure!(
+                params.message_status.revision != previous.revision
+                    || params.message_status == previous,
+                "message status snapshot revision has conflicting content"
+            );
+        }
         let previous = store
             .get::<TeamBoardSnapshot>("board_cache", "current")
             .await?;
@@ -76,6 +99,19 @@ impl TeamHostService {
                 "invalid cancellation adapter"
             );
         }
+        let previous_directory = store
+            .get::<TeamDirectorySnapshot>("directory_cache", "current")
+            .await?;
+        if let Some(previous) = previous_directory {
+            ensure!(
+                params.directory.revision >= previous.revision,
+                "directory snapshot revision must not regress"
+            );
+            ensure!(
+                params.directory.revision != previous.revision || params.directory == previous,
+                "directory snapshot changed without a new revision"
+            );
+        }
         store
             .put(
                 "configuration",
@@ -83,11 +119,22 @@ impl TeamHostService {
                 &params.cancellation_adapters,
             )
             .await?;
-        for entry in params.directory {
-            store
-                .put("directory", &serde_json::to_string(&entry.address)?, &entry)
-                .await?;
-        }
+        // One durable record replaces the complete directory, including removals.
+        let cached_directory = CachedDirectory {
+            directory: params.directory,
+            last_synchronized_at: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_secs()
+                    .try_into()?,
+            ),
+        };
+        store
+            .put("directory_cache", "current", &cached_directory)
+            .await?;
+        store
+            .put("message_status_cache", "current", &params.message_status)
+            .await?;
         for message in params.board {
             if let Some(topic) = &message.topic {
                 store
@@ -171,6 +218,12 @@ impl TeamHostService {
             ..enrollment.address
         };
         let result = match action {
+            TeamAgentAction::MessageStatus { query } => {
+                serde_json::to_value(self.agent_message_status(&sender, query).await?)?
+            }
+            TeamAgentAction::ExplainAction { query } => {
+                serde_json::to_value(self.agent_action_explanation(&sender, query).await?)?
+            }
             TeamAgentAction::BoardAction { request } => {
                 self.board_action(sender, request, operation.as_ref())
                     .await?
@@ -206,16 +259,24 @@ impl TeamHostService {
                 )
                 .await?
             }
-            TeamAgentAction::Directory { cursor, limit } => page(
-                store
-                    .list::<TeamEnrollment>(
-                        "directory",
-                        cursor.as_deref().unwrap_or(""),
-                        limit.unwrap_or(100).clamp(1, 1000) + 1,
-                    )
-                    .await?,
-                limit,
-            ),
+            TeamAgentAction::Directory { cursor, limit } => {
+                let cached = store
+                    .get::<CachedDirectory>("directory_cache", "current")
+                    .await?
+                    .unwrap_or_default();
+                let snapshot = cached.directory;
+                let mut entries = snapshot
+                    .data
+                    .into_iter()
+                    .map(|entry| serde_json::to_string(&entry.address).map(|key| (key, entry)))
+                    .collect::<serde_json::Result<Vec<_>>>()?;
+                entries.retain(|(key, _)| cursor.as_ref().is_none_or(|cursor| key > cursor));
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                let mut result = page(entries, limit);
+                result["revision"] = json!(snapshot.revision);
+                result["lastSynchronizedAt"] = json!(cached.last_synchronized_at);
+                result
+            }
             TeamAgentAction::Board {
                 topic,
                 cursor,

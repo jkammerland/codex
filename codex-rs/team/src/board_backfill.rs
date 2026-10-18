@@ -81,6 +81,7 @@ impl Coordinator {
                 };
                 let key = subscription_key(&subscription.topic, &identity)?;
                 let value = subscription.enabled.then_some(TeamBoardTopicSubscription {
+                    mode: TeamBoardSubscriptionMode::Wake,
                     topic: subscription.topic,
                     identity,
                 });

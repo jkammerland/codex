@@ -104,3 +104,31 @@ fn board_response_schema_and_wire_round_trip_share_pagination_and_identity_field
         assert_schema_matches_serialized_variant::<TeamBoardResponse>(&wire);
     }
 }
+
+#[test]
+fn legacy_follow_wire_forms_keep_their_original_operation_digest_input() {
+    for wire in [
+        json!({"type":"follow", "conversationId":"root", "identity":null, "enabled":true}),
+        json!({"type":"topicFollow", "topic":"review", "identity":null, "enabled":false}),
+    ] {
+        let request: TeamBoardParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+    }
+    let request = TeamBoardParams::SubscriptionSet {
+        target: TeamBoardSubscriptionTarget::Conversation {
+            conversation_id: "root".into(),
+        },
+        identity: None,
+        mode: TeamBoardSubscriptionMode::Watch,
+    };
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        wire,
+        json!({"type":"subscriptionSet", "target":{"type":"conversation", "conversationId":"root"}, "identity":null, "mode":"watch"})
+    );
+    assert_eq!(
+        serde_json::from_value::<TeamBoardParams>(wire.clone()).unwrap(),
+        request
+    );
+    assert_schema_matches_serialized_variant::<TeamBoardParams>(&wire);
+}

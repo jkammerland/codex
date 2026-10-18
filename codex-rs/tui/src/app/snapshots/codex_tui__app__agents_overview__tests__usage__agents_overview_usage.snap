@@ -4,7 +4,7 @@ assertion_line: 135
 expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{project}  2\"),\n&group).replace(&project, \"/tmp/project\").replace(\"fwd del\", \"del\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 2   Needs you 1   Working 0   Ready 1   Inactive 0                      tab/⇧tab filter
+   All 2   Needs you 1   Working 0   Idle 1   Inactive 0                       tab/⇧tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────
       Tasks                                           │ Task details
   /tmp/project  2                                     │

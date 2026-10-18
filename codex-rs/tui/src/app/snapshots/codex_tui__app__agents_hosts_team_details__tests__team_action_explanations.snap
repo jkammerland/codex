@@ -1,0 +1,35 @@
+---
+source: tui/src/app/agents_hosts_team_details_tests.rs
+assertion_line: 92
+expression: "crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, 100)"
+---
+  Action availability and restrictions
+  Observations are rechecked on execution. Team controls grant no tool permissions.
+
+
+› 1. Enroll task · Unconfirmed        The owning host must confirm that the selected task is an
+                                      existing eligible root session before enrollment. · Selected
+                                      worker host · Unconfirmed
+  2. Queue message · Available        Messages can be queued for busy, offline, or held teammates.
+                                      Queueing does not admit a turn. · Team coordinator · Current
+                                      observation
+  3. Process messages · Unconfirmed   The worker has not confirmed the current team control
+                                      revision. · Selected worker host · Unconfirmed · Reconnect the
+                                      owning host and wait for synchronization.
+  4. Post to Board · Available        Changes can be queued while execution is held; subscriptions
+                                      do not grant execution or tool permissions. · Team coordinator
+                                      · Current observation
+  5. Select model · Unconfirmed       The worker has not confirmed the current team control
+                                      revision. · Selected worker host · Unconfirmed · Reconnect the
+                                      owning host and wait for synchronization.
+  6. Change subscription · Available  Changes can be queued while execution is held; subscriptions
+                                      do not grant execution or tool permissions. · Team coordinator
+                                      · Current observation
+  7. Resume · Available               Resume releases the global team hold. Manual holds, pending
+                                      approvals, and tool permissions retain their existing owners.
+                                      · Team coordinator · Current observation
+  8. Pause · Available                Pause holds new execution. Already admitted work may finish;
+                                      offline hosts remain unconfirmed. · Team coordinator · Current
+                                      observation
+↓
+  enter select · esc back

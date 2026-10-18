@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use codex_extension_api::ExtensionRegistryBuilder;
 
+mod action_explanation;
 mod board;
 mod board_context;
 mod bridge;
@@ -14,6 +15,7 @@ mod delivery_evidence;
 mod jobs;
 mod leave;
 mod lifecycle;
+mod message_status;
 mod models;
 mod runtime;
 mod service;

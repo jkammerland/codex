@@ -209,3 +209,64 @@ fn conversation_queries_preserve_pagination_and_read_is_explicit() -> Result<()>
     );
     Ok(())
 }
+
+#[test]
+fn explicit_subscription_commands_preserve_mode_and_target() -> Result<()> {
+    assert_eq!(
+        request(&[
+            "agents",
+            "board",
+            "subscription-set",
+            "--topic",
+            "review",
+            "watch"
+        ])?,
+        TeamBoardParams::SubscriptionSet {
+            target: TeamBoardSubscriptionTarget::Topic {
+                topic: "review".into()
+            },
+            identity: None,
+            mode: TeamBoardSubscriptionMode::Watch
+        }
+    );
+    assert_eq!(
+        request(&[
+            "agents",
+            "board",
+            "subscription-set",
+            "--conversation",
+            "root",
+            "off"
+        ])?,
+        TeamBoardParams::SubscriptionSet {
+            target: TeamBoardSubscriptionTarget::Conversation {
+                conversation_id: "root".into()
+            },
+            identity: None,
+            mode: TeamBoardSubscriptionMode::Off
+        }
+    );
+    assert_eq!(
+        request(&["agents", "board", "topic-overview", "--limit", "5"])?,
+        TeamBoardParams::TopicOverview {
+            cursor: None,
+            limit: Some(5),
+            identity: None
+        }
+    );
+    assert!(
+        request(&[
+            "agents",
+            "board",
+            "subscription-set",
+            "--topic",
+            "review",
+            "--conversation",
+            "root",
+            "watch"
+        ])
+        .is_err()
+    );
+    assert!(request(&["agents", "board", "subscription-set", "watch"]).is_err());
+    Ok(())
+}

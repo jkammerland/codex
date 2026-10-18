@@ -4,9 +4,11 @@
 import type { TeamAddress } from "./TeamAddress";
 import type { TeamBoardParams } from "./TeamBoardParams";
 import type { TeamDeliveryMode } from "./TeamDeliveryMode";
+import type { TeamExplainActionParams } from "./TeamExplainActionParams";
 import type { TeamMessageKind } from "./TeamMessageKind";
+import type { TeamMessageStatusParams } from "./TeamMessageStatusParams";
 
 /**
  * Agent actions deliberately omit execution controls and model settings.
  */
-export type TeamAgentAction = { "type": "boardAction", request: TeamBoardParams, } | { "type": "reply", messageId: string, body: string, delivery: TeamDeliveryMode, } | { "type": "directory", cursor: string | null, limit: number | null, } | { "type": "inbox", cursor: string | null, limit: number | null, } | { "type": "send", recipient: TeamAddress, body: string, kind: TeamMessageKind, replyTo: string | null, delivery: TeamDeliveryMode, } | { "type": "post", topic: string, body: string, replyTo: string | null, } | { "type": "board", topic: string, cursor: string | null, limit: number | null, } | { "type": "subscribe", topic: string, enabled: boolean, };
+export type TeamAgentAction = { "type": "messageStatus", query: TeamMessageStatusParams, } | { "type": "explainAction", query: TeamExplainActionParams, } | { "type": "boardAction", request: TeamBoardParams, } | { "type": "reply", messageId: string, body: string, delivery: TeamDeliveryMode, } | { "type": "directory", cursor: string | null, limit: number | null, } | { "type": "inbox", cursor: string | null, limit: number | null, } | { "type": "send", recipient: TeamAddress, body: string, kind: TeamMessageKind, replyTo: string | null, delivery: TeamDeliveryMode, } | { "type": "post", topic: string, body: string, replyTo: string | null, } | { "type": "board", topic: string, cursor: string | null, limit: number | null, } | { "type": "subscribe", topic: string, enabled: boolean, };

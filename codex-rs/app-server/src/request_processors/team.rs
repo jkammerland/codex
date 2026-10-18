@@ -28,10 +28,15 @@ use crate::outgoing_message::OutgoingMessageSender;
 
 pub(crate) struct TeamRequestProcessor {
     service: Arc<TeamHostService>,
+    thread_watch: crate::thread_status::ThreadWatchManager,
 }
 
 impl TeamRequestProcessor {
-    pub(crate) fn new(service: Arc<TeamHostService>, outgoing: Arc<OutgoingMessageSender>) -> Self {
+    pub(crate) fn new(
+        service: Arc<TeamHostService>,
+        outgoing: Arc<OutgoingMessageSender>,
+        thread_watch: crate::thread_status::ThreadWatchManager,
+    ) -> Self {
         let mut changes = service.subscribe();
         tokio::spawn(async move {
             while changes.changed().await.is_ok() {
@@ -43,7 +48,10 @@ impl TeamRequestProcessor {
                     .await;
             }
         });
-        Self { service }
+        Self {
+            service,
+            thread_watch,
+        }
     }
 
     pub(crate) async fn outbox_list(
@@ -100,10 +108,27 @@ impl TeamRequestProcessor {
         &self,
         params: TeamHostReadParams,
     ) -> Result<TeamHostReadResponse, JSONRPCErrorError> {
-        self.service
+        let mut response = self
+            .service
             .read(params)
             .await
-            .map_err(|error| invalid_request(error.to_string()))
+            .map_err(|error| invalid_request(error.to_string()))?;
+        let statuses = self
+            .thread_watch
+            .loaded_statuses_for_threads(
+                response
+                    .runtime
+                    .iter()
+                    .filter(|runtime| runtime.loaded)
+                    .map(|runtime| runtime.thread_id.clone()),
+            )
+            .await;
+        for runtime in &mut response.runtime {
+            if let Some(status) = statuses.get(&runtime.thread_id) {
+                runtime.activity = status.into();
+            }
+        }
+        Ok(response)
     }
 
     pub(crate) async fn enroll(

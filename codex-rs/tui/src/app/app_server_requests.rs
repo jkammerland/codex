@@ -82,6 +82,19 @@ pub(super) struct PendingAppServerRequests {
 }
 
 impl PendingAppServerRequests {
+    /// Only concrete approval requests with a retained originating connection
+    /// can be offered for authorization. User-input prompts are not grants.
+    pub(super) fn owned_approval_ids(&self, thread_id: &str) -> Vec<AppServerRequestId> {
+        let thread_id = Self::canonical_thread_id(thread_id);
+        self.exec_approvals
+            .iter()
+            .chain(self.file_change_approvals.iter())
+            .chain(self.permissions_approvals.iter())
+            .filter(|((owner, _), request)| owner == &thread_id && request.reply.is_some())
+            .map(|(_, request)| request.request_id.clone())
+            .collect()
+    }
+
     fn canonical_thread_id(thread_id: &str) -> String {
         codex_protocol::ThreadId::from_string(thread_id)
             .map(|thread_id| thread_id.to_string())

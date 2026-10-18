@@ -205,7 +205,7 @@ impl TeamHostService {
         let runtime = self.runtime(&data).await?;
         Ok(TeamHostReadResponse {
             installation_id: self.installation_id.clone(),
-            protocol_version: 3,
+            protocol_version: 4,
             control,
             data,
             runtime,

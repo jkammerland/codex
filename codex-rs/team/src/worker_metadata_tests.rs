@@ -156,7 +156,7 @@ async fn enroll_and_rejoin_windows_thread(initial: InitialThreadState) -> Result
                     json!({"enrollment": enrolled})
                 }
                 "team/hostRead" => json!({
-                    "installationId": "windows-fixture", "protocolVersion": 3,
+                    "installationId": "windows-fixture", "protocolVersion": 4,
                     "control": null, "data": [enrollment.as_ref().unwrap()],
                     "runtime": [], "nextCursor": null
                 }),
@@ -171,6 +171,7 @@ async fn enroll_and_rejoin_windows_thread(initial: InitialThreadState) -> Result
         Ok::<_, anyhow::Error>(methods)
     });
     let server = Server {
+        environment_capabilities: Default::default(),
         id: "primary".into(),
         label: "Primary".into(),
         endpoint: crate::Endpoint::Websocket {
@@ -224,6 +225,7 @@ async fn enroll_and_rejoin_windows_thread(initial: InitialThreadState) -> Result
             )
             .await?;
         let expected = Agent {
+            discovery: Default::default(),
             enrollment: TeamEnrollment {
                 address,
                 alias: "builder".into(),
@@ -240,22 +242,19 @@ async fn enroll_and_rejoin_windows_thread(initial: InitialThreadState) -> Result
             project: loaded.then(|| "saved-project".into()),
         };
         assert_eq!(enrolled, expected);
-        assert_eq!(coordinator.agents().await?, vec![expected.clone()]);
+        let mut observed = expected.clone();
+        observed.discovery.availability.synchronization = TeamSynchronization::Disconnected;
+        observed.discovery.availability.reasons = vec![
+            "Worker synchronization is unavailable or unconfirmed; host reachability is unknown"
+                .into(),
+        ];
+        assert_eq!(coordinator.agents().await?, vec![observed.clone()]);
 
-        // Rejoining consumes the foreign resume metadata as well as enrollment's read.
+        // Discovery after reconnect reads metadata without resuming this thread.
         coordinator
             .refresh_enrollments(&machine, &server, &peer, /*rejoin*/ true)
             .await?;
-        assert_eq!(
-            coordinator.agents().await?,
-            vec![Agent {
-                status: "working".into(),
-                next_model: Some("gpt-6.1-sol".into()),
-                next_effort: Some("medium".into()),
-                project: Some("rejoined-project".into()),
-                ..expected
-            }]
-        );
+        assert_eq!(coordinator.agents().await?, vec![observed]);
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -266,12 +265,7 @@ async fn enroll_and_rejoin_windows_thread(initial: InitialThreadState) -> Result
     if !loaded {
         expected.push("thread/resume");
     }
-    expected.extend([
-        "team/enroll",
-        "thread/read",
-        "team/hostRead",
-        "thread/resume",
-    ]);
+    expected.extend(["team/enroll", "thread/read", "team/hostRead", "thread/read"]);
     assert_eq!(methods, expected);
     Ok(())
 }

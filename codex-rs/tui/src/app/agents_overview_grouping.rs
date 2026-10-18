@@ -39,11 +39,17 @@ impl AgentsOverviewView {
             .enumerate()
             .filter_map(|(index, row)| {
                 let searchable = format!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {}",
                     row.thread.name.as_deref().unwrap_or_default(),
                     row.thread.preview,
                     row.thread.cwd.render_for_ui(),
                     row.machine_label.as_deref().unwrap_or_default(),
+                    row.details
+                        .lines
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" "),
                 )
                 .to_lowercase();
                 ((search.is_empty() || searchable.contains(&search))

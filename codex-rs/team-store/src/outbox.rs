@@ -111,4 +111,21 @@ impl TeamStore {
         tx.commit().await?;
         Ok(())
     }
+
+    /// Sender evidence survives intake acknowledgement: rejected entries are
+    /// acknowledged too, so callers must merge explicit coordinator outcomes.
+    pub async fn message_outbox_evidence(&self) -> Result<Vec<OutboxEntry>> {
+        let rows: Vec<(i64, String, String, String)> = sqlx::query_as("SELECT sequence, id, kind, payload FROM outbox WHERE kind IN ('message', 'board') ORDER BY sequence")
+            .fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|(sequence, id, kind, payload)| {
+                Ok(OutboxEntry {
+                    sequence,
+                    id,
+                    kind,
+                    payload: serde_json::from_str(&payload)?,
+                })
+            })
+            .collect()
+    }
 }

@@ -75,66 +75,11 @@ impl App {
     }
 
     pub(super) fn open_agents_board_followers(&mut self, conversation_id: String) {
-        let state = self
-            .agents_hosts
-            .board
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let items = state
-            .snapshot
-            .members
-            .iter()
-            .filter(|member| {
-                matches!(
-                    member.author.identity,
-                    codex_app_server_protocol::TeamBoardIdentity::Agent { .. }
-                )
-            })
-            .map(|member| {
-                let identity = member.author.identity.clone();
-                let following = state.snapshot.followers.iter().any(|follower| {
-                    follower.conversation_id == conversation_id && follower.identity == identity
-                });
-                let id = conversation_id.clone();
-                crate::bottom_pane::SelectionItem {
-                    name: format!(
-                        "{} {}",
-                        if following { "Unfollow" } else { "Follow" },
-                        member.author.name
-                    ),
-                    description: Some(format!(
-                        "{} · {}",
-                        member.author.machine_name.as_deref().unwrap_or("Agent"),
-                        if member.available {
-                            "available"
-                        } else {
-                            "offline"
-                        }
-                    )),
-                    actions: vec![Box::new(move |sender| {
-                        sender.unscoped().send(AppEvent::AgentsTeamRequest(
-                            codex_team::TeamRequest::Board {
-                                request: TeamBoardParams::Follow {
-                                    conversation_id: id.clone(),
-                                    identity: Some(identity.clone()),
-                                    enabled: !following,
-                                },
-                            },
-                        ))
-                    })],
-                    dismiss_on_select: true,
-                    ..Default::default()
-                }
-            })
-            .collect();
-        drop(state);
-        self.chat_widget
-            .show_selection_view(crate::bottom_pane::SelectionViewParams {
-                title: Some("Choose an agent to follow this conversation".into()),
-                subtitle: Some("Following agents wake for new replies from others".into()),
-                items,
-                ..crate::bottom_pane::SelectionViewParams::picker()
-            });
+        self.open_agents_board_subscriptions(
+            codex_app_server_protocol::TeamBoardSubscriptionTarget::Conversation {
+                conversation_id,
+            },
+        );
     }
 
     pub(super) fn acknowledge_agents_board_frame(&mut self, focused: bool) {

@@ -5,6 +5,7 @@ use codex_core::TurnInputRequest;
 use codex_extension_api::ExecutionControl;
 use codex_extension_api::ExecutionMode;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
@@ -69,9 +70,12 @@ async fn enrolled_agent_cannot_override_child_model_or_effort() -> anyhow::Resul
     Ok(())
 }
 
+#[test_case::test_case(ExecutionMode::Paused; "paused")]
+#[test_case::test_case(ExecutionMode::Stopped; "stopped")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn held_turn_does_not_consume_input_or_sample_and_resume_preserves_session()
--> anyhow::Result<()> {
+async fn held_turn_does_not_consume_input_or_sample_and_resume_preserves_session(
+    mode: ExecutionMode,
+) -> anyhow::Result<()> {
     let server = responses::start_mock_server().await;
     let response = responses::mount_sse_once(
         &server,
@@ -89,7 +93,7 @@ async fn held_turn_does_not_consume_input_or_sample_and_resume_preserves_session
         .build_with_auto_env(&server)
         .await?;
     let thread_id = test.session_configured.thread_id;
-    gate.apply(thread_id, 1, ExecutionMode::Paused);
+    gate.apply(thread_id, 1, mode);
 
     let input = || {
         TurnInputRequest::user_input(vec![UserInput::Text {
@@ -102,7 +106,11 @@ async fn held_turn_does_not_consume_input_or_sample_and_resume_preserves_session
         .start_turn_if_idle(input())
         .await
         .expect_err("held input must not start");
-    assert!(error.to_string().contains("held by team control"));
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::TeamExecutionHeld
+    ));
+    assert_eq!(error.retry_delay(1), None);
     assert!(response.requests().is_empty());
 
     gate.apply(thread_id, 2, ExecutionMode::Running);

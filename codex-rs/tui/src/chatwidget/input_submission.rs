@@ -135,6 +135,13 @@ impl ChatWidget {
         source: UserMessageSource,
         prepared_images: Option<Vec<UserInput>>,
     ) -> (bool, Option<AppCommand>) {
+        if self.team_execution_held() {
+            self.restore_user_message_to_composer(user_message_for_restore(
+                user_message,
+                &history_record,
+            ));
+            return (false, None);
+        }
         self.bottom_pane.dismiss_composer_sparkle();
         if self.has_misalignment_policy_violation() {
             return (false, None);

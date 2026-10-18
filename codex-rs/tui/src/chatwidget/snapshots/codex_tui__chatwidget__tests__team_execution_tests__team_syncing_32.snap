@@ -1,0 +1,10 @@
+---
+source: tui/src/chatwidget/team_execution_tests.rs
+expression: "render_bottom_popup(&chat, width)"
+---
+Team syncing · /agents controls
+
+› Continue after the team
+  resumes
+
+  GPT-5.6-Sol default · /tmp/pr…

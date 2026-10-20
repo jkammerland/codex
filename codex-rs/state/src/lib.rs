@@ -9,6 +9,7 @@ const _: () = assert!(
     "bundled SQLite must include the WAL-reset corruption fix",
 );
 
+mod agent_mail;
 mod audit;
 mod delegated_preview;
 mod extract;
@@ -20,6 +21,18 @@ mod runtime;
 mod sqlite;
 mod telemetry;
 
+pub use agent_mail::AgentMailAcceptance;
+pub use agent_mail::AgentMailEnvelope;
+pub use agent_mail::AgentMailRecord;
+pub use agent_mail::AgentMailboxSummary;
+pub use agent_mail::AgentTaskFilter;
+pub use agent_mail::AgentTaskRecord;
+pub use agent_mail::AgentTaskSnapshot;
+pub use agent_mail::AgentTaskStatus;
+pub use agent_mail::validate_agent_task_completion;
+pub use agent_mail::validate_agent_task_identity;
+pub use agent_mail::validate_agent_task_request;
+pub use agent_mail::validate_agent_task_update;
 pub use log_db::LogWriteFailureReporter;
 pub use model::CreatedProject;
 pub use model::LogEntry;
@@ -94,6 +107,7 @@ pub use runtime::MemoryStore;
 pub use runtime::ReadStateOperation;
 pub use runtime::ReadStateUpdate;
 pub use runtime::RemoteControlEnrollmentRecord;
+pub use runtime::SqliteAgentMailboxStore;
 pub use runtime::SqliteIntegrityCheck;
 pub use runtime::SqliteQueueStore;
 pub use runtime::ThreadFilterOptions;

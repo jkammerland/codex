@@ -1178,6 +1178,7 @@ ON CONFLICT(id) DO UPDATE SET
                 .execute_with_busy_retry(self.logs_pool.as_ref())
                 .await?;
             self.thread_queue.delete_thread_queue(*thread_id).await?;
+            self.agent_mailbox.remove_root(*thread_id).await?;
             self.delete_versioned_thread_memory(*thread_id).await?;
             self.thread_goals.delete_thread_goal(*thread_id).await?;
         }

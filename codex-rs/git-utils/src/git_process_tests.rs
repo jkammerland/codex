@@ -344,23 +344,28 @@ async fn assert_owned_git_descendant_cleanup(
     // Delete immediately, before any other awaited observation can hide a cleanup race.
     // On Windows this requires both the descendant's file and cwd handles to be gone.
     directory.close()?;
-    assert_eq!(
-        tokio::time::timeout(FIXTURE_DEADLINE, connection.read(&mut ready))
-            .await
-            .expect("terminated descendant closed its readiness socket")?,
-        0,
-    );
+    let closed = tokio::time::timeout(FIXTURE_DEADLINE, connection.read(&mut ready))
+        .await
+        .expect("terminated descendant closed its readiness socket");
+    match closed {
+        Ok(bytes) => assert_eq!(bytes, 0),
+        // Forced Windows process termination can reset TCP instead of sending FIN. This
+        // observation follows successful process cleanup and immediate directory deletion.
+        #[cfg(windows)]
+        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 
 #[cfg(windows)]
 #[tokio::test]
 async fn owned_git_command_cleans_descendants_after_successful_wrapper_exit() -> io::Result<()> {
-    assert_owned_git_descendant_cleanup(
-        /*detached_pipes*/ true,
-        OwnedGitFinish::SuccessfulWrapperExit,
-    )
-    .await
+    for detached_pipes in [false, true] {
+        assert_owned_git_descendant_cleanup(detached_pipes, OwnedGitFinish::SuccessfulWrapperExit)
+            .await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]

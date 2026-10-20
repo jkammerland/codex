@@ -222,7 +222,7 @@ impl TeamRequestProcessor {
                 })
                 .await
                 .map_err(|error| invalid_request(error.to_string()))?;
-            let version = codex_history::InitialHistory::Resumed(codex_history::ResumedHistory {
+            let version = codex_rollout::InitialHistory::Resumed(codex_rollout::ResumedHistory {
                 conversation_id: thread_id,
                 history: Arc::new(context.items),
                 rollout_path: stored.rollout_path,

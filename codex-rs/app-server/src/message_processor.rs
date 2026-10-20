@@ -879,6 +879,11 @@ impl MessageProcessor {
     }
 
     pub(crate) async fn drain_background_tasks(&self) {
+        self.thread_processor
+            .thread_manager
+            .plugins_manager()
+            .shutdown_curated_git()
+            .await;
         self.models_refresh_worker.shutdown();
         if let Some(worker) = &self.turn_cost_worker {
             worker.shutdown();

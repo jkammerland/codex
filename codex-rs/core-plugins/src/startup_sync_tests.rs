@@ -277,8 +277,12 @@ fn pretrust_git_sync_ignores_repository_local_transport_config() {
         ),
     );
 
-    let err = sync_openai_plugins_repo_via_git(&codex_home, &git_wrapper)
-        .expect_err("isolated probe should use the missing global-config remote");
+    let err = sync_openai_plugins_repo_via_git(
+        &codex_home,
+        &git_wrapper,
+        &CuratedGitLifecycle::default(),
+    )
+    .expect_err("isolated probe should use the missing global-config remote");
 
     assert!(err.contains("git ls-remote curated plugins repo"));
     assert!(
@@ -595,6 +599,7 @@ async fn run_sync_with_transport_overrides(
             &api_base_url,
             &backup_archive_api_url,
             &crate::test_support::test_http_client_factory(),
+            &CuratedGitLifecycle::default(),
         )
     })
     .await
@@ -615,6 +620,7 @@ async fn run_sync_without_git(
             &api_base_url,
             &backup_archive_api_url,
             &crate::test_support::test_http_client_factory(),
+            &CuratedGitLifecycle::default(),
         )
     })
     .await
@@ -772,6 +778,7 @@ exit 1
                 "http://127.0.0.1:9",
                 "http://127.0.0.1:9/backend-api/plugins/export/curated",
                 &crate::test_support::test_http_client_factory(),
+                &CuratedGitLifecycle::default(),
             )
         };
         let first = scope.spawn(run_sync);
@@ -889,8 +896,9 @@ fn sync_openai_plugins_repo_via_git_succeeds_with_local_rewritten_remote() {
         ),
     );
 
-    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper)
-        .expect("git sync should succeed");
+    let synced_sha =
+        sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper, &CuratedGitLifecycle::default())
+            .expect("git sync should succeed");
 
     assert_eq!(synced_sha, sha);
     assert_curated_gmail_repo(&curated_plugins_repo_path(tmp.path()));
@@ -942,8 +950,9 @@ fn sync_openai_plugins_repo_via_git_succeeds_with_local_rewritten_remote() {
         .trim()
         .to_string();
 
-    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper)
-        .expect("incremental git sync should succeed");
+    let synced_sha =
+        sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper, &CuratedGitLifecycle::default())
+            .expect("incremental git sync should succeed");
 
     assert_eq!(synced_sha, updated_sha);
     assert!(
@@ -997,8 +1006,9 @@ fn sync_openai_plugins_repo_via_git_succeeds_with_local_rewritten_remote() {
     assert!(!has_plugins_clone_dirs(tmp.path()));
 
     let unchanged_sync_invocation_count = invocation_log_contents.lines().count();
-    let synced_sha = sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper)
-        .expect("unchanged git sync should succeed");
+    let synced_sha =
+        sync_openai_plugins_repo_via_git(tmp.path(), &git_wrapper, &CuratedGitLifecycle::default())
+            .expect("unchanged git sync should succeed");
 
     assert_eq!(synced_sha, updated_sha);
     let invocation_log = std::fs::read_to_string(&invocation_log).expect("read sync invocations");
@@ -1136,7 +1146,8 @@ exit 1
     );
 
     let err =
-        sync_openai_plugins_repo_via_git(tmp.path(), &git_path).expect_err("git sync should fail");
+        sync_openai_plugins_repo_via_git(tmp.path(), &git_path, &CuratedGitLifecycle::default())
+            .expect_err("git sync should fail");
 
     assert!(err.contains("fatal: early EOF"));
     assert!(!has_plugins_clone_dirs(tmp.path()));
@@ -1201,8 +1212,9 @@ exit 1
         ),
     );
 
-    let err = sync_openai_plugins_repo_via_git(tmp.path(), &git_path)
-        .expect_err("invalid staged checkout should fail");
+    let err =
+        sync_openai_plugins_repo_via_git(tmp.path(), &git_path, &CuratedGitLifecycle::default())
+            .expect_err("invalid staged checkout should fail");
 
     assert!(err.contains("curated plugins archive missing marketplace manifest"));
     assert_curated_gmail_repo(&repo_path);

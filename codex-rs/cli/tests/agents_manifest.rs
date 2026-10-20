@@ -402,6 +402,7 @@ async fn unavailable_manifest(held: bool) -> Result<()> {
             id: "bench".into(),
             label: label.into(),
             servers: vec![Server {
+                environment_capabilities: Default::default(),
                 id: "worker".into(),
                 label: "Saved worker".into(),
                 endpoint: Endpoint::Websocket {

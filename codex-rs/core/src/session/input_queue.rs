@@ -96,18 +96,45 @@ pub(crate) struct TurnInputQueue {
 }
 
 #[derive(Default)]
-struct MailReceipts {
+struct MailboxState {
+    pending: VecDeque<PendingMailboxCommunication>,
     recorded: IndexMap<String, InterAgentCommunication>,
     submitted: HashSet<String>,
+}
+
+impl MailboxState {
+    fn enqueue(
+        &mut self,
+        communication: InterAgentCommunication,
+        start_options: TurnStartOptions,
+    ) -> bool {
+        if communication.mail.as_ref().is_some_and(|metadata| {
+            self.submitted.contains(&metadata.message_id)
+                || self.pending.iter().any(|mail| {
+                    mail.communication
+                        .mail
+                        .as_ref()
+                        .is_some_and(|existing| existing.message_id == metadata.message_id)
+                })
+        }) {
+            return false;
+        }
+        self.pending.push_back(PendingMailboxCommunication {
+            communication,
+            start_options,
+            _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
+        });
+        true
+    }
 }
 
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     controller: Option<(ThreadId, Arc<dyn AgentControl>, watch::Receiver<bool>)>,
-    mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
     // Recording history is not a transport receipt. Retain wake debt until request acceptance.
-    mail_receipts: Mutex<MailReceipts>,
+    // Queue admission shares the receipt lock so delayed delivery cannot revive submitted mail.
+    mailbox: Mutex<MailboxState>,
 }
 
 pub(crate) struct PendingMailboxCommunication {
@@ -122,8 +149,7 @@ impl InputQueue {
         Self {
             activity_tx,
             controller: None,
-            mailbox_pending_mails: Mutex::new(VecDeque::new()),
-            mail_receipts: Mutex::new(MailReceipts::default()),
+            mailbox: Mutex::new(MailboxState::default()),
         }
     }
 
@@ -145,18 +171,11 @@ impl InputQueue {
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
     }
 
-    fn read_mailbox(&self, pending: &mut VecDeque<PendingMailboxCommunication>) {
+    fn read_mailbox(&self, mailbox: &mut MailboxState) {
         if let Some((thread_id, control, _)) = &self.controller {
-            pending.extend(
-                control
-                    .take_mailbox(*thread_id)
-                    .into_iter()
-                    .map(|communication| PendingMailboxCommunication {
-                        communication,
-                        start_options: TurnStartOptions::default(),
-                        _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
-                    }),
-            );
+            for communication in control.take_mailbox(*thread_id) {
+                mailbox.enqueue(communication, TurnStartOptions::default());
+            }
         }
     }
 
@@ -215,35 +234,26 @@ impl InputQueue {
         true
     }
 
+    /// Returns whether this delivery added a new pending message.
     pub(crate) async fn enqueue_mailbox_communication(
         &self,
         communication: crate::PendingAgentMessage,
         start_options: TurnStartOptions,
-    ) {
-        let mut pending = self.mailbox_pending_mails.lock().await;
+    ) -> bool {
+        let mut mailbox = self.mailbox.lock().await;
         // Mail retained while unloaded precedes new submissions to the loaded session.
-        self.read_mailbox(&mut pending);
-        if communication.mail.as_ref().is_some_and(|metadata| {
-            pending.iter().any(|mail| {
-                mail.communication
-                    .mail
-                    .as_ref()
-                    .is_some_and(|existing| existing.message_id == metadata.message_id)
-            })
-        }) {
-            return;
+        self.read_mailbox(&mut mailbox);
+        let inserted = mailbox.enqueue(communication, start_options);
+        if inserted {
+            self.activity_tx.send_replace(InputQueueActivity::Mailbox);
         }
-        pending.push_back(PendingMailboxCommunication {
-            communication,
-            start_options,
-            _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
-        });
-        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
+        inserted
     }
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
-        !self.mailbox_pending_mails.lock().await.is_empty()
-            || !self.mail_receipts.lock().await.recorded.is_empty()
+        let mailbox = self.mailbox.lock().await;
+        !mailbox.pending.is_empty()
+            || !mailbox.recorded.is_empty()
             || self
                 .controller
                 .as_ref()
@@ -251,51 +261,33 @@ impl InputQueue {
     }
 
     pub(crate) async fn has_wakeable_mailbox_items(&self) -> bool {
-        let pending_wakes = {
-            let mut pending = self.mailbox_pending_mails.lock().await;
-            self.read_mailbox(&mut pending);
-            pending.iter().any(|mail| mail_wakes(&mail.communication))
-        };
-        pending_wakes
-            || self
-                .mail_receipts
-                .lock()
-                .await
-                .recorded
-                .values()
-                .any(mail_wakes)
+        let mut mailbox = self.mailbox.lock().await;
+        self.read_mailbox(&mut mailbox);
+        mailbox
+            .pending
+            .iter()
+            .any(|mail| mail_wakes(&mail.communication))
+            || mailbox.recorded.values().any(mail_wakes)
     }
 
     /// A failed request retains its receipt debt, but that debt cannot retry the
     /// request itself. A newly queued message can authorize another continuation.
     pub(crate) async fn has_new_wakeable_mailbox_items(&self) -> bool {
-        // Capture only wake identities before consulting receipts. Recording or
-        // submitting the captured input meanwhile must not make it fresh again.
-        let waking_ids = {
-            let mut pending = self.mailbox_pending_mails.lock().await;
-            self.read_mailbox(&mut pending);
-            pending
-                .iter()
-                .filter(|mail| mail_wakes(&mail.communication))
-                .map(|mail| {
-                    mail.communication
-                        .mail
-                        .as_ref()
-                        .map(|metadata| metadata.message_id.clone())
-                })
-                .collect::<Vec<_>>()
-        };
-        let receipts = self.mail_receipts.lock().await;
-        waking_ids.iter().any(|id| {
-            id.as_ref().is_none_or(|id| {
-                !receipts.recorded.contains_key(id) && !receipts.submitted.contains(id)
-            })
+        let mut mailbox = self.mailbox.lock().await;
+        self.read_mailbox(&mut mailbox);
+        mailbox.pending.iter().any(|mail| {
+            mail_wakes(&mail.communication)
+                && mail
+                    .communication
+                    .mail
+                    .as_ref()
+                    .is_none_or(|metadata| !mailbox.recorded.contains_key(&metadata.message_id))
         })
     }
 
     pub(crate) async fn record_mail(&self, communication: &InterAgentCommunication) {
         if let Some(metadata) = &communication.mail {
-            let mut receipts = self.mail_receipts.lock().await;
+            let mut receipts = self.mailbox.lock().await;
             if !receipts.submitted.contains(&metadata.message_id) {
                 receipts
                     .recorded
@@ -314,19 +306,13 @@ impl InputQueue {
                         .is_some_and(|id| task_ids.contains(id))
             })
         };
-        self.mail_receipts
-            .lock()
-            .await
-            .recorded
-            .retain(|_, mail| retain(mail));
-        self.mailbox_pending_mails
-            .lock()
-            .await
-            .retain(|mail| retain(&mail.communication));
+        let mut mailbox = self.mailbox.lock().await;
+        mailbox.recorded.retain(|_, mail| retain(mail));
+        mailbox.pending.retain(|mail| retain(&mail.communication));
     }
 
     pub(crate) async fn unsubmitted_recorded_mail(&self) -> Vec<InterAgentCommunication> {
-        self.mail_receipts
+        self.mailbox
             .lock()
             .await
             .recorded
@@ -336,11 +322,11 @@ impl InputQueue {
     }
 
     pub(crate) async fn was_mail_submitted(&self, id: &str) -> bool {
-        self.mail_receipts.lock().await.submitted.contains(id)
+        self.mailbox.lock().await.submitted.contains(id)
     }
 
     pub(crate) async fn accept_submitted_mail(&self, items: &[ResponseItem]) {
-        let mut receipts = self.mail_receipts.lock().await;
+        let mut receipts = self.mailbox.lock().await;
         for item in items {
             let id = match item {
                 ResponseItem::AgentMessage { id, .. } | ResponseItem::Message { id, .. } => {
@@ -354,6 +340,17 @@ impl InputQueue {
                 receipts.submitted.insert(id.to_string());
             }
         }
+        // Reconciliation may submit a message before its original delivery Op
+        // reaches this queue. Remove copies that arrived before the receipt too.
+        let MailboxState {
+            pending, submitted, ..
+        } = &mut *receipts;
+        pending.retain(|mail| {
+            mail.communication
+                .mail
+                .as_ref()
+                .is_none_or(|metadata| !submitted.contains(&metadata.message_id))
+        });
     }
 
     /// Selected completion records satisfy the barrier through the durable task store.
@@ -387,24 +384,28 @@ impl InputQueue {
                 return Some(InputQueueActivity::Mailbox);
             }
         }
-        let mut pending = self.mailbox_pending_mails.lock().await;
-        self.read_mailbox(&mut pending);
-        pending
+        let mut mailbox = self.mailbox.lock().await;
+        self.read_mailbox(&mut mailbox);
+        mailbox
+            .pending
             .iter()
             .any(|mail| interrupts(&mail.communication))
             .then_some(InputQueueActivity::Mailbox)
     }
 
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
-        let mut pending = self.mailbox_pending_mails.lock().await;
-        self.read_mailbox(&mut pending);
-        pending.iter().any(|mail| mail.communication.trigger_turn)
+        let mut mailbox = self.mailbox.lock().await;
+        self.read_mailbox(&mut mailbox);
+        mailbox
+            .pending
+            .iter()
+            .any(|mail| mail.communication.trigger_turn)
     }
 
     pub(crate) async fn drain_mailbox(&self) -> Vec<PendingMailboxCommunication> {
-        let mut pending = self.mailbox_pending_mails.lock().await;
-        self.read_mailbox(&mut pending);
-        pending.drain(..).collect()
+        let mut mailbox = self.mailbox.lock().await;
+        self.read_mailbox(&mut mailbox);
+        mailbox.pending.drain(..).collect()
     }
 
     pub(crate) async fn drain_mailbox_input_items(&self) -> (Vec<TurnInput>, TurnStartOptions) {
@@ -774,6 +775,9 @@ mod tests {
         };
         let submitted = make_typed_mail("submitted");
         input_queue.record_mail(&submitted).await;
+        input_queue
+            .enqueue_mailbox_communication(submitted.clone(), Default::default())
+            .await;
         assert!(input_queue.has_wakeable_mailbox_items().await);
 
         // History recording alone retains debt; only the exact submitted input
@@ -795,7 +799,9 @@ mod tests {
         input_queue
             .enqueue_mailbox_communication(submitted, Default::default())
             .await;
+        assert!(!input_queue.has_wakeable_mailbox_items().await);
         assert!(!input_queue.has_new_wakeable_mailbox_items().await);
+        assert!(input_queue.drain_mailbox().await.is_empty());
         input_queue
             .enqueue_mailbox_communication(make_typed_mail("new"), Default::default())
             .await;

@@ -1247,6 +1247,8 @@ impl ThreadRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            #[cfg(test)]
+            listener_start_gate: None,
         }
     }
 
@@ -1377,6 +1379,8 @@ impl ThreadRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            #[cfg(test)]
+            listener_start_gate: None,
         };
         let request_trace = request_context.request_trace();
         let config_manager = self.config_manager.clone();
@@ -6900,3 +6904,7 @@ fn build_thread_from_loaded_snapshot(
 #[cfg(test)]
 #[path = "thread_processor_tests.rs"]
 mod thread_processor_tests;
+
+#[cfg(test)]
+#[path = "thread_agent_work_listener_tests.rs"]
+mod thread_agent_work_listener_tests;

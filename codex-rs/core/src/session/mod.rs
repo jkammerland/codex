@@ -1713,14 +1713,22 @@ impl Session {
             InitialHistory::Resumed(resumed_history) => {
                 let turn_context = self.new_default_turn().await;
                 let rollout_items = resumed_history.history;
-                if matches!(
-                    rollout_items.iter().rev().find_map(|item| match item {
-                        RolloutItem::EventMsg(event) => agent_status_from_event(event),
-                        _ => None,
-                    }),
-                    Some(AgentStatus::Interrupted)
-                ) {
+                // Establish the manual hold before the submission loop can inspect
+                // an existing mailbox. Shutdown is not a replacement task outcome.
+                let mail_enabled = self.features.enabled(Feature::WakeOnAgentMessages);
+                let restored_status = rollout_items.iter().rev().find_map(|item| match item {
+                    RolloutItem::EventMsg(EventMsg::ShutdownComplete) if mail_enabled => None,
+                    RolloutItem::EventMsg(event) => agent_status_from_event(event),
+                    _ => None,
+                });
+                if matches!(restored_status, Some(AgentStatus::Interrupted))
+                    || (mail_enabled && matches!(restored_status, Some(AgentStatus::Running)))
+                {
                     self.agent_status.send_replace(AgentStatus::Interrupted);
+                } else if mail_enabled
+                    && let Some(status @ AgentStatus::Errored(_)) = restored_status
+                {
+                    self.agent_status.send_replace(status);
                 }
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
@@ -2605,7 +2613,7 @@ impl Session {
                 }
             }
         };
-        if !is_final(&status) {
+        if !is_final(&status) && status != AgentStatus::Interrupted {
             return;
         }
 
@@ -2627,6 +2635,25 @@ impl Session {
                 &self.services.rollout_thread_trace,
             )
             .await;
+        if self.features.enabled(Feature::WakeOnAgentMessages)
+            && self.services.agent_control.supports_task_barriers()
+            && let Ok(snapshot) = self
+                .services
+                .agent_control
+                .tasks(codex_thread_store::AgentTaskFilter {
+                    target_id: Some(self.thread_id),
+                    ..Default::default()
+                })
+                .await
+        {
+            let settled = snapshot
+                .tasks
+                .into_iter()
+                .filter(|task| task.status.is_terminal())
+                .map(|task| task.task_id)
+                .collect();
+            self.input_queue.discard_settled_assignments(&settled).await;
+        }
     }
 
     async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {
@@ -4129,6 +4156,41 @@ impl Session {
         communication: impl Into<crate::PendingAgentMessage>,
     ) {
         let communication = communication.into();
+        if let Some(metadata) = &communication.mail {
+            if self
+                .input_queue
+                .was_mail_submitted(&metadata.message_id)
+                .await
+            {
+                return;
+            }
+            let history = self.clone_history().await;
+            if history.raw_items().any(|item| match item {
+                ResponseItem::AgentMessage { id, .. } | ResponseItem::Message { id, .. } => {
+                    id == &communication.id
+                }
+                _ => false,
+            }) {
+                // History can survive a crash before its separate mailbox receipt.
+                // Repair that receipt without appending the same input again.
+                if self.features.enabled(Feature::WakeOnAgentMessages) {
+                    self.input_queue.record_mail(&communication).await;
+                    if let Err(err) = self
+                        .services
+                        .agent_control
+                        .mail_recorded(
+                            self.thread_id,
+                            &turn_context.sub_id,
+                            metadata.message_id.clone(),
+                        )
+                        .await
+                    {
+                        warn!("failed to repair durable mail history receipt: {err}");
+                    }
+                }
+                return;
+            }
+        }
         let mut response_item = communication.to_model_input_item();
         if let ResponseItem::AgentMessage {
             content,
@@ -4206,6 +4268,23 @@ impl Session {
         ])
         .await;
         drop(boundary);
+        if self.features.enabled(Feature::WakeOnAgentMessages) {
+            self.input_queue.record_mail(&communication).await;
+        }
+        if self.features.enabled(Feature::WakeOnAgentMessages)
+            && let Some(metadata) = &communication.mail
+            && let Err(err) = self
+                .services
+                .agent_control
+                .mail_recorded(
+                    self.thread_id,
+                    &turn_context.sub_id,
+                    metadata.message_id.clone(),
+                )
+                .await
+        {
+            warn!("failed to record durable mail receipt: {err}");
+        }
         self.send_raw_response_items(turn_context, items).await;
     }
 

@@ -37,6 +37,266 @@ impl AgentControl for LocalAgentControl {
         self.session_id()
     }
 
+    fn supports_task_barriers(&self) -> bool {
+        true
+    }
+
+    fn watch_agent_work(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.runtime.work_updates.subscribe()
+    }
+
+    fn set_task_barrier(&self, agent: ThreadId, task_ids: Option<Vec<String>>) {
+        let mut barriers = self
+            .runtime
+            .barriers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(task_ids) = task_ids {
+            barriers.insert(agent, task_ids);
+        } else {
+            barriers.remove(&agent);
+        }
+        drop(barriers);
+        self.work_changed();
+    }
+
+    fn tasks(
+        &self,
+        filter: codex_thread_store::AgentTaskFilter,
+    ) -> BoxFuture<'_, Result<codex_thread_store::AgentTaskSnapshot>> {
+        Box::pin(async move {
+            self.mail_store()
+                .await?
+                .tasks(self.session_id.into(), filter)
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))
+        })
+    }
+
+    fn agent_work(
+        &self,
+        agent: ThreadId,
+    ) -> BoxFuture<'_, Result<Option<crate::agent::api::AgentWorkSummary>>> {
+        Box::pin(async move { self.work_summary(agent).await.map(Some) })
+    }
+
+    fn restore_attached_agents(&self, root: ThreadId) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if root != ThreadId::from(self.session_id) {
+                return Ok(());
+            }
+            let manager = self.runtime.upgrade()?;
+            let root_thread = manager.get_thread(root).await?;
+            if !root_thread
+                .session
+                .enabled(codex_features::Feature::WakeOnAgentMessages)
+            {
+                return Ok(());
+            }
+            let mut config = root_thread.config().await.as_ref().clone();
+            config.base_instructions = None;
+            config.base_instructions_provenance = None;
+            config.restore_saved_model_policy = true;
+            for metadata in self.runtime.registry.live_agents() {
+                let Some(agent) = metadata.agent_id.filter(|id| *id != root) else {
+                    continue;
+                };
+                if manager.get_thread(agent).await.is_ok() {
+                    continue;
+                }
+                let pending = self.pending_mail(agent).await?;
+                if pending.iter().any(|mail| {
+                    mail.mail.as_ref().is_some_and(|metadata| {
+                        metadata.wake == codex_protocol::protocol::AgentMailWake::Auto
+                    })
+                }) && let Err(err) = self
+                    .ensure_v2_agent_loaded(config.clone(), agent, /*parent*/ None)
+                    .await
+                {
+                    tracing::warn!("pending recipient could not be restored: {err}");
+                    self.mail_blocked(agent, codex_thread_store::AgentTaskStatus::Unavailable)
+                        .await?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn mail_blocked(
+        &self,
+        agent: ThreadId,
+        status: codex_thread_store::AgentTaskStatus,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let store = self.mail_store().await?;
+            let snapshot = store
+                .tasks(
+                    self.session_id.into(),
+                    codex_thread_store::AgentTaskFilter {
+                        target_id: Some(agent),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            for mut task in snapshot
+                .tasks
+                .into_iter()
+                .filter(|task| !task.status.is_terminal())
+            {
+                task.status = status;
+                store
+                    .put_task(task)
+                    .await
+                    .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            }
+            self.work_changed();
+            Ok(())
+        })
+    }
+
+    fn pending_mail(
+        &self,
+        agent: ThreadId,
+    ) -> BoxFuture<'_, Result<Vec<codex_protocol::protocol::InterAgentCommunication>>> {
+        Box::pin(async move {
+            let store = self.mail_store().await?;
+            let terminal = store
+                .tasks(
+                    self.session_id.into(),
+                    codex_thread_store::AgentTaskFilter {
+                        target_id: Some(agent),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?
+                .tasks
+                .into_iter()
+                .filter(|task| task.status.is_terminal())
+                .map(|task| task.task_id)
+                .collect::<HashSet<_>>();
+            let records = store
+                .pending(self.session_id.into(), agent)
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            records
+                .into_iter()
+                .map(|record| {
+                    serde_json::from_str::<codex_protocol::protocol::InterAgentCommunication>(
+                        &record.envelope.payload_json,
+                    )
+                    .map_err(|err| CodexErr::Fatal(err.to_string()))
+                })
+                .filter(|result| {
+                    !result.as_ref().is_ok_and(|mail| {
+                        mail.mail.as_ref().is_some_and(|metadata| {
+                            metadata.kind == codex_protocol::protocol::AgentMailKind::Assignment
+                                && metadata
+                                    .task_id
+                                    .as_ref()
+                                    .is_some_and(|id| terminal.contains(id))
+                        })
+                    })
+                })
+                .collect()
+        })
+    }
+
+    fn mail_recorded<'a>(
+        &'a self,
+        agent: ThreadId,
+        turn: &'a str,
+        message_id: String,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.mail_store()
+                .await?
+                .mark_recorded(
+                    self.session_id.into(),
+                    agent,
+                    vec![message_id],
+                    turn.to_owned(),
+                )
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))
+        })
+    }
+
+    fn mail_attempted<'a>(
+        &'a self,
+        agent: ThreadId,
+        turn: &'a str,
+        items: &'a [codex_protocol::models::ResponseItem],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let ids = items
+                .iter()
+                .filter_map(|item| match item {
+                    codex_protocol::models::ResponseItem::AgentMessage { id, .. }
+                    | codex_protocol::models::ResponseItem::Message { id, .. } => {
+                        id.as_ref().map(ToString::to_string)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                return Ok(());
+            }
+            let store = self.mail_store().await?;
+            let ids = store
+                .accepted_ids(self.session_id.into(), agent, ids)
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            if ids.is_empty() {
+                return Ok(());
+            }
+            store
+                .mark_attempted(self.session_id.into(), agent, ids, turn.to_owned())
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            self.work_changed();
+            Ok(())
+        })
+    }
+
+    fn mail_submitted<'a>(
+        &'a self,
+        agent: ThreadId,
+        turn: &'a str,
+        items: &'a [codex_protocol::models::ResponseItem],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let ids = items
+                .iter()
+                .filter_map(|item| match item {
+                    codex_protocol::models::ResponseItem::AgentMessage { id, .. }
+                    | codex_protocol::models::ResponseItem::Message { id, .. } => {
+                        id.as_ref().map(ToString::to_string)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                return Ok(());
+            }
+            let store = self.mail_store().await?;
+            let ids = store
+                .accepted_ids(self.session_id.into(), agent, ids)
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            if ids.is_empty() {
+                return Ok(());
+            }
+            store
+                .mark_submitted(self.session_id.into(), agent, ids, turn.to_owned())
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            self.work_changed();
+            Ok(())
+        })
+    }
+
     fn resolve<'a>(
         &'a self,
         caller: ThreadId,
@@ -107,7 +367,10 @@ impl AgentControl for LocalAgentControl {
                 mut start_options,
             } = request;
             let target = self.resolve_target(caller, &target)?;
-            let (metadata, submission_id) = match input {
+            let track_assignment = resume_config
+                .features
+                .enabled(codex_features::Feature::WakeOnAgentMessages);
+            let (metadata, submission_id, task_id) = match input {
                 AgentInput::UserInput(input) => {
                     let receiver = self.get_agent_metadata(target);
                     let _residency_pin = if receiver.is_some() {
@@ -117,7 +380,7 @@ impl AgentControl for LocalAgentControl {
                         None
                     };
                     let submission_id = self.send_input(target, input, start_options).await?;
-                    (receiver.unwrap_or_default(), submission_id)
+                    (receiver.unwrap_or_default(), submission_id, None)
                 }
                 AgentInput::Message { message, mode } => {
                     let receiver = self.runtime.ensure_agent_known(target)?;
@@ -143,6 +406,10 @@ impl AgentControl for LocalAgentControl {
                     // Loaded recipients go straight to delivery, which rejects sends
                     // racing an in-progress eviction when it acquires the residency pin.
                     let _residency_pin = if mode == MessageDeliveryMode::TriggerTurn
+                        || (mode == MessageDeliveryMode::Auto
+                            && resume_config
+                                .features
+                                .enabled(codex_features::Feature::WakeOnAgentMessages))
                         || (self.runtime.upgrade()?.get_thread(target).await.is_err()
                             && self.runtime.registry.evicted_environments(target).is_none())
                     {
@@ -152,8 +419,13 @@ impl AgentControl for LocalAgentControl {
                         None
                     };
                     let communication = message.into_communication(author, receiver_path, mode);
+                    let task_id = communication
+                        .mail
+                        .as_ref()
+                        .and_then(|mail| mail.task_id.clone())
+                        .filter(|_| track_assignment);
                     let kind = match mode {
-                        MessageDeliveryMode::QueueOnly => {
+                        MessageDeliveryMode::Auto | MessageDeliveryMode::QueueOnly => {
                             start_options.parent_turn_id = None;
                             AgentCommunicationKind::Message
                         }
@@ -167,10 +439,11 @@ impl AgentControl for LocalAgentControl {
                             start_options,
                         )
                         .await?;
-                    (receiver, submission_id)
+                    (receiver, submission_id, task_id)
                 }
             };
             Ok(DeliveryReceipt {
+                task_id,
                 thread_id: target,
                 metadata,
                 submission_id,

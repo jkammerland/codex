@@ -799,6 +799,23 @@ impl CodexThread {
         self.io.agent_status().await
     }
 
+    /// Read native mailbox and barrier state without starting or attaching work.
+    pub async fn agent_work(&self) -> CodexResult<Option<crate::AgentWorkSummary>> {
+        if !self.enabled(Feature::WakeOnAgentMessages) {
+            return Ok(None);
+        }
+        self.session
+            .services
+            .agent_control
+            .agent_work(self.session.thread_id)
+            .await
+    }
+
+    /// Subscribe before reading a snapshot so a concurrent update cannot be missed.
+    pub fn watch_agent_work(&self) -> watch::Receiver<u64> {
+        self.session.services.agent_control.watch_agent_work()
+    }
+
     pub async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
         self.session.list_background_terminals().await
     }

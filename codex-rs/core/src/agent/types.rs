@@ -44,6 +44,8 @@ pub struct SpawnAgentOptions {
 /// Identity and status observed from a loaded agent, without a handle to its runtime.
 #[derive(Clone, Debug)]
 pub struct LiveAgent {
+    /// Opaque accepted assignment identifier, present on spawn receipts.
+    pub task_id: Option<String>,
     pub thread_id: ThreadId,
     pub metadata: AgentMetadata,
     pub status: AgentStatus,
@@ -57,6 +59,8 @@ pub struct ResolvedMultiAgentV2UsageHints {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MessageDeliveryMode {
+    /// Wake with the recipient's enabled mail policy.
+    Auto,
     /// Deliver to the mailbox without starting an idle agent.
     QueueOnly,
     /// Deliver to the active turn or start work if the agent is idle.

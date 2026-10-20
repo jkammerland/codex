@@ -86,6 +86,12 @@ pub async fn inter_agent_communication(
     start_options: codex_protocol::turn_input::TurnStartOptions,
 ) {
     let trigger_turn = communication.trigger_turn;
+    // Only a newly accepted explicit follow-up releases a manual interruption.
+    // Requeued assignments and automatic mailbox continuations retain the hold.
+    if trigger_turn && sess.is_interrupted() {
+        sess.agent_status
+            .send_replace(codex_protocol::protocol::AgentStatus::PendingInit);
+    }
     sess.input_queue
         .enqueue_mailbox_communication(communication, start_options)
         .await;

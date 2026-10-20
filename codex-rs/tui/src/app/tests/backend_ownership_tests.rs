@@ -213,6 +213,34 @@ async fn auxiliary_picker_connection_preserves_backend_selection() -> Result<()>
         .await?
         .expect("picker target");
     assert_eq!(target.backend_id, consumer.backend_id());
+    let (mut other_backend, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+    requests.lock().unwrap().clear();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.resume_target_session(&mut tui, &mut other_backend, target.clone())
+        .await?;
+    assert!(requests.lock().unwrap().is_empty());
+    assert_eq!(app.chat_widget.thread_id(), None);
+    other_backend.shutdown().await?;
+    proxy.await??;
+
+    // Replacing A's transport preserves the selection made before viewing backend B.
+    consumer.shutdown().await?;
+    consumer = crate::start_app_server_for_picker(
+        backend_id,
+        &app.config,
+        &AppServerTarget::Embedded,
+        Vec::new(),
+        LoaderOverrides::without_managed_config_for_tests(),
+        /*state_db*/ None,
+        Arc::clone(&app.environment_manager),
+    )
+    .await?;
+    assert_eq!(target.backend_id, consumer.backend_id());
     crate::legacy_core::config::set_project_trust_level(
         app.config.codex_home.as_path(),
         app.config.cwd.as_path(),
@@ -221,7 +249,6 @@ async fn auxiliary_picker_connection_preserves_backend_selection() -> Result<()>
     .map_err(std::io::Error::other)?;
     app.harness_overrides.cwd = Some(app.config.cwd.to_path_buf());
     let thread_id = target.thread_id;
-    let mut tui = crate::tui::test_support::make_test_tui()?;
     app.resume_target_session(&mut tui, &mut consumer, target)
         .await?;
     assert_eq!(app.chat_widget.thread_id(), Some(thread_id));

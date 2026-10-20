@@ -194,8 +194,12 @@ impl App {
                 Ok(client) => sender.send(AppEvent::AgentsHostUpdate(Box::new(
                     HostUpdate::Connected {
                         scope,
-                        session: AppServerSession::new(backend_id, client, target.thread_params_mode())
-                            .with_local_codex_home(&home),
+                        session: AppServerSession::new(
+                            backend_id,
+                            client,
+                            target.thread_params_mode(),
+                        )
+                        .with_local_codex_home(&home),
                     },
                 ))),
                 Err(_) => sender.send(AppEvent::AgentsHostUpdate(Box::new(HostUpdate::Offline(

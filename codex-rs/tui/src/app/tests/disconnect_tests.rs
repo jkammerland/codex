@@ -516,46 +516,50 @@ async fn rejected_initial_thread_start_reconnects_and_submits_prompt_once() -> R
         let cwd = app.config.cwd.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
-            serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| {
-                let cwd = cwd.clone();
-                async move {
-                    assert_eq!(request.method, "thread/start");
-                    let params = request.params.as_ref().expect("thread/start params");
-                    assert_eq!(params["model"], "gpt-retry");
-                    assert_eq!(params["config"]["model_reasoning_effort"], "high");
-                    if reject_again {
-                        return Some(json!({"error": {
-                            "code": -32600,
-                            "message": "Server is draining; retry after reconnecting",
-                            "data": {"reason": "serverShuttingDown"}
-                        }}));
-                    }
-                    Some(json!({"result": {
-                        "thread": {
-                            "id": thread_id,
-                            "sessionId": thread_id,
-                            "preview": "startup prompt",
-                            "ephemeral": false,
+            serve_reconnect_requests(
+                tokio_tungstenite::accept_async(stream).await?,
+                "2.0.0",
+                |request| {
+                    let cwd = cwd.clone();
+                    async move {
+                        assert_eq!(request.method, "thread/start");
+                        let params = request.params.as_ref().expect("thread/start params");
+                        assert_eq!(params["model"], "gpt-retry");
+                        assert_eq!(params["config"]["model_reasoning_effort"], "high");
+                        if reject_again {
+                            return Some(json!({"error": {
+                                "code": -32600,
+                                "message": "Server is draining; retry after reconnecting",
+                                "data": {"reason": "serverShuttingDown"}
+                            }}));
+                        }
+                        Some(json!({"result": {
+                            "thread": {
+                                "id": thread_id,
+                                "sessionId": thread_id,
+                                "preview": "startup prompt",
+                                "ephemeral": false,
+                                "modelProvider": "test-provider",
+                                "createdAt": 1,
+                                "updatedAt": 1,
+                                "status": {"type": "idle"},
+                                "cwd": cwd,
+                                "cliVersion": "0.0.0",
+                                "source": "cli",
+                                "turns": []
+                            },
+                            "model": "gpt-retry",
                             "modelProvider": "test-provider",
-                            "createdAt": 1,
-                            "updatedAt": 1,
-                            "status": {"type": "idle"},
+                            "serviceTier": null,
                             "cwd": cwd,
-                            "cliVersion": "0.0.0",
-                            "source": "cli",
-                            "turns": []
-                        },
-                        "model": "gpt-retry",
-                        "modelProvider": "test-provider",
-                        "serviceTier": null,
-                        "cwd": cwd,
-                        "approvalPolicy": "never",
-                        "approvalsReviewer": "user",
-                        "sandbox": {"type": "dangerFullAccess"},
-                        "reasoningEffort": "high"
-                    }}))
-                }
-            })
+                            "approvalPolicy": "never",
+                            "approvalsReviewer": "user",
+                            "sandbox": {"type": "dangerFullAccess"},
+                            "reasoningEffort": "high"
+                        }}))
+                    }
+                },
+            )
             .await
         });
         let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
@@ -610,6 +614,7 @@ async fn rejected_initial_thread_start_reconnects_and_submits_prompt_once() -> R
             /*remote_cwd*/ None,
             crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
             app.reconnect.presentation,
+            /*host_key*/ None,
         )
         .await?;
         app.finish_reconnect(

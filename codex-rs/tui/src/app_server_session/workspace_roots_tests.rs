@@ -306,6 +306,7 @@ async fn windows_executor_paths_survive_lifecycle_and_normal_turn_omits_client_p
         Ok::<_, color_eyre::Report>(turn_params.expect("normal turn request"))
     });
     let mut session = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
         crate::connect_remote_app_server(endpoint).await?,
         ThreadParamsMode::Remote,
     );

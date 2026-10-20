@@ -468,7 +468,11 @@ impl AppServerSession {
         client: AppServerClient,
         thread_params_mode: ThreadParamsMode,
     ) -> Self {
-        Self::from_connection(backend_id, connection::Connection::new(client), thread_params_mode)
+        Self::from_connection(
+            backend_id,
+            connection::Connection::new(client),
+            thread_params_mode,
+        )
     }
 
     pub(crate) fn discovery_placeholder() -> Self {
@@ -521,8 +525,11 @@ impl AppServerSession {
     }
 
     pub(crate) fn request_copy(&self) -> Self {
-        let mut session =
-            Self::from_connection(self.backend_id, self.client.request_copy(), self.thread_params_mode);
+        let mut session = Self::from_connection(
+            self.backend_id,
+            self.client.request_copy(),
+            self.thread_params_mode,
+        );
         session.request_namespace = Some(Uuid::new_v4());
         session.task_tool_threads = self.task_tool_threads.clone();
         session.task_tool_capabilities_dir = self.task_tool_capabilities_dir.clone();
@@ -961,6 +968,10 @@ impl AppServerSession {
             })
             .await
             .map_err(|err| bootstrap_request_error("account/read failed during TUI bootstrap", err))
+    }
+
+    pub(crate) fn owns_event_receiver(&self) -> bool {
+        self.client.events.is_some()
     }
 
     pub(crate) fn take_events(

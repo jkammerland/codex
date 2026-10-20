@@ -1315,9 +1315,7 @@ See the Codex keymap documentation for supported actions and examples."
                     backends.resume_events(displayed_owner);
                 }
                 if reconnect_waiting_for_drain
-                    && app.agents_hosts.enabled()
-                    && app.agents_hosts.hosts.get(&app.agents_hosts.foreground)
-                        .is_some_and(|host| !host.connected)
+                    && !app.startup_connection_is_draining(&backends, displayed_session)
                 {
                     reconnect = None;
                     reconnect_waiting_for_drain = false;
@@ -1407,12 +1405,7 @@ See the Codex keymap documentation for supported actions and examples."
                     reconnect_scope = Some(app.agents_hosts.scope());
                     let presentation = app.reconnect.presentation;
                     let wait_for_drain = app.pending_startup_thread_start
-                        && if app.agents_hosts.enabled() {
-                            app.agents_hosts.hosts.get(&app.agents_hosts.foreground)
-                                .is_some_and(|host| host.connected)
-                        } else {
-                            backends.is_listening(displayed_owner)
-                        };
+                        && app.startup_connection_is_draining(&backends, displayed_session);
                     reconnect_waiting_for_drain = wait_for_drain;
                     let attempt = reconnect::reconnect(
                         displayed_owner,
@@ -1578,6 +1571,9 @@ See the Codex keymap documentation for supported actions and examples."
                             Some(_) => {}
                             None => {
                                 if owner == displayed_owner {
+                                    if let Some(host) = app.agents_hosts.hosts.get_mut(&app.agents_hosts.foreground) {
+                                        host.connected = false;
+                                    }
                                     if app.reconnect.offline && app.pending_startup_thread_start {
                                         reconnect = None;
                                     } else if !app.pending_startup_thread_start {

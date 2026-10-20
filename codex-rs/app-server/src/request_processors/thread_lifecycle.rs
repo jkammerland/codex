@@ -17,6 +17,8 @@ pub(super) struct ListenerTaskContext {
     pub(super) codex_home: PathBuf,
     pub(super) skills_watcher: Arc<SkillsWatcher>,
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+    #[cfg(test)]
+    pub(super) listener_start_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 struct UnloadingState {
@@ -261,6 +263,11 @@ pub(super) async fn ensure_listener_task_running(
     let is_v2_child = conversation.multi_agent_version() == Some(MultiAgentVersion::V2)
         && matches!(config_snapshot.session_source, SessionSource::SubAgent(_));
     let thread_settings_baseline = thread_settings_from_config_snapshot(&config_snapshot);
+    let mut agent_work_updates = conversation.watch_agent_work();
+    // Capture the baseline before advertising the listener to concurrent attachers.
+    // Once attachment returns and publishes a snapshot, later changes must survive
+    // even if the listener task has not started running yet.
+    let mut previous_agent_work = super::thread_agent_work::snapshot(&conversation).await;
     let (mut listener_command_rx, listener_generation) = {
         let mut thread_state = thread_state.lock().await;
         if thread_state.listener_matches(&conversation) {
@@ -283,6 +290,8 @@ pub(super) async fn ensure_listener_task_running(
             .register_listener_command_tx(conversation_id, listener_command_tx);
         (listener_command_rx, listener_generation)
     };
+    #[cfg(test)]
+    let listener_start_gate = listener_task_context.listener_start_gate.clone();
     let ListenerTaskContext {
         outgoing,
         thread_manager,
@@ -294,10 +303,12 @@ pub(super) async fn ensure_listener_task_running(
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
-    let mut agent_work_updates = conversation.watch_agent_work();
     tokio::spawn(async move {
+        #[cfg(test)]
+        if let Some(gate) = listener_start_gate {
+            gate.notified().await;
+        }
         let mut agent_work_updates_open = true;
-        let mut previous_agent_work = super::thread_agent_work::snapshot(&conversation).await;
         loop {
             tokio::select! {
                 biased;

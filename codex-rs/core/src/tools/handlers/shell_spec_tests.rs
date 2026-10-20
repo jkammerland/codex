@@ -155,7 +155,7 @@ fn wait_process_tool_matches_expected_no_timeout_spec() {
     );
     assert_eq!(
         spec.parameters.required,
-        Some(vec!["session_id".to_string()])
+        Some(vec!["session_id".to_string()].into_boxed_slice())
     );
     let Some(output_schema) = spec.output_schema else {
         panic!("wait_process should define an output schema");

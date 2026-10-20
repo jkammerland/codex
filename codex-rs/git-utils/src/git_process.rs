@@ -127,7 +127,7 @@ pub async fn run_git_command_with_timeout_and_cancellation_output(
     #[cfg(windows)]
     let job = JobObject::create_without_breakaway()?;
     #[cfg(windows)]
-    let mut child = match job.spawn_contained_owned(command).await {
+    let child = match job.spawn_contained_owned(command).await {
         Ok(child) => child,
         Err(error) => {
             tokio::task::spawn_blocking(move || job.terminate_and_wait())
@@ -149,55 +149,101 @@ pub async fn run_git_command_with_timeout_and_cancellation_output(
         job: Some(job),
     };
 
+    #[cfg(windows)]
+    {
+        wait_for_owned_windows_git_command(child, process_tree, timeout_duration, cancelled).await
+    }
     #[cfg(unix)]
-    let mut process_tree = process_tree;
+    {
+        let mut process_tree = process_tree;
 
-    // Keep the Unix group leader unreaped while descendants still hold output pipes.
-    // Its numeric group ID cannot be reused before cancellation has signalled the group.
-    let output = async {
-        let (stdout, stderr) = tokio::join!(
-            read_owned_pipe(child.stdout.take()),
-            read_owned_pipe(child.stderr.take()),
-        );
-        (child.wait().await, stdout, stderr)
-    };
-    tokio::pin!(output);
-    let stop = tokio::select! {
-        biased;
-        () = &mut cancelled => Err(io::ErrorKind::Interrupted),
-        result = &mut output => Ok(result),
-        () = tokio::time::sleep(timeout_duration) => Err(io::ErrorKind::TimedOut),
-    };
-    match stop {
-        Ok((status, stdout, stderr)) => {
-            // The wait has reaped the leader. Never signal its numeric ID after this point,
-            // including on wait errors; successful Unix commands preserve existing semantics.
-            #[cfg(unix)]
-            {
+        // Keep the Unix group leader unreaped while descendants still hold output pipes.
+        // Its numeric group ID cannot be reused before cancellation has signalled the group.
+        let output = async {
+            let (stdout, stderr) = tokio::join!(
+                read_owned_pipe(child.stdout.take()),
+                read_owned_pipe(child.stderr.take()),
+            );
+            (child.wait().await, stdout, stderr)
+        };
+        tokio::pin!(output);
+        let stop = tokio::select! {
+            biased;
+            () = &mut cancelled => Err(io::ErrorKind::Interrupted),
+            result = &mut output => Ok(result),
+            () = tokio::time::sleep(timeout_duration) => Err(io::ErrorKind::TimedOut),
+        };
+        match stop {
+            Ok((status, stdout, stderr)) => {
+                // The wait has reaped the leader. Never signal its numeric ID after this point,
+                // including on wait errors; successful Unix commands preserve existing semantics.
                 process_tree.armed = false;
+                Ok(Output {
+                    status: status?,
+                    stdout: stdout?,
+                    stderr: stderr?,
+                })
             }
-            #[cfg(windows)]
-            terminate_owned_git_process_tree(process_tree).await?;
-            Ok(Output {
-                status: status?,
-                stdout: stdout?,
-                stderr: stderr?,
-            })
-        }
-        Err(reason) => {
-            // Retain the child and both readers until termination releases all pipe ends.
-            terminate_owned_git_process_tree(process_tree).await?;
-            let (status, stdout, stderr) = output.await;
-            status?;
-            stdout?;
-            stderr?;
-            let message = match reason {
-                io::ErrorKind::Interrupted => "Git command cancelled",
-                _ => "Git command timed out",
-            };
-            Err(io::Error::new(reason, message))
+            Err(reason) => {
+                // Retain the child and both readers until termination releases all pipe ends.
+                terminate_owned_git_process_tree(process_tree).await?;
+                let (status, stdout, stderr) = output.await;
+                status?;
+                stdout?;
+                stderr?;
+                let message = match reason {
+                    io::ErrorKind::Interrupted => "Git command cancelled",
+                    _ => "Git command timed out",
+                };
+                Err(io::Error::new(reason, message))
+            }
         }
     }
+}
+
+#[cfg(windows)]
+async fn wait_for_owned_windows_git_command(
+    mut child: Child,
+    process_tree: KillGitProcessTreeOnDrop,
+    timeout_duration: Duration,
+    cancelled: impl Future<Output = ()>,
+) -> io::Result<Output> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let finish = async {
+        tokio::pin!(cancelled);
+        let stop = tokio::select! {
+            biased;
+            () = &mut cancelled => Err(io::ErrorKind::Interrupted),
+            status = child.wait() => Ok(status),
+            () = tokio::time::sleep(timeout_duration) => Err(io::ErrorKind::TimedOut),
+        };
+
+        // The job handle retains process identity after the direct child exits. Terminate
+        // remaining members before waiting for EOF: descendants may retain inherited pipes.
+        terminate_owned_git_process_tree(process_tree).await?;
+        match stop {
+            Ok(status) => status.map(|status| (status, None)),
+            Err(reason) => child.wait().await.map(|status| (status, Some(reason))),
+        }
+    };
+    let (finish, stdout, stderr) =
+        tokio::join!(finish, read_owned_pipe(stdout), read_owned_pipe(stderr),);
+    let (status, reason) = finish?;
+    let stdout = stdout?;
+    let stderr = stderr?;
+    if let Some(reason) = reason {
+        let message = match reason {
+            io::ErrorKind::Interrupted => "Git command cancelled",
+            _ => "Git command timed out",
+        };
+        return Err(io::Error::new(reason, message));
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 async fn read_owned_pipe(pipe: Option<impl AsyncRead + Unpin>) -> io::Result<Vec<u8>> {

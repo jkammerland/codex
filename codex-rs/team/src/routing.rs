@@ -265,6 +265,10 @@ impl Coordinator {
         Ok(())
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "orders resumed settings and delivery with model selections and leave"
+    )]
     pub(crate) async fn deliver_to(
         &self,
         machine_id: &str,
@@ -284,6 +288,8 @@ impl Coordinator {
                 if address.machine_id != machine_id || address.server_id != server_id {
                     continue;
                 }
+                let model_updates = self.model_update_lock(machine_id, server_id).await;
+                let _selection = model_updates.lock().await;
                 let delivery_id = format!("{id}:{}", address_key(address));
                 let agent = self
                     .store
@@ -312,6 +318,9 @@ impl Coordinator {
                     return Ok(());
                 }
                 if agent.is_some_and(|agent| agent.runtime.is_some_and(|runtime| !runtime.loaded)) {
+                    // Resume can immediately dispatch the host's durable mail.
+                    // Journal the latest selection before readiness admits it.
+                    self.apply_model_selection(address, peer).await?;
                     let _: ThreadResumeResponse = peer
                         .handle
                         .request_typed(ClientRequest::ThreadResume {

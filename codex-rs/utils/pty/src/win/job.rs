@@ -8,22 +8,34 @@ use tokio::process::Child;
 use tokio::process::Command;
 use winapi::shared::ntdef::NT_SUCCESS;
 use winapi::shared::ntdef::NTSTATUS;
+use winapi::shared::winerror::ERROR_INVALID_PARAMETER;
+use winapi::shared::winerror::ERROR_MORE_DATA;
+use winapi::um::jobapi::IsProcessInJob;
 use winapi::um::jobapi2::AssignProcessToJobObject;
 use winapi::um::jobapi2::CreateJobObjectW;
+use winapi::um::jobapi2::QueryInformationJobObject;
 use winapi::um::jobapi2::SetInformationJobObject;
 use winapi::um::jobapi2::TerminateJobObject;
 use winapi::um::processthreadsapi::OpenProcess;
 use winapi::um::processthreadsapi::TerminateProcess;
+use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::winbase::CREATE_NO_WINDOW;
 use winapi::um::winbase::CREATE_SUSPENDED;
+use winapi::um::winbase::INFINITE;
+use winapi::um::winbase::WAIT_FAILED;
+use winapi::um::winbase::WAIT_OBJECT_0;
 use winapi::um::winnt::HANDLE;
 use winapi::um::winnt::JOB_OBJECT_LIMIT_BREAKAWAY_OK;
 use winapi::um::winnt::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+use winapi::um::winnt::JOBOBJECT_BASIC_PROCESS_ID_LIST;
 use winapi::um::winnt::JOBOBJECT_EXTENDED_LIMIT_INFORMATION;
+use winapi::um::winnt::JobObjectBasicProcessIdList;
 use winapi::um::winnt::JobObjectExtendedLimitInformation;
+use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
 use winapi::um::winnt::PROCESS_SET_QUOTA;
 use winapi::um::winnt::PROCESS_SUSPEND_RESUME;
 use winapi::um::winnt::PROCESS_TERMINATE;
+use winapi::um::winnt::SYNCHRONIZE;
 
 #[link(name = "ntdll")]
 unsafe extern "system" {
@@ -64,6 +76,137 @@ impl JobObject {
         let job = Self::create()?;
         Self::set_limit_flags(&job.handle, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)?;
         Ok(job)
+    }
+
+    /// Terminates this owned job and waits on its processes' authoritative exit handles.
+    /// Call from a blocking thread. The job must not have preserved descendants.
+    pub fn terminate_and_wait(self) -> io::Result<()> {
+        if *self
+            .preserve_descendants
+            .lock()
+            .map_err(|_| io::Error::other("job state lock poisoned"))?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot await termination of preserved descendants",
+            ));
+        }
+
+        let mut previous_ids = Vec::new();
+        loop {
+            let process_ids = self.process_ids()?;
+            if process_ids.is_empty() {
+                return Ok(());
+            }
+            if process_ids == previous_ids {
+                return Err(io::Error::other(
+                    "job process list did not advance after exit",
+                ));
+            }
+            let mut processes = Vec::with_capacity(process_ids.len());
+            for &process_id in &process_ids {
+                let handle = unsafe {
+                    OpenProcess(
+                        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        /*bInheritHandle*/ 0,
+                        process_id,
+                    )
+                };
+                if handle.is_null() {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                        // The process exited between the job snapshot and opening its handle.
+                        continue;
+                    }
+                    return Err(error);
+                }
+                let handle = unsafe { OwnedHandle::from_raw_handle(handle.cast()) };
+                let mut member = 0;
+                let queried = unsafe {
+                    IsProcessInJob(
+                        handle.as_raw_handle().cast(),
+                        self.handle.as_raw_handle().cast(),
+                        &mut member,
+                    )
+                };
+                if queried == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // A reused numeric ID is not ownership evidence. Only await handles that
+                // still belong to this job; a mismatch proves the original process exited.
+                if member != 0 {
+                    processes.push(handle);
+                }
+            }
+
+            self.terminate()?;
+            for process in processes {
+                let waited =
+                    unsafe { WaitForSingleObject(process.as_raw_handle().cast(), INFINITE) };
+                match waited {
+                    WAIT_OBJECT_0 => {}
+                    WAIT_FAILED => return Err(io::Error::last_os_error()),
+                    _ => return Err(io::Error::other("unexpected process wait result")),
+                }
+            }
+
+            // Only an observed process exit advances the loop. Re-enumeration catches
+            // descendants created between the snapshot and termination, without relying
+            // on advisory job notifications or periodic queries.
+            previous_ids = process_ids;
+        }
+    }
+
+    fn process_ids(&self) -> io::Result<Vec<u32>> {
+        // usize storage supplies the alignment of the variable-length ULONG_PTR array.
+        let header_size = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+        let mut storage = vec![0_usize; 16];
+        loop {
+            let buffer_size = u32::try_from(std::mem::size_of_val(storage.as_slice()))
+                .map_err(|_| io::Error::other("job process list is too large"))?;
+            let list = storage
+                .as_mut_ptr()
+                .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+            let queried = unsafe {
+                QueryInformationJobObject(
+                    self.handle.as_raw_handle().cast(),
+                    JobObjectBasicProcessIdList,
+                    list.cast(),
+                    buffer_size,
+                    std::ptr::null_mut(),
+                )
+            };
+            let error = (queried == 0).then(io::Error::last_os_error);
+            let count = unsafe { (*list).NumberOfProcessIdsInList } as usize;
+            let assigned = unsafe { (*list).NumberOfAssignedProcesses } as usize;
+            if error
+                .as_ref()
+                .is_some_and(|error| error.raw_os_error() == Some(ERROR_MORE_DATA as i32))
+                || count < assigned
+            {
+                let words = header_size.div_ceil(std::mem::size_of::<usize>())
+                    + assigned.max(storage.len());
+                storage.resize(words, 0);
+                continue;
+            }
+            if let Some(error) = error {
+                return Err(error);
+            }
+            let ids = unsafe {
+                std::slice::from_raw_parts(
+                    std::ptr::addr_of!((*list).ProcessIdList).cast::<usize>(),
+                    count,
+                )
+            };
+            let mut ids = ids
+                .iter()
+                .map(|id| {
+                    u32::try_from(*id).map_err(|_| io::Error::other("invalid job process id"))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            ids.sort_unstable();
+            return Ok(ids);
+        }
     }
 
     /// Captures an owned process handle before its numeric identifier can be reused.
@@ -197,6 +340,28 @@ impl JobObject {
     pub fn spawn_contained(&self, command: &mut Command) -> io::Result<Child> {
         self.prepare_suspended_spawn(command);
         let child = command.spawn()?;
+        self.assign_and_resume_child(&child)?;
+        Ok(child)
+    }
+
+    /// Starts a contained child and drains it before returning any post-spawn error.
+    /// Unlike the compatibility launcher, this never retries without containment.
+    pub async fn spawn_contained_owned(&self, command: &mut Command) -> io::Result<Child> {
+        self.prepare_suspended_spawn(command);
+        let mut child = command.spawn()?;
+        if let Err(error) = self.assign_and_resume_child(&child) {
+            if let Err(kill_error) = child.start_kill()
+                && child.try_wait()?.is_none()
+            {
+                return Err(kill_error);
+            }
+            child.wait_with_output().await?;
+            return Err(error);
+        }
+        Ok(child)
+    }
+
+    fn assign_and_resume_child(&self, child: &Child) -> io::Result<()> {
         let process_handle = child
             .raw_handle()
             .ok_or_else(|| io::Error::other("missing child process handle"))?;
@@ -209,7 +374,7 @@ impl JobObject {
             )));
         }
 
-        Ok(child)
+        Ok(())
     }
 
     /// Allows contained descendants to keep running after the root exits normally.

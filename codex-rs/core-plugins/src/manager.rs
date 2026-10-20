@@ -81,8 +81,9 @@ use crate::skill_snapshots::new_plugin_skill_snapshots;
 use crate::startup_sync::OPENAI_PLUGINS_GIT_URL;
 use crate::startup_sync::curated_plugins_api_marketplace_path;
 use crate::startup_sync::curated_plugins_repo_path;
+use crate::startup_sync::lifecycle::CuratedGitLifecycle;
 use crate::startup_sync::read_curated_plugins_sha;
-use crate::startup_sync::sync_openai_plugins_repo;
+use crate::startup_sync::sync_openai_plugins_repo_with_lifecycle;
 use crate::store::PluginInstallResult as StorePluginInstallResult;
 use crate::store::PluginStore;
 use crate::store::PluginStoreError;
@@ -554,6 +555,7 @@ impl From<PluginDetail> for PluginCapabilitySummary {
 
 pub struct PluginsManager {
     codex_home: PathBuf,
+    curated_git: Arc<CuratedGitLifecycle>,
     store: PluginStore,
     featured_plugin_ids_cache: RwLock<Option<CachedFeaturedPluginIds>>,
     recommended_plugins_cache: RwLock<HashMap<RecommendedPluginsCacheKey, RecommendedPluginsMode>>,
@@ -709,6 +711,7 @@ impl PluginsManager {
             ToolSuggestMetadataCache::new(Arc::clone(&store.manifest_cache));
         Self {
             codex_home,
+            curated_git: Arc::new(CuratedGitLifecycle::default()),
             store,
             featured_plugin_ids_cache: RwLock::new(None),
             recommended_plugins_cache: RwLock::new(HashMap::new()),
@@ -748,6 +751,11 @@ impl PluginsManager {
 
     pub fn auth_mode(&self) -> Option<AuthMode> {
         self.auth_manager.get_api_auth_mode()
+    }
+
+    /// Cancels curated Git commands and waits for their process cleanup only.
+    pub async fn shutdown_curated_git(&self) {
+        self.curated_git.shutdown().await;
     }
 
     fn remote_global_catalog_active(&self, config: &PluginsConfigInput) -> bool {
@@ -3300,6 +3308,9 @@ impl PluginsManager {
         http_client_factory: HttpClientFactory,
         on_effective_plugins_changed: Option<EffectivePluginsChangedCallback>,
     ) {
+        if self.curated_git.ensure_running().is_err() {
+            return;
+        }
         if CURATED_REPO_SYNC_STARTED.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -3308,10 +3319,15 @@ impl PluginsManager {
                 let Ok(runtime) = tokio::runtime::Handle::try_current() else {
                     return on_effective_plugins_changed;
                 };
+                let lifecycle = Arc::clone(&self.curated_git);
                 let callback: EffectivePluginsChangedCallback = Arc::new(move |change| {
                     let on_effective_plugins_changed = Arc::clone(&on_effective_plugins_changed);
+                    let lifecycle = Arc::clone(&lifecycle);
                     runtime.spawn(async move {
-                        on_effective_plugins_changed(change);
+                        let _ = lifecycle.publish(|| {
+                            on_effective_plugins_changed(change);
+                            Ok(())
+                        });
                     });
                 });
                 callback
@@ -3321,8 +3337,16 @@ impl PluginsManager {
         if let Err(err) = std::thread::Builder::new()
             .name("plugins-curated-repo-sync".to_string())
             .spawn(move || {
-                match sync_openai_plugins_repo(codex_home.as_path(), http_client_factory) {
+                match sync_openai_plugins_repo_with_lifecycle(
+                    codex_home.as_path(),
+                    http_client_factory,
+                    &manager.curated_git,
+                ) {
                     Ok(curated_plugin_version) => {
+                        if manager.curated_git.ensure_running().is_err() {
+                            CURATED_REPO_SYNC_STARTED.store(false, Ordering::SeqCst);
+                            return;
+                        }
                         let configured_curated_plugin_ids =
                             configured_curated_plugin_ids_from_codex_home(codex_home.as_path());
                         match refresh_curated_plugin_cache(
@@ -3331,10 +3355,19 @@ impl PluginsManager {
                             &configured_curated_plugin_ids,
                         ) {
                             Ok(cache_refreshed) => {
-                                manager.clear_caches_after_marketplace_source_refresh(
-                                    cache_refreshed,
-                                    on_effective_plugins_changed.as_ref(),
-                                );
+                                if manager
+                                    .curated_git
+                                    .publish(|| {
+                                        manager.clear_caches_after_marketplace_source_refresh(
+                                            cache_refreshed,
+                                            on_effective_plugins_changed.as_ref(),
+                                        );
+                                        Ok(())
+                                    })
+                                    .is_err()
+                                {
+                                    CURATED_REPO_SYNC_STARTED.store(false, Ordering::SeqCst);
+                                }
                             }
                             Err(err) => {
                                 manager.clear_cache();

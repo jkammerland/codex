@@ -4154,7 +4154,7 @@ dependencies = [
 
 [[package]]
 name = "codex-multi-env-copy-file"
-version = "0.0.0"
+version = "0.163.0"
 dependencies = [
  "anyhow",
  "codex-config",
@@ -4405,7 +4405,7 @@ dependencies = [
 
 [[package]]
 name = "codex-protocol-test-support"
-version = "0.0.0"
+version = "0.163.0"
 dependencies = [
  "codex-protocol",
 ]
@@ -4587,7 +4587,7 @@ dependencies = [
 
 [[package]]
 name = "codex-runtime-agent-instance"
-version = "0.0.0"
+version = "0.163.0"
 dependencies = [
  "base64 0.22.1",
  "codex-agent-identity",

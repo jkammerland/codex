@@ -13,6 +13,11 @@ use codex_protocol::team_model::TeamSelectionOrigin;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[path = "models_deferred.rs"]
+mod deferred;
+
+use deferred::DeferredModelIntent;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LocalModelIntent {
     pub model: String,
@@ -86,9 +91,10 @@ impl TeamHostService {
                 );
                 if selection.revision == revision {
                     ensure!(
-                        ["selection", "model", "effort"]
-                            .iter()
-                            .all(|field| previous[*field] == request[*field]),
+                        ["selection", "model", "effort"].iter().all(|field| {
+                            (*field == "model" && selection.model == TeamSelection::Default)
+                                || previous[*field] == request[*field]
+                        }),
                         "model selection revision was reused with different input"
                     );
                     return Ok(None);
@@ -100,31 +106,80 @@ impl TeamHostService {
             .manager
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("host is shutting down"))?;
-        let snapshot = manager.get_thread(thread_id).await?.config_snapshot().await;
-        let previous_desired = match previous
-            .as_ref()
-            .filter(|request| {
-                request
-                    .pointer("/selection/revision")
-                    .and_then(serde_json::Value::as_i64)
-                    .is_some_and(|revision| fence.is_none_or(|fence| revision > fence))
-            })
-            .and_then(|request| request.get("desired"))
-        {
+        let previous_requested = previous.as_ref().filter(|request| {
+            request
+                .pointer("/selection/revision")
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|revision| fence.is_none_or(|fence| revision > fence))
+        });
+        let previous_desired = match previous_requested.and_then(|request| request.get("desired")) {
             Some(desired) => Some(serde_json::from_value::<LocalModelIntent>(desired.clone())?),
             None => None,
         };
-        let mut intent = previous_local
+        let previous_deferred = previous_requested
+            .and_then(|request| request.get("deferred").map(|deferred| (request, deferred)))
+            .map(|(request, deferred)| {
+                Ok::<_, serde_json::Error>((
+                    serde_json::from_value::<DeferredModelIntent>(deferred.clone())?,
+                    serde_json::from_value::<TeamModelSelection>(request["selection"].clone())?,
+                ))
+            })
+            .transpose()?;
+        let local = previous_local
             .as_ref()
             .filter(|intent| intent.superseded_by.is_none())
-            .cloned()
-            .or(previous_desired)
-            .unwrap_or(LocalModelIntent {
-                model: snapshot.model,
-                effort: snapshot.reasoning_effort,
-                policy: snapshot.team_model_policy,
-                superseded_by: None,
-            });
+            .cloned();
+        let thread = match manager.get_thread(thread_id).await {
+            Ok(thread) => thread,
+            Err(error) => {
+                let Some(selection) = &settings.team_selection else {
+                    return Err(error.into());
+                };
+                let mut deferred = previous_deferred.map(|(deferred, _)| deferred).unwrap_or(
+                    DeferredModelIntent {
+                        base: local.or(previous_desired),
+                        ..Default::default()
+                    },
+                );
+                if selection.model != TeamSelection::Keep {
+                    deferred.model = selection.model.clone();
+                    deferred.resolved_model.clone_from(&settings.model);
+                }
+                if selection.effort != TeamSelection::Keep {
+                    deferred.effort = selection.effort.clone();
+                    deferred.resolved_effort = settings.effort.clone().flatten();
+                }
+                request["deferred"] = serde_json::to_value(deferred)?;
+                let mut writes = vec![("model_selection_request", id.as_str(), request)];
+                if let Some(mut local) = previous_local {
+                    local.superseded_by = Some(selection.revision);
+                    writes.push((
+                        "model_local_intent",
+                        id.as_str(),
+                        serde_json::to_value(local)?,
+                    ));
+                }
+                store.put_records(&writes).await?;
+                self.notify();
+                return Ok(None);
+            }
+        };
+        let previous_deferred = if let Some((deferred, selection)) = previous_deferred {
+            Some(deferred.resolve(&thread, &selection).await?)
+        } else {
+            None
+        };
+        let snapshot = thread.config_snapshot().await;
+        let mut intent =
+            local
+                .or(previous_deferred)
+                .or(previous_desired)
+                .unwrap_or(LocalModelIntent {
+                    model: snapshot.model,
+                    effort: snapshot.reasoning_effort,
+                    policy: snapshot.team_model_policy,
+                    superseded_by: None,
+                });
         // Legacy coordinator journals have no complete desired snapshot. Merge
         // their selected fields once before a newer sparse edit supersedes them.
         if let Some(previous) = &previous {
@@ -155,7 +210,15 @@ impl TeamHostService {
             intent.model = mode.model().to_owned();
             intent.effort = mode.reasoning_effort();
         } else {
-            if let Some(model) = &settings.model {
+            if settings
+                .team_selection
+                .as_ref()
+                .is_some_and(|selection| selection.model == TeamSelection::Default)
+            {
+                // An unloaded request can race a completed load. Resolve the
+                // default here too, before journaling a complete desired state.
+                intent.model = thread.configured_default_model().await;
+            } else if let Some(model) = &settings.model {
                 intent.model.clone_from(model);
             }
             if let Some(effort) = &settings.effort {
@@ -271,10 +334,18 @@ impl TeamHostService {
                     .and_then(serde_json::Value::as_i64)
                     .is_some_and(|revision| fence.is_none_or(|fence| revision > fence))
             });
-            let requested_desired = requested
-                .and_then(|request| request.get("desired"))
-                .map(|desired| serde_json::from_value::<LocalModelIntent>(desired.clone()))
-                .transpose()?;
+            let requested_desired = if let Some((request, deferred)) = requested
+                .and_then(|request| request.get("deferred").map(|deferred| (request, deferred)))
+            {
+                let deferred: DeferredModelIntent = serde_json::from_value(deferred.clone())?;
+                let selection = serde_json::from_value(request["selection"].clone())?;
+                Some(deferred.resolve(&thread, &selection).await?)
+            } else {
+                requested
+                    .and_then(|request| request.get("desired"))
+                    .map(|desired| serde_json::from_value::<LocalModelIntent>(desired.clone()))
+                    .transpose()?
+            };
             let desired = local.or(requested_desired);
             if let Some(intent) = desired {
                 let current = thread.config_snapshot().await;

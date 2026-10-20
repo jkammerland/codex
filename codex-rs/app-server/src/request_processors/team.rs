@@ -28,12 +28,16 @@ use crate::outgoing_message::OutgoingMessageSender;
 
 pub(crate) struct TeamRequestProcessor {
     service: Arc<TeamHostService>,
+    thread_manager: Arc<codex_core::ThreadManager>,
+    thread_store: Arc<dyn codex_thread_store::ThreadStore>,
     thread_watch: crate::thread_status::ThreadWatchManager,
 }
 
 impl TeamRequestProcessor {
     pub(crate) fn new(
         service: Arc<TeamHostService>,
+        thread_manager: Arc<codex_core::ThreadManager>,
+        thread_store: Arc<dyn codex_thread_store::ThreadStore>,
         outgoing: Arc<OutgoingMessageSender>,
         thread_watch: crate::thread_status::ThreadWatchManager,
     ) -> Self {
@@ -50,6 +54,8 @@ impl TeamRequestProcessor {
         });
         Self {
             service,
+            thread_manager,
+            thread_store,
             thread_watch,
         }
     }
@@ -174,6 +180,63 @@ impl TeamRequestProcessor {
     ) -> Result<TeamDeliverResponse, JSONRPCErrorError> {
         self.service
             .deliver(params)
+            .await
+            .map_err(|error| invalid_request(error.to_string()))
+    }
+
+    pub(crate) async fn defer_model_selection(
+        &self,
+        params: &codex_app_server_protocol::ThreadSettingsUpdateParams,
+    ) -> Result<bool, JSONRPCErrorError> {
+        if params.team_selection.is_none() {
+            return Ok(false);
+        }
+        let thread_id = codex_protocol::ThreadId::from_string(&params.thread_id)
+            .map_err(|error| invalid_request(error.to_string()))?;
+        if self.thread_manager.get_thread(thread_id).await.is_ok() {
+            return Ok(false);
+        }
+        let stored = self
+            .thread_store
+            .read_thread(codex_thread_store::ReadThreadParams {
+                thread_id,
+                include_history: false,
+                include_archived: false,
+            })
+            .await
+            .map_err(|error| invalid_request(error.to_string()))?;
+
+        // Unloaded children retain the same parent-ownership restriction as
+        // the loaded settings and resume paths.
+        if matches!(
+            &stored.source,
+            codex_protocol::protocol::SessionSource::SubAgent(
+                codex_protocol::protocol::SubAgentSource::ThreadSpawn { .. }
+            )
+        ) {
+            let context = self
+                .thread_store
+                .load_latest_model_context(codex_thread_store::LoadThreadHistoryParams {
+                    thread_id,
+                    include_archived: false,
+                })
+                .await
+                .map_err(|error| invalid_request(error.to_string()))?;
+            let version = codex_rollout::InitialHistory::Resumed(codex_rollout::ResumedHistory {
+                conversation_id: thread_id,
+                history: Arc::new(context.items),
+                rollout_path: stored.rollout_path,
+                history_revision: context.revision,
+            })
+            .get_multi_agent_version();
+            if !super::thread_input::can_accept_direct_input(version, &stored.source) {
+                return Err(invalid_request(
+                    super::thread_input::DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR,
+                ));
+            }
+        }
+        self.service
+            .defer_model_selection(params)
             .await
             .map_err(|error| invalid_request(error.to_string()))
     }

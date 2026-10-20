@@ -203,6 +203,8 @@ pub(crate) struct LocalAgentRuntime {
         Arc<tokio::sync::OnceCell<Arc<dyn codex_thread_store::AgentMailboxStore>>>,
     pub(super) work_updates: Arc<tokio::sync::watch::Sender<u64>>,
     pub(super) barriers: Arc<Mutex<std::collections::HashMap<ThreadId, Vec<String>>>>,
+    /// Serializes summary reads with durable mutations and their revision publication.
+    pub(super) work_store_access: Arc<tokio::sync::RwLock<()>>,
 
     /// Shared by every session in this tree, including private delegates.
     pub(crate) shutdown: CancellationToken,
@@ -224,6 +226,7 @@ impl LocalAgentRuntime {
             mail_store: Arc::default(),
             work_updates: Arc::new(tokio::sync::watch::channel(0).0),
             barriers: Arc::default(),
+            work_store_access: Arc::default(),
             shutdown: CancellationToken::new(),
             shutdown_state: Arc::default(),
             agent_execution_limiter: Arc::default(),

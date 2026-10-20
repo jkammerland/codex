@@ -56,8 +56,9 @@ impl AgentControl for LocalAgentControl {
         } else {
             barriers.remove(&agent);
         }
-        drop(barriers);
-        self.work_changed();
+        self.runtime
+            .work_updates
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     fn tasks(
@@ -129,29 +130,32 @@ impl AgentControl for LocalAgentControl {
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             let store = self.mail_store().await?;
-            let snapshot = store
-                .tasks(
-                    self.session_id.into(),
-                    codex_thread_store::AgentTaskFilter {
-                        target_id: Some(agent),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-            for mut task in snapshot
-                .tasks
-                .into_iter()
-                .filter(|task| !task.status.is_terminal())
-            {
-                task.status = status;
-                store
-                    .put_task(task)
+            let root = self.session_id.into();
+            self.mutate_work(async move {
+                let snapshot = store
+                    .tasks(
+                        root,
+                        codex_thread_store::AgentTaskFilter {
+                            target_id: Some(agent),
+                            ..Default::default()
+                        },
+                    )
                     .await
                     .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-            }
-            self.work_changed();
-            Ok(())
+                for mut task in snapshot
+                    .tasks
+                    .into_iter()
+                    .filter(|task| !task.status.is_terminal())
+                {
+                    task.status = status;
+                    store
+                        .put_task(task)
+                        .await
+                        .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+                }
+                Ok(())
+            })
+            .await
         })
     }
 
@@ -210,16 +214,16 @@ impl AgentControl for LocalAgentControl {
         message_id: String,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            self.mail_store()
-                .await?
-                .mark_recorded(
-                    self.session_id.into(),
-                    agent,
-                    vec![message_id],
-                    turn.to_owned(),
-                )
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))
+            let store = self.mail_store().await?;
+            let root = self.session_id.into();
+            let turn = turn.to_owned();
+            self.mutate_work(async move {
+                store
+                    .mark_recorded(root, agent, vec![message_id], turn)
+                    .await
+                    .map_err(|err| CodexErr::Fatal(err.to_string()))
+            })
+            .await
         })
     }
 
@@ -244,19 +248,23 @@ impl AgentControl for LocalAgentControl {
                 return Ok(());
             }
             let store = self.mail_store().await?;
-            let ids = store
-                .accepted_ids(self.session_id.into(), agent, ids)
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-            if ids.is_empty() {
-                return Ok(());
-            }
-            store
-                .mark_attempted(self.session_id.into(), agent, ids, turn.to_owned())
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-            self.work_changed();
-            Ok(())
+            let root = self.session_id.into();
+            let turn = turn.to_owned();
+            self.mutate_work(async move {
+                let ids = store
+                    .accepted_ids(root, agent, ids)
+                    .await
+                    .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+                if ids.is_empty() {
+                    return Ok(());
+                }
+                store
+                    .mark_attempted(root, agent, ids, turn)
+                    .await
+                    .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+                Ok(())
+            })
+            .await
         })
     }
 
@@ -281,19 +289,23 @@ impl AgentControl for LocalAgentControl {
                 return Ok(());
             }
             let store = self.mail_store().await?;
-            let ids = store
-                .accepted_ids(self.session_id.into(), agent, ids)
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-            if ids.is_empty() {
-                return Ok(());
-            }
-            store
-                .mark_submitted(self.session_id.into(), agent, ids, turn.to_owned())
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-            self.work_changed();
-            Ok(())
+            let root = self.session_id.into();
+            let turn = turn.to_owned();
+            self.mutate_work(async move {
+                let ids = store
+                    .accepted_ids(root, agent, ids)
+                    .await
+                    .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+                if ids.is_empty() {
+                    return Ok(());
+                }
+                store
+                    .mark_submitted(root, agent, ids, turn)
+                    .await
+                    .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+                Ok(())
+            })
+            .await
         })
     }
 

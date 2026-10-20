@@ -138,6 +138,144 @@ async fn idle_mail_continues_with_current_mode_and_retains_queue_only_mail(
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_delivery_of_reconciled_mail_does_not_start_an_extra_request() -> Result<()> {
+    use codex_core::config::Config;
+    use codex_extension_api::ExtensionRegistryBuilder;
+    use codex_thread_store::AgentMailEnvelope;
+    use codex_thread_store::AgentMailboxStore;
+    use codex_thread_store::LocalAgentMailboxStore;
+    use core_test_support::ThreadIdle;
+    use std::sync::Arc;
+
+    let server = responses::start_mock_server().await;
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
+    let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::WakeOnAgentMessages)
+                .expect("enable WakeOnAgentMessages");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let responses = responses::mount_sse_sequence(
+        &server,
+        ["Consumed reconciled mail", "Consumed fresh mail"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let id = format!("mail-{index}");
+                responses::sse(vec![
+                    responses::ev_response_created(&id),
+                    responses::ev_assistant_message(&format!("answer-{index}"), text),
+                    responses::ev_completed(&id),
+                ])
+            })
+            .collect(),
+    )
+    .await;
+    let root = test.session_configured.thread_id;
+    let store = LocalAgentMailboxStore::new(
+        codex_core::init_state_db(&test.config)
+            .await
+            .expect("state database"),
+    );
+    let mail = |text: &str| {
+        let id = codex_protocol::ResponseItemId::new("agentmail");
+        let mut communication = InterAgentCommunication::new(
+            AgentPath::root().join("worker").expect("worker path"),
+            AgentPath::root(),
+            Vec::new(),
+            text.to_string(),
+            /*trigger_turn*/ false,
+        );
+        communication.id = Some(id.clone());
+        communication.mail = Some(AgentMailMetadata {
+            message_id: id.to_string(),
+            task_id: None,
+            kind: AgentMailKind::DirectMessage,
+            wake: AgentMailWake::Auto,
+        });
+        communication
+    };
+    let envelope = |communication: &InterAgentCommunication| -> Result<AgentMailEnvelope> {
+        Ok(AgentMailEnvelope {
+            message_id: communication
+                .mail
+                .as_ref()
+                .expect("typed mail metadata")
+                .message_id
+                .clone(),
+            root_id: root,
+            sender_id: root,
+            recipient_id: root,
+            kind: serde_json::to_string(&AgentMailKind::DirectMessage)?,
+            payload_json: serde_json::to_string(communication)?,
+            wake: true,
+            task_id: None,
+        })
+    };
+
+    // Acceptance precedes delivery. The running request reconciles M from the
+    // durable store and receives Created before its delivery Op is released.
+    let consumed = mail("message reconciled before delivery");
+    store.accept(envelope(&consumed)?).await?;
+    test.submit_text_turn("Read the accepted mail").await?;
+    ThreadIdle::wait(&test.codex).await;
+    assert_eq!(store.pending(root, root).await?, Vec::new());
+    test.codex
+        .submit(Op::InterAgentCommunication {
+            communication: consumed,
+            start_options: Default::default(),
+        })
+        .await?;
+    core_test_support::submit_thread_settings(&test.codex, ThreadSettingsOverrides::default())
+        .await?;
+
+    // The acknowledgement follows delivery's complete scheduling decision.
+    // Either a still-running duplicate turn or a completed extra request fails.
+    assert!(
+        test.codex
+            .active_turn_environment_selections()
+            .await
+            .is_none()
+    );
+    assert_eq!(responses.requests().len(), 1);
+    let fresh = mail("distinct authorized message");
+    store.accept(envelope(&fresh)?).await?;
+    test.codex
+        .submit(Op::InterAgentCommunication {
+            communication: fresh,
+            start_options: Default::default(),
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(complete) if complete.last_agent_message.as_deref() == Some("Consumed fresh mail"))
+    })
+    .await;
+    ThreadIdle::wait(&test.codex).await;
+    test.codex.shutdown_and_wait().await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].inputs_of_type("agent_message").len(), 1);
+    let messages = requests[1].inputs_of_type("agent_message");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[0]["content"][0]["text"],
+        "message reconciled before delivery"
+    );
+    assert_eq!(
+        messages[1]["content"][0]["text"],
+        "distinct authorized message"
+    );
+    assert_eq!(store.pending(root, root).await?, Vec::new());
+    Ok(())
+}
+
 #[derive(Default)]
 struct LeafGate {
     entered: tokio::sync::Notify,

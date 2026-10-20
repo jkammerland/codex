@@ -1783,6 +1783,8 @@ impl TurnRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            #[cfg(test)]
+            listener_start_gate: None,
         }
     }
 

@@ -16,8 +16,31 @@ use codex_thread_store::AgentMailboxStore;
 use codex_thread_store::AgentTaskFilter;
 use codex_thread_store::AgentTaskRecord;
 use codex_thread_store::AgentTaskStatus;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::PoisonError;
+
+/// The storage task owns publication and access until the operation finishes.
+/// Caller cancellation cannot release either before a queued commit completes.
+struct WorkMutation {
+    control: LocalAgentControl,
+    _store_access: tokio::sync::OwnedRwLockWriteGuard<()>,
+}
+
+impl Drop for WorkMutation {
+    fn drop(&mut self) {
+        let _barriers = self
+            .control
+            .runtime
+            .barriers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.control
+            .runtime
+            .work_updates
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+}
 
 impl LocalAgentControl {
     pub(super) async fn mail_store(&self) -> Result<Arc<dyn AgentMailboxStore>> {
@@ -40,10 +63,24 @@ impl LocalAgentControl {
         Ok(Arc::clone(store))
     }
 
-    pub(super) fn work_changed(&self) {
-        self.runtime
-            .work_updates
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    pub(super) async fn mutate_work<T: Send + 'static>(
+        &self,
+        operation: impl Future<Output = Result<T>> + Send + 'static,
+    ) -> Result<T> {
+        let mutation = WorkMutation {
+            control: self.clone(),
+            _store_access: Arc::clone(&self.runtime.work_store_access)
+                .write_owned()
+                .await,
+        };
+        // SQLx can finish a queued COMMIT after its waiting future is dropped.
+        // Detach only the caller's wait, keeping the operation and guard together.
+        tokio::spawn(async move {
+            let _mutation = mutation;
+            operation.await
+        })
+        .await
+        .map_err(|err| CodexErr::Fatal(format!("agent work mutation failed: {err}")))?
     }
 
     pub(super) async fn accept_mail(
@@ -100,36 +137,37 @@ impl LocalAgentControl {
             task_id: task_id.clone(),
         };
         let store = self.mail_store().await?;
-        if let Some(task_id) = task_id.filter(|_| assignment) {
-            store
-                .accept_task(
-                    AgentTaskRecord {
-                        task_id,
-                        root_id: self.session_id.into(),
-                        owner_id: context.sender_thread_id,
-                        target_id: agent,
-                        name: Some(communication.recipient.to_string()),
-                        status: AgentTaskStatus::Queued,
-                        turn_id: None,
-                        result_ref: None,
-                    },
-                    envelope,
-                )
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-        } else {
-            store
-                .accept(envelope)
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-        }
-        self.work_changed();
+        let task = task_id
+            .filter(|_| assignment)
+            .map(|task_id| AgentTaskRecord {
+                task_id,
+                root_id: self.session_id.into(),
+                owner_id: context.sender_thread_id,
+                target_id: agent,
+                name: Some(communication.recipient.to_string()),
+                status: AgentTaskStatus::Queued,
+                turn_id: None,
+                result_ref: None,
+            });
+        self.mutate_work(async move {
+            let accepted = if let Some(task) = task {
+                store.accept_task(task, envelope).await
+            } else {
+                store.accept(envelope).await
+            };
+            accepted.map_err(|err| CodexErr::Fatal(err.to_string()))
+        })
+        .await?;
         Ok(message_id)
     }
 
     /// Settle only assignments selected for this exact terminal turn. Failed
     /// attempts need no submission receipt; success requires accepted input.
     /// Late mail stays queued and interruptions retain resumable assignments.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "The read lock protects only the bounded storage snapshot from unfinished mutations; it is released before settlement writes, delivery, or model execution."
+    )]
     pub(super) async fn settle_consumed_tasks(
         &self,
         outcome: &crate::agent::api::AgentTurnOutcome,
@@ -147,16 +185,22 @@ impl LocalAgentControl {
             return Ok(false);
         }
         let store = self.mail_store().await?;
-        let snapshot = store
-            .tasks(
-                self.session_id.into(),
-                AgentTaskFilter {
-                    target_id: Some(outcome.thread_id),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+        let snapshot = {
+            // An interrupted caller may leave its selected-input mutation still
+            // committing. Settlement must observe that association before it
+            // decides which assignments belong to the terminal turn.
+            let _snapshot = self.runtime.work_store_access.read().await;
+            store
+                .tasks(
+                    self.session_id.into(),
+                    AgentTaskFilter {
+                        target_id: Some(outcome.thread_id),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|err| CodexErr::Fatal(err.to_string()))?
+        };
         let mut settled_parent = false;
         for mut task in snapshot.tasks.into_iter().filter(|task| {
             !task.status.is_terminal() && task.turn_id.as_deref() == Some(outcome.turn_id.as_str())
@@ -182,11 +226,14 @@ impl LocalAgentControl {
                 | codex_protocol::protocol::AgentStatus::Running => continue,
             };
             if !task.status.is_terminal() {
-                store
-                    .put_task(task)
-                    .await
-                    .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-                self.work_changed();
+                let store = Arc::clone(&store);
+                self.mutate_work(async move {
+                    store
+                        .put_task(task)
+                        .await
+                        .map_err(|err| CodexErr::Fatal(err.to_string()))
+                })
+                .await?;
                 continue;
             }
             let author = outcome
@@ -235,11 +282,16 @@ impl LocalAgentControl {
                 wake: true,
                 task_id: Some(task.task_id.clone()),
             };
-            store
-                .settle_task(task, envelope)
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-            self.work_changed();
+            {
+                let store = Arc::clone(&store);
+                self.mutate_work(async move {
+                    store
+                        .settle_task(task, envelope)
+                        .await
+                        .map_err(|err| CodexErr::Fatal(err.to_string()))
+                })
+                .await?;
+            }
             settled_parent |= matches!(&outcome.source, codex_protocol::protocol::SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn { parent_thread_id, .. }) if *parent_thread_id == owner_id);
             // The durable result above is authoritative even if the chat route is gone.
             let context = AgentCommunicationContext::new(
@@ -261,18 +313,29 @@ impl LocalAgentControl {
         Ok(settled_parent)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "The read lock keeps counts and revision coherent across bounded storage snapshot reads; no delivery or model execution runs while it is held."
+    )]
     pub(super) async fn work_summary(&self, agent: ThreadId) -> Result<AgentWorkSummary> {
         let store = self.mail_store().await?;
+        let _snapshot = self.runtime.work_store_access.read().await;
+        // Barrier selection and revision share one synchronous boundary. A barrier
+        // change during the following reads belongs to a later snapshot.
+        let (barrier, revision) = {
+            let barriers = self
+                .runtime
+                .barriers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (
+                barriers.get(&agent).cloned(),
+                *self.runtime.work_updates.borrow(),
+            )
+        };
         let pending_mail = crate::agent::api::AgentControl::pending_mail(self, agent)
             .await?
             .len();
-        let barrier = self
-            .runtime
-            .barriers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&agent)
-            .cloned();
         let waiting_tasks = if let Some(task_ids) = barrier {
             let total = task_ids.len();
             let snapshot = store
@@ -314,7 +377,7 @@ impl LocalAgentControl {
             None
         };
         Ok(AgentWorkSummary {
-            revision: *self.runtime.work_updates.borrow(),
+            revision,
             pending_mail,
             waiting_tasks,
         })

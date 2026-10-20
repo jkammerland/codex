@@ -993,6 +993,143 @@ async fn shutdown_blocks_delayed_failed_mail_continuation_without_consuming_it()
     );
 }
 
+#[test_case(false; "direct_mail")]
+#[test_case(true; "assignment_mail")]
+#[tokio::test]
+async fn submitted_duplicate_cannot_reserve_another_successful_turn(trigger_turn: bool) {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    session
+        .features
+        .enable(Feature::WakeOnAgentMessages)
+        .expect("enable agent-message wakes");
+    let mail = |id: &str| {
+        let mut communication = InterAgentCommunication::new(
+            AgentPath::try_from("/root/worker").expect("valid worker path"),
+            AgentPath::root(),
+            Vec::new(),
+            id.to_string(),
+            trigger_turn,
+        );
+        communication.id = Some(codex_protocol::ResponseItemId::from_server(id.to_string()));
+        communication.mail = Some(codex_protocol::protocol::AgentMailMetadata {
+            message_id: id.to_string(),
+            task_id: trigger_turn.then(|| id.to_string()),
+            kind: if trigger_turn {
+                codex_protocol::protocol::AgentMailKind::Assignment
+            } else {
+                codex_protocol::protocol::AgentMailKind::DirectMessage
+            },
+            wake: codex_protocol::protocol::AgentMailWake::Auto,
+        });
+        communication
+    };
+    let consumed = mail("consumed-before-delivery");
+    session.input_queue.record_mail(&consumed).await;
+    session
+        .input_queue
+        .accept_submitted_mail(&[consumed.to_model_input_item()])
+        .await;
+    session
+        .agent_status
+        .send_replace(AgentStatus::Completed(Some("Finished".to_string())));
+
+    // Durable reconciliation consumed M before its original delivery Op reached
+    // the now-successful idle session. It cannot reserve an extra turn.
+    session
+        .input_queue
+        .enqueue_mailbox_communication(consumed, Default::default())
+        .await;
+    assert!(session.reserve_pending_work_turn().await.is_none());
+    assert!(session.active_turn.lock().await.is_none());
+
+    // A distinct message still starts work, with no stale assignment attribution
+    // or duplicate input carried along from the earlier delivery.
+    let fresh = mail("new-work");
+    session
+        .input_queue
+        .enqueue_mailbox_communication(fresh.clone(), Default::default())
+        .await;
+    assert!(session.reserve_pending_work_turn().await.is_some());
+    assert_eq!(
+        session.input_queue.drain_mailbox_input_items().await.0,
+        vec![TurnInput::InterAgentCommunication(fresh)]
+    );
+}
+
+#[tokio::test]
+async fn submitted_assignment_duplicate_cannot_release_interrupt_with_fresh_mail_waiting() {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    session
+        .features
+        .enable(Feature::WakeOnAgentMessages)
+        .expect("enable agent-message wakes");
+    let mut assignment = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "assignment consumed before interruption".to_string(),
+        /*trigger_turn*/ true,
+    );
+    assignment.id = Some(codex_protocol::ResponseItemId::from_server(
+        "old-assignment".to_string(),
+    ));
+    assignment.mail = Some(codex_protocol::protocol::AgentMailMetadata {
+        message_id: "old-assignment".to_string(),
+        task_id: Some("old-task".to_string()),
+        kind: codex_protocol::protocol::AgentMailKind::Assignment,
+        wake: codex_protocol::protocol::AgentMailWake::Auto,
+    });
+    session.input_queue.record_mail(&assignment).await;
+    session
+        .input_queue
+        .accept_submitted_mail(&[assignment.to_model_input_item()])
+        .await;
+    session.mark_interrupted();
+    let session = Arc::new(session);
+
+    let mut fresh = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "fresh automatic mail held by interruption".to_string(),
+        /*trigger_turn*/ false,
+    );
+    fresh.id = Some(codex_protocol::ResponseItemId::from_server(
+        "held-fresh-mail".to_string(),
+    ));
+    fresh.mail = Some(codex_protocol::protocol::AgentMailMetadata {
+        message_id: "held-fresh-mail".to_string(),
+        task_id: None,
+        kind: codex_protocol::protocol::AgentMailKind::DirectMessage,
+        wake: codex_protocol::protocol::AgentMailWake::Auto,
+    });
+    super::super::handlers::inter_agent_communication(
+        &session,
+        "fresh-delivery".to_string(),
+        fresh.clone(),
+        Default::default(),
+    )
+    .await;
+    assert!(session.active_turn.lock().await.is_none());
+    assert_eq!(*session.agent_status.borrow(), AgentStatus::Interrupted);
+
+    // Rejecting the delayed assignment must happen before it can release the
+    // interrupt and let the distinct automatic message start a model turn.
+    super::super::handlers::inter_agent_communication(
+        &session,
+        "duplicate-delivery".to_string(),
+        assignment,
+        Default::default(),
+    )
+    .await;
+    assert_eq!(*session.agent_status.borrow(), AgentStatus::Interrupted);
+    assert!(session.active_turn.lock().await.is_none());
+    assert_eq!(
+        session.input_queue.drain_mailbox_input_items().await.0,
+        vec![TurnInput::InterAgentCommunication(fresh)]
+    );
+}
+
 #[tokio::test]
 async fn steer_only_requires_active_turn() {
     let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;

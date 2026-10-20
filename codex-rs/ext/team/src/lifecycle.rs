@@ -215,7 +215,10 @@ impl TeamHostService {
                 let Some(enrollment) = store.enrollment(&root.to_string()).await? else {
                     continue;
                 };
-                if enrollment.manually_held || self.gate.try_enter(thread_id).is_none() {
+                if enrollment.manually_held
+                    || self.gate.try_enter(thread_id).is_none()
+                    || self.model_selection_pending(thread_id).await?
+                {
                     continue;
                 }
                 let dispatched = async {

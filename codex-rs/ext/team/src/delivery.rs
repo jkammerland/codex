@@ -57,6 +57,9 @@ impl TeamHostService {
         thread_id: ThreadId,
         boundary: DeliveryBoundary<'_>,
     ) -> Result<()> {
+        if self.model_selection_pending(thread_id).await? {
+            return Ok(());
+        }
         let Some(store) = self.store.get() else {
             return Ok(());
         };

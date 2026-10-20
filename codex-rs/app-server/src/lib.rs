@@ -867,6 +867,7 @@ pub async fn run_main_with_transport_options(
                 transport_event_tx.clone(),
                 transport_shutdown_token.clone(),
                 policy_from_settings(&auth)?,
+                websocket_compression,
             )
             .await?,
         );

@@ -899,6 +899,53 @@ async fn agent_message_wake_reservation_preserves_existing_boundaries(
     );
 }
 
+#[test_case(codex_extension_api::ExecutionMode::Paused; "paused")]
+#[test_case(codex_extension_api::ExecutionMode::Stopped; "stopped")]
+#[tokio::test]
+async fn agent_message_wakes_preserve_mail_while_team_execution_is_held(
+    mode: codex_extension_api::ExecutionMode,
+) {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    session
+        .features
+        .enable(Feature::WakeOnAgentMessages)
+        .expect("enable agent-message wakes");
+    let control = session.services.extensions.execution_control().clone();
+    control.apply(session.thread_id, 1, mode);
+    let session = Arc::new(session);
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "queued worker update".to_string(),
+        /*trigger_turn*/ false,
+    );
+
+    // Exercise the automatic wake path, including its task-start admission gate.
+    super::super::handlers::inter_agent_communication(
+        &session,
+        "held-message".to_string(),
+        communication.clone(),
+        Default::default(),
+    )
+    .await;
+    assert!(session.active_turn.lock().await.is_none());
+    assert_eq!(control.pending_turn_starts(session.thread_id), 0);
+    assert!(session.input_queue.has_pending_mailbox_items().await);
+
+    // Releasing the hold makes the same queued mail eligible, without replaying it.
+    control.apply(
+        session.thread_id,
+        2,
+        codex_extension_api::ExecutionMode::Running,
+    );
+    assert!(session.reserve_pending_work_turn().await.is_some());
+    assert_eq!(
+        session.input_queue.drain_mailbox_input_items().await.0,
+        vec![TurnInput::InterAgentCommunication(communication)]
+    );
+}
+
 #[tokio::test]
 async fn steer_only_requires_active_turn() {
     let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;

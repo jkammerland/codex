@@ -1,7 +1,7 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
-fn agent(
+pub(super) fn agent(
     id: &str,
     parent: Option<&str>,
     model_origin: TeamSelectionOrigin,
@@ -53,6 +53,68 @@ fn agent(
         next_effort: Some("medium".into()),
         requested_selection: None,
     }
+}
+
+#[tokio::test]
+async fn sparse_pending_choice_retains_unapplied_inherited_field() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let coordinator = Coordinator::open(crate::tests::manifest(directory.path())).await?;
+    let child = agent(
+        "child",
+        Some("parent"),
+        TeamSelectionOrigin::Role,
+        TeamSelectionOrigin::Configured,
+    );
+    let child = coordinator
+        .persist_selection(
+            child,
+            RequestedSelection {
+                selection: TeamModelSelection {
+                    revision: 0,
+                    model: TeamSelection::Inherit,
+                    effort: TeamSelection::Keep,
+                },
+                model: Some("parent-before".into()),
+                effort: None,
+            },
+            /*operation*/ None,
+        )
+        .await?;
+    let child = coordinator
+        .persist_selection(
+            child,
+            RequestedSelection {
+                selection: TeamModelSelection {
+                    revision: 0,
+                    model: TeamSelection::Keep,
+                    effort: TeamSelection::Value {
+                        value: "high".into(),
+                    },
+                },
+                model: None,
+                effort: Some("high".into()),
+            },
+            /*operation*/ None,
+        )
+        .await?;
+    assert_eq!(
+        coordinator
+            .store
+            .get::<RequestedSelection>("model_request", &address_key(&child.enrollment.address))
+            .await?,
+        Some(RequestedSelection {
+            selection: TeamModelSelection {
+                revision: 2,
+                model: TeamSelection::Inherit,
+                effort: TeamSelection::Value {
+                    value: "high".into()
+                },
+            },
+            model: Some("parent-before".into()),
+            effort: Some("high".into()),
+        })
+    );
+    Ok(())
 }
 
 #[test]

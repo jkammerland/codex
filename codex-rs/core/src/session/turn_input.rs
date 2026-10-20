@@ -36,6 +36,7 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AdditionalContextEntry;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -728,13 +729,29 @@ impl Session {
         &self,
     ) -> Option<(Arc<tokio::sync::Mutex<TurnState>>, TurnStartOptions)> {
         let mut active_turn = self.active_turn.lock().await;
-        if active_turn.is_some() {
+        if active_turn.is_some() || self.is_interrupted() {
+            return None;
+        }
+        // Terminal cleanup can reach this check after idle was published and
+        // shutdown completed. Its retained mail must stay pending for reopening.
+        if self.state.lock().await.shutting_down {
+            return None;
+        }
+        // Keep rejected request input pending without replaying it. A fresh
+        // message or explicit user turn can include that context in new work.
+        let previous_failed = matches!(*self.agent_status.borrow(), AgentStatus::Errored(_));
+        if self.features.enabled(Feature::WakeOnAgentMessages)
+            && previous_failed
+            && !self.input_queue.has_new_wakeable_mailbox_items().await
+        {
             return None;
         }
         let has_trigger_turn = self.input_queue.has_trigger_turn_mailbox_items().await;
-        if !has_trigger_turn
-            && !self.has_outstanding_durable_sleep()
-            && !self.should_wake_on_agent_messages().await
+        if !(has_trigger_turn
+            || (self.has_outstanding_durable_sleep()
+                && !self.is_interrupted()
+                && self.input_queue.has_wakeable_mailbox_items().await)
+            || self.should_wake_on_agent_messages().await)
         {
             return None;
         }
@@ -786,17 +803,9 @@ impl Session {
     }
 
     async fn should_wake_on_agent_messages(&self) -> bool {
-        if !self.features.enabled(Feature::WakeOnAgentMessages)
-            || self.is_interrupted()
-            || !self.input_queue.has_pending_mailbox_items().await
-        {
-            return false;
-        }
-
-        let state = self.state.lock().await;
-        let config = &state.session_configuration;
-        !config.session_source.is_non_root_agent()
-            && TurnStartKind::Automatic.permits_mode(config.step_settings.collaboration_mode.mode)
+        self.features.enabled(Feature::WakeOnAgentMessages)
+            && !self.is_interrupted()
+            && self.input_queue.has_wakeable_mailbox_items().await
     }
 
     pub(crate) async fn route_realtime_text_input(

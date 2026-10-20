@@ -10,8 +10,10 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
+use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -93,11 +95,19 @@ pub(crate) struct TurnInputQueue {
     has_pending_injection: bool,
 }
 
+#[derive(Default)]
+struct MailReceipts {
+    recorded: IndexMap<String, InterAgentCommunication>,
+    submitted: HashSet<String>,
+}
+
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     controller: Option<(ThreadId, Arc<dyn AgentControl>, watch::Receiver<bool>)>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    // Recording history is not a transport receipt. Retain wake debt until request acceptance.
+    mail_receipts: Mutex<MailReceipts>,
 }
 
 pub(crate) struct PendingMailboxCommunication {
@@ -113,6 +123,7 @@ impl InputQueue {
             activity_tx,
             controller: None,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            mail_receipts: Mutex::new(MailReceipts::default()),
         }
     }
 
@@ -212,6 +223,16 @@ impl InputQueue {
         let mut pending = self.mailbox_pending_mails.lock().await;
         // Mail retained while unloaded precedes new submissions to the loaded session.
         self.read_mailbox(&mut pending);
+        if communication.mail.as_ref().is_some_and(|metadata| {
+            pending.iter().any(|mail| {
+                mail.communication
+                    .mail
+                    .as_ref()
+                    .is_some_and(|existing| existing.message_id == metadata.message_id)
+            })
+        }) {
+            return;
+        }
         pending.push_back(PendingMailboxCommunication {
             communication,
             start_options,
@@ -222,18 +243,162 @@ impl InputQueue {
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
         !self.mailbox_pending_mails.lock().await.is_empty()
+            || !self.mail_receipts.lock().await.recorded.is_empty()
             || self
                 .controller
                 .as_ref()
                 .is_some_and(|(_, _, updates)| *updates.borrow())
     }
 
-    pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
+    pub(crate) async fn has_wakeable_mailbox_items(&self) -> bool {
+        let pending_wakes = {
+            let mut pending = self.mailbox_pending_mails.lock().await;
+            self.read_mailbox(&mut pending);
+            pending.iter().any(|mail| mail_wakes(&mail.communication))
+        };
+        pending_wakes
+            || self
+                .mail_receipts
+                .lock()
+                .await
+                .recorded
+                .values()
+                .any(mail_wakes)
+    }
+
+    /// A failed request retains its receipt debt, but that debt cannot retry the
+    /// request itself. A newly queued message can authorize another continuation.
+    pub(crate) async fn has_new_wakeable_mailbox_items(&self) -> bool {
+        // Capture only wake identities before consulting receipts. Recording or
+        // submitting the captured input meanwhile must not make it fresh again.
+        let waking_ids = {
+            let mut pending = self.mailbox_pending_mails.lock().await;
+            self.read_mailbox(&mut pending);
+            pending
+                .iter()
+                .filter(|mail| mail_wakes(&mail.communication))
+                .map(|mail| {
+                    mail.communication
+                        .mail
+                        .as_ref()
+                        .map(|metadata| metadata.message_id.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let receipts = self.mail_receipts.lock().await;
+        waking_ids.iter().any(|id| {
+            id.as_ref().is_none_or(|id| {
+                !receipts.recorded.contains_key(id) && !receipts.submitted.contains(id)
+            })
+        })
+    }
+
+    pub(crate) async fn record_mail(&self, communication: &InterAgentCommunication) {
+        if let Some(metadata) = &communication.mail {
+            let mut receipts = self.mail_receipts.lock().await;
+            if !receipts.submitted.contains(&metadata.message_id) {
+                receipts
+                    .recorded
+                    .insert(metadata.message_id.clone(), communication.clone());
+            }
+        }
+    }
+
+    pub(crate) async fn discard_settled_assignments(&self, task_ids: &HashSet<String>) {
+        let retain = |mail: &InterAgentCommunication| {
+            !mail.mail.as_ref().is_some_and(|metadata| {
+                metadata.kind == codex_protocol::protocol::AgentMailKind::Assignment
+                    && metadata
+                        .task_id
+                        .as_ref()
+                        .is_some_and(|id| task_ids.contains(id))
+            })
+        };
+        self.mail_receipts
+            .lock()
+            .await
+            .recorded
+            .retain(|_, mail| retain(mail));
         self.mailbox_pending_mails
             .lock()
             .await
+            .retain(|mail| retain(&mail.communication));
+    }
+
+    pub(crate) async fn unsubmitted_recorded_mail(&self) -> Vec<InterAgentCommunication> {
+        self.mail_receipts
+            .lock()
+            .await
+            .recorded
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) async fn was_mail_submitted(&self, id: &str) -> bool {
+        self.mail_receipts.lock().await.submitted.contains(id)
+    }
+
+    pub(crate) async fn accept_submitted_mail(&self, items: &[ResponseItem]) {
+        let mut receipts = self.mail_receipts.lock().await;
+        for item in items {
+            let id = match item {
+                ResponseItem::AgentMessage { id, .. } | ResponseItem::Message { id, .. } => {
+                    id.as_ref()
+                }
+                _ => None,
+            };
+            if let Some(id) = id
+                && receipts.recorded.shift_remove(id.as_str()).is_some()
+            {
+                receipts.submitted.insert(id.to_string());
+            }
+        }
+    }
+
+    /// Selected completion records satisfy the barrier through the durable task store.
+    /// Other waking input interrupts the barrier without consuming its mailbox entry.
+    pub(crate) async fn pending_barrier_activity(
+        &self,
+        turn_state: Option<&Mutex<TurnState>>,
+        selected_task_ids: &[String],
+    ) -> Option<InputQueueActivity> {
+        let interrupts = |mail: &InterAgentCommunication| {
+            mail_wakes(mail)
+                && !mail.mail.as_ref().is_some_and(|metadata| {
+                    matches!(
+                        metadata.kind,
+                        codex_protocol::protocol::AgentMailKind::Completion
+                            | codex_protocol::protocol::AgentMailKind::LegacyCompletion
+                    ) && metadata
+                        .task_id
+                        .as_ref()
+                        .is_some_and(|id| selected_task_ids.contains(id))
+                })
+        };
+        if let Some(turn_state) = turn_state {
+            let state = turn_state.lock().await;
+            if state.pending_input.has_user_input() {
+                return Some(InputQueueActivity::Steer);
+            }
+            if state.pending_input.items.iter().any(
+                |item| matches!(item, TurnInput::InterAgentCommunication(mail) if interrupts(mail)),
+            ) {
+                return Some(InputQueueActivity::Mailbox);
+            }
+        }
+        let mut pending = self.mailbox_pending_mails.lock().await;
+        self.read_mailbox(&mut pending);
+        pending
             .iter()
-            .any(|mail| mail.communication.trigger_turn)
+            .any(|mail| interrupts(&mail.communication))
+            .then_some(InputQueueActivity::Mailbox)
+    }
+
+    pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
+        let mut pending = self.mailbox_pending_mails.lock().await;
+        self.read_mailbox(&mut pending);
+        pending.iter().any(|mail| mail.communication.trigger_turn)
     }
 
     pub(crate) async fn drain_mailbox(&self) -> Vec<PendingMailboxCommunication> {
@@ -316,12 +481,19 @@ impl InputQueue {
 
     /// Clear any pending waiters and input buffered for the current turn.
     pub(crate) async fn clear_pending(&self, active_turn: &ActiveTurn) {
-        let mut turn_state = active_turn.turn_state.lock().await;
-        turn_state.clear_pending_waiters();
-        // Pending mail can own extension attachments whose destructors need the lock released.
-        let pending_input = std::mem::take(&mut turn_state.pending_input);
-        drop(turn_state);
-        drop(pending_input);
+        let pending = {
+            let mut turn_state = active_turn.turn_state.lock().await;
+            turn_state.clear_pending_waiters();
+            // Reset injection state, retaining mail for the next admitted turn.
+            std::mem::take(&mut turn_state.pending_input)
+        };
+        // Extension attachments may acquire queue locks when dropped.
+        for input in pending.items {
+            if let TurnInput::InterAgentCommunication(communication) = input {
+                self.enqueue_mailbox_communication(communication, TurnStartOptions::default())
+                    .await;
+            }
+        }
     }
 
     pub(crate) async fn defer_mailbox_delivery_to_next_turn(
@@ -500,6 +672,12 @@ impl TurnInputQueue {
     }
 }
 
+fn mail_wakes(mail: &InterAgentCommunication) -> bool {
+    mail.mail
+        .as_ref()
+        .is_none_or(|metadata| metadata.wake == codex_protocol::protocol::AgentMailWake::Auto)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +751,55 @@ mod tests {
             content.to_string(),
             trigger_turn,
         )
+    }
+
+    #[tokio::test]
+    async fn submitted_mail_cannot_regain_recorded_debt_or_authorize_a_new_wake() {
+        let input_queue = InputQueue::new();
+        let make_typed_mail = |id: &str| {
+            let mut mail = make_mail(
+                AgentPath::root(),
+                AgentPath::try_from("/root/worker").expect("agent path"),
+                id,
+                /*trigger_turn*/ false,
+            );
+            mail.id = Some(codex_protocol::ResponseItemId::from_server(id.to_string()));
+            mail.mail = Some(codex_protocol::protocol::AgentMailMetadata {
+                message_id: id.to_string(),
+                task_id: None,
+                kind: codex_protocol::protocol::AgentMailKind::DirectMessage,
+                wake: codex_protocol::protocol::AgentMailWake::Auto,
+            });
+            mail
+        };
+        let submitted = make_typed_mail("submitted");
+        input_queue.record_mail(&submitted).await;
+        assert!(input_queue.has_wakeable_mailbox_items().await);
+
+        // History recording alone retains debt; only the exact submitted input
+        // clears it, and a delayed duplicate recording cannot recreate it.
+        input_queue
+            .accept_submitted_mail(&[ResponseItem::Other])
+            .await;
+        assert!(input_queue.has_wakeable_mailbox_items().await);
+        input_queue
+            .accept_submitted_mail(&[submitted.to_model_input_item()])
+            .await;
+        input_queue.record_mail(&submitted).await;
+        assert!(input_queue.was_mail_submitted("submitted").await);
+        assert!(input_queue.unsubmitted_recorded_mail().await.is_empty());
+        assert!(!input_queue.has_wakeable_mailbox_items().await);
+
+        // A stale pending copy is not fresh authorization after receipt. A new
+        // message remains eligible even when that stale copy precedes it.
+        input_queue
+            .enqueue_mailbox_communication(submitted, Default::default())
+            .await;
+        assert!(!input_queue.has_new_wakeable_mailbox_items().await);
+        input_queue
+            .enqueue_mailbox_communication(make_typed_mail("new"), Default::default())
+            .await;
+        assert!(input_queue.has_new_wakeable_mailbox_items().await);
     }
 
     #[tokio::test]

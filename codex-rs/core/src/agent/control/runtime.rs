@@ -199,6 +199,11 @@ pub(crate) struct LocalAgentRuntime {
     pub(super) registry: Arc<AgentRegistry>,
     pub(super) residency: Arc<V2Residency>,
     pub(super) mailboxes: Arc<super::mailbox::Mailboxes>,
+    pub(super) mail_store:
+        Arc<tokio::sync::OnceCell<Arc<dyn codex_thread_store::AgentMailboxStore>>>,
+    pub(super) work_updates: Arc<tokio::sync::watch::Sender<u64>>,
+    pub(super) barriers: Arc<Mutex<std::collections::HashMap<ThreadId, Vec<String>>>>,
+
     /// Shared by every session in this tree, including private delegates.
     pub(crate) shutdown: CancellationToken,
     shutdown_state: Arc<AgentTreeShutdownState>,
@@ -216,6 +221,9 @@ impl LocalAgentRuntime {
             registry: Arc::default(),
             residency: Arc::default(),
             mailboxes: Arc::default(),
+            mail_store: Arc::default(),
+            work_updates: Arc::new(tokio::sync::watch::channel(0).0),
+            barriers: Arc::default(),
             shutdown: CancellationToken::new(),
             shutdown_state: Arc::default(),
             agent_execution_limiter: Arc::default(),

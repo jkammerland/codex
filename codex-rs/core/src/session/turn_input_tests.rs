@@ -854,14 +854,16 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
     assert_eq!(session.collaboration_mode().await.mode, ModeKind::Plan);
 }
 
-/// Queue-only agent mail respects stop, Plan mode, and inherited child configuration.
-#[test_case(SessionSource::Exec, true, ModeKind::Default; "interrupted_root")]
-#[test_case(SessionSource::Exec, false, ModeKind::Plan; "plan_root")]
-#[test_case(SessionSource::SubAgent(SubAgentSource::Review), false, ModeKind::Default; "inherited_child_flag")]
+/// Mail continuation keeps Plan and nested settings; an explicit interrupt holds it.
+#[test_case(SessionSource::Exec, true, false, ModeKind::Default; "interrupted_root")]
+#[test_case(SessionSource::Exec, true, true, ModeKind::Default; "interrupted_assignment")]
+#[test_case(SessionSource::Exec, false, false, ModeKind::Plan; "plan_root")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::Review), false, false, ModeKind::Default; "inherited_child_flag")]
 #[tokio::test]
 async fn agent_message_wake_reservation_preserves_existing_boundaries(
     source: SessionSource,
     interrupted: bool,
+    trigger_turn: bool,
     mode: ModeKind,
 ) {
     let (mut session, _turn_context) = make_session_and_context().await;
@@ -884,15 +886,19 @@ async fn agent_message_wake_reservation_preserves_existing_boundaries(
         AgentPath::root(),
         Vec::new(),
         "late worker update".to_string(),
-        /*trigger_turn*/ false,
+        trigger_turn,
     );
     session
         .input_queue
         .enqueue_mailbox_communication(communication.clone().into(), Default::default())
         .await;
 
-    assert!(session.reserve_pending_work_turn().await.is_none());
-    assert!(session.active_turn.lock().await.is_none());
+    assert_eq!(
+        session.reserve_pending_work_turn().await.is_some(),
+        !interrupted
+    );
+    assert_eq!(session.active_turn.lock().await.is_some(), !interrupted);
+    assert_eq!(session.collaboration_mode().await.mode, mode);
     assert_eq!(
         session.input_queue.drain_mailbox_input_items().await.0,
         vec![TurnInput::InterAgentCommunication(communication.into())]
@@ -943,6 +949,48 @@ async fn agent_message_wakes_preserve_mail_while_team_execution_is_held(
     assert_eq!(
         session.input_queue.drain_mailbox_input_items().await.0,
         vec![TurnInput::InterAgentCommunication(communication)]
+    );
+}
+
+#[tokio::test]
+async fn shutdown_blocks_delayed_failed_mail_continuation_without_consuming_it() {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    session
+        .features
+        .enable(Feature::WakeOnAgentMessages)
+        .expect("enable agent-message wakes");
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "request rejected before model acceptance".to_string(),
+        /*trigger_turn*/ false,
+    );
+    communication.mail = Some(codex_protocol::protocol::AgentMailMetadata {
+        message_id: "failed-mail-at-shutdown".to_string(),
+        task_id: None,
+        kind: codex_protocol::protocol::AgentMailKind::DirectMessage,
+        wake: codex_protocol::protocol::AgentMailWake::Auto,
+    });
+    session.input_queue.record_mail(&communication).await;
+    session
+        .agent_status
+        .send_replace(AgentStatus::Errored("request rejected".to_string()));
+    assert!(session.reserve_pending_work_turn().await.is_none());
+
+    // Turn cleanup releases active_turn and emits idle before its final wake
+    // check. Shutdown can finish in that gap, replacing Errored with Shutdown.
+    let session = Arc::new(session);
+    assert!(super::super::handlers::shutdown(&session, "shutdown".to_string()).await);
+    assert!(session.state.lock().await.shutting_down);
+    assert_eq!(*session.agent_status.borrow(), AgentStatus::Shutdown);
+
+    // This is the delayed cleanup's admission check after shutdown completed.
+    assert!(session.reserve_pending_work_turn().await.is_none());
+    assert!(session.active_turn.lock().await.is_none());
+    assert_eq!(
+        session.input_queue.unsubmitted_recorded_mail().await,
+        vec![communication]
     );
 }
 

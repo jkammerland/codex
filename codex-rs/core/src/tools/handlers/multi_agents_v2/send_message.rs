@@ -1,4 +1,5 @@
 use super::analytics::ToolCallAnalytics;
+use super::message_tool::MessageArgs;
 use super::message_tool::SendMessageArgs;
 use super::message_tool::handle_message_string_tool;
 use super::*;
@@ -6,7 +7,16 @@ use crate::agent::types::MessageDeliveryMode;
 use crate::tools::handlers::multi_agents_spec::create_send_message_tool;
 use codex_tools::ToolSpec;
 
-pub(crate) struct Handler;
+#[derive(Default)]
+pub(crate) struct Handler {
+    wake_enabled: bool,
+}
+
+impl Handler {
+    pub(crate) fn new(wake_enabled: bool) -> Self {
+        Self { wake_enabled }
+    }
+}
 
 impl ToolExecutor<ToolInvocation> for Handler {
     fn tool_name(&self) -> ToolName {
@@ -14,7 +24,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_send_message_tool()
+        create_send_message_tool(self.wake_enabled)
     }
 
     fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
@@ -37,16 +47,22 @@ impl Handler {
         analytics: &mut ToolCallAnalytics,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         let arguments = function_arguments(invocation.payload.clone())?;
-        let args: SendMessageArgs = parse_arguments(&arguments)?;
-        handle_message_string_tool(
-            invocation,
-            MessageDeliveryMode::QueueOnly,
-            args.target,
-            args.message,
-            analytics,
-        )
-        .await
-        .map(boxed_tool_output)
+        // Keep parsing aligned with the feature-gated schema, including legacy diagnostics.
+        let args: SendMessageArgs = if self.wake_enabled {
+            parse_arguments(&arguments)?
+        } else {
+            let args: MessageArgs = parse_arguments(&arguments)?;
+            SendMessageArgs {
+                target: args.target,
+                message: args.message,
+                wake: None,
+            }
+        };
+        let mode = match args.wake {
+            Some(false) => MessageDeliveryMode::QueueOnly,
+            Some(true) | None => MessageDeliveryMode::Auto,
+        };
+        handle_message_string_tool(invocation, mode, args.target, args.message, analytics).await
     }
 }
 

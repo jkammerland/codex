@@ -912,8 +912,36 @@ impl FromStr for ThreadHistoryMode {
     }
 }
 
+/// Durable routing metadata; it never changes the message's model-visible text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMailKind {
+    DirectMessage,
+    Assignment,
+    Completion,
+    LegacyCompletion,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMailWake {
+    Auto,
+    QueueOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct AgentMailMetadata {
+    pub message_id: String,
+    pub task_id: Option<String>,
+    pub kind: AgentMailKind,
+    pub wake: AgentMailWake,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct InterAgentCommunication {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mail: Option<AgentMailMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub id: Option<ResponseItemId>,
@@ -940,6 +968,7 @@ impl InterAgentCommunication {
         trigger_turn: bool,
     ) -> Self {
         Self {
+            mail: None,
             id: None,
             author,
             recipient,
@@ -959,6 +988,7 @@ impl InterAgentCommunication {
         trigger_turn: bool,
     ) -> Self {
         Self {
+            mail: None,
             id: None,
             author,
             recipient,
@@ -980,6 +1010,7 @@ impl InterAgentCommunication {
     pub fn to_response_input_item(&self) -> ResponseInputItem {
         let mut communication = self.clone();
         communication.id = None;
+        communication.mail = None;
         communication.internal_chat_message_metadata_passthrough = None;
         ResponseInputItem::Message {
             role: "assistant".to_string(),
@@ -993,6 +1024,25 @@ impl InterAgentCommunication {
     }
 
     pub fn to_model_input_item(&self) -> ResponseItem {
+        if self
+            .mail
+            .as_ref()
+            .is_some_and(|mail| mail.kind == AgentMailKind::LegacyCompletion)
+        {
+            return ResponseItem::Message {
+                id: self.id.clone(),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: self.content.clone(),
+                }],
+                encrypted_content: None,
+                status: None,
+                phase: None,
+                internal_chat_message_metadata_passthrough: self
+                    .internal_chat_message_metadata_passthrough
+                    .clone(),
+            };
+        }
         let content = match &self.encrypted_content {
             Some(encrypted_content) => {
                 let message_type = if self.trigger_turn {
@@ -4870,6 +4920,7 @@ mod tests {
     #[test]
     fn inter_agent_communication_response_input_item_preserves_commentary_phase() {
         let mut communication = InterAgentCommunication {
+            mail: None,
             id: Some(ResponseItemId::with_suffix("amsg", "1")),
             author: AgentPath::root(),
             recipient: AgentPath::root().join("reviewer").expect("recipient path"),

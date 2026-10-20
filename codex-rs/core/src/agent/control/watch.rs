@@ -26,6 +26,7 @@ impl LocalAgentControl {
         let mut receiver = thread.subscribe_status();
         let config = Box::new(thread.config_snapshot().await);
         let initial = LiveAgent {
+            task_id: None,
             thread_id: agent_id,
             metadata: self.get_agent_metadata(agent_id).unwrap_or_default(),
             status: receiver.borrow_and_update().clone(),

@@ -50,6 +50,7 @@ use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHand
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::WaitAllHandler;
 use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
@@ -115,6 +116,7 @@ struct CoreToolPlanContext<'a> {
     wait_for_environment_tool_config: Option<&'a Arc<crate::WaitForEnvironmentToolConfig>>,
     default_agent_type_description: &'a str,
     wait_agent_timeouts: WaitAgentTimeoutOptions,
+    task_barriers_supported: bool,
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -145,6 +147,7 @@ pub(crate) fn build_tool_router(
         wait_for_environment_tool_config: wait_for_environment_tool_config.as_ref(),
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        task_barriers_supported: session.services.agent_control.supports_task_barriers(),
     };
     let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
     add_core_tool_sources(&context, &mut registry);
@@ -312,6 +315,7 @@ pub(crate) fn build_core_tool_registry(
         wait_for_environment_tool_config,
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        task_barriers_supported: true,
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -542,7 +546,11 @@ pub(crate) fn finalize_tool_router(
             collect_tool_namespaces_info(&registry, &code_mode_tool_names, &model_visible_specs)
         })
         .filter(|info| !info.is_empty());
-    let child_management_tools = required_child_management_tool_names(turn_context, model_info);
+    let mut child_management_tools = required_child_management_tool_names(turn_context, model_info);
+    let wait_all_name = ToolName::plain("wait_all");
+    if registry.registered_tool(&wait_all_name).is_some() {
+        child_management_tools.push(wait_all_name);
+    }
 
     Ok(ToolRouter::from_parts(
         registry,
@@ -1488,6 +1496,11 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                                 .config
                                 .multi_agent_v2
                                 .expose_spawn_agent_model_overrides,
+                            task_receipts: context.task_barriers_supported
+                                && turn_context
+                                    .config
+                                    .features
+                                    .enabled(Feature::WakeOnAgentMessages),
                             usage_hint_text: turn_context
                                 .config
                                 .multi_agent_v2
@@ -1505,20 +1518,43 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 exposure,
             );
             if !turn_context.config.multi_agent_v2.disable_direct_message {
+                let waking_mail = turn_context
+                    .config
+                    .features
+                    .enabled(Feature::WakeOnAgentMessages);
+                let send_description =
+                    model_messages.multi_agent_tool_description_override("send_message");
+                let effective_send_description = waking_mail.then(|| format!(
+                    "{}\nMessage wakeups are enabled: omitted wake or wake:true delivers normal waking direct mail, including to a parent or peer. wake:false is authoritative queue-only progress. Direct mail does not create an assignment receipt.",
+                    send_description.unwrap_or("Send a direct message to an existing agent.")
+                ));
+                let followup_description =
+                    model_messages.multi_agent_tool_description_override("followup_task");
+                let effective_followup_description = (context.task_barriers_supported && waking_mail).then(|| format!(
+                    "{}\nReturns task_name and task_id for the accepted assignment. Save task_id for wait_all; acceptance does not claim task fulfillment.",
+                    followup_description.unwrap_or("Send a follow-up assignment to an existing non-root agent, starting a turn when idle.")
+                ));
                 registry.register_trusted_with_exposure(
                     multi_agent_v2_handler(
-                        SendMessageHandlerV2,
+                        SendMessageHandlerV2::new(waking_mail),
                         tool_namespace,
-                        model_messages.multi_agent_tool_description_override("send_message"),
-                        model_messages.multi_agent_tool_parameters_override("send_message"),
+                        effective_send_description.as_deref().or(send_description),
+                        // The local schema carries the wake override even with an older catalog.
+                        if waking_mail {
+                            None
+                        } else {
+                            model_messages.multi_agent_tool_parameters_override("send_message")
+                        },
                     ),
                     exposure,
                 );
                 registry.register_trusted_with_exposure(
                     multi_agent_v2_handler(
-                        FollowupTaskHandlerV2,
+                        FollowupTaskHandlerV2::new(context.task_barriers_supported && waking_mail),
                         tool_namespace,
-                        model_messages.multi_agent_tool_description_override("followup_task"),
+                        effective_followup_description
+                            .as_deref()
+                            .or(followup_description),
                         model_messages.multi_agent_tool_parameters_override("followup_task"),
                     ),
                     exposure,
@@ -1534,6 +1570,15 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     ),
                     exposure,
                 );
+            }
+            if context.task_barriers_supported
+                && turn_context
+                    .config
+                    .features
+                    .enabled(Feature::WakeOnAgentMessages)
+            {
+                // The provider's reserved collaboration namespace only accepts its built-in tools.
+                registry.add_with_exposure(WaitAllHandler, exposure);
             }
             registry.register_trusted_with_exposure(
                 multi_agent_v2_handler(
@@ -1574,6 +1619,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     hide_agent_type_model_reasoning: false,
                     expose_spawn_agent_model_overrides: true,
                     usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                    task_receipts: false,
                 }),
                 exposure,
             );

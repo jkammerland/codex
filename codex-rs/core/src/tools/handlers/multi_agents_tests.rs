@@ -74,6 +74,8 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::team_model::TeamModelPolicy;
+use codex_protocol::team_model::TeamSelectionOrigin;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use core_test_support::TempDirExt;
@@ -1191,7 +1193,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         json!(r#"<agent name="/root/test_process" />"#),
     );
 
-    SendMessageHandlerV2
+    SendMessageHandlerV2::default()
         .handle(invocation(
             session.clone(),
             turn.clone(),
@@ -1348,7 +1350,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         agent_role: None,
     });
 
-    SendMessageHandlerV2
+    SendMessageHandlerV2::default()
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1425,7 +1427,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
         agent_role: None,
     });
 
-    let Err(err) = FollowupTaskHandlerV2
+    let Err(err) = FollowupTaskHandlerV2::default()
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1811,7 +1813,7 @@ async fn multi_agent_v2_send_message_rejects_legacy_items_field() {
         })),
     );
 
-    let Err(err) = SendMessageHandlerV2.handle(invocation).await else {
+    let Err(err) = SendMessageHandlerV2::default().handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
     let FunctionCallError::RespondToModel(message) = err else {
@@ -1820,22 +1822,44 @@ async fn multi_agent_v2_send_message_rejects_legacy_items_field() {
     assert!(message.contains("unknown field `items`"));
 }
 
+#[test_case::test_case(false; "waking_mail_disabled")]
+#[test_case::test_case(true; "waking_mail_enabled")]
 #[tokio::test]
-async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
+async fn multi_agent_v2_send_message_rejects_interrupt_parameter(waking_mail: bool) {
     let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = turn.config.as_ref().clone();
+    // This synthetic manager has no state database; ephemeral roots use its in-memory mailbox.
+    config.ephemeral = true;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config
+        .features
+        .set_enabled(Feature::WakeOnAgentMessages, waking_mail)
+        .expect("set waking mail feature");
+    set_turn_config(&mut turn, config);
+
+    // Match both the feature state and controller identity to the actual mailbox root.
     let manager = thread_manager();
     let root = manager
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
-    set_agent_control(&mut session, manager.agent_control());
+    set_agent_control(
+        &mut session,
+        root.thread
+            .session
+            .services
+            .local_agent_runtime
+            .control(root.thread.session.session_id()),
+    );
     session.thread_id = root.thread_id;
-    let mut config = turn.config.as_ref().clone();
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    set_turn_config(&mut turn, config);
+    assert_eq!(
+        session.session_id(),
+        codex_protocol::SessionId::from(root.thread_id)
+    );
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
+    // Argument rejection needs an existing worker, not a persisted parent-history fork.
     SpawnAgentHandlerV2::default()
         .handle(invocation(
             session.clone(),
@@ -1843,7 +1867,8 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
             "spawn_agent",
             function_payload(json!({
                 "message": "boot worker",
-                "task_name": "worker"
+                "task_name": "worker",
+                "fork_turns": "none"
             })),
         ))
         .await
@@ -1866,15 +1891,24 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
         })),
     );
 
-    let Err(err) = SendMessageHandlerV2.handle(invocation).await else {
+    let Err(err) = SendMessageHandlerV2::new(waking_mail)
+        .handle(invocation)
+        .await
+    else {
         panic!("send_message interrupt parameter should be rejected");
     };
     let FunctionCallError::RespondToModel(message) = err else {
         panic!("expected model-facing parse error");
     };
-    assert!(message.starts_with(
+    let expected = if waking_mail {
+        "failed to parse function arguments: unknown field `interrupt`, expected one of `target`, `message`, `wake`"
+    } else {
         "failed to parse function arguments: unknown field `interrupt`, expected `target` or `message`"
-    ));
+    };
+    assert!(
+        message.starts_with(expected),
+        "unexpected parse error: {message}"
+    );
 
     let ops = manager.captured_ops();
     let ops_for_agent: Vec<&Op> = ops
@@ -1955,7 +1989,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         )
         .await;
 
-    FollowupTaskHandlerV2
+    FollowupTaskHandlerV2::default()
         .handle(invocation(
             session,
             turn,
@@ -2096,7 +2130,7 @@ async fn multi_agent_v2_followup_task_rejects_legacy_items_field() {
         })),
     );
 
-    let Err(err) = FollowupTaskHandlerV2.handle(invocation).await else {
+    let Err(err) = FollowupTaskHandlerV2::default().handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
     let FunctionCallError::RespondToModel(message) = err else {
@@ -4665,6 +4699,15 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
     expected.model_reasoning_effort = Some(ReasoningEffort::High);
     expected.model_reasoning_summary = Some(ReasoningSummary::Detailed);
     expected.developer_instructions = turn.developer_instructions.clone();
+
+    // Child selections are inherited even when the parent's policy predates origin tracking.
+    expected.team_model_policy = TeamModelPolicy {
+        model_origin: TeamSelectionOrigin::Inherited,
+        effort_origin: TeamSelectionOrigin::Inherited,
+        selection: None,
+        superseded_revision: None,
+    };
+
     #[allow(deprecated)]
     {
         expected.cwd = turn.cwd.clone();
@@ -4718,6 +4761,15 @@ async fn build_agent_resume_config_clears_base_instructions() {
     expected.model_reasoning_effort = turn.reasoning_effort().cloned();
     expected.model_reasoning_summary = Some(turn.reasoning_summary());
     expected.developer_instructions = turn.developer_instructions.clone();
+
+    // Resume rebuilds child inheritance while preserving the saved model policy.
+    expected.team_model_policy = TeamModelPolicy {
+        model_origin: TeamSelectionOrigin::Inherited,
+        effort_origin: TeamSelectionOrigin::Inherited,
+        selection: None,
+        superseded_revision: None,
+    };
+
     #[allow(deprecated)]
     {
         expected.cwd = turn.cwd.clone();

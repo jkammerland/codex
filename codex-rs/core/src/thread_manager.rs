@@ -1746,6 +1746,26 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    pub(crate) async fn agent_mailbox_store(
+        &self,
+    ) -> CodexResult<Arc<dyn codex_thread_store::AgentMailboxStore>> {
+        if let Some(local) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+        {
+            let state_db = local.state_db().await.ok_or_else(|| {
+                CodexErr::Fatal("durable agent mailbox storage is unavailable".into())
+            })?;
+            return Ok(Arc::new(codex_thread_store::LocalAgentMailboxStore::new(
+                state_db,
+            )));
+        }
+        Ok(Arc::new(
+            codex_thread_store::InMemoryAgentMailboxStore::default(),
+        ))
+    }
+
     pub(crate) fn shared_thread_instructions_provider(
         &self,
         root_thread_id: ThreadId,
@@ -2535,6 +2555,47 @@ impl ThreadManagerState {
                 return Err(error);
             }
         };
+        // Replay only unsubmitted mail for the session explicitly being attached.
+        // An old running assignment is never submitted as work again here.
+        let session = &new_thread.thread.session;
+        if session.enabled(Feature::WakeOnAgentMessages) {
+            match session
+                .services
+                .agent_control
+                .pending_mail(new_thread.thread_id)
+                .await
+            {
+                Ok(mail) => {
+                    let history = session.clone_history().await;
+                    for communication in mail {
+                        if history.raw_items().any(|item| match item {
+                            codex_protocol::models::ResponseItem::AgentMessage { id, .. }
+                            | codex_protocol::models::ResponseItem::Message { id, .. } => {
+                                id == &communication.id
+                            }
+                            _ => false,
+                        }) {
+                            session.input_queue.record_mail(&communication).await;
+                        } else {
+                            session
+                                .input_queue
+                                .enqueue_mailbox_communication(communication, Default::default())
+                                .await;
+                        }
+                    }
+                    session.maybe_start_turn_for_pending_work().await;
+                }
+                Err(err) => warn!("failed to restore attached recipient mail: {err}"),
+            }
+            if let Err(err) = session
+                .services
+                .agent_control
+                .restore_attached_agents(new_thread.thread_id)
+                .await
+            {
+                warn!("failed to restore pending attached-tree mail: {err}");
+            }
+        }
         new_thread.thread.emit_thread_ready_lifecycle().await;
         if source_changed_during_startup.load(Ordering::Acquire) {
             new_thread.thread.session.request_mcp_runtime_refresh();

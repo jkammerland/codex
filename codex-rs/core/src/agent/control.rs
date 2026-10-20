@@ -91,6 +91,7 @@ mod spawn_telemetry;
 mod target;
 mod user_authorization;
 mod watch;
+mod work;
 
 /// Per-session controller handle for a local agent tree.
 /// Handles retain a session identity and share their tree's `LocalAgentRuntime`.
@@ -179,14 +180,42 @@ impl LocalAgentControl {
                 .ensure_execution_capacity_for_turn_start(self)
                 .await?;
         }
-        self.send_inter_agent_communication_after_capacity_check(
-            agent_id,
-            &state,
-            communication,
-            agent_communication_context,
-            start_options,
-        )
-        .await
+        let auto_wake = communication
+            .mail
+            .as_ref()
+            .is_none_or(|metadata| metadata.wake == codex_protocol::protocol::AgentMailWake::Auto);
+        let sender = agent_communication_context.sender_thread_id;
+        let result = self
+            .send_inter_agent_communication_after_capacity_check(
+                agent_id,
+                &state,
+                communication,
+                agent_communication_context,
+                start_options,
+            )
+            .await;
+        // A durable completion can target an evicted intermediate parent. Restore
+        // its session through the existing loader; startup restores persisted holds.
+        if result.is_ok()
+            && auto_wake
+            && state.get_thread(agent_id).await.is_err()
+            && let Ok(sender) = state.get_thread(sender).await
+            && sender
+                .session
+                .enabled(codex_features::Feature::WakeOnAgentMessages)
+            && let Ok(root) = state.get_thread(self.session_id.into()).await
+        {
+            let mut config = root.config().await.as_ref().clone();
+            config.base_instructions = None;
+            config.base_instructions_provenance = None;
+            config.restore_saved_model_policy = true;
+            if let Err(err) =
+                Box::pin(self.ensure_v2_agent_loaded(config, agent_id, /*parent*/ None)).await
+            {
+                warn!("accepted mail recipient could not be restored: {err}");
+            }
+        }
+        result
     }
 
     pub(crate) async fn emit_sub_agent_activity(
@@ -264,6 +293,9 @@ impl LocalAgentControl {
         context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
+        let durable_id = self
+            .accept_mail(agent_id, &mut communication, &context)
+            .await?;
         let observers = state.extensions.message_lifecycle_contributors();
         let delivery = (!observers.is_empty()).then(|| {
             let message_id = communication
@@ -282,7 +314,7 @@ impl LocalAgentControl {
             if !communication.trigger_turn && !threads.contains_key(&agent_id) {
                 let _membership = self.runtime.admit_start()?;
                 self.runtime.ensure_agent_known(agent_id)?;
-                let submission_id = uuid::Uuid::now_v7().to_string();
+                let submission_id = durable_id.clone();
                 self.runtime.mailboxes.enqueue(
                     agent_id,
                     Some(submission_id.clone()),
@@ -336,7 +368,7 @@ impl LocalAgentControl {
                 agent_id,
             );
         }
-        result
+        result.map(|_| durable_id)
     }
 
     /// Interrupt the current task for an existing agent thread.
@@ -430,6 +462,7 @@ impl LocalAgentControl {
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
             agents.push(LiveAgent {
+                task_id: None,
                 thread_id: root_thread_id,
                 metadata: AgentMetadata {
                     agent_id: Some(root_thread_id),
@@ -455,6 +488,7 @@ impl LocalAgentControl {
                 continue;
             };
             agents.push(LiveAgent {
+                task_id: None,
                 thread_id,
                 metadata,
                 status: thread.agent_status().await,
@@ -583,10 +617,51 @@ impl LocalAgentControl {
                         .unwrap_or(ContentItemNamespace::Functions),
                 ),
             };
-            parent_thread
-                .inject_fragment_without_turn(
-                    SubagentNotification::new(child_reference.as_str(), status)
-                        .with_metadata(ContentItemMetadata::tool(namespace)),
+            let fragment = SubagentNotification::new(child_reference.as_str(), status)
+                .with_metadata(ContentItemMetadata::tool(namespace));
+            if !config
+                .features
+                .enabled(codex_features::Feature::WakeOnAgentMessages)
+            {
+                parent_thread.inject_fragment_without_turn(fragment).await;
+                return;
+            }
+            let item = ContextualUserFragment::into(fragment);
+            let ResponseItem::Message {
+                content,
+                internal_chat_message_metadata_passthrough,
+                ..
+            } = item
+            else {
+                return;
+            };
+            let Some(ContentItem::InputText { text }) = content.into_iter().next() else {
+                return;
+            };
+            let mut communication = InterAgentCommunication::new(
+                child_agent_path.unwrap_or_else(AgentPath::root),
+                parent_thread
+                    .session_source
+                    .get_agent_path()
+                    .unwrap_or_else(AgentPath::root),
+                Vec::new(),
+                text,
+                /*trigger_turn*/ false,
+            );
+            communication.internal_chat_message_metadata_passthrough =
+                internal_chat_message_metadata_passthrough;
+            communication.mail = Some(codex_protocol::protocol::AgentMailMetadata {
+                message_id: codex_protocol::ResponseItemId::new("agentmail").to_string(),
+                task_id: None,
+                kind: codex_protocol::protocol::AgentMailKind::LegacyCompletion,
+                wake: codex_protocol::protocol::AgentMailWake::Auto,
+            });
+            let _ = control
+                .send_inter_agent_communication(
+                    parent_thread_id,
+                    communication,
+                    AgentCommunicationContext::new(AgentCommunicationKind::Result, child_thread_id),
+                    TurnStartOptions::default(),
                 )
                 .await;
         };

@@ -1,12 +1,21 @@
 use super::analytics::ToolCallAnalytics;
-use super::message_tool::FollowupTaskArgs;
+use super::message_tool::MessageArgs;
 use super::message_tool::handle_message_string_tool;
 use super::*;
 use crate::agent::types::MessageDeliveryMode;
 use crate::tools::handlers::multi_agents_spec::create_followup_task_tool;
 use codex_tools::ToolSpec;
 
-pub(crate) struct Handler;
+#[derive(Default)]
+pub(crate) struct Handler {
+    task_receipts: bool,
+}
+
+impl Handler {
+    pub(crate) fn new(task_receipts: bool) -> Self {
+        Self { task_receipts }
+    }
+}
 
 impl ToolExecutor<ToolInvocation> for Handler {
     fn tool_name(&self) -> ToolName {
@@ -14,7 +23,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_followup_task_tool()
+        create_followup_task_tool(self.task_receipts)
     }
 
     fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
@@ -37,7 +46,7 @@ impl Handler {
         analytics: &mut ToolCallAnalytics,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         let arguments = function_arguments(invocation.payload.clone())?;
-        let args: FollowupTaskArgs = parse_arguments(&arguments)?;
+        let args: MessageArgs = parse_arguments(&arguments)?;
         handle_message_string_tool(
             invocation,
             MessageDeliveryMode::TriggerTurn,
@@ -46,7 +55,6 @@ impl Handler {
             analytics,
         )
         .await
-        .map(boxed_tool_output)
     }
 }
 

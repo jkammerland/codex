@@ -56,6 +56,7 @@ impl LocalAgentControl {
         let snapshot = match state.get_thread(agent_id).await {
             Ok(thread) => {
                 let agent = LiveAgent {
+                    task_id: None,
                     thread_id: agent_id,
                     metadata: metadata.unwrap_or_default(),
                     status: thread.agent_status().await,

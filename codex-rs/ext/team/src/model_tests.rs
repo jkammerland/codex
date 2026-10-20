@@ -91,6 +91,206 @@ fn coordinator_selection(
 }
 
 #[tokio::test]
+async fn default_model_request_without_resolved_value_uses_loaded_host_default()
+-> anyhow::Result<()> {
+    let (model, fixture, service, thread_id) = model_host().await?;
+    let default_model = fixture.codex.configured_default_model().await;
+    let other_model = if default_model == "gpt-5.2-codex" {
+        "gpt-5.1-codex"
+    } else {
+        "gpt-5.2-codex"
+    };
+    fixture
+        .codex
+        .update_thread_settings(ThreadSettingsOverrides {
+            model: Some(other_model.into()),
+            ..Default::default()
+        })
+        .await?;
+    let original = fixture.codex.thread_settings_snapshot().await;
+    let selection = TeamModelSelection {
+        revision: 10,
+        model: TeamSelection::Default,
+        effort: TeamSelection::Keep,
+    };
+
+    // Offline normalization leaves the default unresolved. The journal can
+    // nevertheless find a loaded thread if resume won that race.
+    service
+        .journal_model_selection(
+            thread_id,
+            &ThreadSettingsOverrides {
+                team_selection: Some(selection.clone()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    service.reconcile_model_selection(thread_id).await?;
+    let settings = fixture.codex.thread_settings_snapshot().await;
+    assert_eq!(
+        (
+            settings.model,
+            settings.reasoning_effort,
+            settings.team_model_policy
+        ),
+        (
+            default_model,
+            original.reasoning_effort,
+            TeamModelPolicy {
+                model_origin: TeamSelectionOrigin::Default,
+                selection: Some(selection),
+                ..original.team_model_policy
+            }
+        )
+    );
+    model.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "holds lifecycle dispatch until explicit pre-ready journal assertions finish"
+)]
+async fn unloaded_sparse_selections_preserve_pending_fields_and_revision_fences()
+-> anyhow::Result<()> {
+    let (model, fixture, service, thread_id) = model_host().await?;
+    let _operation = service.operations.lock().await;
+    let rollout_path = fixture.session_configured.rollout_path.clone().unwrap();
+    fixture.codex.shutdown_and_wait().await?;
+    fixture.thread_manager.remove_thread(&thread_id).await;
+
+    let model_choice = ThreadSettingsUpdateParams {
+        thread_id: thread_id.to_string(),
+        team_selection: Some(TeamModelSelection {
+            revision: 40,
+            model: TeamSelection::Value {
+                value: "gpt-5.2-codex".into(),
+            },
+            effort: TeamSelection::Keep,
+        }),
+        ..Default::default()
+    };
+    let effort_choice = ThreadSettingsUpdateParams {
+        thread_id: thread_id.to_string(),
+        team_selection: Some(TeamModelSelection {
+            revision: 41,
+            model: TeamSelection::Keep,
+            effort: TeamSelection::Default,
+        }),
+        ..Default::default()
+    };
+    assert!(service.defer_model_selection(&model_choice).await?);
+    assert!(service.defer_model_selection(&effort_choice).await?);
+    assert!(service.defer_model_selection(&effort_choice).await?);
+    // Pending settings do not close the family execution gate.
+    assert!(service.gate.try_enter(thread_id).is_some());
+    assert!(
+        service
+            .defer_model_selection(&model_choice)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale")
+    );
+    let mut conflicting = effort_choice.clone();
+    conflicting.team_selection.as_mut().unwrap().effort = TeamSelection::Value {
+        value: "high".into(),
+    };
+    assert!(
+        service
+            .defer_model_selection(&conflicting)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("reused")
+    );
+
+    // Ordinary unloaded edits are still handled by the loaded-thread API.
+    assert!(
+        !service
+            .defer_model_selection(&ThreadSettingsUpdateParams {
+                thread_id: thread_id.to_string(),
+                model: Some("gpt-5.2-codex".into()),
+                ..Default::default()
+            })
+            .await?
+    );
+    let resumed = fixture
+        .thread_manager
+        .resume_legacy_thread_from_rollout(
+            fixture.config.clone(),
+            rollout_path,
+            fixture.thread_manager.auth_manager(),
+            /*parent_trace*/ None,
+            Default::default(),
+        )
+        .await?;
+    // Reproduce Dispatch seeing the registered thread before Ready restores
+    // settings. Its stored mail must remain pending without starting a turn.
+    let store = service.store.get().unwrap();
+    let address = TeamAddress {
+        machine_id: "machine".into(),
+        server_id: "server".into(),
+        thread_id: thread_id.to_string(),
+    };
+    let receipt = store
+        .receive(&TeamDelivery {
+            id: "pending-wake".into(),
+            thread_id: thread_id.to_string(),
+            mode: TeamDeliveryMode::NextTurn,
+            wake: true,
+            message: TeamMessage {
+                id: "wake-message".into(),
+                sender: address.clone(),
+                recipient: Some(address),
+                kind: TeamMessageKind::Request,
+                body: "Use the selected model".into(),
+                reply_to: None,
+                topic: None,
+                created_at: 1,
+            },
+        })
+        .await?;
+    service
+        .dispatch_delivery(
+            thread_id,
+            crate::delivery::DeliveryBoundary::IdleOrSafeBoundary,
+        )
+        .await?;
+    assert_eq!(
+        store.deliveries(&thread_id.to_string()).await?[0].1,
+        receipt
+    );
+    assert_eq!(resumed.thread.team_active_turn_id().await, None);
+    assert!(service.model_selection_pending(thread_id).await?);
+    service.reconcile_model_selection(thread_id).await?;
+    assert!(!service.model_selection_pending(thread_id).await?);
+    assert!(service.gate.try_enter(thread_id).is_some());
+    let settings = resumed.thread.config_snapshot().await;
+    assert_eq!(
+        (
+            settings.model,
+            settings.reasoning_effort,
+            settings.team_model_policy
+        ),
+        (
+            "gpt-5.2-codex".into(),
+            None,
+            TeamModelPolicy {
+                model_origin: TeamSelectionOrigin::Explicit,
+                effort_origin: TeamSelectionOrigin::Default,
+                selection: effort_choice.team_selection,
+                superseded_revision: None,
+            }
+        )
+    );
+    resumed.thread.shutdown_and_wait().await?;
+    model.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sparse_local_edits_survive_acknowledgement_before_core_and_publish_the_durable_fence()
 -> anyhow::Result<()> {
     let (model, fixture, service, thread_id) = model_host().await?;

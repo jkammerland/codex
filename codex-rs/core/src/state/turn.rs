@@ -121,6 +121,20 @@ pub(crate) struct PendingRequestPermissions {
 }
 
 impl TurnState {
+    pub(crate) fn has_pending_approval(&self) -> bool {
+        // The host groups permission requests and MCP elicitations with approvals.
+        self.pending_approvals.values().any(|tx| !tx.is_closed())
+            || self
+                .pending_request_permissions
+                .values()
+                .any(|request| !request.tx_response.is_closed())
+            || self.pending_elicitations.values().any(|tx| !tx.is_closed())
+    }
+
+    pub(crate) fn has_pending_user_input(&self) -> bool {
+        self.pending_user_input.values().any(|tx| !tx.is_closed())
+    }
+
     pub(crate) fn insert_pending_approval(
         &mut self,
         key: String,
@@ -221,3 +235,7 @@ impl TurnState {
         self.mailbox_delivery_phase = phase;
     }
 }
+
+#[cfg(test)]
+#[path = "turn_tests.rs"]
+mod tests;

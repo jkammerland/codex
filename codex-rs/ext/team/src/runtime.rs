@@ -7,6 +7,10 @@ use codex_protocol::ThreadId;
 
 use crate::TeamHostService;
 
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;
+
 impl TeamHostService {
     pub(crate) async fn runtime(&self, roots: &[TeamEnrollment]) -> Result<Vec<TeamAgentRuntime>> {
         let Some(store) = self.store.get() else {
@@ -84,7 +88,7 @@ impl TeamHostService {
                 continue;
             };
             let config = thread.config_snapshot().await;
-            let active = thread.team_active_turn_model().await;
+            let active = thread.team_active_turn().await;
             let Some(gate) = self.gate.snapshot(thread_id) else {
                 continue;
             };
@@ -142,10 +146,15 @@ impl TeamHostService {
                 }
             }
             let member = TeamAgentRuntime {
-                activity: if active.is_some() {
-                    codex_app_server_protocol::TeamActivity::Working
-                } else {
-                    codex_app_server_protocol::TeamActivity::Idle
+                activity: match &active {
+                    Some(turn) if turn.waiting_for_approval => {
+                        codex_app_server_protocol::TeamActivity::WaitingForApproval
+                    }
+                    Some(turn) if turn.waiting_for_input => {
+                        codex_app_server_protocol::TeamActivity::WaitingForInput
+                    }
+                    Some(_) => codex_app_server_protocol::TeamActivity::Working,
+                    None => codex_app_server_protocol::TeamActivity::Idle,
                 },
                 environments: environments.into_values().collect(),
                 thread_id: thread_id.to_string(),
@@ -154,9 +163,9 @@ impl TeamHostService {
                 alias,
                 loaded: true,
                 archived: false,
-                turn_id: active.as_ref().map(|(id, _, _)| id.clone()),
-                current_model: active.as_ref().map(|(_, model, _)| model.clone()),
-                current_effort: active.and_then(|(_, _, effort)| effort),
+                turn_id: active.as_ref().map(|turn| turn.turn_id.clone()),
+                current_model: active.as_ref().map(|turn| turn.model.clone()),
+                current_effort: active.and_then(|turn| turn.effort),
                 next_model: Some(config.model),
                 next_effort: config.reasoning_effort.map(|effort| effort.to_string()),
                 model_error: store

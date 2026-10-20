@@ -15,6 +15,15 @@ use tokio::sync::oneshot;
 
 use super::CodexThread;
 
+/// Live turn settings and interaction waits captured together for the team host.
+pub struct TeamActiveTurn {
+    pub turn_id: String,
+    pub model: String,
+    pub effort: Option<String>,
+    pub waiting_for_approval: bool,
+    pub waiting_for_input: bool,
+}
+
 impl CodexThread {
     /// Inspect the thread's resolved local shell without detecting or launching it again.
     pub fn team_local_shell_name(&self) -> &'static str {
@@ -128,12 +137,24 @@ impl CodexThread {
             .map(|task| task.turn_context.sub_id.clone())
     }
 
-    /// Capture the active turn's settings separately from next-turn settings.
-    pub async fn team_active_turn_model(&self) -> Option<(String, String, Option<String>)> {
+    /// Capture waits with their owning turn so refreshes do not retain stale status events.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the active task and its interaction waits must belong to the same snapshot"
+    )]
+    pub async fn team_active_turn(&self) -> Option<TeamActiveTurn> {
         let active = self.session.active_turn.lock().await;
-        let turn = &active.as_ref()?.task.as_ref()?.turn_context;
+        let active = active.as_ref()?;
+        let turn = &active.task.as_ref()?.turn_context;
+        let state = active.turn_state.lock().await;
         let (model, effort) = turn.capture_current_model_selection();
-        Some((turn.sub_id.clone(), model, effort))
+        Some(TeamActiveTurn {
+            turn_id: turn.sub_id.clone(),
+            model,
+            effort,
+            waiting_for_approval: state.has_pending_approval(),
+            waiting_for_input: state.has_pending_user_input(),
+        })
     }
 
     /// Wait for turn cancellation before the host enumerates surviving jobs.

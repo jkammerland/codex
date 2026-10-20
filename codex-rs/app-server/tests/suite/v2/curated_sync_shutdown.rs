@@ -75,10 +75,13 @@ async fn shutdown_reaps_blocked_curated_git_before_returning() -> Result<()> {
         .close()
         .context("shutdown released the curated Git working directory")?;
     let mut remainder = Vec::new();
-    let bytes = timeout(Duration::from_secs(10), socket.read_to_end(&mut remainder)).await??;
-    assert_eq!(
-        bytes, 0,
-        "the blocked transport must close without a response"
-    );
+    let closed = timeout(Duration::from_secs(10), socket.read_to_end(&mut remainder)).await?;
+    // Terminating a Windows transport can reset TCP instead of sending a FIN.
+    // Both prove closure; the directory check above independently proves cleanup.
+    match closed {
+        Ok(bytes) => assert_eq!(bytes, 0, "the blocked transport must close"),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+    }
+    assert!(remainder.is_empty(), "the transport sent unexpected data");
     Ok(())
 }

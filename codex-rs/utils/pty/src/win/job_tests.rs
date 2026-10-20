@@ -85,3 +85,54 @@ async fn background_launches_keep_consoles_hidden_when_containment_fails() -> an
     tokio::time::timeout(Duration::from_secs(/*secs*/ 10), holder.wait()).await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn owned_launch_assignment_failure_drains_suspended_child() -> anyhow::Result<()> {
+    let job = JobObject::create_without_breakaway()?;
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.handle.as_raw_handle().cast(),
+            JobObjectExtendedLimitInformation,
+            std::ptr::addr_of_mut!(limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        )
+    };
+    anyhow::ensure!(configured != 0, "{}", io::Error::last_os_error());
+
+    // A suspended holder fills the job without executing test code or needing a timed gate.
+    let mut holder_command = Command::new(std::env::current_exe()?);
+    holder_command
+        .args(["--list"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    job.prepare_suspended_spawn(&mut holder_command);
+    let mut holder = holder_command.spawn()?;
+    job.assign_process(
+        holder
+            .raw_handle()
+            .expect("suspended holder has a process handle"),
+    )?;
+
+    // The executable and cwd are valid; the full job forces failure after CreateProcess.
+    // Immediate deletion checks that the rejected suspended child released its cwd handle.
+    let directory = tempfile::tempdir()?;
+    let mut rejected = Command::new(std::env::current_exe()?);
+    rejected
+        .args(["--list"])
+        .current_dir(directory.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let result = job.spawn_contained_owned(&mut rejected).await;
+    assert!(result.is_err(), "assigning into the full job must fail");
+    directory.close()?;
+
+    holder.start_kill()?;
+    holder.wait_with_output().await?;
+    Ok(())
+}

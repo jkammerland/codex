@@ -4,6 +4,8 @@
 //! Implementations are responsible for resolving that id to local rollout files, RPC requests, or
 //! any other backing store.
 
+mod agent_mailbox;
+mod agent_mailbox_memory;
 mod error;
 mod in_memory;
 mod live_thread;
@@ -16,7 +18,18 @@ mod thread_metadata_sync;
 mod thread_sections;
 mod types;
 
+pub use agent_mailbox::AgentMailboxStore;
+pub use agent_mailbox::LocalAgentMailboxStore;
+pub use agent_mailbox_memory::InMemoryAgentMailboxStore;
 pub use codex_state::AddThreadAttachmentOutcome;
+pub use codex_state::AgentMailAcceptance;
+pub use codex_state::AgentMailEnvelope;
+pub use codex_state::AgentMailRecord;
+pub use codex_state::AgentMailboxSummary;
+pub use codex_state::AgentTaskFilter;
+pub use codex_state::AgentTaskRecord;
+pub use codex_state::AgentTaskSnapshot;
+pub use codex_state::AgentTaskStatus;
 pub use codex_state::MAX_QUEUE_ITEMS;
 pub use codex_state::MAX_THREAD_ATTACHMENT_PAYLOAD_BYTES;
 pub use codex_state::ProjectSortKey;

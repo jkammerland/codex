@@ -40,6 +40,7 @@ use std::sync::atomic::AtomicI64;
 use std::time::Instant;
 use tracing::warn;
 
+mod agent_mailbox;
 mod backfill;
 mod external_agent_config_imports;
 mod goals;
@@ -63,6 +64,7 @@ mod thread_section_order;
 mod thread_sections;
 mod threads;
 
+pub use agent_mailbox::SqliteAgentMailboxStore;
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
@@ -107,6 +109,7 @@ pub struct StateRuntime {
     memories: MemoryStore,
     memories_v2: Arc<tokio::sync::OnceCell<MemoryStore>>,
     thread_queue: SqliteQueueStore,
+    agent_mailbox: SqliteAgentMailboxStore,
     thread_updated_at_millis: Arc<AtomicI64>,
     thread_recency_at_millis: Arc<AtomicI64>,
     reclamation: Arc<reclamation::SqliteReclamationWorker>,
@@ -269,6 +272,7 @@ impl StateRuntime {
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
             memories_v2: Arc::new(tokio::sync::OnceCell::new()),
+            agent_mailbox: SqliteAgentMailboxStore::new(Arc::clone(&queue_pool)),
             thread_queue: SqliteQueueStore::new(queue_pool),
             pool,
             logs_pool,
@@ -307,6 +311,10 @@ impl StateRuntime {
     /// Return the durable, SQLite-backed user-message queue.
     pub fn thread_queue(&self) -> &SqliteQueueStore {
         &self.thread_queue
+    }
+
+    pub fn agent_mailbox(&self) -> &SqliteAgentMailboxStore {
+        &self.agent_mailbox
     }
 
     /// Close all SQLite pools and wait for outstanding pool workers to exit.

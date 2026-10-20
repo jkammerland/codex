@@ -5543,6 +5543,54 @@ class ThreadActiveFlag(Enum):
     waiting_on_user_input = "waitingOnUserInput"
 
 
+class ThreadAgentBarrier(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    held: Annotated[int, Field(ge=0)]
+    remaining: Annotated[int, Field(ge=0)]
+    total: Annotated[int, Field(ge=0)]
+    unavailable: Annotated[int, Field(ge=0)]
+
+
+class ThreadAgentWork(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    pending_mail: Annotated[
+        int,
+        Field(
+            alias="pendingMail",
+            description="Accepted messages not yet included in an accepted model request.",
+            ge=0,
+        ),
+    ]
+    revision: Annotated[
+        int, Field(description="Monotonic revision within the current controller instance.", ge=0)
+    ]
+    waiting_tasks: Annotated[
+        ThreadAgentBarrier | None,
+        Field(
+            alias="waitingTasks",
+            description="The current wait-all observation, if any. This does not own or cancel tasks.",
+        ),
+    ] = None
+
+
+class ThreadAgentWorkUpdatedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    agent_work: Annotated[
+        ThreadAgentWork | None,
+        Field(
+            alias="agentWork",
+            description="Null means this controller cannot currently supply an authoritative snapshot.",
+        ),
+    ] = None
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
 class ThreadApproveGuardianDeniedActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -9922,6 +9970,24 @@ class ThreadQueueChangedServerNotification(BaseModel):
     params: ThreadQueueChangedNotification
 
 
+class ThreadAgentWorkUpdatedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["thread/agentWork/updated"],
+        Field(title="Thread/agentWork/updatedNotificationMethod"),
+    ]
+    params: ThreadAgentWorkUpdatedNotification
+
+
 class ThreadProjectUpdatedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -14043,6 +14109,7 @@ class ServerNotification(
         | ThreadGoalClearedServerNotification
         | TeamChangedServerNotification
         | ThreadQueueChangedServerNotification
+        | ThreadAgentWorkUpdatedServerNotification
         | ProjectChangedServerNotification
         | ThreadProjectUpdatedServerNotification
         | ThreadEnvironmentConnectedServerNotification
@@ -14132,6 +14199,7 @@ class ServerNotification(
         | ThreadGoalClearedServerNotification
         | TeamChangedServerNotification
         | ThreadQueueChangedServerNotification
+        | ThreadAgentWorkUpdatedServerNotification
         | ProjectChangedServerNotification
         | ThreadProjectUpdatedServerNotification
         | ThreadEnvironmentConnectedServerNotification

@@ -76,6 +76,34 @@ Revisions are equality tokens, not clocks: never compare or merge them across
 threads or hosts. When concurrent responses disagree, refresh with `thread/read`.
 Offscreen threads converge on page refresh.
 
+# Native agent work state
+
+With `features.wake_on_agent_messages` enabled, loaded native threads expose
+`Thread.agentWork` in start, read, resume, fork, list and search responses. It is null when the
+controller cannot supply this state, including unloaded threads and disabled or
+unsupported backends. This state is independent of whether the thread is active.
+
+`pendingMail` counts accepted messages not yet included in a model request
+accepted by the transport. Writing a message into history does not decrement it.
+`waitingTasks`, when present, reports the current `wait_all` selection with
+`total`, `remaining`, `held` and `unavailable` counts. Held or unavailable work is
+incomplete; a terminal task outcome does not imply successful work.
+
+`thread/agentWork/updated` publishes changed snapshots to clients that enable
+`initialize.capabilities.experimentalApi`,
+including clients viewing the agents overview without a transcript subscription.
+The existing notification opt-out setting applies. `revision` increases within
+one controller instance; never compare it across hosts or after reconnecting.
+Refresh loaded threads with `thread/read` after reconnecting or event loss.
+These reads do not consume mail, resume work or clear a hold.
+
+Automatic continuation requires the controller to remain attached, as it does
+in an open TUI or persistent app-server connection. `codex exec` still exits
+after its requested root turn finishes; use `wait_all` before finalizing when
+that turn needs delegated results. Reopening an attached native tree recovers
+its unsubmitted mail without replaying child work. There is no startup scan of
+unopened conversations.
+
 # Guardian circuit-breaker errors
 
 Set `auto_review.circuit_break_action = "strict"` to include `TooManyDenials` in

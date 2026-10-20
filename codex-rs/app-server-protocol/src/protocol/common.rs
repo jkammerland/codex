@@ -2053,6 +2053,8 @@ server_notification_definitions! {
     TeamChanged => "team/changed" (v2::TeamChangedNotification),
     #[experimental("thread/queue/changed")]
     ThreadQueueChanged => "thread/queue/changed" (v2::ThreadQueueChangedNotification),
+    #[experimental("thread/agentWork/updated")]
+    ThreadAgentWorkUpdated => "thread/agentWork/updated" (v2::ThreadAgentWorkUpdatedNotification),
     #[experimental("project/changed")]
     ProjectChanged => "project/changed" (v2::ProjectChangedNotification),
     #[experimental("thread/project/updated")]
@@ -3351,6 +3353,7 @@ mod tests {
                     cwd: cwd.clone().into(),
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
+                    agent_work: None,
                     can_accept_direct_input: None,
                     thread_source: None,
                     agent_nickname: None,
@@ -3413,6 +3416,7 @@ mod tests {
                         "cliVersion": "0.0.0",
                         "originator": null,
                         "source": "exec",
+                        "agentWork": null,
                         "canAcceptDirectInput": null,
                         "threadSource": null,
                         "agentNickname": null,

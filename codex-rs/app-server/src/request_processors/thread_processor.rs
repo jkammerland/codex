@@ -1718,6 +1718,8 @@ impl ThreadRequestProcessor {
                 otel.name = "app_server.thread_start.config_snapshot",
             ))
             .await;
+        let native_thread = Arc::clone(&thread);
+        let agent_work = super::thread_agent_work::snapshot(&native_thread).await;
         let mut thread = build_thread_from_snapshot(
             thread_id,
             session_configured.session_id.to_string(),
@@ -1725,6 +1727,7 @@ impl ThreadRequestProcessor {
             &config_snapshot,
             session_configured.rollout_path.clone(),
         );
+        thread.agent_work = agent_work;
         thread.project_id = project_id.clone();
         thread.daybreak_enabled = daybreak_enabled;
 
@@ -1812,6 +1815,14 @@ impl ThreadRequestProcessor {
                 otel.name = "app_server.thread_start.notify_started",
             ))
             .await;
+        // Publish after the initial response and ThreadStarted so changes during
+        // listener attachment cannot be hidden by its initial deduplication state.
+        super::thread_agent_work::publish(
+            thread_id,
+            &native_thread,
+            &listener_task_context.outgoing,
+        )
+        .await;
         session_telemetry.record_startup_phase(
             "thread_start_total",
             thread_start_started_at.elapsed(),
@@ -3186,6 +3197,10 @@ impl ThreadRequestProcessor {
 
         thread.daybreak_enabled = thread.daybreak_enabled.or(pending_daybreak_enabled);
 
+        if let Some(loaded_thread) = loaded_thread.as_ref() {
+            thread.agent_work = super::thread_agent_work::snapshot(loaded_thread).await;
+        }
+
         let has_live_in_progress_turn = if let Some(loaded_thread) = loaded_thread.as_ref() {
             matches!(loaded_thread.agent_status().await, AgentStatus::Running)
         } else {
@@ -4426,6 +4441,7 @@ impl ThreadRequestProcessor {
                         return Ok(ControlFlow::Break(()));
                     }
                 };
+                thread.agent_work = super::thread_agent_work::snapshot(&codex_thread).await;
                 thread.thread_source = codex_thread
                     .config_snapshot()
                     .await
@@ -5843,6 +5859,7 @@ impl ThreadRequestProcessor {
         if let Some(name) = source_thread_name {
             set_thread_name_from_title(&mut thread, name);
         }
+        thread.agent_work = super::thread_agent_work::snapshot(&forked_thread).await;
         thread.can_accept_direct_input = Some(can_accept_direct_input(
             forked_thread.multi_agent_version(),
             &config_snapshot.session_source,
@@ -5912,6 +5929,7 @@ impl ThreadRequestProcessor {
         self.outgoing
             .send_server_notification(ServerNotification::ThreadStarted(notif))
             .await;
+        super::thread_agent_work::publish(thread_id, &forked_thread, &self.outgoing).await;
         if inherited_goal {
             self.thread_goal_processor
                 .emit_thread_goal_snapshot(thread_id)
@@ -6640,6 +6658,7 @@ pub(crate) fn thread_from_stored_thread(
         agent_nickname: source.get_nickname(),
         agent_role: source.get_agent_role(),
         source: source.into(),
+        agent_work: None,
         can_accept_direct_input: None,
         thread_source: thread.thread_source.map(Into::into),
         git_info,
@@ -6823,6 +6842,7 @@ fn build_thread_from_snapshot(
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
         source: config_snapshot.session_source.clone().into(),
+        agent_work: None,
         can_accept_direct_input: Some(can_accept_direct_input(
             multi_agent_version,
             &config_snapshot.session_source,

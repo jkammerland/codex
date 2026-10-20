@@ -57,6 +57,7 @@ async fn enrich_loaded_thread(
     };
     let config_snapshot = loaded_thread.config_snapshot().await;
     apply_live_thread_settings(thread, &config_snapshot);
+    thread.agent_work = super::thread_agent_work::snapshot(&loaded_thread).await;
     if !matches!(
         &thread.source,
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })

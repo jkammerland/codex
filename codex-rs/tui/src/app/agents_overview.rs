@@ -540,6 +540,11 @@ impl App {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .vim_enabled = self.chat_widget.composer_is_vim_enabled();
         for row in &mut rows {
+            row.details
+                .lines
+                .extend(super::agents_overview_agent_work::detail_lines(
+                    row.thread.agent_work.as_ref(),
+                ));
             let team_lines =
                 super::agents_overview_team::task_lines(row, self.agents_hosts.snapshot.as_ref());
             row.details.lines.extend(team_lines.status);

@@ -106,6 +106,7 @@ pub(super) fn append_enrolled_rows(
                 cli_version: String::new(),
                 originator: None,
                 source: SessionSource::Unknown,
+                agent_work: None,
                 can_accept_direct_input: None,
                 thread_source: None,
                 agent_nickname: None,

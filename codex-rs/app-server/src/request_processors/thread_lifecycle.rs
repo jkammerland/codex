@@ -294,7 +294,10 @@ pub(super) async fn ensure_listener_task_running(
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
+    let mut agent_work_updates = conversation.watch_agent_work();
     tokio::spawn(async move {
+        let mut agent_work_updates_open = true;
+        let mut previous_agent_work = super::thread_agent_work::snapshot(&conversation).await;
         loop {
             tokio::select! {
                 biased;
@@ -394,6 +397,27 @@ pub(super) async fn ensure_listener_task_running(
                     {
                         let _ = completion_tx.send(());
                     }
+                }
+                update = agent_work_updates.changed(), if agent_work_updates_open => {
+                    if update.is_err() {
+                        agent_work_updates_open = false;
+                        continue;
+                    }
+                    let agent_work = super::thread_agent_work::snapshot(&conversation).await;
+                    if super::thread_agent_work::same_state(&previous_agent_work, &agent_work) {
+                        continue;
+                    }
+                    previous_agent_work.clone_from(&agent_work);
+                    // Like thread status, these counts also serve overview clients that
+                    // are not subscribed to this thread's transcript.
+                    outgoing_for_task.send_server_notification(
+                        ServerNotification::ThreadAgentWorkUpdated(
+                            codex_app_server_protocol::ThreadAgentWorkUpdatedNotification {
+                                thread_id: conversation_id.to_string(),
+                                agent_work,
+                            },
+                        ),
+                    ).await;
                 }
                 unloading_watchers_open = unloading_state.wait_for_unloading_trigger() => {
                     if !unloading_watchers_open {
@@ -760,6 +784,7 @@ pub(super) async fn handle_pending_thread_resume_request(
     let request_id = pending.request_id;
     let connection_id = request_id.connection_id;
     let mut thread = pending.thread_summary;
+    thread.agent_work = super::thread_agent_work::snapshot(conversation).await;
     if pending.include_turns {
         if let Some(turns) = pending.paginated_turns.take() {
             thread.turns = turns;

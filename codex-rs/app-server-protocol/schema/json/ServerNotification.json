@@ -4458,6 +4458,92 @@
       ],
       "type": "string"
     },
+    "ThreadAgentBarrier": {
+      "properties": {
+        "held": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "remaining": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "unavailable": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "held",
+        "remaining",
+        "total",
+        "unavailable"
+      ],
+      "type": "object"
+    },
+    "ThreadAgentWork": {
+      "description": "Authoritative native-agent mailbox and barrier state, independent of turn activity.",
+      "properties": {
+        "pendingMail": {
+          "description": "Accepted messages not yet included in an accepted model request.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "revision": {
+          "description": "Monotonic revision within the current controller instance.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "waitingTasks": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadAgentBarrier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The current wait-all observation, if any. This does not own or cancel tasks."
+        }
+      },
+      "required": [
+        "pendingMail",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ThreadAgentWorkUpdatedNotification": {
+      "properties": {
+        "agentWork": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadAgentWork"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null means this controller cannot currently supply an authoritative snapshot."
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadArchivedNotification": {
       "properties": {
         "threadId": {
@@ -7499,6 +7585,26 @@
         "params"
       ],
       "title": "Thread/queue/changedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/agentWork/updated"
+          ],
+          "title": "Thread/agentWork/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadAgentWorkUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/agentWork/updatedNotification",
       "type": "object"
     },
     {

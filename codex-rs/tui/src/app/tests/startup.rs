@@ -1284,6 +1284,7 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             cwd: session.cwd.clone(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
+            agent_work: None,
             can_accept_direct_input: None,
             thread_source: None,
             agent_nickname: Some("Robie".to_string()),

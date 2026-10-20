@@ -1,0 +1,11 @@
+---
+source: tui/src/app/agents_overview_agent_work_tests.rs
+expression: terminal.backend()
+---
+"Mail      2 queued                                               "
+"Barrier   Waiting for 2 of 3 tasks                               "
+"          1 held · 1 unavailable                                 "
+"                                                                 "
+"                                                                 "
+"                                                                 "
+"                                                                 "

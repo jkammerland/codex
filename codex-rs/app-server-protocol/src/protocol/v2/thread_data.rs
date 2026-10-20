@@ -258,6 +258,10 @@ pub struct Thread {
     pub recency_at: Option<i64>,
     /// Current runtime status for the thread.
     pub status: ThreadStatus,
+    /// Native agent work state. Null for unsupported or unavailable controllers.
+    #[experimental("thread.agentWork")]
+    #[serde(default)]
+    pub agent_work: Option<super::ThreadAgentWork>,
     /// [UNSTABLE] Path to the thread on disk.
     pub path: Option<PathBuf>,
     /// Working directory captured for the thread.
@@ -322,6 +326,8 @@ struct ThreadCompatibility {
     updated_at: i64,
     recency_at: Option<i64>,
     status: ThreadStatus,
+    #[serde(default)]
+    agent_work: Option<super::ThreadAgentWork>,
     path: Option<PathBuf>,
     cwd: LegacyAppPathString,
     cli_version: String,
@@ -363,6 +369,7 @@ impl<'de> Deserialize<'de> for Thread {
             updated_at: thread.updated_at,
             recency_at: thread.recency_at,
             status: thread.status,
+            agent_work: thread.agent_work,
             path: thread.path,
             cwd: thread.cwd,
             cli_version: thread.cli_version,

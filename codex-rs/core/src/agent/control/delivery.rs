@@ -16,7 +16,7 @@ impl AgentMessage {
         mode: MessageDeliveryMode,
     ) -> InterAgentCommunication {
         let trigger_turn = mode == MessageDeliveryMode::TriggerTurn;
-        match self {
+        let mut communication = match self {
             Self::Encrypted(message) => InterAgentCommunication::new_encrypted(
                 author,
                 recipient,
@@ -26,7 +26,9 @@ impl AgentMessage {
             ),
             Self::Plaintext(message) => {
                 let message_type = match mode {
-                    MessageDeliveryMode::QueueOnly => InterAgentMessageType::Message,
+                    MessageDeliveryMode::Auto | MessageDeliveryMode::QueueOnly => {
+                        InterAgentMessageType::Message
+                    }
                     MessageDeliveryMode::TriggerTurn => InterAgentMessageType::NewTask,
                 };
                 let content = InterAgentMessage::new(
@@ -40,6 +42,21 @@ impl AgentMessage {
                 .unwrap_or_default();
                 InterAgentCommunication::new(author, recipient, Vec::new(), content, trigger_turn)
             }
-        }
+        };
+        communication.mail = Some(codex_protocol::protocol::AgentMailMetadata {
+            message_id: codex_protocol::ResponseItemId::new("agentmail").to_string(),
+            task_id: trigger_turn.then(|| uuid::Uuid::now_v7().to_string()),
+            kind: if trigger_turn {
+                codex_protocol::protocol::AgentMailKind::Assignment
+            } else {
+                codex_protocol::protocol::AgentMailKind::DirectMessage
+            },
+            wake: if mode == MessageDeliveryMode::QueueOnly {
+                codex_protocol::protocol::AgentMailWake::QueueOnly
+            } else {
+                codex_protocol::protocol::AgentMailWake::Auto
+            },
+        });
+        communication
     }
 }

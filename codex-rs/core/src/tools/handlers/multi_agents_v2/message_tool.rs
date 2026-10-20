@@ -1,7 +1,7 @@
 //! Shared argument parsing and dispatch for the v2 agent messaging tools.
 //!
 //! `send_message` and `followup_task` share the same submission path and differ only in whether the
-//! resulting `InterAgentCommunication` should wake the target immediately.
+//! resulting `InterAgentCommunication` is direct mail or an accepted assignment.
 
 use super::analytics::ToolCallAnalytics;
 use super::*;
@@ -19,12 +19,13 @@ use crate::tools::context::FunctionToolOutput;
 pub(crate) struct SendMessageArgs {
     pub(crate) target: String,
     pub(crate) message: String,
+    pub(crate) wake: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Input for the MultiAgentV2 `followup_task` tool.
-pub(crate) struct FollowupTaskArgs {
+/// Shared message input without a wake override, including feature-off direct mail.
+pub(crate) struct MessageArgs {
     pub(crate) target: String,
     pub(crate) message: String,
 }
@@ -45,7 +46,7 @@ pub(super) async fn handle_message_string_tool(
     target: String,
     message: String,
     analytics: &mut ToolCallAnalytics,
-) -> Result<FunctionToolOutput, FunctionCallError> {
+) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
     let message = message_content(message)?;
     let ToolInvocation {
         session,
@@ -91,11 +92,50 @@ pub(super) async fn handle_message_string_tool(
             reasoning_effort: None,
             id: call_id,
             agent_thread_id: receiver_thread_id,
-            agent_path: receiver_agent_path,
+            agent_path: receiver_agent_path.clone(),
             kind: SubAgentActivityKind::Interacted,
         },
     )
     .await;
 
-    Ok(FunctionToolOutput::from_text(String::new(), Some(true)))
+    if turn
+        .config
+        .features
+        .enabled(codex_features::Feature::WakeOnAgentMessages)
+        && session.services.agent_control.supports_task_barriers()
+        && let Some(task_id) = receipt.task_id
+    {
+        return Ok(boxed_tool_output(TaskReceiptResult {
+            task_name: String::from(receiver_agent_path),
+            task_id,
+        }));
+    }
+    Ok(boxed_tool_output(FunctionToolOutput::from_text(
+        String::new(),
+        Some(true),
+    )))
+}
+
+#[derive(Debug, Serialize)]
+struct TaskReceiptResult {
+    task_name: String,
+    task_id: String,
+}
+
+impl ToolOutput for TaskReceiptResult {
+    fn log_output(&self) -> String {
+        tool_output_json_text(self, "followup_task")
+    }
+
+    fn success_for_logging(&self) -> bool {
+        true
+    }
+
+    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
+        tool_output_response_item(call_id, payload, self, Some(true), "followup_task")
+    }
+
+    fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
+        tool_output_code_mode_result(self, "followup_task")
+    }
 }

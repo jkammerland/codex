@@ -27,6 +27,7 @@ impl LocalAgentControl {
             Err(err) => return Err(err),
         };
         let agent = LiveAgent {
+            task_id: None,
             thread_id,
             metadata: self.get_agent_metadata(thread_id).unwrap_or_default(),
             status: thread.agent_status().await,

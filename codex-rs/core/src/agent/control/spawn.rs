@@ -713,6 +713,7 @@ impl LocalAgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
     ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
+        let track_assignment = config.features.enabled(Feature::WakeOnAgentMessages);
         let membership = self.runtime.admit_start()?;
         let spawn_started_at = Instant::now();
         let state = self.runtime.upgrade()?;
@@ -968,6 +969,14 @@ impl LocalAgentControl {
             ..Default::default()
         };
         let input_admission_started_at = Instant::now();
+        let task_id = match &initial_input {
+            SpawnInitialInput::InterAgentCommunication(mail, _) => mail
+                .mail
+                .as_ref()
+                .and_then(|metadata| metadata.task_id.clone())
+                .filter(|_| track_assignment),
+            SpawnInitialInput::UserInput(_) => None,
+        };
         match initial_input {
             SpawnInitialInput::UserInput(input) => {
                 self.send_input(new_thread.thread_id, input, start_options)
@@ -1019,6 +1028,7 @@ impl LocalAgentControl {
         }
 
         let agent = LiveAgent {
+            task_id,
             thread_id: new_thread.thread_id,
             metadata: agent_metadata,
             status,

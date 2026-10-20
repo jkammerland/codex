@@ -178,6 +178,42 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    // An automatic turn starts with its mail in the pending queue. Own that
+    // initial selection before preflight so failure can settle those assignments
+    // without attributing mail that arrives later during cleanup.
+    if input.is_empty() && sess.enabled(Feature::WakeOnAgentMessages) {
+        input = sess
+            .input_queue
+            .get_pending_input(&sess.active_turn)
+            .await
+            .0;
+    }
+    if sess.enabled(Feature::WakeOnAgentMessages) {
+        let mail = input
+            .iter()
+            .filter_map(|item| match item {
+                TurnInput::InterAgentCommunication(mail) => Some(mail.to_model_input_item()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if let Err(err) = sess
+            .services
+            .agent_control
+            .mail_attempted(sess.thread_id, &turn_context.sub_id, &mail)
+            .await
+        {
+            run_hooks_and_record_inputs(
+                &sess,
+                &turn_context,
+                &turn_context.capture_current_model_info(),
+                &input,
+                PersistContext::Standard,
+            )
+            .await;
+            return Err(err);
+        }
+    }
+
     let auto_compaction_enabled = sess
         .services
         .thread_extension_data
@@ -555,6 +591,48 @@ pub(crate) async fn run_turn(
             // Keep the override after accepted input so history truncation removes them together.
             sess.record_reasoning_effort_override(step_context.as_ref())
                 .await;
+
+            // Terminal task state and completion payload commit together. Read the
+            // durable inbox at the request boundary so a barrier cannot outrun
+            // best-effort chat routing and request reasoning without its results.
+            if sess.features.enabled(Feature::WakeOnAgentMessages) {
+                for communication in sess
+                    .services
+                    .agent_control
+                    .pending_mail(sess.thread_id)
+                    .await?
+                {
+                    sess.record_inter_agent_communication(
+                        &turn_context,
+                        &step_context.settings.model_info,
+                        communication.clone(),
+                    )
+                    .await;
+                    sess.input_queue.record_mail(&communication).await;
+                }
+            }
+
+            // Compaction may have removed mail recorded during cleanup. Restore only
+            // unsubmitted items absent from the actual next prompt.
+            let current_input = sess
+                .clone_history()
+                .await
+                .for_prompt(&step_context.settings.model_info.input_modalities);
+            for communication in sess.input_queue.unsubmitted_recorded_mail().await {
+                if !current_input.iter().any(|item| match item {
+                    ResponseItem::AgentMessage { id, .. } | ResponseItem::Message { id, .. } => {
+                        id == &communication.id
+                    }
+                    _ => false,
+                }) {
+                    sess.record_inter_agent_communication(
+                        &turn_context,
+                        &step_context.settings.model_info,
+                        communication,
+                    )
+                    .await;
+                }
+            }
 
             // Construct the input that we will send to the model.
             let sampling_request_input: Vec<ResponseItem> = async {
@@ -2636,6 +2714,12 @@ async fn try_run_sampling_request(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
+    if sess.features.enabled(Feature::WakeOnAgentMessages) {
+        sess.services
+            .agent_control
+            .mail_attempted(sess.thread_id, &step_context.turn.sub_id, &prompt.input)
+            .await?;
+    }
     let execution = sess
         .enter_execution()
         .or_cancel(&cancellation_token)
@@ -2825,6 +2909,19 @@ async fn try_run_sampling_request(
             }
             Err(_) => break Err(CodexErr::TurnAborted),
         };
+
+        // Once response.created has been observed, cancellation cannot undo the
+        // server's acceptance. Receipt that exact input before stopping output
+        // processing; this still cannot dispatch an assistant tool after cancel.
+        if matches!(event.as_ref(), Some(Ok(ResponseEvent::Created { .. })))
+            && sess.features.enabled(Feature::WakeOnAgentMessages)
+        {
+            sess.services
+                .agent_control
+                .mail_submitted(sess.thread_id, &turn_context.sub_id, &prompt.input)
+                .await?;
+            sess.input_queue.accept_submitted_mail(&prompt.input).await;
+        }
 
         if cancellation_token.is_cancelled()
             && !matches!(event.as_ref(), Some(Err(err))

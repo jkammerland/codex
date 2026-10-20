@@ -33,6 +33,7 @@ pub struct SpawnAgentToolOptions {
     pub multi_agent_version: MultiAgentVersion,
     pub model_catalog_in_context: bool,
     pub usage_hint_text: Option<String>,
+    pub task_receipts: bool,
 }
 
 impl Default for SpawnAgentToolOptions {
@@ -46,6 +47,7 @@ impl Default for SpawnAgentToolOptions {
             multi_agent_version: MultiAgentVersion::Disabled,
             model_catalog_in_context: false,
             usage_hint_text: None,
+            task_receipts: false,
         }
     }
 }
@@ -138,18 +140,23 @@ pub fn create_spawn_agent_tool_v2(
         )),
     );
 
+    let mut description = spawn_agent_tool_description_v2(
+        available_models_description.as_deref(),
+        options.model_catalog_in_context,
+        options
+            .expose_spawn_agent_model_overrides
+            .then_some(SPAWN_AGENT_MODEL_CATALOG_GUIDANCE),
+        inherited_model_guidance,
+        options.usage_hint_text,
+        description_override,
+    );
+    if options.task_receipts {
+        description.push_str("\nThe result includes an opaque task_id for this accepted assignment. Save it for wait_all; acceptance does not claim task fulfillment.");
+    }
+
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
-        description: spawn_agent_tool_description_v2(
-            available_models_description.as_deref(),
-            options.model_catalog_in_context,
-            options
-                .expose_spawn_agent_model_overrides
-                .then_some(SPAWN_AGENT_MODEL_CATALOG_GUIDANCE),
-            inherited_model_guidance,
-            options.usage_hint_text,
-            description_override,
-        ),
+        description,
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
@@ -158,7 +165,11 @@ pub fn create_spawn_agent_tool_v2(
             Some(false.into()),
         ),
         output_schema: Some(
-            spawn_agent_output_schema_v2(options.hide_agent_type_model_reasoning).into(),
+            spawn_agent_output_schema_v2(
+                options.hide_agent_type_model_reasoning,
+                options.task_receipts,
+            )
+            .into(),
         ),
     })
 }
@@ -201,8 +212,8 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
     })
 }
 
-pub fn create_send_message_tool() -> ToolSpec {
-    let properties = BTreeMap::from([
+pub fn create_send_message_tool(wake_enabled: bool) -> ToolSpec {
+    let mut properties = BTreeMap::from([
         (
             "target".to_string(),
             JsonSchema::string(Some(
@@ -216,12 +227,25 @@ pub fn create_send_message_tool() -> ToolSpec {
             ))
             .with_encrypted(),
         ),
+        (
+            "wake".to_string(),
+            JsonSchema::boolean(Some(
+                "Whether the message should wake the recipient when message wakeups are enabled. Omit for normal waking mail; false always queues without waking. Progress updates should use false."
+                    .to_string(),
+            )),
+        ),
     ]);
 
+    if !wake_enabled {
+        properties.remove("wake");
+    }
     ToolSpec::Function(ResponsesApiTool {
         name: "send_message".to_string(),
-        description: "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
-            .to_string(),
+        description: if wake_enabled {
+            "Send a direct message to an existing agent, including a parent or peer. Normal messages wake the recipient; set wake to false for progress that can wait. Sending a message does not create an assignment receipt."
+        } else {
+            "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
+        }.to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
@@ -233,7 +257,7 @@ pub fn create_send_message_tool() -> ToolSpec {
     })
 }
 
-pub fn create_followup_task_tool() -> ToolSpec {
+pub fn create_followup_task_tool(task_receipts: bool) -> ToolSpec {
     let properties = BTreeMap::from([
         (
             "target".to_string(),
@@ -258,7 +282,15 @@ pub fn create_followup_task_tool() -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(properties, Some(vec!["target".to_string(), "message".to_string()]), Some(false.into())),
-        output_schema: None,
+        output_schema: task_receipts.then(|| json!({
+            "type": "object",
+            "properties": {
+                "task_name": { "type": "string" },
+                "task_id": { "type": "string", "description": "Opaque accepted assignment identifier for wait_all." }
+            },
+            "required": ["task_name", "task_id"],
+            "additionalProperties": false
+        }).into()),
     })
 }
 
@@ -430,34 +462,34 @@ fn spawn_agent_output_schema_v1() -> Value {
     })
 }
 
-fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
-    if hide_agent_metadata {
-        return json!({
-            "type": "object",
-            "properties": {
-                "task_name": {
-                    "type": "string",
-                    "description": "Canonical task name for the spawned agent."
-                }
-            },
-            "required": ["task_name"],
-            "additionalProperties": false
+fn spawn_agent_output_schema_v2(hide_agent_metadata: bool, task_receipts: bool) -> Value {
+    let mut properties = json!({
+        "task_name": {
+            "type": "string",
+            "description": "Canonical task name for the spawned agent."
+        }
+    });
+    let mut required = vec!["task_name"];
+    if !hide_agent_metadata {
+        properties["nickname"] = json!({
+            "type": ["string", "null"],
+            "description": "User-facing nickname for the spawned agent when available."
         });
+        required.push("nickname");
+    }
+
+    if task_receipts {
+        properties["task_id"] = json!({
+            "type": "string",
+            "description": "Opaque accepted assignment identifier for wait_all."
+        });
+        required.push("task_id");
     }
 
     json!({
         "type": "object",
-        "properties": {
-            "task_name": {
-                "type": "string",
-                "description": "Canonical task name for the spawned agent."
-            },
-            "nickname": {
-                "type": ["string", "null"],
-                "description": "User-facing nickname for the spawned agent when available."
-            }
-        },
-        "required": ["task_name", "nickname"],
+        "properties": properties,
+        "required": required,
         "additionalProperties": false
     })
 }

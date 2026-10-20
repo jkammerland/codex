@@ -57,6 +57,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::WarningEvent;
+use codex_protocol::turn_input::TurnStartOptions;
 use codex_thread_store::PersistContext;
 
 use codex_features::Feature;
@@ -481,8 +482,45 @@ impl Session {
         sub_id: String,
     ) {
         let Some(_startup) = self.try_enter_turn_start() else {
+            if self.enabled(Feature::WakeOnAgentMessages)
+                && let Err(err) = self
+                    .services
+                    .agent_control
+                    .mail_blocked(self.thread_id, codex_thread_store::AgentTaskStatus::Held)
+                    .await
+            {
+                warn!("failed to persist held assignments: {err}");
+            }
             return;
         };
+        if self.active_turn.lock().await.is_some() {
+            return;
+        }
+        let snapshot = self.thread_config_snapshot().await;
+        if self
+            .services
+            .agent_control
+            .check_turn_admission(
+                self.multi_agent_version()
+                    .unwrap_or(codex_protocol::protocol::MultiAgentVersion::Disabled),
+                &snapshot.session_source,
+            )
+            .is_err()
+        {
+            if self.enabled(Feature::WakeOnAgentMessages)
+                && let Err(err) = self
+                    .services
+                    .agent_control
+                    .mail_blocked(
+                        self.thread_id,
+                        codex_thread_store::AgentTaskStatus::CapacityUnavailable,
+                    )
+                    .await
+            {
+                warn!("failed to persist assignment capacity block: {err}");
+            }
+            return;
+        }
         if self
             .team_model_error(&self.thread_config_snapshot().await)
             .await
@@ -706,10 +744,28 @@ impl Session {
         let Some(turn_state) = turn_state else {
             return;
         };
-        let pending_input = self
+        let mut pending_input = self
             .input_queue
             .take_pending_input_for_turn_state(turn_state.as_ref())
             .await;
+        if self.enabled(Feature::WakeOnAgentMessages)
+            && turn_context.terminal_error.lock().await.is_some()
+        {
+            // A failed turn never selected these late arrivals. Keep them fresh
+            // for the next turn instead of recording them as failed wake debt.
+            let mut other_input = Vec::new();
+            for input in pending_input {
+                match input {
+                    TurnInput::InterAgentCommunication(mail) if mail.mail.is_some() => {
+                        self.input_queue
+                            .enqueue_mailbox_communication(mail, TurnStartOptions::default())
+                            .await;
+                    }
+                    input => other_input.push(input),
+                }
+            }
+            pending_input = other_input;
+        }
         let (
             turn_had_memory_citation,
             turn_tool_calls,

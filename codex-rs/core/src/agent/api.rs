@@ -41,6 +41,80 @@ const _: Option<&dyn AgentControl> = None;
 pub trait AgentControl: Send + Sync {
     fn identity(&self) -> SessionId;
 
+    fn supports_task_barriers(&self) -> bool {
+        false
+    }
+
+    fn watch_agent_work(&self) -> tokio::sync::watch::Receiver<u64> {
+        tokio::sync::watch::channel(0).1
+    }
+
+    fn set_task_barrier(&self, _agent: ThreadId, _task_ids: Option<Vec<String>>) {}
+
+    fn tasks(
+        &self,
+        _filter: codex_thread_store::AgentTaskFilter,
+    ) -> BoxFuture<'_, Result<codex_thread_store::AgentTaskSnapshot>> {
+        Box::pin(async {
+            Err(codex_protocol::error::CodexErr::UnsupportedOperation(
+                "task barriers are unavailable".into(),
+            ))
+        })
+    }
+
+    fn agent_work(&self, _agent: ThreadId) -> BoxFuture<'_, Result<Option<AgentWorkSummary>>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Associate assignments with a prepared request without claiming transport acceptance.
+    fn mail_attempted<'a>(
+        &'a self,
+        _agent: ThreadId,
+        _turn: &'a str,
+        _items: &'a [codex_protocol::models::ResponseItem],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Acknowledge only input actually contained in an accepted inference request.
+    fn mail_submitted<'a>(
+        &'a self,
+        _agent: ThreadId,
+        _turn: &'a str,
+        _items: &'a [codex_protocol::models::ResponseItem],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Restore only this explicitly attached recipient; this never scans global state.
+    fn restore_attached_agents(&self, _root: ThreadId) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn mail_blocked(
+        &self,
+        _agent: ThreadId,
+        _status: codex_thread_store::AgentTaskStatus,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn pending_mail(
+        &self,
+        _agent: ThreadId,
+    ) -> BoxFuture<'_, Result<Vec<codex_protocol::protocol::InterAgentCommunication>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn mail_recorded<'a>(
+        &'a self,
+        _agent: ThreadId,
+        _turn: &'a str,
+        _message_id: String,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Resolve an ID or a name relative to the caller's captured source, without loading.
     /// The local backend lazily registers callers with no parent before resolving, including
     /// for direct IDs. Keeping resolution separate preserves tool error and analytics ordering.
@@ -227,7 +301,23 @@ pub struct SendRequest {
     pub start_options: TurnStartOptions,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentBarrierSummary {
+    pub total: usize,
+    pub remaining: usize,
+    pub held: usize,
+    pub unavailable: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentWorkSummary {
+    pub revision: u64,
+    pub pending_mail: usize,
+    pub waiting_tasks: Option<AgentBarrierSummary>,
+}
+
 pub struct DeliveryReceipt {
+    pub task_id: Option<String>,
     pub thread_id: ThreadId,
     /// Recipient identity captured during delivery, for activity and tool output.
     pub metadata: AgentMetadata,

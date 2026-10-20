@@ -1,7 +1,7 @@
 //! Delivers terminal child results and completion activity to the agent tree.
 //!
-//! Sessions capture terminal state; the controller owns routing and queue-only delivery.
-//! Delivery remains best effort; metrics distinguish queue acceptance from delivery failure.
+//! Sessions capture terminal state; the controller persists assignment outcomes before routing.
+//! Chat delivery remains best effort after durable acceptance.
 
 use super::LocalAgentControl;
 use crate::TurnStartOptions;
@@ -29,6 +29,13 @@ impl LocalAgentControl {
         outcome: AgentTurnOutcome,
         trace: &ThreadTraceContext,
     ) {
+        let settled_parent = match self.settle_consumed_tasks(&outcome).await {
+            Ok(settled_parent) => settled_parent,
+            Err(err) => {
+                tracing::warn!("failed to persist task outcome: {err}");
+                false
+            }
+        };
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
@@ -89,6 +96,9 @@ impl LocalAgentControl {
             }
         }
 
+        if settled_parent {
+            return;
+        }
         let message = match (&status, outcome.error_info) {
             (AgentStatus::Errored(error), Some(CodexErrorInfo::TooManyDenials)) => {
                 Some(format_guardian_interruption_message(

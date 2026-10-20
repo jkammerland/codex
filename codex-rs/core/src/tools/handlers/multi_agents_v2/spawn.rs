@@ -179,14 +179,25 @@ async fn handle_spawn_agent(
         &[("role", role_tag), ("version", "v2")],
     );
     let task_name = String::from(new_agent_path);
+    let task_id = if turn
+        .config
+        .features
+        .enabled(codex_features::Feature::WakeOnAgentMessages)
+        && session.services.agent_control.supports_task_barriers()
+    {
+        spawned_agent.task_id
+    } else {
+        None
+    };
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     let output = if hide_agent_metadata {
-        SpawnAgentResult::HiddenMetadata { task_name }
+        SpawnAgentResult::HiddenMetadata { task_name, task_id }
     } else {
         SpawnAgentResult::WithNickname {
             task_name,
             nickname,
+            task_id,
         }
     };
     Ok((output, new_thread_id, agent_status, agent_snapshot))
@@ -245,9 +256,13 @@ pub(crate) enum SpawnAgentResult {
     WithNickname {
         task_name: String,
         nickname: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
     HiddenMetadata {
         task_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
 }
 

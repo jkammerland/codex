@@ -3046,6 +3046,48 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_wait_all_uses_plain_namespace_with_direct_code_mode_exposure() {
+    for namespace in [None, Some("collaboration"), Some("agents")] {
+        for code_mode_only in [false, true] {
+            let plan = probe(|turn| {
+                set_features(turn, &[Feature::MultiAgentV2, Feature::WakeOnAgentMessages]);
+                set_feature(turn, Feature::CodeMode, /*enabled*/ code_mode_only);
+                set_feature(turn, Feature::CodeModeOnly, /*enabled*/ code_mode_only);
+                update_config(turn, |config| {
+                    config.multi_agent_v2.tool_namespace = namespace.map(str::to_owned);
+                    config.multi_agent_v2.non_code_mode_only = true;
+                });
+            })
+            .await;
+
+            // The native barrier keeps a stable recipient outside reserved provider namespaces.
+            plan.assert_visible_contains(&["wait_all"]);
+            plan.assert_registered_contains(&["wait_all"]);
+            assert_eq!(plan.exposure("wait_all"), ToolExposure::DirectModelOnly);
+            assert_eq!(plan.code_mode_tool_names.get("wait_all"), None);
+            assert_eq!(
+                plan.tool_mode,
+                if code_mode_only {
+                    ToolMode::CodeModeOnly
+                } else {
+                    ToolMode::Direct
+                }
+            );
+            assert!(plan.can_manage_children);
+            if let Some(namespace) = namespace {
+                let namespaced_barrier = ToolName::namespaced(namespace, "wait_all").to_string();
+                plan.assert_registered_lacks(&[&namespaced_barrier]);
+                let names = plan.namespace_function_names(namespace);
+                assert!(!names.iter().any(|name| name == "wait_all"));
+                assert!(names.iter().any(|name| name == "spawn_agent"));
+            } else {
+                plan.assert_visible_contains(&["spawn_agent"]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn multi_agent_v2_namespace_is_supported_by_bedrock_provider() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);

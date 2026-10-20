@@ -27,8 +27,8 @@ impl AgentCommunicationKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentCommunicationContext {
-    kind: AgentCommunicationKind,
-    sender_thread_id: ThreadId,
+    pub(crate) kind: AgentCommunicationKind,
+    pub(crate) sender_thread_id: ThreadId,
 }
 
 impl AgentCommunicationContext {

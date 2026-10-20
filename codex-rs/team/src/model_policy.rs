@@ -84,6 +84,31 @@ impl Coordinator {
             .store
             .get::<RequestedSelection>("model_request", &key)
             .await?;
+        if let Some(previous) = previous.as_ref().filter(|previous| {
+            agent
+                .runtime
+                .as_ref()
+                .into_iter()
+                .flat_map(|runtime| {
+                    runtime
+                        .applied_selection_revision
+                        .into_iter()
+                        .chain(runtime.superseded_selection_revision)
+                })
+                .max()
+                .is_none_or(|revision| revision < previous.selection.revision)
+        }) {
+            // A sparse edit must preserve earlier unacknowledged ownership,
+            // including inheritance that has not reached the worker yet.
+            if desired.selection.model == TeamSelection::Keep {
+                desired.selection.model = previous.selection.model.clone();
+                desired.model.clone_from(&previous.model);
+            }
+            if desired.selection.effort == TeamSelection::Keep {
+                desired.selection.effort = previous.selection.effort.clone();
+                desired.effort.clone_from(&previous.effort);
+            }
+        }
         desired.selection.revision = [
             previous.as_ref().map(|request| request.selection.revision),
             agent
@@ -145,7 +170,7 @@ impl Coordinator {
 
     #[expect(
         clippy::await_holding_invalid_type,
-        reason = "keeps each destination's selection RPCs ordered and journals inherited intent under the snapshot mutation fence"
+        reason = "keeps each destination's selection RPCs ordered"
     )]
     pub(crate) async fn inherit_models(
         &self,
@@ -155,28 +180,55 @@ impl Coordinator {
     ) -> Result<()> {
         let lock = self.model_update_lock(&machine.id, &server.id).await;
         let _selection = lock.lock().await;
-        let version = self
-            .observed_versions
-            .lock()
-            .await
-            .get(&server_key(&machine.id, &server.id))
-            .copied()
-            .unwrap_or_default();
-        let agents = self.agents().await?;
-        for child in &agents {
+        for child in self.agents().await? {
             let address = &child.enrollment.address;
-            if address.machine_id != machine.id || address.server_id != server.id {
+            if address.machine_id != machine.id
+                || address.server_id != server.id
+                || child
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.archived)
+            {
                 continue;
             }
-            let Some(runtime) = child.runtime.as_ref().filter(|runtime| runtime.loaded) else {
-                continue;
+            self.apply_model_selection(address, peer).await?;
+        }
+        Ok(())
+    }
+
+    /// The caller holds the destination's model-update lock through dispatch.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "resolves and journals inherited intent from one snapshot under the mutation fence"
+    )]
+    pub(crate) async fn apply_model_selection(
+        &self,
+        address: &TeamAddress,
+        peer: &Peer,
+    ) -> Result<()> {
+        let request = {
+            // Resolve from current state atomically so notifications cannot
+            // leave inheritance based on an older snapshot before first wake.
+            let _mutation = self.mutations.lock().await;
+            let agents = self.agents().await?;
+            let Some(child) = agents
+                .iter()
+                .find(|agent| agent.enrollment.address == *address)
+            else {
+                return Ok(());
             };
+            let Some(runtime) = child.runtime.as_ref() else {
+                return Ok(());
+            };
+            if runtime.archived {
+                return Ok(());
+            }
             let key = address_key(address);
             let pending = self
                 .store
                 .get::<RequestedSelection>("model_request", &key)
                 .await?;
-            let request = if let Some(pending) = pending.clone().filter(|pending| {
+            if let Some(pending) = pending.clone().filter(|pending| {
                 runtime
                     .applied_selection_revision
                     .into_iter()
@@ -184,11 +236,32 @@ impl Coordinator {
                     .max()
                     .is_none_or(|revision| revision < pending.selection.revision)
             }) {
-                Some(pending)
+                // An unloaded inherited request can remain pending while its
+                // parent changes. Refresh those fields before first wake;
+                // explicit fields retain the operator's selected values.
+                let desired = resolve_selection(
+                    child,
+                    &agents,
+                    pending.selection.model.clone(),
+                    pending.selection.effort.clone(),
+                )?;
+                if desired.model != pending.model || desired.effort != pending.effort {
+                    self.persist_selection(child.clone(), desired, None).await?;
+                    self.store
+                        .get::<RequestedSelection>("model_request", &key)
+                        .await?
+                } else {
+                    Some(pending)
+                }
             } else {
+                // Unloaded snapshots may predate a local edit. Only replay
+                // actual pending choices until readiness refreshes provenance.
+                if !runtime.loaded {
+                    return Ok(());
+                }
                 let (model, effort) = inherited_fields(runtime);
                 if model == TeamSelection::Keep && effort == TeamSelection::Keep {
-                    continue;
+                    return Ok(());
                 }
                 let desired = resolve_selection(child, &agents, model, effort)?;
                 if !requires_update(child, &desired)
@@ -196,47 +269,37 @@ impl Coordinator {
                         .as_ref()
                         .is_some_and(|previous| same_inherited_intent(previous, &desired))
                 {
-                    continue;
-                }
-                let _mutation = self.mutations.lock().await;
-                if self
-                    .observed_versions
-                    .lock()
-                    .await
-                    .get(&server_key(&machine.id, &server.id))
-                    .copied()
-                    .unwrap_or_default()
-                    != version
-                {
-                    continue;
+                    return Ok(());
                 }
                 self.persist_selection(child.clone(), desired, None).await?;
                 self.store
                     .get::<RequestedSelection>("model_request", &key)
                     .await?
-            };
-            let Some(request) = request else { continue };
-            // Queue acknowledgement does not establish next-turn application.
-            // The host runtime's applied revision is the authoritative receipt.
-            let _: ThreadSettingsUpdateResponse = peer
-                .handle
-                .request_typed(ClientRequest::ThreadSettingsUpdate {
-                    request_id: request_id(),
-                    params: ThreadSettingsUpdateParams {
-                        thread_id: address.thread_id.clone(),
-                        model: request.model,
-                        effort: request
-                            .effort
-                            .as_deref()
-                            .map(str::parse)
-                            .transpose()
-                            .map_err(anyhow::Error::msg)?,
-                        team_selection: Some(request.selection),
-                        ..Default::default()
-                    },
-                })
-                .await?;
-        }
+            }
+        };
+        let Some(request) = request else {
+            return Ok(());
+        };
+        // Queue acknowledgement does not establish next-turn application.
+        // The host runtime's applied revision is the authoritative receipt.
+        let _: ThreadSettingsUpdateResponse = peer
+            .handle
+            .request_typed(ClientRequest::ThreadSettingsUpdate {
+                request_id: request_id(),
+                params: ThreadSettingsUpdateParams {
+                    thread_id: address.thread_id.clone(),
+                    model: request.model,
+                    effort: request
+                        .effort
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(anyhow::Error::msg)?,
+                    team_selection: Some(request.selection),
+                    ..Default::default()
+                },
+            })
+            .await?;
         Ok(())
     }
 }
@@ -346,3 +409,7 @@ fn validate_selection(
 #[cfg(test)]
 #[path = "model_policy_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "model_policy_delivery_tests.rs"]
+mod delivery_tests;

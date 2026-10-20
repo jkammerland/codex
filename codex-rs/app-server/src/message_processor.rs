@@ -523,6 +523,8 @@ impl MessageProcessor {
         )]
         let team_processor = super::request_processors::TeamRequestProcessor::new(
             team_service.expect("team host initialized"),
+            Arc::clone(&thread_manager),
+            Arc::clone(&thread_store),
             outgoing.clone(),
             thread_watch_manager.clone(),
         );
@@ -1528,9 +1530,15 @@ impl MessageProcessor {
                 self.thread_processor.thread_section_delete(params).await
             }
             ClientRequest::ThreadSettingsUpdate { params, .. } => {
-                self.turn_processor
-                    .thread_settings_update(&request_id, params)
-                    .await
+                if self.team_processor.defer_model_selection(&params).await? {
+                    Ok(Some(
+                        codex_app_server_protocol::ThreadSettingsUpdateResponse {}.into(),
+                    ))
+                } else {
+                    self.turn_processor
+                        .thread_settings_update(&request_id, params)
+                        .await
+                }
             }
             ClientRequest::ThreadMemoryModeSet { params, .. } => {
                 self.thread_processor.thread_memory_mode_set(params).await

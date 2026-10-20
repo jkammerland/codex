@@ -284,6 +284,17 @@ pub(in crate::app) fn track_notification(
                 thread.status = status.status.clone();
             }
         }
+        ServerNotification::ThreadAgentWorkUpdated(update) => {
+            if let Some(Some(thread)) = state.threads.get_mut(&id)
+                && thread
+                    .agent_work
+                    .as_ref()
+                    .zip(update.agent_work.as_ref())
+                    .is_none_or(|(current, incoming)| incoming.revision >= current.revision)
+            {
+                thread.agent_work.clone_from(&update.agent_work);
+            }
+        }
         ServerNotification::ThreadNameUpdated(name) => {
             if let Some(Some(thread)) = state.threads.get_mut(&id) {
                 thread.name.clone_from(&name.thread_name);
@@ -301,6 +312,7 @@ pub(in crate::app) fn track_notification(
         ServerNotification::ThreadClosed(_) => {
             if let Some(Some(thread)) = state.threads.get_mut(&id) {
                 thread.status = codex_app_server_protocol::ThreadStatus::NotLoaded;
+                thread.agent_work = None;
             }
         }
         ServerNotification::ItemCompleted(

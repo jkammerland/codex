@@ -288,6 +288,7 @@ pub(in crate::app) fn overview_thread(
                 agent_role: None,
             })
         }),
+        agent_work: None,
         can_accept_direct_input: Some(parent_thread_id.is_none()),
         thread_source: None,
         agent_nickname: None,

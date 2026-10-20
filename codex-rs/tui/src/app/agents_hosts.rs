@@ -578,6 +578,7 @@ impl App {
                             | ServerNotification::ThreadStatusChanged(_)
                             | ServerNotification::ThreadNameUpdated(_)
                             | ServerNotification::ThreadSettingsUpdated(_)
+                            | ServerNotification::ThreadAgentWorkUpdated(_)
                             | ServerNotification::ThreadClosed(_)
                     )
                     && let Some(host) = self.agents_hosts.hosts.get_mut(&scope.host)

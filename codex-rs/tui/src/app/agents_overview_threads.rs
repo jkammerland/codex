@@ -146,6 +146,7 @@ impl App {
                 }
                 if let Some(thread) = thread {
                     thread.status = ThreadStatus::NotLoaded;
+                    thread.agent_work = None;
                 }
             }
             ServerNotification::ThreadReverted(_) => {
@@ -160,6 +161,20 @@ impl App {
                 if let Some(thread) = thread {
                     thread.status = status.status.clone();
                 }
+            }
+            ServerNotification::ThreadAgentWorkUpdated(update) => {
+                if let Some(thread) = thread {
+                    // Notifications are revisioned; a delayed update must not roll back the view.
+                    if thread
+                        .agent_work
+                        .as_ref()
+                        .zip(update.agent_work.as_ref())
+                        .is_none_or(|(current, incoming)| incoming.revision >= current.revision)
+                    {
+                        thread.agent_work.clone_from(&update.agent_work);
+                    }
+                }
+                self.repaint_agents_overview();
             }
             ServerNotification::ThreadNameUpdated(name) => {
                 if let Some(thread) = thread {
@@ -198,7 +213,9 @@ impl App {
         }
         if !matches!(
             notification,
-            ServerNotification::ThreadReverted(_) | ServerNotification::ThreadTokenUsageUpdated(_)
+            ServerNotification::ThreadReverted(_)
+                | ServerNotification::ThreadTokenUsageUpdated(_)
+                | ServerNotification::ThreadAgentWorkUpdated(_)
         ) && self.agents_overview.threads.contains_key(&thread_id)
         {
             self.agents_overview.refresh_thread_ids.insert(thread_id);

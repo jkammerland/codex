@@ -218,6 +218,7 @@ mod agents_hosts_team_details;
 mod agents_hosts_usage;
 mod agents_overview;
 mod agents_overview_actions;
+mod agents_overview_agent_work;
 mod agents_overview_details;
 pub(crate) mod agents_overview_discovery;
 mod agents_overview_team;

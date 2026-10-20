@@ -142,6 +142,7 @@ mod skills_list;
 mod sleep;
 mod sqlite_recovery;
 mod team;
+mod team_model_wake;
 mod team_board;
 mod team_boundaries;
 mod team_jobs;

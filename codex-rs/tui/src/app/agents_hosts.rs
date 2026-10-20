@@ -555,12 +555,17 @@ impl App {
                 let owner = if scope.host == self.agents_hosts.foreground {
                     Some(foreground.backend_id())
                 } else {
-                    self.agents_hosts.hosts.get(&scope.host)
+                    self.agents_hosts
+                        .hosts
+                        .get(&scope.host)
                         .and_then(|host| host.session.as_ref())
                         .map(AppServerSession::backend_id)
                 };
                 if owner != Some(event.backend_id) {
                     tracing::warn!("ignoring host event from a different backend");
+                    return Ok(());
+                }
+                if scope.host == self.agents_hosts.foreground && self.reconnect.offline {
                     return Ok(());
                 }
                 let event = event.event;
@@ -783,8 +788,9 @@ impl App {
                 let was_connected = host.connected;
                 host.connected = false;
                 if scope.host == self.agents_hosts.foreground {
-                    // A rejected initial start waits for EOF before reconnecting with its draft intact.
-                    if !(self.reconnect.offline && self.pending_startup_thread_start) {
+                    // The start result distinguishes rejected admission from a lost reply.
+                    // Preserve it while waiting for that result or draining a rejected startup.
+                    if !self.pending_startup_thread_start {
                         self.begin_reconnect();
                     }
                 } else if was_connected {

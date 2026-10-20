@@ -141,6 +141,22 @@ pub(super) async fn reconnect(
 }
 
 impl App {
+    pub(super) fn startup_connection_is_draining(
+        &self,
+        backends: &super::backend_sessions::BackendSessions,
+        slot: super::backend_sessions::SessionSlot,
+    ) -> bool {
+        let session = backends.session_at(slot);
+        if session.owns_event_receiver() {
+            backends.is_listening(session.backend_id())
+        } else {
+            self.agents_hosts
+                .hosts
+                .get(&self.agents_hosts.foreground)
+                .is_some_and(|host| host.connected)
+        }
+    }
+
     pub(crate) fn is_offline(&self) -> bool {
         self.reconnect.offline
     }

@@ -1172,7 +1172,10 @@ async fn run_ratatui_app(
     startup_draft: startup_draft::StartupDraft,
     preconnected_app_server: Option<AppServerSession>,
 ) -> color_eyre::Result<AppExitInfo> {
-    let backend_id = crate::backend_id::BackendId::new();
+    let backend_id = preconnected_app_server.as_ref().map_or_else(
+        crate::backend_id::BackendId::new,
+        AppServerSession::backend_id,
+    );
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
     let manifest_overview = cli.agents_overview
         && !cli.agents_local

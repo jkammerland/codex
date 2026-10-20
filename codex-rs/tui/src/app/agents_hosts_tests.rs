@@ -206,6 +206,8 @@ async fn request_copies_keep_transport_alive_and_namespace_concurrent_rpc_ids() 
     let mut original = crate::start_embedded_app_server_for_picker(&app.config).await?;
     let mut first = original.request_copy();
     let mut second = original.request_copy();
+    let backend_id = original.backend_id();
+    assert_eq!([first.backend_id(), second.backend_id()], [backend_id; 2]);
     let ids = [
         original.next_request_id(),
         first.next_request_id(),
@@ -216,6 +218,7 @@ async fn request_copies_keep_transport_alive_and_namespace_concurrent_rpc_ids() 
     drop(original);
     let account = first.read_account().await?;
     assert_eq!(account, expected);
+    assert_eq!(first.backend_id(), backend_id);
     second.shutdown().await?;
     Ok(())
 }
@@ -579,6 +582,7 @@ async fn discovery_completions_follow_the_host_that_became_foreground() {
 async fn route_started_before_manifest_mapping_keeps_its_original_host_identity() -> Result<()> {
     let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
     let mut session = AppServerSession::discovery_placeholder();
+    let backend_id = session.backend_id();
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let machine = key("alpha");
     let id = ThreadId::from_u128(42);
@@ -599,12 +603,15 @@ async fn route_started_before_manifest_mapping_keeps_its_original_host_identity(
                 host: HostKey::default(),
                 epoch: 1,
             },
-            event: AppServerEvent::ServerNotification(Box::new(
-                ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
-                    thread_id: id.to_string(),
-                    thread_name: Some("New".into()),
-                }),
-            )),
+            event: crate::app_server_session::AppServerSessionEvent {
+                backend_id,
+                event: AppServerEvent::ServerNotification(Box::new(
+                    ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
+                        thread_id: id.to_string(),
+                        thread_name: Some("New".into()),
+                    }),
+                )),
+            },
         },
     )
     .await?;
@@ -623,6 +630,7 @@ async fn reverted_notification_uses_normal_intake_and_does_not_edit_another_visi
 -> Result<()> {
     let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
     let mut session = AppServerSession::discovery_placeholder();
+    let backend_id = session.backend_id();
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let machine = key("alpha");
     let reverted_id = ThreadId::from_u128(40);
@@ -664,13 +672,16 @@ async fn reverted_notification_uses_normal_intake_and_does_not_edit_another_visi
                 host: machine,
                 epoch: 1,
             },
-            event: AppServerEvent::ServerNotification(Box::new(
-                ServerNotification::ThreadReverted(
-                    codex_app_server_protocol::ThreadRevertedNotification {
-                        thread_id: reverted_id.to_string(),
-                    },
-                ),
-            )),
+            event: crate::app_server_session::AppServerSessionEvent {
+                backend_id,
+                event: AppServerEvent::ServerNotification(Box::new(
+                    ServerNotification::ThreadReverted(
+                        codex_app_server_protocol::ThreadRevertedNotification {
+                            thread_id: reverted_id.to_string(),
+                        },
+                    ),
+                )),
+            },
         },
     )
     .await?;
@@ -714,13 +725,16 @@ async fn team_control_keys_work_inside_child_compose_views() -> Result<()> {
 async fn prompt_revert_preparation_returns_to_the_loop_before_its_rpc_finishes() -> Result<()> {
     let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
     let mut session = AppServerSession::discovery_placeholder();
+    let backend_id = session.backend_id();
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let source = key("source");
     let other = key("other");
     let id = ThreadId::from_u128(90);
     app.agents_hosts.foreground = source.clone();
     app.agents_hosts.hosts.insert(source, host("Source"));
-    app.agents_hosts.hosts.insert(other.clone(), host("Other"));
+    let mut other_host = host("Other");
+    other_host.session = Some(session.request_copy());
+    app.agents_hosts.hosts.insert(other.clone(), other_host);
     app.agents_hosts.manifest = Some(PathBuf::from("manifest.toml"));
     app.agents_hosts.started = true;
     app.active_thread_id = Some(id);
@@ -751,12 +765,15 @@ async fn prompt_revert_preparation_returns_to_the_loop_before_its_rpc_finishes()
                 host: other.clone(),
                 epoch: 1,
             },
-            event: AppServerEvent::ServerNotification(Box::new(
-                ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
-                    thread_id: id.to_string(),
-                    thread_name: Some("Other host updated".into()),
-                }),
-            )),
+            event: crate::app_server_session::AppServerSessionEvent {
+                backend_id,
+                event: AppServerEvent::ServerNotification(Box::new(
+                    ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
+                        thread_id: id.to_string(),
+                        thread_name: Some("Other host updated".into()),
+                    }),
+                )),
+            },
         },
     )
     .await?;
@@ -828,9 +845,11 @@ async fn cached_task_capabilities_are_qualified_by_machine_and_server() {
 async fn parked_status_wakeups_stay_with_their_host_when_thread_ids_match() -> Result<()> {
     let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
     let mut session = AppServerSession::discovery_placeholder();
+    let backend_id = session.backend_id();
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let machine = key("parked");
     let mut parked = host("Parked");
+    parked.session = Some(session.request_copy());
     let (updates, mut parked_receiver) = tokio::sync::broadcast::channel(4);
     parked.state.dynamic_tool_status_updates = Some(updates);
     app.agents_hosts.hosts.insert(machine.clone(), parked);
@@ -847,9 +866,12 @@ async fn parked_status_wakeups_stay_with_their_host_when_thread_ids_match() -> R
                 host: machine,
                 epoch: 1,
             },
-            event: AppServerEvent::ServerNotification(Box::new(
-                ServerNotification::ThreadStatusChanged(status.clone()),
-            )),
+            event: crate::app_server_session::AppServerSessionEvent {
+                backend_id,
+                event: AppServerEvent::ServerNotification(Box::new(
+                    ServerNotification::ThreadStatusChanged(status.clone()),
+                )),
+            },
         },
     )
     .await?;
@@ -1133,6 +1155,7 @@ async fn parked_host_discovery_includes_loaded_threads_without_user_previews() -
     });
 
     let session = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
         crate::connect_remote_app_server(endpoint).await?,
         ThreadParamsMode::Remote,
     );
@@ -1317,9 +1340,11 @@ async fn unknown_loaded_status_coalesces_only_its_host_after_in_flight_listings(
         Ok::<_, color_eyre::Report>(loaded_lists)
     });
     let session = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
         crate::connect_remote_app_server(endpoint).await?,
         ThreadParamsMode::Remote,
     );
+    let backend_id = session.backend_id();
     let mut parked = host("Resuming host / main");
     parked.session = Some(session);
     parked
@@ -1340,6 +1365,7 @@ async fn unknown_loaded_status_coalesces_only_its_host_after_in_flight_listings(
     app.agents_hosts.hosts.insert(machine.clone(), parked);
     let mut other_host = host("Other host / main");
     other_host.session = Some(AppServerSession::new(
+        crate::backend_id::BackendId::new(),
         crate::connect_remote_app_server(other_endpoint).await?,
         ThreadParamsMode::Remote,
     ));
@@ -1367,14 +1393,17 @@ async fn unknown_loaded_status_coalesces_only_its_host_after_in_flight_listings(
                     host: machine.clone(),
                     epoch: 1,
                 },
-                event: AppServerEvent::ServerNotification(Box::new(
-                    ServerNotification::ThreadStatusChanged(
-                        codex_app_server_protocol::ThreadStatusChangedNotification {
-                            thread_id: thread_id.to_string(),
-                            status,
-                        },
-                    ),
-                )),
+                event: crate::app_server_session::AppServerSessionEvent {
+                    backend_id,
+                    event: AppServerEvent::ServerNotification(Box::new(
+                        ServerNotification::ThreadStatusChanged(
+                            codex_app_server_protocol::ThreadStatusChangedNotification {
+                                thread_id: thread_id.to_string(),
+                                status,
+                            },
+                        ),
+                    )),
+                },
             },
         )
         .await?;
@@ -1539,11 +1568,13 @@ async fn failed_initial_configuration_can_retry_without_stale_results_replacing_
 async fn first_listing_replays_unknown_metadata_after_its_host_becomes_foreground() -> Result<()> {
     let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
     let mut session = AppServerSession::discovery_placeholder();
+    let backend_id = session.backend_id();
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let machine = key("first-list");
     let id = ThreadId::from_u128(93);
     let archived = ThreadId::from_u128(94);
     let mut loading = host("First list");
+    loading.session = Some(session.request_copy());
     loading.refreshing = true;
     loading.refresh_generation = 7;
     app.agents_hosts.hosts.insert(machine.clone(), loading);
@@ -1565,7 +1596,10 @@ async fn first_listing_replays_unknown_metadata_after_its_host_becomes_foregroun
             &mut session,
             HostUpdate::Event {
                 scope: scope.clone(),
-                event: AppServerEvent::ServerNotification(Box::new(notification)),
+                event: crate::app_server_session::AppServerSessionEvent {
+                    backend_id,
+                    event: AppServerEvent::ServerNotification(Box::new(notification)),
+                },
             },
         )
         .await?;
@@ -1578,14 +1612,17 @@ async fn first_listing_replays_unknown_metadata_after_its_host_becomes_foregroun
         &mut session,
         HostUpdate::Event {
             scope: scope.clone(),
-            event: AppServerEvent::ServerNotification(Box::new(
-                ServerNotification::ThreadStatusChanged(
-                    codex_app_server_protocol::ThreadStatusChangedNotification {
-                        thread_id: id.to_string(),
-                        status: ThreadStatus::SystemError,
-                    },
-                ),
-            )),
+            event: crate::app_server_session::AppServerSessionEvent {
+                backend_id,
+                event: AppServerEvent::ServerNotification(Box::new(
+                    ServerNotification::ThreadStatusChanged(
+                        codex_app_server_protocol::ThreadStatusChangedNotification {
+                            thread_id: id.to_string(),
+                            status: ThreadStatus::SystemError,
+                        },
+                    ),
+                )),
+            },
         },
     )
     .await?;
@@ -1659,20 +1696,51 @@ async fn queued_safe_completion_cannot_be_reauthorized_after_host_reconnect() ->
             email: Some("old-epoch@example.test".into()),
         },
     );
+    let backend_id = server.backend_id();
+    server.shutdown().await?;
+    server = crate::start_app_server_for_picker(
+        backend_id,
+        &app.config,
+        &AppServerTarget::Embedded,
+        Vec::new(),
+        LoaderOverrides::without_managed_config_for_tests(),
+        /*state_db*/ None,
+        Arc::clone(&app.environment_manager),
+    )
+    .await?;
+    assert_eq!(server.backend_id(), backend_id);
     let host = app.agents_hosts.hosts.get_mut(&machine).unwrap();
+    host.session = Some(server.request_copy());
     host.epoch = 2;
     let completion = host
         .state
         .pending_app_events
         .pop_front()
         .expect("origin completion retained");
-    app.agents_hosts.foreground = machine;
+    app.agents_hosts.foreground = machine.clone();
     app.account_email_request_id = Some(request_id);
     app.handle_event(&mut tui, &mut server, completion).await?;
     assert_eq!(app.account_email_request_id, Some(request_id));
+    let current = app
+        .recover_host_completion(
+            ConnectionScope {
+                host: machine,
+                epoch: 2,
+            },
+            AppEvent::AccountEmailLoaded {
+                request_id,
+                email: Some("current-epoch@example.test".into()),
+            },
+        )
+        .expect("current transport completion is accepted");
+    app.handle_event(&mut tui, &mut server, current).await?;
+    assert_eq!(app.account_email_request_id, None);
     server.shutdown().await?;
     Ok(())
 }
 
 #[path = "agents_hosts_execution_tests.rs"]
 mod execution;
+
+#[path = "agents_hosts_backend_identity_tests.rs"]
+mod backend_identity;

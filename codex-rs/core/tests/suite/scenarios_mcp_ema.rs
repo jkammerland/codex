@@ -143,11 +143,13 @@ enum EnterpriseLifecycle {
     Policy,
     Removal,
     RefreshPermissions,
+    ZeroTimeoutRefreshRevocation,
 }
 
 #[test_case::test_case(EnterpriseLifecycle::Policy; "policy")]
 #[test_case::test_case(EnterpriseLifecycle::Removal; "removal")]
 #[test_case::test_case(EnterpriseLifecycle::RefreshPermissions; "permission_refresh")]
+#[test_case::test_case(EnterpriseLifecycle::ZeroTimeoutRefreshRevocation; "zero_timeout_refresh_revocation")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enterprise_lifecycle_preserves_history_and_ordinary_tools(
     scenario: EnterpriseLifecycle,
@@ -281,6 +283,11 @@ async fn enterprise_lifecycle_preserves_history_and_ordinary_tools(
         )),
     )
     .await;
+    let tool_timeout = if matches!(scenario, EnterpriseLifecycle::ZeroTimeoutRefreshRevocation) {
+        "tool_timeout_sec = 0"
+    } else {
+        ""
+    };
     let policy = format!(
         r#"
 [features]
@@ -294,6 +301,7 @@ client_id = "enterprise-client"
 url = "{resource}"
 auth = "ema_auth"
 oauth = {{ client_id = "mcp-client", authorization_server_issuer = "{origin}/as" }}
+{tool_timeout}
 [mcp_servers.ordinary]
 url = "{resource}"
 http_headers = {{ Authorization = "Bearer ordinary-access" }}
@@ -639,8 +647,68 @@ http_headers = {{ Authorization = "Bearer ordinary-access" }}
             .await
     });
     pending_request.wait_until_satisfied().await;
+    if matches!(scenario, EnterpriseLifecycle::ZeroTimeoutRefreshRevocation) {
+        use codex_protocol::protocol::Op;
+        use codex_protocol::protocol::ThreadSettingsOverrides;
+
+        assert_eq!(
+            test.codex.config().await.mcp_servers.get()["enterprise"].tool_timeout_sec,
+            Some(std::time::Duration::ZERO)
+        );
+
+        // Flush a hard refresh while the original unbounded request is admitted.
+        // Ordinary discovery proves a manager refresh occurred; EMA must remain live.
+        let requests_before_refresh = mcp.received_requests().await.expect("MCP requests").len();
+        test.codex.submit(Op::RefreshMcpServers).await?;
+        test.codex
+            .update_thread_settings(ThreadSettingsOverrides::default())
+            .await?;
+        test.codex
+            .mcp_server_status_snapshot(
+                "ordinary",
+                codex_mcp::McpSnapshotDetail::ToolsAndAuthOnly,
+                /*expected_registration*/ None,
+            )
+            .await?;
+        assert!(
+            !pending.is_finished(),
+            "hard refresh must retain the original zero-timeout EMA call"
+        );
+        let discovery_requests = mcp
+            .received_requests()
+            .await
+            .expect("MCP requests")
+            .into_iter()
+            .skip(requests_before_refresh)
+            .filter(|request| {
+                request.body_json::<serde_json::Value>().is_ok_and(|body| {
+                    matches!(
+                        body["method"].as_str(),
+                        Some("initialize" | "server/discover" | "tools/list")
+                    )
+                })
+            })
+            .map(|request| {
+                request
+                    .headers
+                    .get("authorization")
+                    .and_then(|header| header.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !discovery_requests.is_empty(),
+            "hard refresh must reconnect ordinary MCP"
+        );
+        assert!(
+            discovery_requests
+                .iter()
+                .all(|authorization| authorization.as_deref() == Some("Bearer ordinary-access")),
+            "hard refresh must retain EMA without rediscovery or relisting: {discovery_requests:?}"
+        );
+    }
     match scenario {
-        EnterpriseLifecycle::Policy => {
+        EnterpriseLifecycle::Policy | EnterpriseLifecycle::ZeroTimeoutRefreshRevocation => {
             let denied =
                 CloudConfigBundleFixture::enterprise_requirement("[features]\nuse_xaa = false\n")
                     .into_bundle();
@@ -683,6 +751,24 @@ http_headers = {{ Authorization = "Bearer ordinary-access" }}
         result["_meta"]["mcp/www_authenticate"],
         "Bearer error=\"invalid_token\""
     );
+    if matches!(scenario, EnterpriseLifecycle::ZeroTimeoutRefreshRevocation) {
+        // Revocation also rejects fresh dispatch through the retained owner.
+        let rejected = test
+            .codex
+            .call_mcp_tool(
+                "enterprise",
+                "calendar_list_events",
+                Some(json!({"query": "after-revocation"})),
+                /*meta*/ None,
+            )
+            .await?;
+        let rejected = serde_json::to_value(rejected)?;
+        assert_eq!(rejected["isError"], true);
+        assert_eq!(
+            rejected["_meta"]["mcp/www_authenticate"],
+            "Bearer error=\"invalid_token\""
+        );
+    }
     // The pending response is already cancelled. Apply the config update before
     // building the next turn's tool catalog, preserving the original history check.
     test.codex.disable_mcp_enterprise_auth().await;
@@ -690,10 +776,23 @@ http_headers = {{ Authorization = "Bearer ordinary-access" }}
         .await?;
     let requests = mock.requests();
     assert_eq!(requests.len(), 4);
-    let calls = mcp
-        .received_requests()
-        .await
-        .expect("MCP requests")
+    let mcp_requests = mcp.received_requests().await.expect("MCP requests");
+    if matches!(scenario, EnterpriseLifecycle::ZeroTimeoutRefreshRevocation) {
+        let blocked_requests = mcp_requests
+            .iter()
+            .filter(|request| {
+                request.body_json::<serde_json::Value>().is_ok_and(|body| {
+                    body["method"] == "tools/call"
+                        && body["params"]["arguments"]["query"] == "blocked"
+                })
+            })
+            .count();
+        assert_eq!(
+            blocked_requests, 1,
+            "refresh and revocation must not replay the original request"
+        );
+    }
+    let calls = mcp_requests
         .into_iter()
         .filter(|request| {
             serde_json::from_slice::<serde_json::Value>(&request.body)

@@ -182,6 +182,17 @@ async fn widget_replacement_preserves_mention_usage_with_history_disabled() -> R
         /*initial_user_message*/ None,
     );
     app.replace_chat_widget(ChatWidget::new_with_app_event(init));
+    // This test snapshots mention restoration, using a stable header fixture so
+    // package-version lengths cannot affect the popup layout.
+    crate::chatwidget::tests::helpers::set_active_cell(
+        &mut app.chat_widget,
+        Box::new(crate::history_cell::SessionHeaderHistoryCell::new(
+            "test-model".to_string(),
+            /*reasoning_effort*/ None,
+            app.config.cwd.to_path_buf(),
+            "<VERSION>",
+        )),
+    );
     app.chat_widget.set_skills_from_response(&skills);
     app.chat_widget.insert_str("$stat");
     insta::assert_snapshot!(normalize_snapshot_paths(render_bottom_popup(

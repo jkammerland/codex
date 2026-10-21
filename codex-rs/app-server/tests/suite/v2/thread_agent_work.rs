@@ -155,9 +155,8 @@ async fn live_agent_mail_counts_remain_pending_until_the_model_request_includes_
         vec![
             responses::sse(vec![
                 responses::ev_response_created("before-mail"),
-                responses::ev_function_call_with_namespace(
+                responses::ev_function_call(
                     "send-mail",
-                    "collaboration",
                     "send_message",
                     &json!({"target": "/root", "message": "queued native mail", "wake": false})
                         .to_string(),

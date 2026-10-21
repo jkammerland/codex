@@ -141,10 +141,14 @@ async fn incompatible_daemon_can_run_embedded_for_explicit_features() -> Result<
             vec!["-c", "features.api_key_model_discovery=true"]
         };
         let mut terminal = PtyCodex::start(&cwd, home, &args)?;
-        terminal.wait_for_screen("Background server has incompatible feature settings")?;
+        terminal
+            .wait_for_screen("Background server has incompatible feature settings")
+            .context("show daemon compatibility recovery before startup")?;
         terminal.write_input(b"1")?;
         terminal.wait_for_startup()?;
-        terminal.wait_for_screen("Background server has incompatible feature settings")?;
+        // Startup diagnostics now live in the warnings viewer after recovery.
+        terminal.wait_for_screen("1 warning")?;
+        terminal.write_input(b"\x1bOQ")?;
         let (snapshot, warning_end) = match scenario {
             "explicit enable" => (
                 "daemon_feature_mismatch",
@@ -163,7 +167,7 @@ async fn incompatible_daemon_can_run_embedded_for_explicit_features() -> Result<
             .find(|line| line.contains(warning_end))
             .context("missing warning line")?;
         insta::assert_snapshot!(snapshot, warning);
-        terminal.write_input(b"1")?;
+        terminal.write_input(b"\x1b")?;
         terminal.wait_for_screen("GPT-5.6-Terra")?;
         terminal.write_input(b"/status")?;
         terminal.wait_for_screen("show current session configuration")?;

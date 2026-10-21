@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
+use app_test_support::DEFAULT_CLIENT_NAME;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
+use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ProjectChangeType;
@@ -51,6 +54,27 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+async fn initialize_project_lifecycle_client(server: &mut TestAppServer) -> Result<()> {
+    // Team discovery revisions are independent of the thread lifecycle ordering
+    // checked below. Subscribe to the lifecycle stream without those revisions.
+    let initialized = server
+        .initialize_with_capabilities(
+            ClientInfo {
+                name: DEFAULT_CLIENT_NAME.to_string(),
+                title: None,
+                version: "0.1.0".to_string(),
+            },
+            Some(InitializeCapabilities {
+                experimental_api: true,
+                opt_out_notification_methods: Some(vec!["team/changed".to_string()]),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    assert!(matches!(initialized, JSONRPCMessage::Response(_)));
+    Ok(())
+}
 
 #[tokio::test]
 async fn projects_list_by_recency_and_preserve_metadata_timestamps() -> Result<()> {
@@ -213,8 +237,9 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
     let root = AbsolutePathBuf::from_absolute_path(codex_home.path())?;
     let mut server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .build_initialized()
+        .build()
         .await?;
+    initialize_project_lifecycle_client(&mut server).await?;
 
     let created: ProjectCreateResponse = server
         .request(|request_id| ClientRequest::ProjectCreate {
@@ -1031,8 +1056,9 @@ async fn assigned_forks_inherit_projects_for_persistent_and_ephemeral_children()
         .write(codex_home.path())?;
     let mut server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .build_initialized()
+        .build()
         .await?;
+    initialize_project_lifecycle_client(&mut server).await?;
     let project: ProjectCreateResponse = server
         .request(|request_id| ClientRequest::ProjectCreate {
             request_id,

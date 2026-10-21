@@ -379,8 +379,16 @@ fn active_transcript_preserves_clipped_markdown_hyperlinks() {
 #[tokio::test]
 async fn initial_session_header_starts_at_the_top_of_the_viewport() {
     let (mut widget, _sender, _events, _operations) = make_chatwidget_manual_with_sender().await;
-    widget.transcript.active_cell =
-        Some(ChatWidget::placeholder_session_header_cell(&widget.config));
+    // Fix the version before layout so package suffixes cannot truncate the title.
+    widget.transcript.active_cell = Some(Box::new(
+        history_cell::SessionHeaderHistoryCell::new(
+            DEFAULT_MODEL_DISPLAY_NAME.to_string(),
+            /*reasoning_effort*/ None,
+            widget.config.cwd.to_path_buf(),
+            "<VERSION>",
+        )
+        .with_yolo_mode(history_cell::is_yolo_mode(&widget.config)),
+    ));
 
     let frame = render_frame(&widget, /*width*/ 48);
     let header = frame
@@ -395,12 +403,12 @@ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
                 .to_string()
         })
         .collect::<Vec<_>>()
-        .join("\n")
-        .replace(crate::version::CODEX_CLI_VERSION, "<VERSION>");
+        .join("\n");
 
     let cwd = widget.config.cwd.as_path().display().to_string();
 
     insta::assert_snapshot!(header.replace(&cwd, "/tmp/project"), @r"
+
       >_ OpenAI Codex (v<VERSION>)
          /tmp/project
     ");

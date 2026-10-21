@@ -64,9 +64,8 @@ async fn delayed_listener_publishes_mail_accepted_after_initial_snapshot() -> Re
         vec![
             responses::sse(vec![
                 responses::ev_response_created("queue-mail"),
-                responses::ev_function_call_with_namespace(
+                responses::ev_function_call(
                     "send-mail",
-                    "collaboration",
                     "send_message",
                     &json!({"target": "/root", "message": "queued update", "wake": false})
                         .to_string(),

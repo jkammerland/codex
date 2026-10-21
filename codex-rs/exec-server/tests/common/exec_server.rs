@@ -92,6 +92,21 @@ where
     child.args(["exec-server", "--listen", "ws://127.0.0.1:0"]);
     child.args(args);
     child.envs(env);
+
+    // This helper runs from a constructor, before Rust's runtime ignores SIGPIPE.
+    // Match normal executor startup so a closed child pipe reports EPIPE instead
+    // of terminating the test server.
+    // SAFETY: the callback runs in the forked child and only changes its signal
+    // disposition with an async-signal-safe libc call.
+    #[cfg(unix)]
+    unsafe {
+        child.pre_exec(|| {
+            if libc::signal(libc::SIGPIPE, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     ExecServerHarness::start(child).await
 }
 
@@ -127,6 +142,16 @@ impl ExecServerHarness {
             websocket,
             next_request_id: 1,
         })
+    }
+
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    pub(crate) fn process_diagnostics(&mut self) -> String {
+        let pid = self.process_id();
+        let status = self.child.try_wait();
+        format!("executor pid={pid:?}, exit_status={status:?}")
     }
 
     pub(crate) fn codex_home(&self) -> &std::path::Path {

@@ -1,47 +1,47 @@
 ---
 source: cli/tests/daemon_startup.rs
-assertion_line: 511
+assertion_line: 517
 expression: transition
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 0   Needs you 0   Working 0   Ready 0   Inactive 0                                         tab/shift+tab filter
+   All 0   Needs you 0   Working 0   Idle 0   Inactive 0                                          tab/shift+tab filter
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  No tasks yet                                                                │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
-                                                                              │
+  No tasks yet                                                        │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
   ? help  esc back  ↑/↓ move  enter open  n new
 
 --- Start a task ---

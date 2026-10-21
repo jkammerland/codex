@@ -103,11 +103,12 @@ struct MailboxState {
 }
 
 impl MailboxState {
+    /// Return rejected mail so its attachments can be dropped after unlocking.
     fn enqueue(
         &mut self,
         communication: crate::PendingAgentMessage,
         start_options: TurnStartOptions,
-    ) -> Result<(), crate::PendingAgentMessage> {
+    ) -> Option<crate::PendingAgentMessage> {
         if communication.mail.as_ref().is_some_and(|metadata| {
             self.submitted.contains(&metadata.message_id)
                 || self.pending.iter().any(|mail| {
@@ -117,14 +118,14 @@ impl MailboxState {
                         .is_some_and(|existing| existing.message_id == metadata.message_id)
                 })
         }) {
-            return Err(communication);
+            return Some(communication);
         }
         self.pending.push_back(PendingMailboxCommunication {
             communication,
             start_options,
             _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
         });
-        Ok(())
+        None
     }
 }
 
@@ -178,7 +179,7 @@ impl InputQueue {
     ) {
         if let Some((thread_id, control, _)) = &self.controller {
             for communication in control.take_mailbox(*thread_id) {
-                if let Err(communication) =
+                if let Some(communication) =
                     mailbox.enqueue(communication, TurnStartOptions::default())
                 {
                     rejected.push(communication);
@@ -255,8 +256,8 @@ impl InputQueue {
         // Mail retained while unloaded precedes new submissions to the loaded session.
         self.read_mailbox(&mut mailbox, &mut rejected);
         let inserted = match mailbox.enqueue(communication, start_options) {
-            Ok(()) => true,
-            Err(communication) => {
+            None => true,
+            Some(communication) => {
                 rejected.push(communication);
                 false
             }

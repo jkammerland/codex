@@ -36,6 +36,19 @@ async fn root_metadata_symlinks_cannot_reopen_approved_denials() {
     codex_utils_cargo_bin::copy_executable(&codex_linux_sandbox_exe(), &work.join("sandbox"))
         .unwrap();
 
+    // The namespace root is writable, so trusted PATH lookup can reject /usr/bin.
+    // Use its matching bundled artifact when present (including Bazel runfiles).
+    // Scoped Cargo builds can reuse the already vetted system binary instead.
+    let resources = work.join("codex-resources");
+    fs::create_dir(&resources).unwrap();
+    let bundled_bwrap = codex_linux_sandbox::find_bundled_bwrap_for_exe(
+        &codex_linux_sandbox_exe(),
+        &std::env::current_dir().expect("current directory"),
+        |key| std::env::var_os(key),
+    );
+    let fixture_bwrap = bundled_bwrap.as_deref().unwrap_or(&bwrap);
+    codex_utils_cargo_bin::copy_executable(fixture_bwrap, &resources.join("bwrap")).unwrap();
+
     let path_entry = |path: &str, access| {
         FileSystemSandboxEntry::new(
             AbsolutePathBuf::from_absolute_path(path).unwrap().into(),
@@ -63,8 +76,9 @@ async fn root_metadata_symlinks_cannot_reopen_approved_denials() {
         let profile =
             PermissionProfile::from_runtime_permissions(policy, NetworkSandboxPolicy::Enabled);
         let mut command = Command::new(&bwrap);
-        command
-            .args("--unshare-user --uid 0 --gid 0 --die-with-parent --tmpfs /".split_whitespace());
+        // Preserve the caller's IDs: mapping outer UID 0 would require CAP_SETFCAP
+        // for the inner sandbox's user namespace on Linux 5.12 and newer.
+        command.args("--unshare-user --die-with-parent --tmpfs /".split_whitespace());
         command.args(
             "--ro-bind /usr /usr --ro-bind /etc /etc --proc /proc --dev /dev".split_whitespace(),
         );

@@ -33,7 +33,7 @@ impl codex_extension_api::MessageLifecycleContributor for LiveMessageEvents {
         assert!(
             self.published
                 .lock()
-                .unwrap()
+                .expect("live message observations lock")
                 .insert(input.message_id.to_string())
         );
     }
@@ -46,13 +46,13 @@ impl codex_extension_api::MessageLifecycleContributor for LiveMessageEvents {
         assert!(
             self.published
                 .lock()
-                .unwrap()
+                .expect("live message observations lock")
                 .contains(input.message_id.as_str())
         );
         assert!(
             self.consumed
                 .lock()
-                .unwrap()
+                .expect("live message observations lock")
                 .insert(input.message_id.to_string())
         );
     }
@@ -372,9 +372,19 @@ async fn grandchild_completion_wakes_its_completed_parent(evict_parent: bool) ->
             // have fired its one history-consumption callback.
             for item in body["input"].as_array().expect("request inputs") {
                 if let Some(id) = item["id"].as_str()
-                    && sampled_messages.published.lock().unwrap().contains(id)
+                    && sampled_messages
+                        .published
+                        .lock()
+                        .expect("live message observations lock")
+                        .contains(id)
                 {
-                    assert!(sampled_messages.consumed.lock().unwrap().contains(id));
+                    assert!(
+                        sampled_messages
+                            .consumed
+                            .lock()
+                            .expect("live message observations lock")
+                            .contains(id)
+                    );
                     sampled_messages
                         .sampled
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -570,7 +580,13 @@ async fn grandchild_completion_wakes_its_completed_parent(evict_parent: bool) ->
         .shutdown_all_threads_bounded(std::time::Duration::from_secs(5))
         .await;
     assert!(messages.sampled.load(std::sync::atomic::Ordering::SeqCst) > 0);
-    assert!(!messages.consumed.lock().unwrap().is_empty());
+    assert!(
+        !messages
+            .consumed
+            .lock()
+            .expect("live message observations lock")
+            .is_empty()
+    );
     Ok(())
 }
 

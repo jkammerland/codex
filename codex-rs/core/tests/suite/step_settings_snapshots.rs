@@ -11,6 +11,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_protocol::team_model::TeamSelectionOrigin;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -110,6 +111,8 @@ async fn ordinary_settings_updates_keep_the_running_turn_snapshot() -> Result<()
     )
     .await?;
     expected.model = "snapshot-model-b".to_string();
+    expected.team_model_policy.model_origin = TeamSelectionOrigin::Explicit;
+    expected.team_model_policy.effort_origin = TeamSelectionOrigin::Explicit;
     expected.reasoning_effort = Some(ReasoningEffort::High);
     expected.reasoning_summary = Some(ReasoningSummary::Detailed);
     expected.service_tier = Some(ServiceTier::Fast.request_value().to_string());

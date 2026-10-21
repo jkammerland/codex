@@ -4938,7 +4938,7 @@ async fn paginated_compaction_cold_resume_from_bounded_suffix() -> Result<()> {
     )
     .await?;
     // The resumed turn retains its frozen settings, even after an in-flight update.
-    let expected_settings = test.codex.thread_settings_snapshot().await;
+    let mut expected_settings = test.codex.thread_settings_snapshot().await;
     let codex_core::TurnInputSubmission::Started { turn_id, .. } = test
         .codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -4963,6 +4963,10 @@ async fn paginated_compaction_cold_resume_from_bounded_suffix() -> Result<()> {
     )
     .await?;
     test.codex.checkpoint_thread_settings().await?;
+    // Compaction restores the running turn's frozen values while the saved
+    // thread policy retains ownership of the explicit next-turn effort choice.
+    expected_settings.team_model_policy.effort_origin =
+        codex_protocol::team_model::TeamSelectionOrigin::Explicit;
     test.codex
         .submit(Op::UserInputAnswer {
             id: turn_id.clone(),
@@ -6206,10 +6210,56 @@ async fn remote_v2_compaction_refreshes_instructions_and_preserves_them_on_cold_
     assert_eq!(requests.len(), 4);
     assert_single_instruction_fragment(&requests[3], &new_fragment);
     let resumed_input = requests[3].input();
+    // The public conversation view excludes contextual user messages such as
+    // AGENTS.md, but retains the exact provenance of its other history items.
+    let contextual_instruction = replacement_history
+        .iter()
+        .filter(|item| {
+            item["role"] == "user"
+                && item["content"]
+                    .as_array()
+                    .is_some_and(|content| content.iter().any(|part| part["text"] == new_fragment))
+        })
+        .collect::<Vec<_>>();
+    let [contextual_instruction] = contextual_instruction.as_slice() else {
+        panic!("expected one contextual user message with refreshed instructions");
+    };
+    let replacement_conversation = replacement_history
+        .iter()
+        .filter(|item| item["id"] != contextual_instruction["id"])
+        .cloned()
+        .collect::<Vec<_>>();
+    let resumed_history = resumed.codex.conversation_history_snapshot().await;
+    let resumed_history = resumed_history
+        .items()
+        .map(serde_json::to_value)
+        .collect::<serde_json::Result<Vec<_>>>()?;
     assert_eq!(
-        resumed_input.get(..replacement_history.len()),
-        Some(replacement_history.as_slice()),
-        "remote-v2 cold resume should replay persisted replacement history verbatim"
+        resumed_history.get(..replacement_conversation.len()),
+        Some(replacement_conversation.as_slice()),
+        "remote-v2 cold resume should preserve conversation history and provenance verbatim"
+    );
+    let replacement_wire_history = replacement_history
+        .into_iter()
+        .map(|mut item| {
+            if let Some(metadata) = item
+                .get_mut("internal_chat_message_metadata_passthrough")
+                .and_then(Value::as_object_mut)
+            {
+                metadata.remove("content_item_metadata");
+                if metadata.is_empty() {
+                    item.as_object_mut()
+                        .expect("response item object")
+                        .remove("internal_chat_message_metadata_passthrough");
+                }
+            }
+            item
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resumed_input.get(..replacement_wire_history.len()),
+        Some(replacement_wire_history.as_slice()),
+        "the resumed request may omit only unsupported content provenance"
     );
     let post_compact_input = requests[2].input();
     assert_eq!(

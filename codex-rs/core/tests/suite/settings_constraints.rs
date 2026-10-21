@@ -18,6 +18,8 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_protocol::team_model::TeamModelPolicy;
+use codex_protocol::team_model::TeamSelectionOrigin;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -187,6 +189,10 @@ async fn protected_model_settings_use_the_proposed_permissions(
     assert!(response.requests().is_empty());
 
     let expected = ThreadSettingsSnapshot {
+        team_model_policy: TeamModelPolicy {
+            model_origin: TeamSelectionOrigin::Explicit,
+            ..initial.team_model_policy.clone()
+        },
         model: PROTECTED_MODEL.to_string(),
         collaboration_mode: initial.collaboration_mode.with_updates(
             Some(PROTECTED_MODEL.to_string()),

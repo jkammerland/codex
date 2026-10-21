@@ -215,13 +215,18 @@ enum ReviewerResponse {
     NextReview,
 }
 
+// The continuation fixtures use the cached-compaction case's 7k window and 16KB
+// inspection output (~4k text tokens on top of the complete tool catalog). The
+// exact request/compaction counts below require it to exceed the aggregate budget.
+// The original image reserves 10k tokens and the ineffective 64KB summary costs
+// ~16k tokens, so each of those exceeds the window even before request overhead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[test_case(1, ReviewerResponse::Decision; "required_context_fails_closed")]
-#[test_case(4_500, ReviewerResponse::ToolContinuation; "oversized_tool_continuation_compacts")]
+#[test_case(7_000, ReviewerResponse::ToolContinuation; "oversized_tool_continuation_compacts")]
 #[test_case(7_000, ReviewerResponse::CachedCompactionContinuation; "cached_compaction_fits_reviewer_budget")]
-#[test_case(4_500, ReviewerResponse::FileImageContinuation; "uploaded_original_image_history_compacts")]
-#[test_case(5_000, ReviewerResponse::UncompactableContinuation; "ineffective_compaction_fails_closed")]
-#[test_case(5_000, ReviewerResponse::CompactionError; "compaction_service_error_does_not_request_user_approval")]
+#[test_case(7_000, ReviewerResponse::FileImageContinuation; "uploaded_original_image_history_compacts")]
+#[test_case(7_000, ReviewerResponse::UncompactableContinuation; "ineffective_compaction_fails_closed")]
+#[test_case(7_000, ReviewerResponse::CompactionError; "compaction_service_error_does_not_request_user_approval")]
 #[test_case(6_000, ReviewerResponse::NextReview; "incoming_review_compacts_existing_history")]
 async fn review_respects_complete_context_budget(
     window: i64,
@@ -338,17 +343,15 @@ async fn review_respects_complete_context_budget(
                         })
                         .to_string(),
                     ),
-                    ReviewerResponse::CachedCompactionContinuation => ev_custom_tool_call(
-                        "reviewer-inspect",
-                        "exec",
-                        "text('inspection-output'.repeat(1000));",
-                    ),
+                    // Leave room for the complete shared tool guidance, then exceed the
+                    // window with inspection evidence so compaction occurs after sampling.
                     ReviewerResponse::ToolContinuation
+                    | ReviewerResponse::CachedCompactionContinuation
                     | ReviewerResponse::UncompactableContinuation
                     | ReviewerResponse::CompactionError => ev_custom_tool_call(
                         "reviewer-inspect",
                         "exec",
-                        "text('inspection-output'.repeat(600));",
+                        "text('inspection-output'.repeat(1000));",
                     ),
                     // A tiny inline image fits before upload. Its opaque original-detail file
                     // reference must reserve 10k tokens in reviewer history and force compaction.
@@ -478,7 +481,15 @@ async fn review_respects_complete_context_budget(
                 | ReviewerResponse::CachedCompactionContinuation
                 | ReviewerResponse::FileImageContinuation
         );
-        assert_eq!(requests.len(), if recovered { 4 } else { 3 });
+        assert_eq!(
+            requests.len(),
+            if recovered { 4 } else { 3 },
+            "parent resumed with: {}",
+            requests
+                .last()
+                .expect("parent resumes after review")
+                .function_call_output("exec-over-budget")
+        );
         assert_eq!(guardian_requests.len(), if recovered { 2 } else { 1 });
         if recovered {
             assert_eq!(compact_requests.len(), 1);

@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/skills_extension.rs
+assertion_line: 3350
 expression: "context_snapshot::format_request_history_snapshot(\"Cloud skills rebalance once to retain every executor skill. Post-turn compaction installs both catalogs and their allocation before resume; the saved catalogs remain visible while the executor reconnects.\",\n&requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
 ---
 Scenario: Cloud skills rebalance once to retain every executor skill. Post-turn compaction installs both catalogs and their allocation before resume; the saved catalogs remain visible while the executor reconnects.
@@ -15,9 +16,10 @@ Settings:
   stream: true
   text: {"verbosity":"low"}
   tool_choice: "auto"
-  tools (9; hash=1df9146cc32e8188):
-    - function/exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction.; args=[cmd, justification, login, max_output_tokens, prefix_rule, sandbox_permissions, shell, tty, workdir, yield_time_ms]; hash=c04108e51a8548c5
-    - function/write_stdin: Writes characters to an existing unified exec session and returns recent output.; args=[chars, max_output_tokens, session_id, yield_time_ms]; hash=7fb62d8a3e2df4e2
+  tools (10; hash=23da76a7565e0421):
+    - function/exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction. For a still-ru...; args=[cmd, justification, login, max_output_tokens, prefix_rule, sandbox_permissions, shell, tty, workdir, yield_time_ms]; hash=246c437db3cdda63
+    - function/wait_process: Waits on a running unified exec session until a meaningful event occurs, without polling. Non-TTY...; args=[max_output_tokens, session_id]; hash=449897ad1b2ca325
+    - function/write_stdin: Writes characters to an existing unified exec session and returns recent output. Use this to send...; args=[chars, max_output_tokens, session_id, yield_time_ms]; hash=415ddd0433b00c0d
     - function/wait_for_environment: Wait for the selected environment.; args=[environment_id]; hash=aac8552da86b3b20
     - function/request_user_input: Request user input for one to three short questions and wait for the response. This tool is only ...; args=[questions]; hash=64a729b25c424fc6
     - custom/apply_patch: The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the pat...; hash=dea9f12b0111a4ba
@@ -62,6 +64,7 @@ Settings: relative to window 1
   parallel_tool_calls: false
   tools (0; hash=09612b07b5ecb5a5):
     - removed function/exec_command
+    - removed function/wait_process
     - removed function/write_stdin
     - removed function/wait_for_environment
     - removed function/request_user_input

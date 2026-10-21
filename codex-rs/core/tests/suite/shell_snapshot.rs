@@ -1054,6 +1054,9 @@ async fn unified_exec_snapshot_preserves_shell_environment_policy_set() -> Resul
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
     let codex_home = harness.test().home.path().to_path_buf();
+    // Snapshot capture starts independently with the inherited environment. Keep the
+    // warmup out of host login profiles, which may require commands absent from the
+    // deliberately invalid policy PATH; the assertion below still uses login replay.
     run_tool_turn_on_harness(
         &harness,
         "warm up unified exec shell snapshot",
@@ -1061,6 +1064,7 @@ async fn unified_exec_snapshot_preserves_shell_environment_policy_set() -> Resul
         "exec_command",
         json!({
             "cmd": "printf warmup",
+            "login": false,
             "yield_time_ms": 1_000,
         }),
     )

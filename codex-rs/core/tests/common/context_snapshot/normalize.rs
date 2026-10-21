@@ -480,13 +480,18 @@ pub(super) fn portable_tool_schema(tool: &Value) -> Value {
             // Code mode embeds the exec_command description and its TypeScript declaration
             // inside the exec tool. Apply the same narrow platform normalization there.
             if let Some((start, section)) = description.split_once("### `exec_command`\n")
-                && let Some(rest) = section.strip_prefix(BASE)
-                && let Some((suffix, _)) = rest.split_once("\n\nexec tool declaration:")
-                && suffix.starts_with("\n\nWindows safety rules:")
-                && fnv1a(normalize_line_endings(suffix).as_bytes()) == WINDOWS_SAFETY_SUFFIX_HASH
+                && section.starts_with(BASE)
+                && let Some((shell, _)) = section.split_once("\n\nexec tool declaration:")
+                && let Some(windows_start) = shell.find("\n\nWindows safety rules:")
+                && fnv1a(normalize_line_endings(&shell[windows_start..]).as_bytes())
+                    == WINDOWS_SAFETY_SUFFIX_HASH
             {
-                *description =
-                    format!("{start}### `exec_command`\n{BASE}{}", &rest[suffix.len()..]);
+                // Keep all shared guidance between the original description and platform suffix.
+                *description = format!(
+                    "{start}### `exec_command`\n{}{}",
+                    &shell[..windows_start],
+                    &section[shell.len()..]
+                );
             }
             for platform_wait in [UNIX_WAIT, WINDOWS_WAIT] {
                 *description = description.replace(
@@ -501,14 +506,16 @@ pub(super) fn portable_tool_schema(tool: &Value) -> Value {
         return stable;
     }
     if let Some(Value::String(description)) = definition.get_mut("description") {
-        if let Some(rest) = description.strip_prefix(BASE) {
-            let suffix = rest
+        if description.starts_with(BASE) {
+            let shell = description
                 .split_once("\n\nexec tool declaration:")
-                .map_or(rest, |(suffix, _)| suffix);
-            if suffix.starts_with("\n\nWindows safety rules:")
-                && fnv1a(normalize_line_endings(suffix).as_bytes()) == WINDOWS_SAFETY_SUFFIX_HASH
+                .map_or(description.as_str(), |(shell, _)| shell);
+            if let Some(windows_start) = shell.find("\n\nWindows safety rules:")
+                && fnv1a(normalize_line_endings(&shell[windows_start..]).as_bytes())
+                    == WINDOWS_SAFETY_SUFFIX_HASH
             {
-                *description = format!("{BASE}{}", &rest[suffix.len()..]);
+                *description =
+                    format!("{}{}", &shell[..windows_start], &description[shell.len()..]);
             }
         }
         *description = description.replace(

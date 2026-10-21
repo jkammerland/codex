@@ -2,11 +2,17 @@ use super::*;
 use pretty_assertions::assert_eq;
 use test_case::test_case;
 
+pub(super) fn capture_diagnostics(home: &std::path::Path) -> String {
+    let captures = std::fs::read_to_string(home.join("captures"));
+    format!("captures={captures:?}")
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SnapshotSandbox {
     None,
     WorkspaceWrite,
     DenyFdPath,
+    ClosedDescriptor,
 }
 
 pub(super) struct StartupProcesses(pub(super) std::path::PathBuf);
@@ -91,7 +97,9 @@ async fn shell_snapshot_preserves_successful_startup_output_and_services(
 #[test_case("bash", true, SnapshotSandbox::None; "bash_tty")]
 #[cfg_attr(target_os = "macos", test_case("zsh", false, SnapshotSandbox::None; "zsh"))]
 #[cfg_attr(target_os = "macos", test_case("zsh", true, SnapshotSandbox::None; "zsh_tty"))]
-#[test_case("bash", false, SnapshotSandbox::DenyFdPath; "blocked_descriptor_path")]
+#[cfg_attr(target_os = "macos", test_case("bash", false, SnapshotSandbox::DenyFdPath; "blocked_descriptor_path"))]
+#[cfg_attr(target_os = "linux", test_case("bash", false, SnapshotSandbox::ClosedDescriptor; "bash_closed_descriptor"))]
+#[cfg_attr(target_os = "linux", test_case("bash", true, SnapshotSandbox::ClosedDescriptor; "bash_closed_descriptor_tty"))]
 #[cfg_attr(target_os = "macos", test_case("zsh", false, SnapshotSandbox::DenyFdPath; "zsh_blocked_descriptor_path"))]
 #[cfg_attr(target_os = "macos", test_case("zsh", true, SnapshotSandbox::DenyFdPath; "zsh_blocked_descriptor_path_tty"))]
 #[test_case("bash", false, SnapshotSandbox::WorkspaceWrite; "bash_protected_transport")]
@@ -106,7 +114,11 @@ async fn shell_snapshot_concurrent_replays_keep_independent_readers(
     sandbox_mode: SnapshotSandbox,
 ) -> Result<()> {
     let deny_fd_path = sandbox_mode == SnapshotSandbox::DenyFdPath;
-    let use_sandbox = sandbox_mode != SnapshotSandbox::None;
+    let close_descriptor = sandbox_mode == SnapshotSandbox::ClosedDescriptor;
+    let use_sandbox = matches!(
+        sandbox_mode,
+        SnapshotSandbox::WorkspaceWrite | SnapshotSandbox::DenyFdPath
+    );
     if use_sandbox
         && let Some(warning) = codex_sandboxing::system_bwrap_warning(
             &PermissionProfile::read_only(),
@@ -116,7 +128,7 @@ async fn shell_snapshot_concurrent_replays_keep_independent_readers(
         eprintln!("skipping sandbox test: {warning}");
         return Ok(());
     }
-    let context = if sandbox_mode == SnapshotSandbox::WorkspaceWrite {
+    let mut context = if sandbox_mode == SnapshotSandbox::WorkspaceWrite {
         let (exe, linux_sandbox) = current_test_binary_helper_paths()?;
         let environment = Environment::create(
             /*exec_server_url*/ None,
@@ -135,19 +147,45 @@ async fn shell_snapshot_concurrent_replays_keep_independent_readers(
     let home = TempDir::new()?;
     let cwd = PathUri::from_host_native_path(home.path())?;
     // Keep full-size state in a function, below the 512 KiB state + environment cap.
-    // The blocked-path case still exercises the smaller environment fallback.
-    let payload_len = if deny_fd_path { 1 } else { 480 * 1024 };
+    // Unavailable descriptors exercise the smaller environment fallback.
+    let payload_len = if deny_fd_path || close_descriptor {
+        1
+    } else {
+        480 * 1024
+    };
     let payload = "x".repeat(payload_len);
     let source = if shell == "bash" {
         "${BASH_SOURCE[0]}"
     } else {
         "${(%):-%x}"
     };
-    let source_check = if deny_fd_path {
+    let source_check = if close_descriptor {
+        format!("case \"{source}\" in /dev/fd/*) return 42 ;; esac; ")
+    } else if deny_fd_path {
         String::new()
     } else {
         format!("case \"{source}\" in /dev/fd/*) ;; *) return 42 ;; esac; ")
     };
+    if close_descriptor {
+        // BASH_ENV runs before the probe. Close extra inherited descriptors while
+        // preserving stdio and Bash's descriptor for this startup script itself.
+        std::fs::write(
+            home.path().join(".bash-env"),
+            r#"for snapshot_fd_path in /dev/fd/*; do
+  snapshot_fd=${snapshot_fd_path##*/}
+  if (( snapshot_fd <= 2 )) || [[ "$snapshot_fd_path" -ef "${BASH_SOURCE[0]}" ]]; then
+    continue
+  fi
+  [[ -e "$snapshot_fd_path" ]] || continue
+  exec {snapshot_fd}<&-
+  [[ ! -e "$snapshot_fd_path" ]] || exit 51
+  printf '%s\n' "$snapshot_fd" >> "$HOME/closed-descriptors"
+done
+unset snapshot_fd snapshot_fd_path
+. "$HOME/.bashrc"
+"#,
+        )?;
+    }
     let aliases = if shell == "zsh" {
         "module_path=()\nsetopt RC_QUOTES\nalias snapshot_quoted=\"printf '%s|' 'one''two'\"\nalias eval='exit 44'\nalias case='exit 45'\n"
     } else {
@@ -207,6 +245,20 @@ async fn shell_snapshot_concurrent_replays_keep_independent_readers(
         let command = command.clone();
         let protected_path = protected_file.path();
         async move {
+            let mut environment = HashMap::from([
+                ("HOME".to_string(), home.to_string_lossy().into_owned()),
+                ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+                (
+                    "SNAPSHOT_TRANSPORT_PROBE".to_string(),
+                    protected_path.to_string_lossy().into_owned(),
+                ),
+            ]);
+            if close_descriptor {
+                environment.insert(
+                    "BASH_ENV".to_string(),
+                    home.join(".bash-env").to_string_lossy().into_owned(),
+                );
+            }
             let started = backend
                 .start(ExecParams {
                     metadata: Default::default(),
@@ -218,14 +270,7 @@ async fn shell_snapshot_concurrent_replays_keep_independent_readers(
                         inherit: ShellEnvironmentPolicyInherit::None,
                         ignore_default_excludes: false,
                         exclude: Vec::new(),
-                        r#set: HashMap::from([
-                            ("HOME".to_string(), home.to_string_lossy().into_owned()),
-                            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
-                            (
-                                "SNAPSHOT_TRANSPORT_PROBE".to_string(),
-                                protected_path.to_string_lossy().into_owned(),
-                            ),
-                        ]),
+                        r#set: environment,
                         include_only: Vec::new(),
                     }),
                     shell_snapshot: Some(ShellSnapshotRequest {
@@ -252,7 +297,7 @@ async fn shell_snapshot_concurrent_replays_keep_independent_readers(
                 collect_process_output_from_events(started.process).await?;
             assert!(
                 output.ends_with(&format!("restored:input-{index}")),
-                "{output:?}"
+                "stdout={output:?}, stderr={errors:?}, status={status:?}, closed={closed}"
             );
             if shell == "zsh" {
                 assert!(
@@ -264,10 +309,143 @@ async fn shell_snapshot_concurrent_replays_keep_independent_readers(
             Ok::<_, anyhow::Error>(())
         }
     });
-    for result in futures::future::join_all(commands).await {
-        result?;
+    for (index, result) in futures::future::join_all(commands)
+        .await
+        .into_iter()
+        .enumerate()
+    {
+        if let Err(error) = result {
+            let executor = context
+                ._server
+                .as_mut()
+                .map(ExecServerHarness::process_diagnostics);
+            return Err(error).with_context(|| {
+                format!(
+                    "parallel replay {index}: {executor:?}; {}",
+                    capture_diagnostics(home.path()),
+                )
+            });
+        }
     }
     assert_eq!(std::fs::read_to_string(home.path().join("captures"))?, "x");
+    if close_descriptor {
+        // Exactly one inherited probe was closed; the eight replays must neither
+        // run startup again nor silently avoid exercising the failure injection.
+        let closed_descriptors = std::fs::read_to_string(home.path().join("closed-descriptors"))?
+            .lines()
+            .map(str::parse::<u32>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(closed_descriptors.len(), 1);
+        assert!(closed_descriptors[0] > 2);
+    }
     assert_eq!(std::fs::read_to_string(protected_file.path())?, "protected");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[serial_test::serial(remote_exec_server)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn denied_descriptor_symlink_fails_closed_and_executor_survives_sigpipe() -> Result<()> {
+    if let Some(warning) = codex_sandboxing::system_bwrap_warning(
+        &PermissionProfile::read_only(),
+        &std::env::current_dir()?,
+    ) {
+        eprintln!("skipping sandbox test: {warning}");
+        return Ok(());
+    }
+
+    let mut context = create_process_context(/*use_remote*/ true).await?;
+    let home = TempDir::new()?;
+    let cwd = PathUri::from_host_native_path(home.path())?;
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "printf x >> \"$HOME/captures\"\n",
+    )?;
+
+    // Linux bwrap cannot mount a denial over its /dev/fd symlink. Keep that
+    // policy error explicit instead of treating it as a successful replay.
+    let mut policy = FileSystemSandboxPolicy::read_only();
+    policy.entries.extend([
+        FileSystemSandboxEntry::new(cwd.clone().into(), FileSystemAccessMode::Write),
+        FileSystemSandboxEntry::new(
+            PathUri::from_host_native_path("/dev/fd")?.into(),
+            FileSystemAccessMode::Deny,
+        ),
+    ]);
+    let mut params = ExecParams {
+        metadata: Default::default(),
+        process_id: "denied-descriptor".into(),
+        argv: vec![
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            "printf unexpected".to_string(),
+        ],
+        cwd: cwd.clone(),
+        env: HashMap::from([
+            (
+                "HOME".to_string(),
+                home.path().to_string_lossy().into_owned(),
+            ),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ]),
+        env_policy: None,
+        shell_snapshot: Some(ShellSnapshotRequest {
+            scope_id: "denied-descriptor".to_string(),
+            shell: ShellInfo {
+                name: "bash".to_string(),
+                path: "/bin/bash".to_string(),
+            },
+        }),
+        tty: false,
+        pipe_stdin: true,
+        arg0: None,
+        sandbox: Some(FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+            cwd,
+        )),
+        enforce_managed_network: false,
+        managed_network: None,
+        network_proxy: None,
+    };
+    let started = context.backend.start(params.clone()).await?;
+    assert_eq!(
+        collect_process_output_from_events(started.process).await?,
+        (
+            String::new(),
+            "bwrap: Can't mount on symlink destination /dev/fd\n".to_string(),
+            Some(1),
+            true,
+        )
+    );
+    assert!(!home.path().join("captures").exists());
+
+    // Deliver SIGPIPE explicitly: writing to a rapidly exiting child would make
+    // coverage depend on whether the server had already observed the closed pipe.
+    let server = context._server.as_mut().expect("remote executor harness");
+    let pid: libc::pid_t = server
+        .process_id()
+        .context("live executor PID")?
+        .try_into()?;
+    // SAFETY: the harness owns this unreaped child, so its PID cannot be reused.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGPIPE) }, 0);
+
+    params.process_id = "after-denied-descriptor".into();
+    params.argv = vec![
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        "printf alive".to_string(),
+    ];
+    params.shell_snapshot = None;
+    params.sandbox = None;
+    params.pipe_stdin = false;
+    let started = context
+        .backend
+        .start(params)
+        .await
+        .with_context(|| server.process_diagnostics())?;
+    assert_eq!(
+        collect_process_output_from_events(started.process).await?,
+        ("alive".to_string(), String::new(), Some(0), true)
+    );
     Ok(())
 }

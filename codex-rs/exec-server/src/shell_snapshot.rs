@@ -371,6 +371,14 @@ impl ShellSnapshotCache {
             )
         };
 
+        // Bash's remote-shell detection can source .bashrc from socket stdin even
+        // in privileged mode. Suppress that startup before restoring cached state.
+        if shell_type == ShellType::Bash {
+            prepared
+                .command
+                .insert(shell_start + 1, "--norc".to_string());
+        }
+
         telemetry.shell_snapshot_command(wait, availability, "used");
         Ok(reader)
     }
@@ -432,8 +440,10 @@ done
         let fd = probe.as_raw_fd();
         // Automatic startup has already run: do not call exec/unset here,
         // which may be user functions. Capture exit closes this harmless probe.
+        // Open the probe before redirecting stderr: saving stderr could otherwise
+        // reuse a probe descriptor that startup closed and make the probe succeed.
         format!(
-            "if case '' in '') ;; esac 2>/dev/null </dev/fd/{fd}; then printf '\\0%s\\0%s\\0' '{SOURCE_MARKER}' 1; else printf '\\0%s\\0%s\\0' '{SOURCE_MARKER}' 0; fi\n{script}"
+            "if case '' in '') ;; esac </dev/fd/{fd} 2>/dev/null; then printf '\\0%s\\0%s\\0' '{SOURCE_MARKER}' 1; else printf '\\0%s\\0%s\\0' '{SOURCE_MARKER}' 0; fi\n{script}"
         )
     } else {
         format!("printf '\\0%s\\0%s\\0' '{SOURCE_MARKER}' 0\n{script}")

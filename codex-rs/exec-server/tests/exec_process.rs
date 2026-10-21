@@ -226,6 +226,23 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     let context = create_process_context(use_remote).await?;
     let home = TempDir::new()?;
     let cwd = PathUri::from_host_native_path(home.path())?;
+    let counters = home.path().join("counters");
+    std::fs::create_dir(&counters)?;
+
+    // Capture and replay share one policy; only diagnostic counters need writes.
+    let sandbox = if use_sandbox {
+        let mut policy = FileSystemSandboxPolicy::read_only();
+        policy.entries.push(FileSystemSandboxEntry::new(
+            PathUri::from_host_native_path(&counters)?.into(),
+            FileSystemAccessMode::Write,
+        ));
+        Some(FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+            cwd.clone(),
+        ))
+    } else {
+        None
+    };
     let (shell_path, profile_name) = match shell_name {
         "bash" if automatic_startup => ("/bin/bash", ".bash-env"),
         "bash" => ("/bin/bash", ".bashrc"),
@@ -242,7 +259,7 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     let wc = profile_path_entry.join("wc");
     codex_utils_cargo_bin::write_executable(
         &wc,
-        "#!/bin/sh\nprintf x >> \"$HOME/tool-captures\"\nexec /usr/bin/wc \"$@\"\n",
+        "#!/bin/sh\nprintf x >> \"$HOME/counters/tool-captures\"\nexec /usr/bin/wc \"$@\"\n",
     )?;
     let posix_shell = matches!(shell_name, "sh" | "bash-sh");
     let padding = if !use_remote && !tty && shell_name == "bash" {
@@ -261,7 +278,7 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
     std::fs::write(
         &profile_path,
         format!(
-            "printf x >> \"$HOME/captures\"\nexport PATH=\"$HOME/profile-bin:/usr/bin:/bin\"\nexport PROFILE_ALLOWED=profile\nexport PROFILE_SECRET=secret\nexport PROFILE_DENIED=denied\nprofile_helper() {{ printf helper; }}\nif [ -n \"${{BASH_VERSION-}}\" ]; then\n  shopt -s extglob nocasematch\n  eval 'profile_helper() {{ case $1 in @(foo|bar)*) printf helper ;; *) return 1 ;; esac; }}'\nfi\nset -u\n{shadowed_builtins}{padding}"
+            "printf x >> \"$HOME/counters/captures\"\nexport PATH=\"$HOME/profile-bin:/usr/bin:/bin\"\nexport PROFILE_ALLOWED=profile\nexport PROFILE_SECRET=secret\nexport PROFILE_DENIED=denied\nprofile_helper() {{ printf helper; }}\nif [ -n \"${{BASH_VERSION-}}\" ]; then\n  shopt -s extglob nocasematch\n  eval 'profile_helper() {{ case $1 in @(foo|bar)*) printf helper ;; *) return 1 ;; esac; }}'\nfi\nset -u\n{shadowed_builtins}{padding}"
         ),
     )?;
     if shell_name == "zsh" && automatic_startup {
@@ -350,12 +367,7 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
                 tty,
                 pipe_stdin: false,
                 arg0: (shell_name == "bash-sh").then(|| "sh".to_string()),
-                sandbox: (use_sandbox && attempt == 0).then(|| {
-                    FileSystemSandboxContext::from_permission_profile(
-                        PermissionProfile::read_only(),
-                        cwd.clone(),
-                    )
-                }),
+                sandbox: sandbox.clone(),
                 enforce_managed_network: false,
                 managed_network: None,
                 network_proxy: None,
@@ -369,8 +381,8 @@ async fn shell_snapshot_v2_filters_profile_exports_and_stays_in_memory(
         );
     }
 
-    assert_eq!(std::fs::read_to_string(home.path().join("captures"))?, "x");
-    assert!(!std::fs::read(home.path().join("tool-captures"))?.is_empty());
+    assert_eq!(std::fs::read_to_string(counters.join("captures"))?, "x");
+    assert!(!std::fs::read(counters.join("tool-captures"))?.is_empty());
     if let Some(server) = context._server {
         assert!(!server.codex_home().join("shell_snapshots").exists());
     }
@@ -1015,7 +1027,9 @@ async fn shell_snapshot_v2_capture_failure_falls_back_and_retries(
             }
             drop(start);
         } else {
-            let fallback = start.await?;
+            let fallback = start
+                .await
+                .with_context(|| shell_snapshot::capture_diagnostics(home.path()))?;
             assert_eq!(
                 collect_process_output_from_events(fallback.process).await?,
                 ("original".to_string(), String::new(), Some(0), true)

@@ -162,48 +162,16 @@ impl AgentControl for LocalAgentControl {
     fn pending_mail(
         &self,
         agent: ThreadId,
-    ) -> BoxFuture<'_, Result<Vec<codex_protocol::protocol::InterAgentCommunication>>> {
+    ) -> BoxFuture<'_, Result<Vec<crate::PendingAgentMessage>>> {
         Box::pin(async move {
-            let store = self.mail_store().await?;
-            let terminal = store
-                .tasks(
-                    self.session_id.into(),
-                    codex_thread_store::AgentTaskFilter {
-                        target_id: Some(agent),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?
-                .tasks
+            let (pending, discarded) = self.pending_mail_data(agent).await?;
+            for message_id in discarded {
+                self.runtime.live_mail.remove(agent, &message_id);
+            }
+            Ok(pending
                 .into_iter()
-                .filter(|task| task.status.is_terminal())
-                .map(|task| task.task_id)
-                .collect::<HashSet<_>>();
-            let records = store
-                .pending(self.session_id.into(), agent)
-                .await
-                .map_err(|err| CodexErr::Fatal(err.to_string()))?;
-            records
-                .into_iter()
-                .map(|record| {
-                    serde_json::from_str::<codex_protocol::protocol::InterAgentCommunication>(
-                        &record.envelope.payload_json,
-                    )
-                    .map_err(|err| CodexErr::Fatal(err.to_string()))
-                })
-                .filter(|result| {
-                    !result.as_ref().is_ok_and(|mail| {
-                        mail.mail.as_ref().is_some_and(|metadata| {
-                            metadata.kind == codex_protocol::protocol::AgentMailKind::Assignment
-                                && metadata
-                                    .task_id
-                                    .as_ref()
-                                    .is_some_and(|id| terminal.contains(id))
-                        })
-                    })
-                })
-                .collect()
+                .map(|communication| self.runtime.live_mail.attach(agent, communication))
+                .collect())
         })
     }
 
@@ -214,6 +182,7 @@ impl AgentControl for LocalAgentControl {
         message_id: String,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            self.runtime.live_mail.remove(agent, &message_id);
             let store = self.mail_store().await?;
             let root = self.session_id.into();
             let turn = turn.to_owned();

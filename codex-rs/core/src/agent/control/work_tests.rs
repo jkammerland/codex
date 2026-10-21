@@ -160,6 +160,8 @@ struct PausedSnapshotStore {
     continue_read: tokio::sync::Notify,
     submission: Option<Arc<IndependentSubmission>>,
     attempt: Option<Arc<IndependentSubmission>>,
+    acceptance: Option<Arc<IndependentSubmission>>,
+    settlement: Option<Arc<IndependentSubmission>>,
 }
 
 #[derive(Default)]
@@ -180,7 +182,16 @@ impl PausedSnapshotStore {
 
 impl AgentMailboxStore for PausedSnapshotStore {
     fn accept(&self, envelope: AgentMailEnvelope) -> ThreadStoreFuture<'_, AgentMailAcceptance> {
-        self.inner.accept(envelope)
+        let Some(acceptance) = self.acceptance.as_ref().map(Arc::clone) else {
+            return self.inner.accept(envelope);
+        };
+        Box::pin(async move {
+            acceptance.started.notify_one();
+            acceptance.allow_commit.notified().await;
+            let result = self.inner.accept(envelope).await;
+            acceptance.committed.notify_one();
+            result
+        })
     }
 
     fn pending(
@@ -277,7 +288,15 @@ impl AgentMailboxStore for PausedSnapshotStore {
         task: AgentTaskRecord,
         completion: AgentMailEnvelope,
     ) -> ThreadStoreFuture<'_, AgentMailAcceptance> {
-        self.inner.settle_task(task, completion)
+        let Some(settlement) = self.settlement.as_ref().map(Arc::clone) else {
+            return self.inner.settle_task(task, completion);
+        };
+        Box::pin(async move {
+            let result = self.inner.settle_task(task, completion).await;
+            settlement.started.notify_one();
+            settlement.allow_commit.notified().await;
+            result
+        })
     }
 
     fn tasks(
@@ -322,6 +341,8 @@ async fn work_summary_keeps_counts_and_revision_coherent(change: SnapshotChange)
         continue_read: tokio::sync::Notify::new(),
         submission: None,
         attempt: None,
+        acceptance: None,
+        settlement: None,
     });
     let erased_store: Arc<dyn AgentMailboxStore> = store.clone();
     assert!(control.runtime.mail_store.set(erased_store).is_ok());
@@ -461,6 +482,8 @@ async fn canceled_work_mutation_publishes_only_after_independent_commit() {
         continue_read: tokio::sync::Notify::new(),
         submission: Some(Arc::clone(&submission)),
         attempt: None,
+        acceptance: None,
+        settlement: None,
     });
     let erased_store: Arc<dyn AgentMailboxStore> = store.clone();
     assert!(control.runtime.mail_store.set(erased_store).is_ok());
@@ -586,6 +609,8 @@ async fn interrupted_settlement_waits_for_canceled_assignment_attempt() {
         continue_read: tokio::sync::Notify::new(),
         submission: None,
         attempt: Some(Arc::clone(&attempt)),
+        acceptance: None,
+        settlement: None,
     });
     let erased_store: Arc<dyn AgentMailboxStore> = store.clone();
     assert!(control.runtime.mail_store.set(erased_store).is_ok());
@@ -723,3 +748,6 @@ async fn interrupted_settlement_waits_for_canceled_assignment_attempt() {
         .await
         .expect("stop recipient");
 }
+
+#[path = "work_lifecycle_tests.rs"]
+mod lifecycle;

@@ -21,6 +21,43 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use test_case::test_case;
 
+#[derive(Default)]
+struct LiveMessageEvents {
+    published: std::sync::Mutex<std::collections::HashSet<String>>,
+    consumed: std::sync::Mutex<std::collections::HashSet<String>>,
+    sampled: std::sync::atomic::AtomicUsize,
+}
+
+impl codex_extension_api::MessageLifecycleContributor for LiveMessageEvents {
+    fn on_publish(&self, input: &codex_extension_api::MessageLifecycleInput) {
+        assert!(
+            self.published
+                .lock()
+                .unwrap()
+                .insert(input.message_id.to_string())
+        );
+    }
+
+    fn on_consumed(
+        &self,
+        input: &codex_extension_api::MessageLifecycleInput,
+        _recipient: codex_protocol::ThreadId,
+    ) {
+        assert!(
+            self.published
+                .lock()
+                .unwrap()
+                .contains(input.message_id.as_str())
+        );
+        assert!(
+            self.consumed
+                .lock()
+                .unwrap()
+                .insert(input.message_id.to_string())
+        );
+    }
+}
+
 #[path = "agent_mail_recovery_tests.rs"]
 mod recovery;
 
@@ -313,6 +350,8 @@ async fn grandchild_completion_wakes_its_completed_parent(evict_parent: bool) ->
     use wiremock::matchers::path;
 
     let server = responses::start_mock_server().await;
+    let messages = Arc::new(LiveMessageEvents::default());
+    let sampled_messages = Arc::clone(&messages);
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let captured = Arc::clone(&requests);
     Mock::given(method("POST"))
@@ -329,6 +368,18 @@ async fn grandchild_completion_wakes_its_completed_parent(evict_parent: bool) ->
                 request.body.clone()
             };
             let body: Value = serde_json::from_slice(&bytes).expect("responses request");
+            // Every live message selected for this actual HTTP request must already
+            // have fired its one history-consumption callback.
+            for item in body["input"].as_array().expect("request inputs") {
+                if let Some(id) = item["id"].as_str()
+                    && sampled_messages.published.lock().unwrap().contains(id)
+                {
+                    assert!(sampled_messages.consumed.lock().unwrap().contains(id));
+                    sampled_messages
+                        .sampled
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
             let response_id = {
                 let mut captured = captured.lock().expect("captured requests lock");
                 captured.push(body.clone());
@@ -385,6 +436,7 @@ async fn grandchild_completion_wakes_its_completed_parent(evict_parent: bool) ->
     let gate = Arc::new(LeafGate::default());
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     extensions.tool_lifecycle_contributor(gate.clone());
+    extensions.message_lifecycle_contributor(messages.clone());
     extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
     let test = test_codex()
         .with_model("gpt-5.6-sol")
@@ -517,6 +569,8 @@ async fn grandchild_completion_wakes_its_completed_parent(evict_parent: bool) ->
     test.thread_manager
         .shutdown_all_threads_bounded(std::time::Duration::from_secs(5))
         .await;
+    assert!(messages.sampled.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    assert!(!messages.consumed.lock().unwrap().is_empty());
     Ok(())
 }
 

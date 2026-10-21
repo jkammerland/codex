@@ -221,6 +221,7 @@ impl CodexThread {
                 root_turn_id: None,
                 turn_extension_init: None,
                 residency_guard: None,
+                message_delivery: None,
             })
             .await?;
         result.await.unwrap_or(Err(CodexErr::InternalAgentDied))

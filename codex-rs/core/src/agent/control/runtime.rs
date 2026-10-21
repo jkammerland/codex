@@ -199,6 +199,7 @@ pub(crate) struct LocalAgentRuntime {
     pub(super) registry: Arc<AgentRegistry>,
     pub(super) residency: Arc<V2Residency>,
     pub(super) mailboxes: Arc<super::mailbox::Mailboxes>,
+    pub(super) live_mail: Arc<super::live_mail::LiveMail>,
     pub(super) mail_store:
         Arc<tokio::sync::OnceCell<Arc<dyn codex_thread_store::AgentMailboxStore>>>,
     pub(super) work_updates: Arc<tokio::sync::watch::Sender<u64>>,
@@ -223,6 +224,7 @@ impl LocalAgentRuntime {
             registry: Arc::default(),
             residency: Arc::default(),
             mailboxes: Arc::default(),
+            live_mail: Arc::new(super::live_mail::LiveMail::new()),
             mail_store: Arc::default(),
             work_updates: Arc::new(tokio::sync::watch::channel(0).0),
             barriers: Arc::default(),
@@ -309,6 +311,7 @@ impl LocalAgentRuntime {
         self.shutdown_state.members.close();
         self.shutdown.cancel();
         self.mailboxes.close();
+        self.live_mail.close();
         Arc::clone(&self.shutdown_state)
     }
 

@@ -102,7 +102,7 @@ pub trait AgentControl: Send + Sync {
     fn pending_mail(
         &self,
         _agent: ThreadId,
-    ) -> BoxFuture<'_, Result<Vec<codex_protocol::protocol::InterAgentCommunication>>> {
+    ) -> BoxFuture<'_, Result<Vec<crate::PendingAgentMessage>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 

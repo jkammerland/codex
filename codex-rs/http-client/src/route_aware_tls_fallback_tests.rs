@@ -27,8 +27,6 @@ use crate::client::RequestLogging;
 use crate::client::TransportClient;
 use crate::tls_backend_fallback::should_retry_with_rustls;
 
-const PROTOCOL_VERSION_TLS_ALERT: &[u8] = &[21, 3, 3, 0, 2, 2, 70];
-
 type SuccessfulTlsFallbackServer = (
     String,
     TransportClient,
@@ -107,6 +105,53 @@ async fn default_pool_does_not_retry_a_native_tls_protocol_failure() {
             .expect("TLS server should reject one connection"),
         1
     );
+}
+
+#[tokio::test]
+async fn does_not_retry_unexpected_message_or_certificate_alerts() {
+    if native_tls_test_completed_in_subprocess(
+        "does_not_retry_unexpected_message_or_certificate_alerts",
+    ) {
+        return;
+    }
+
+    for alert_description in [10, 42] {
+        let (url, attempts, stop_server) =
+            spawn_tls_alert_rejection_server(/*maximum_attempts*/ 2, alert_description)
+                .expect("TLS rejection server should start");
+        let pool = RouteAwareClientPool::new(
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            ClientRouteClass::Other,
+        )
+        .with_tls_backend_fallback();
+        let request = reqwest::Request::new(
+            Method::POST,
+            reqwest::Url::parse(&url).expect("valid HTTPS URL"),
+        );
+
+        let error = pool
+            .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
+            .await
+            .expect_err("unrelated TLS alerts must not enable fallback");
+
+        let _ = stop_server.send(());
+        let RouteAwareRequestError::Request(error) = error else {
+            panic!("expected native TLS request error, got {error:?}");
+        };
+        assert!(error.is_connect());
+        assert!(
+            !should_retry_with_rustls(&error),
+            "alert {alert_description}: {error:?}"
+        );
+        assert_eq!(
+            attempts
+                .recv()
+                .expect("TLS server should finish")
+                .expect("TLS server should reject one connection"),
+            1,
+            "alert {alert_description} must not be replayed",
+        );
+    }
 }
 
 #[tokio::test]
@@ -470,15 +515,7 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
                 stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
                 if connection_index == 0 {
-                    let mut client_hello = [0_u8; 2_048];
-                    if stream.read(&mut client_hello)? == 0 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "native TLS peer closed before sending a ClientHello",
-                        ));
-                    }
-                    stream.write_all(PROTOCOL_VERSION_TLS_ALERT)?;
-                    stream.flush()?;
+                    reject_tls_handshake(&mut stream, /*alert_description*/ 70)?;
                     continue;
                 }
 
@@ -549,6 +586,13 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
 fn spawn_protocol_version_rejection_server(
     maximum_attempts: usize,
 ) -> io::Result<(String, mpsc::Receiver<io::Result<usize>>, mpsc::Sender<()>)> {
+    spawn_tls_alert_rejection_server(maximum_attempts, /*alert_description*/ 70)
+}
+
+fn spawn_tls_alert_rejection_server(
+    maximum_attempts: usize,
+    alert_description: u8,
+) -> io::Result<(String, mpsc::Receiver<io::Result<usize>>, mpsc::Sender<()>)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -567,14 +611,7 @@ fn spawn_protocol_version_rejection_server(
                     Ok((mut stream, _)) => {
                         stream.set_nonblocking(false)?;
                         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-                        let mut client_hello = [0_u8; 2_048];
-                        if stream.read(&mut client_hello)? == 0 {
-                            return Err(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "TLS peer closed before sending a ClientHello",
-                            ));
-                        }
-                        stream.write_all(PROTOCOL_VERSION_TLS_ALERT)?;
+                        reject_tls_handshake(&mut stream, alert_description)?;
                         attempts += 1;
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -589,4 +626,52 @@ fn spawn_protocol_version_rejection_server(
     });
 
     Ok((format!("https://{address}/mcp"), attempts_rx, stop_tx))
+}
+
+fn reject_tls_handshake(stream: &mut std::net::TcpStream, alert_description: u8) -> io::Result<()> {
+    // Let rustls consume the complete ClientHello and select a supported TLS 1.2 cipher.
+    // Schannel can collapse alerts before ServerHello into SEC_E_ILLEGAL_MESSAGE.
+    codex_utils_rustls_provider::ensure_rustls_crypto_provider();
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["127.0.0.1".to_string()]).map_err(io::Error::other)?;
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.der().clone()], PrivateKeyDer::from(signing_key))
+        .map_err(io::Error::other)?;
+    let mut connection =
+        rustls::ServerConnection::new(Arc::new(config)).map_err(io::Error::other)?;
+    while !connection.wants_write() {
+        if connection.read_tls(stream)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "TLS peer closed before sending a complete ClientHello",
+            ));
+        }
+        connection.process_new_packets().map_err(io::Error::other)?;
+    }
+
+    // Send only ServerHello from the generated flight: certificates must not mask the alert.
+    let mut flight = Vec::new();
+    while connection.wants_write() {
+        connection.write_tls(&mut flight)?;
+    }
+    assert_eq!(
+        &flight[..3],
+        &[22, 3, 3],
+        "expected TLS 1.2 handshake record"
+    );
+    let record_length = u16::from_be_bytes([flight[3], flight[4]]) as usize;
+    let handshake = &flight[5..5 + record_length];
+    assert_eq!(handshake[0], 2, "expected ServerHello first");
+    let hello_length = 4
+        + ((handshake[1] as usize) << 16)
+        + ((handshake[2] as usize) << 8)
+        + handshake[3] as usize;
+    let server_hello = &handshake[..hello_length];
+    let length = u16::try_from(server_hello.len()).expect("ServerHello fits one TLS record");
+    let [high, low] = length.to_be_bytes();
+    stream.write_all(&[22, 3, 3, high, low])?;
+    stream.write_all(server_hello)?;
+    stream.write_all(&[21, 3, 3, 0, 2, 2, alert_description])?;
+    stream.flush()
 }

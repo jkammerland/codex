@@ -453,6 +453,39 @@ async fn unified_board_preserves_delivery_reconciliation_and_rejected_outgoing_m
 }
 
 #[tokio::test]
+async fn board_message_details_preserve_body_line_and_paragraph_breaks() {
+    let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
+    let mut snapshot = team_snapshot(ThreadId::from_u128(42));
+    snapshot.messages[0].message.body =
+        "Release headline\n\nFirst paragraph.\r\nSecond line.\n\nFinal paragraph.".into();
+    app.agents_hosts.snapshot = Some(snapshot);
+    app.open_agents_team_message("request-one".into());
+
+    // Exercise the complete popup so body conversion and wrapped header rendering are covered.
+    for width in [80, 120] {
+        let output =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, width);
+        let lines = output.lines().map(str::trim).collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| *line == "Release headline")
+            .expect("message headline must occupy its own line");
+        assert_eq!(
+            &lines[start..start + 6],
+            &[
+                "Release headline",
+                "",
+                "First paragraph.",
+                "Second line.",
+                "",
+                "Final paragraph.",
+            ]
+        );
+        insta::assert_snapshot!(format!("board_message_details_paragraphs_{width}"), output);
+    }
+}
+
+#[tokio::test]
 async fn board_team_control_snapshot_refresh_keeps_draft() -> Result<()> {
     use super::super::agents_overview_view::command_center::TeamControlSummary;
     use codex_app_server_protocol::TeamExecutionMode;

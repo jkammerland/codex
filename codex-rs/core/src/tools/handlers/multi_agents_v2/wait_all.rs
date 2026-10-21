@@ -9,6 +9,7 @@ use codex_thread_store::AgentTaskRecord;
 use codex_thread_store::AgentTaskSnapshot;
 use codex_thread_store::AgentTaskStatus;
 use codex_tools::ToolSpec;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -103,12 +104,19 @@ async fn handle_call(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
         control: Arc::clone(control),
         thread_id: session.thread_id,
     };
+
+    // Several selected assignments can belong to the same receiver agent.
+    let mut seen_targets = HashSet::new();
     let started = CollabAgentToolCallItem {
         id: call_id,
         tool: CollabAgentTool::Wait,
         status: CollabAgentToolCallStatus::InProgress,
         sender_thread_id: session.thread_id,
-        receiver_thread_ids: initial_tasks.iter().map(|task| task.target_id).collect(),
+        receiver_thread_ids: initial_tasks
+            .iter()
+            .map(|task| task.target_id)
+            .filter(|target_id| seen_targets.insert(*target_id))
+            .collect(),
         receiver_agents: Vec::new(),
         prompt: None,
         model: None,
@@ -168,11 +176,47 @@ async fn handle_call(invocation: ToolInvocation) -> Result<Box<dyn ToolOutput>, 
             &turn,
             TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                 status: CollabAgentToolCallStatus::Completed,
+                agents_states: observed_agent_states(&tasks),
                 ..started
             }),
         )
         .await;
     Ok(boxed_tool_output(result))
+}
+
+fn observed_agent_states(tasks: &[AgentTaskRecord]) -> HashMap<ThreadId, AgentStatus> {
+    let mut observed = HashMap::<_, (u8, Option<AgentStatus>)>::new();
+    for task in tasks {
+        // A thread can have several selected assignments. Unknown or unfinished
+        // work must not be hidden by another assignment's successful completion.
+        let state = match task.status {
+            AgentTaskStatus::Queued
+            | AgentTaskStatus::CapacityUnavailable
+            | AgentTaskStatus::Unavailable => (0, None),
+            AgentTaskStatus::Failed => (
+                1,
+                Some(AgentStatus::Errored("Assignment failed".to_string())),
+            ),
+            AgentTaskStatus::Held | AgentTaskStatus::Cancelled => {
+                (2, Some(AgentStatus::Interrupted))
+            }
+            AgentTaskStatus::Running => (3, Some(AgentStatus::Running)),
+            AgentTaskStatus::Completed => (4, Some(AgentStatus::Completed(None))),
+        };
+        observed
+            .entry(task.target_id)
+            .and_modify(|previous| {
+                if state.0 < previous.0 {
+                    *previous = state.clone();
+                }
+            })
+            .or_insert(state);
+    }
+
+    observed
+        .into_iter()
+        .filter_map(|(target_id, (_, status))| status.map(|status| (target_id, status)))
+        .collect()
 }
 
 struct BarrierGuard {

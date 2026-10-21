@@ -834,6 +834,47 @@ mod tests {
         assert_snapshot!("collab_agent_transcript", snapshot);
     }
 
+    #[test]
+    fn wait_all_completed_assignments_without_result_text_snapshot() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let robie_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")
+            .expect("valid robie thread id");
+        let bob_id = ThreadId::from_string("00000000-0000-0000-0000-000000000003")
+            .expect("valid bob thread id");
+
+        let cell = tool_call_history_cell(
+            &ThreadItem::CollabAgentToolCall {
+                id: "wait-all".to_string(),
+                tool: CollabAgentTool::Wait,
+                status: CollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![robie_id.to_string(), bob_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: [robie_id, bob_id]
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            id.to_string(),
+                            agent_state(CollabAgentStatus::Completed, /*message*/ None),
+                        )
+                    })
+                    .collect(),
+            },
+            /*cached_spawn_request*/ None,
+            |thread_id| metadata_for(thread_id, robie_id, bob_id),
+        )
+        .expect("completed wait_all item renders");
+
+        assert_snapshot!(cell_to_text(&cell), @"
+        • Finished waiting
+          └ Robie [explorer]: Completed
+            Bob [worker]: Completed
+        ");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn agent_shortcut_matches_option_arrow_word_motion_fallbacks_only_when_allowed() {

@@ -13,6 +13,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
 
 struct MessageHeader(Vec<Line<'static>>);
@@ -248,8 +249,11 @@ impl App {
             )
             .bold()
             .into(),
-            record.message.body.clone().into(),
         ];
+
+        // Preserve authored line and paragraph breaks before wrapping the body.
+        lines.extend(Text::from(record.message.body.clone()).lines);
+
         if let Some(url) = &record.external_url {
             lines.push(url.clone().cyan().into());
         }

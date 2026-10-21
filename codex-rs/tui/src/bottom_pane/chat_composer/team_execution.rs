@@ -26,8 +26,9 @@ impl ChatComposer {
     }
 
     pub(super) fn team_command_allowed(&self) -> bool {
-        let text = self.draft.textarea.text();
-        parse_slash_name(text).is_some_and(|(name, args, _)| {
+        // Slash mode stores its prefix separately from the editable textarea.
+        let text = self.current_text();
+        parse_slash_name(&text).is_some_and(|(name, args, _)| {
             self.slash_input()
                 .command(name)
                 .is_some_and(|command| match command {
@@ -38,7 +39,8 @@ impl ChatComposer {
     }
 
     pub(super) fn team_popup_command_allowed(&self, command: &CommandItem) -> bool {
-        let args = parse_slash_name(self.draft.textarea.text()).map_or("", |(_, args, _)| args);
+        let text = self.current_text();
+        let args = parse_slash_name(&text).map_or("", |(_, args, _)| args);
         match command {
             CommandItem::Builtin(command) => command_allowed(*command, args),
             CommandItem::ServiceTier(_) => true,

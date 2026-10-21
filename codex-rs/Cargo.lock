@@ -5239,7 +5239,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-critical-path"
-version = "0.0.0"
+version = "0.163.0"
 dependencies = [
  "pretty_assertions",
 ]

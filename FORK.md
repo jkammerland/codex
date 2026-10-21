@@ -1,8 +1,9 @@
 # Maintained MCP lifecycle fork
 
 This integration candidate rebases the MCP.25 multi-machine team trial onto
-upstream main `e18a20d6eb6f5ede32a69fb56e3fe276d5e9d914`. It retains
-`0.163.0+jkammerland.mcp.25.team.2` for CLI and app-server and the `0.163.0`
+upstream main `d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4`. It uses
+`0.163.0+jkammerland.mcp.25.team.3` for CLI, app-server, and package manifests,
+and retains the `0.163.0`
 Cargo workspace version used by model discovery. Build the client and server
 from this branch together; changing package metadata alone does not update the
 model catalog request.
@@ -31,7 +32,14 @@ Outgoing Responses requests, including Responses Lite, omit unsupported
 `content_item_metadata` to avoid backend rejection. Internal history provenance
 and supported `content_item_kinds` remain intact.
 
-Qualification is scoped to focused native checks and complete staged packages.
+Builds use Rust 1.99.1 and target-matched V8 152.2.0 archive/binding pairs.
+Upstream message lifecycle callbacks share one live delivery handle across
+queued and reconciled mail. Durable wake receipts remain separate and are
+cleared only when the model accepts the selected request. Restarted mail
+recovers its persisted payload without recreating live extension callbacks.
+
+Qualification includes the default Linux suite, focused native checks, real
+terminal trials, and complete staged packages.
 Staging does not authorize installation, selection, daemon changes, or pushes.
 The retained fleet controller and installer are historical tooling; their raw
 pair activation flow is not the package staging procedure for this candidate.

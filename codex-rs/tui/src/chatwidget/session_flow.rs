@@ -128,7 +128,10 @@ impl ChatWidget {
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
             if (previous_thread_id.is_some()
-                || self.current_cwd.as_deref().unwrap_or(self.config.cwd.as_path())
+                || self
+                    .current_cwd
+                    .as_deref()
+                    .unwrap_or(self.config.cwd.as_path())
                     != std::path::Path::new(session.cwd.as_str()))
                 && self.status_account_display == Some(StatusAccountDisplay::ApiKey)
             {

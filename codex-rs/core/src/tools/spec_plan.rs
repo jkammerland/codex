@@ -784,7 +784,21 @@ fn required_child_management_tool_names(
     };
     let mut tools = names
         .iter()
-        .map(|name| ToolName::new(namespace.map(str::to_owned), (*name).to_owned()))
+        .map(|name| {
+            let namespace = if *name == "send_message"
+                && multi_agent_v2_enabled(turn_context)
+                && turn_context
+                    .config
+                    .features
+                    .enabled(Feature::WakeOnAgentMessages)
+                && namespace == Some("collaboration")
+            {
+                None
+            } else {
+                namespace
+            };
+            ToolName::new(namespace.map(str::to_owned), (*name).to_owned())
+        })
         .collect::<Vec<_>>();
     if multi_agent_v2_enabled(turn_context) && turn_context.config.multi_agent_v2.wait_agent_enabled
     {
@@ -1537,7 +1551,13 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 registry.register_trusted_with_exposure(
                     multi_agent_v2_handler(
                         SendMessageHandlerV2::new(waking_mail),
-                        tool_namespace,
+                        // Reserved provider tools must retain their exact built-in schemas.
+                        // Publish the wake override as a plain tool in that namespace only.
+                        if waking_mail && tool_namespace == Some("collaboration") {
+                            None
+                        } else {
+                            tool_namespace
+                        },
                         effective_send_description.as_deref().or(send_description),
                         // The local schema carries the wake override even with an older catalog.
                         if waking_mail {

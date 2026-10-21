@@ -92,6 +92,43 @@ fn wait_all_requires_every_fixed_assignment_to_be_terminal() {
     assert_eq!(state_outcome(&[]), None);
 }
 
+#[test]
+fn wait_all_completed_assignment_cannot_hide_another_selected_task() {
+    let owner = ThreadId::new();
+    let mut completed = task(owner, AgentTaskStatus::Completed);
+    completed.result_ref = Some("completion-mail-id".to_string());
+    let other_completed = task(owner, AgentTaskStatus::Completed);
+
+    for (status, expected) in [
+        (AgentTaskStatus::Running, Some(AgentStatus::Running)),
+        (AgentTaskStatus::Held, Some(AgentStatus::Interrupted)),
+        (AgentTaskStatus::Cancelled, Some(AgentStatus::Interrupted)),
+        (
+            AgentTaskStatus::Failed,
+            Some(AgentStatus::Errored("Assignment failed".to_string())),
+        ),
+        (AgentTaskStatus::Queued, None),
+        (AgentTaskStatus::CapacityUnavailable, None),
+        (AgentTaskStatus::Unavailable, None),
+    ] {
+        let mut unfinished = completed.clone();
+        unfinished.task_id = "accepted-2".to_string();
+        unfinished.status = status;
+        unfinished.result_ref = None;
+        let mut expected_states =
+            HashMap::from([(other_completed.target_id, AgentStatus::Completed(None))]);
+        if let Some(expected) = expected {
+            expected_states.insert(completed.target_id, expected);
+        }
+
+        // Store order does not decide whether this target appears completed.
+        let mut tasks = vec![completed.clone(), unfinished, other_completed.clone()];
+        assert_eq!(observed_agent_states(&tasks), expected_states);
+        tasks.reverse();
+        assert_eq!(observed_agent_states(&tasks), expected_states);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn wait_all_has_no_default_deadline_and_observation_timeout_is_exact() {
     let indefinite = wait_for_deadline(None);

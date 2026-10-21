@@ -9,9 +9,14 @@ use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
 use codex_protocol::AgentPath;
+use codex_protocol::items::CollabAgentTool;
+use codex_protocol::items::CollabAgentToolCallItem;
+use codex_protocol::items::CollabAgentToolCallStatus;
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::AgentMailKind;
 use codex_protocol::protocol::AgentMailMetadata;
 use codex_protocol::protocol::AgentMailWake;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
@@ -24,6 +29,7 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -148,7 +154,7 @@ async fn selected_results_and_queue_only_progress_do_not_resample_parent(
             };
             let text = body["input"].to_string();
             let call = |id, tool, args: Value| {
-                if tool == "wait_all" {
+                if matches!(tool, "wait_all" | "send_message") {
                     responses::ev_function_call(id, tool, &args.to_string())
                 } else {
                     responses::ev_function_call_with_namespace(id, "collaboration", tool, &args.to_string())
@@ -252,8 +258,10 @@ async fn selected_results_and_queue_only_progress_do_not_resample_parent(
         tokio::time::timeout(Duration::from_secs(10), gates.waiting_again.notified()).await?;
     }
     let mut workers = Vec::new();
+    let mut worker_ids = Vec::new();
     for _ in 0..2 {
         let id = created.recv().await?;
+        worker_ids.push(id);
         let thread = test.thread_manager.get_thread(id).await?;
         let name = thread
             .config_snapshot()
@@ -287,13 +295,56 @@ async fn selected_results_and_queue_only_progress_do_not_resample_parent(
     assert_eq!(root_count(), 2 + usize::from(interrupted));
 
     gates.release[1 - first].notify_one();
+    let mut completed_waits = Vec::new();
     wait_for_event(&test.codex, |event| {
+        if let EventMsg::ItemCompleted(event) = event
+            && let TurnItem::CollabAgentToolCall(call) = &event.item
+            && call.tool == CollabAgentTool::Wait
+        {
+            completed_waits.push(call.clone());
+        }
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
     ThreadIdle::wait(&test.codex).await;
     ThreadIdle::wait(&workers[1 - first]).await;
     assert_eq!(root_count(), 3 + usize::from(interrupted));
+
+    // Inspect the actual terminal-facing events, independently of the model's
+    // wait_all JSON result. Interrupted barriers still have two running workers.
+    assert_eq!(completed_waits.len(), 1 + usize::from(interrupted));
+    worker_ids.sort_by_key(ToString::to_string);
+    for (index, mut call) in completed_waits.into_iter().enumerate() {
+        call.receiver_thread_ids.sort_by_key(ToString::to_string);
+        let status = if interrupted && index == 0 {
+            AgentStatus::Running
+        } else {
+            AgentStatus::Completed(None)
+        };
+        assert_eq!(
+            call,
+            CollabAgentToolCallItem {
+                id: if index == 0 {
+                    "barrier"
+                } else {
+                    "barrier-again"
+                }
+                .to_string(),
+                tool: CollabAgentTool::Wait,
+                status: CollabAgentToolCallStatus::Completed,
+                sender_thread_id: test.session_configured.thread_id,
+                receiver_thread_ids: worker_ids.clone(),
+                receiver_agents: Vec::new(),
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: worker_ids
+                    .iter()
+                    .map(|id| (*id, status.clone()))
+                    .collect::<HashMap<_, _>>(),
+            }
+        );
+    }
     {
         let captured = captured.lock().expect("captured requests");
         assert_eq!(captured.len(), 7 + usize::from(interrupted));
@@ -333,8 +384,146 @@ async fn selected_results_and_queue_only_progress_do_not_resample_parent(
             .expect("parent request after barrier")["input"]
             .to_string();
         assert!(final_input.contains("late quiet progress"));
+        assert!(final_input.contains("progress-a"));
+        assert!(final_input.contains("progress-b"));
         assert!(final_input.contains("result-a"));
         assert!(final_input.contains("result-b"));
+    }
+
+    test.thread_manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiple_assignments_to_one_worker_emit_one_wait_receiver() -> Result<()> {
+    const PROMPT: &str = "root-only: assign two tasks to the same worker and wait for both";
+    let server = responses::start_mock_server().await;
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = Arc::clone(&captured);
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |request: &Request| {
+            let body = body_json(request);
+            let response_id = {
+                let mut requests = requests.lock().expect("captured requests");
+                requests.push(body.clone());
+                format!("response-{}", requests.len())
+            };
+            let event = if body["input"].to_string().contains(PROMPT) {
+                if output(&body, "both-assignments").is_some() {
+                    responses::ev_assistant_message("root-done", "Reviewed both assignments")
+                } else if let Some(followup) = output(&body, "followup") {
+                    let initial = output(&body, "spawn").expect("initial assignment receipt");
+                    responses::ev_function_call(
+                        "both-assignments",
+                        "wait_all",
+                        &json!({"task_ids": [initial["task_id"], followup["task_id"]]}).to_string(),
+                    )
+                } else if output(&body, "spawn").is_some() {
+                    responses::ev_function_call_with_namespace(
+                        "followup",
+                        "collaboration",
+                        "followup_task",
+                        r#"{"target":"worker","message":"Complete the followup assignment"}"#,
+                    )
+                } else {
+                    responses::ev_function_call_with_namespace(
+                        "spawn",
+                        "collaboration",
+                        "spawn_agent",
+                        r#"{"task_name":"worker","message":"Complete the initial assignment","fork_turns":"none"}"#,
+                    )
+                }
+            } else {
+                responses::ev_assistant_message("worker-done", "Assignment completed")
+            };
+            responses::sse_response(responses::sse(vec![
+                responses::ev_response_created(&response_id),
+                event,
+                responses::ev_completed(&response_id),
+            ]))
+        })
+        .mount(&server)
+        .await;
+
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
+    let test = test_codex()
+        .with_model("gpt-5.6-sol")
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| {
+            for feature in [
+                Feature::Collab,
+                Feature::MultiAgentV2,
+                Feature::WakeOnAgentMessages,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("enable collaboration feature");
+            }
+            config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let mut created = test.thread_manager.subscribe_thread_created();
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: PROMPT.to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let mut wait_items = Vec::new();
+    wait_for_event(&test.codex, |event| {
+        let item = match event {
+            EventMsg::ItemStarted(event) => Some(&event.item),
+            EventMsg::ItemCompleted(event) => Some(&event.item),
+            _ => None,
+        };
+        if let Some(TurnItem::CollabAgentToolCall(call)) = item
+            && call.id == "both-assignments"
+        {
+            wait_items.push(call.clone());
+        }
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let worker_id = created.recv().await?;
+
+    // Both accepted receipts remain in the result, but terminal events describe
+    // the one worker once at both the beginning and the end of the barrier.
+    assert_eq!(wait_items.len(), 2);
+    let mut expected = CollabAgentToolCallItem {
+        id: "both-assignments".to_string(),
+        tool: CollabAgentTool::Wait,
+        status: CollabAgentToolCallStatus::InProgress,
+        sender_thread_id: test.session_configured.thread_id,
+        receiver_thread_ids: vec![worker_id],
+        receiver_agents: Vec::new(),
+        prompt: None,
+        model: None,
+        reasoning_effort: None,
+        agents_states: HashMap::new(),
+    };
+    assert_eq!(wait_items[0], expected);
+    expected.status = CollabAgentToolCallStatus::Completed;
+    expected.agents_states = HashMap::from([(worker_id, AgentStatus::Completed(None))]);
+    assert_eq!(wait_items[1], expected);
+    {
+        let captured = captured.lock().expect("captured requests");
+        let result = captured
+            .iter()
+            .find_map(|body| output(body, "both-assignments"))
+            .expect("barrier result");
+        let tasks = result["tasks"].as_array().expect("selected task results");
+        assert_eq!(result["reason"], "all_done");
+        assert_eq!(result["all_done"], true);
+        assert_eq!(tasks.len(), 2);
+        assert_ne!(tasks[0]["task_id"], tasks[1]["task_id"]);
+        assert!(tasks.iter().all(|task| task["status"] == "completed"));
     }
 
     test.thread_manager
@@ -411,10 +600,26 @@ async fn task_barrier_gate_preserves_catalog_help_and_exposes_wake_override() ->
             .expect("default collaboration namespace")["tools"]
             .as_array()
             .expect("namespace tools");
-        let send = collaboration_tools
+        let send_namespace = if enabled {
+            "functions"
+        } else {
+            "collaboration"
+        };
+        let send = namespaces
+            .iter()
+            .find(|namespace| namespace["name"] == send_namespace)
+            .expect("message tool namespace")["tools"]
+            .as_array()
+            .expect("message namespace tools")
             .iter()
             .find(|tool| tool["name"] == "send_message")
             .expect("send_message");
+        assert_eq!(
+            collaboration_tools
+                .iter()
+                .any(|tool| tool["name"] == "send_message"),
+            !enabled
+        );
         let description = send["description"].as_str().expect("send description");
         assert!(description.starts_with("Catalog message routing guidance."));
         assert_eq!(description.contains("queue-only progress"), enabled);

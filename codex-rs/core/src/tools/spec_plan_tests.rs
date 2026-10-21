@@ -3090,6 +3090,51 @@ async fn multi_agent_v2_wait_all_uses_plain_namespace_with_direct_code_mode_expo
 }
 
 #[tokio::test]
+async fn multi_agent_v2_waking_mail_avoids_reserved_send_message_schema() {
+    for namespace in [None, Some("collaboration"), Some("agents")] {
+        for waking_mail in [false, true] {
+            let plan = probe(|turn| {
+                set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+                set_feature(turn, Feature::WakeOnAgentMessages, waking_mail);
+                update_config(turn, |config| {
+                    config.multi_agent_v2.tool_namespace = namespace.map(str::to_owned);
+                    config.multi_agent_v2.non_code_mode_only = true;
+                });
+            })
+            .await;
+
+            // Only the extended schema leaves the provider's reserved namespace.
+            assert!(plan.can_manage_children);
+            let plain_message =
+                namespace.is_none() || (waking_mail && namespace == Some("collaboration"));
+            if plain_message {
+                plan.assert_visible_contains(&["send_message"]);
+                plan.assert_registered_contains(&["send_message"]);
+                assert_eq!(plan.exposure("send_message"), ToolExposure::DirectModelOnly);
+            } else {
+                plan.assert_visible_lacks(&["send_message"]);
+                plan.assert_registered_lacks(&["send_message"]);
+            }
+
+            if let Some(namespace) = namespace {
+                let message_tool = ToolName::namespaced(namespace, "send_message").to_string();
+                if plain_message {
+                    plan.assert_registered_lacks(&[&message_tool]);
+                } else {
+                    plan.assert_registered_contains(&[&message_tool]);
+                }
+                assert_eq!(
+                    plan.namespace_function_names(namespace)
+                        .iter()
+                        .any(|name| name == "send_message"),
+                    !plain_message
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn multi_agent_v2_namespace_is_supported_by_bedrock_provider() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);

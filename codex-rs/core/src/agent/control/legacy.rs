@@ -44,6 +44,7 @@ impl LocalAgentControl {
         self.forget_v2_residency(agent_id);
         self.runtime.registry.release_spawned_thread(agent_id);
         self.runtime.mailboxes.remove(agent_id);
+        self.runtime.live_mail.remove_recipient(agent_id);
         result
     }
 

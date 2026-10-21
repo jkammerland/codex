@@ -9,7 +9,6 @@ use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
-use crate::agent_communication::MessageDelivery;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
 use crate::context::ContextualUserFragment;
@@ -26,7 +25,6 @@ use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_protocol::AgentPath;
-use codex_protocol::ResponseItemId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -76,6 +74,7 @@ mod execution;
 mod inspection;
 mod interrupt;
 mod legacy;
+mod live_mail;
 mod mailbox;
 mod residency;
 pub use residency::ThreadEvictionOutcome;
@@ -169,10 +168,11 @@ impl LocalAgentControl {
     pub(crate) async fn send_inter_agent_communication(
         &self,
         agent_id: ThreadId,
-        communication: InterAgentCommunication,
+        communication: impl Into<crate::PendingAgentMessage>,
         agent_communication_context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
+        let communication = communication.into();
         let state = self.runtime.upgrade()?;
         if communication.trigger_turn {
             let thread = state.get_thread(agent_id).await?;
@@ -271,14 +271,14 @@ impl LocalAgentControl {
         &self,
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
-        communication: InterAgentCommunication,
+        communication: impl Into<crate::PendingAgentMessage>,
         context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         self.submit_inter_agent_communication(
             agent_id,
             state,
-            communication,
+            communication.into(),
             context,
             start_options,
         )
@@ -289,23 +289,13 @@ impl LocalAgentControl {
         &self,
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
-        mut communication: InterAgentCommunication,
+        communication: crate::PendingAgentMessage,
         context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
-        let durable_id = self
-            .accept_mail(agent_id, &mut communication, &context)
-            .await?;
-        let observers = state.extensions.message_lifecycle_contributors();
-        let delivery = (!observers.is_empty()).then(|| {
-            let message_id = communication
-                .id
-                .take()
-                .filter(|id| !id.is_empty())
-                .unwrap_or_else(|| ResponseItemId::new("amsg"));
-            communication.id = Some(message_id.clone());
-            MessageDelivery::publish(context.sender_thread_id, message_id, observers)
-        });
+        let (durable_id, communication) =
+            self.accept_mail(agent_id, communication, &context).await?;
+        let (communication, delivery) = communication.into_parts();
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
         {

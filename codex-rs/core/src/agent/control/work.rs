@@ -1,9 +1,12 @@
 //! Durable mail receipts and assignment observations for the attached local tree.
 
 use super::LocalAgentControl;
+use crate::PendingAgentMessage;
 use crate::agent::api::AgentBarrierSummary;
 use crate::agent::api::AgentWorkSummary;
 use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::MessageDelivery;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
@@ -16,6 +19,7 @@ use codex_thread_store::AgentMailboxStore;
 use codex_thread_store::AgentTaskFilter;
 use codex_thread_store::AgentTaskRecord;
 use codex_thread_store::AgentTaskStatus;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::PoisonError;
@@ -23,8 +27,10 @@ use std::sync::PoisonError;
 /// The storage task owns publication and access until the operation finishes.
 /// Caller cancellation cannot release either before a queued commit completes.
 struct WorkMutation {
-    control: LocalAgentControl,
+    // Fields drop in declaration order: release storage before runtime or attachments.
     _store_access: tokio::sync::OwnedRwLockWriteGuard<()>,
+    control: LocalAgentControl,
+    _retained_mail: Option<PendingAgentMessage>,
 }
 
 impl Drop for WorkMutation {
@@ -67,11 +73,21 @@ impl LocalAgentControl {
         &self,
         operation: impl Future<Output = Result<T>> + Send + 'static,
     ) -> Result<T> {
+        self.mutate_work_retaining(/*retained_mail*/ None, operation)
+            .await
+    }
+
+    async fn mutate_work_retaining<T: Send + 'static>(
+        &self,
+        retained_mail: Option<PendingAgentMessage>,
+        operation: impl Future<Output = Result<T>> + Send + 'static,
+    ) -> Result<T> {
         let mutation = WorkMutation {
             control: self.clone(),
             _store_access: Arc::clone(&self.runtime.work_store_access)
                 .write_owned()
                 .await,
+            _retained_mail: retained_mail,
         };
         // SQLx can finish a queued COMMIT after its waiting future is dropped.
         // Detach only the caller's wait, keeping the operation and guard together.
@@ -86,9 +102,10 @@ impl LocalAgentControl {
     pub(super) async fn accept_mail(
         &self,
         agent: ThreadId,
-        communication: &mut InterAgentCommunication,
+        pending: PendingAgentMessage,
         context: &AgentCommunicationContext,
-    ) -> Result<String> {
+    ) -> Result<(String, PendingAgentMessage)> {
+        let (mut communication, delivery) = pending.into_parts();
         let manager = self.runtime.upgrade()?;
         let feature_enabled = match manager.get_thread(self.session_id.into()).await {
             Ok(root) => root
@@ -102,7 +119,8 @@ impl LocalAgentControl {
         };
         if !feature_enabled {
             communication.mail = None;
-            return Ok(uuid::Uuid::now_v7().to_string());
+            let pending = self.publish_mail(communication, delivery, context.sender_thread_id)?;
+            return Ok((uuid::Uuid::now_v7().to_string(), pending));
         }
         let metadata = communication.mail.get_or_insert_with(|| AgentMailMetadata {
             message_id: codex_protocol::ResponseItemId::new("agentmail").to_string(),
@@ -131,7 +149,7 @@ impl LocalAgentControl {
             sender_id: context.sender_thread_id,
             recipient_id: agent,
             kind,
-            payload_json: serde_json::to_string(communication)
+            payload_json: serde_json::to_string(&communication)
                 .map_err(|err| CodexErr::Fatal(err.to_string()))?,
             wake,
             task_id: task_id.clone(),
@@ -149,16 +167,47 @@ impl LocalAgentControl {
                 turn_id: None,
                 result_ref: None,
             });
-        self.mutate_work(async move {
+        let pending = self.publish_mail(communication, delivery, context.sender_thread_id)?;
+        let registered = pending.clone();
+        let live_mail = Arc::clone(&self.runtime.live_mail);
+        self.mutate_work_retaining(Some(pending.clone()), async move {
+            let registration = live_mail.register(agent, &registered);
             let accepted = if let Some(task) = task {
                 store.accept_task(task, envelope).await
             } else {
                 store.accept(envelope).await
             };
-            accepted.map_err(|err| CodexErr::Fatal(err.to_string()))
+            accepted.map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            if let Some(registration) = registration {
+                registration.committed();
+            }
+            Ok(())
         })
         .await?;
-        Ok(message_id)
+        Ok((message_id, pending))
+    }
+
+    /// Capture hooks once, after choosing the protocol ID but before durable visibility.
+    fn publish_mail(
+        &self,
+        mut communication: InterAgentCommunication,
+        delivery: Option<MessageDelivery>,
+        sender: ThreadId,
+    ) -> Result<PendingAgentMessage> {
+        let manager = self.runtime.upgrade()?;
+        let observers = manager.extensions.message_lifecycle_contributors();
+        let delivery = delivery.or_else(|| {
+            (!observers.is_empty()).then(|| {
+                let message_id = communication
+                    .id
+                    .take()
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| ResponseItemId::new("amsg"));
+                communication.id = Some(message_id.clone());
+                MessageDelivery::publish(sender, message_id, observers)
+            })
+        });
+        Ok(PendingAgentMessage::new(communication, delivery))
     }
 
     /// Settle only assignments selected for this exact terminal turn. Failed
@@ -282,13 +331,22 @@ impl LocalAgentControl {
                 wake: true,
                 task_id: Some(task.task_id.clone()),
             };
+            let communication =
+                self.publish_mail(communication, /*delivery*/ None, outcome.thread_id)?;
             {
                 let store = Arc::clone(&store);
-                self.mutate_work(async move {
+                let registered = communication.clone();
+                let live_mail = Arc::clone(&self.runtime.live_mail);
+                self.mutate_work_retaining(Some(communication.clone()), async move {
+                    let registration = live_mail.register(owner_id, &registered);
                     store
                         .settle_task(task, envelope)
                         .await
-                        .map_err(|err| CodexErr::Fatal(err.to_string()))
+                        .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+                    if let Some(registration) = registration {
+                        registration.committed();
+                    }
+                    Ok(())
                 })
                 .await?;
             }
@@ -313,6 +371,55 @@ impl LocalAgentControl {
         Ok(settled_parent)
     }
 
+    pub(super) async fn pending_mail_data(
+        &self,
+        agent: ThreadId,
+    ) -> Result<(
+        Vec<codex_protocol::protocol::InterAgentCommunication>,
+        Vec<String>,
+    )> {
+        let store = self.mail_store().await?;
+        let terminal = store
+            .tasks(
+                self.session_id.into(),
+                codex_thread_store::AgentTaskFilter {
+                    target_id: Some(agent),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| CodexErr::Fatal(err.to_string()))?
+            .tasks
+            .into_iter()
+            .filter(|task| task.status.is_terminal())
+            .map(|task| task.task_id)
+            .collect::<HashSet<_>>();
+        let records = store
+            .pending(self.session_id.into(), agent)
+            .await
+            .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+        let mut pending = Vec::new();
+        let mut discarded = Vec::new();
+        for record in records {
+            let communication = serde_json::from_str::<
+                codex_protocol::protocol::InterAgentCommunication,
+            >(&record.envelope.payload_json)
+            .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+            if communication.mail.as_ref().is_some_and(|metadata| {
+                metadata.kind == codex_protocol::protocol::AgentMailKind::Assignment
+                    && metadata
+                        .task_id
+                        .as_ref()
+                        .is_some_and(|id| terminal.contains(id))
+            }) {
+                discarded.push(record.envelope.message_id);
+            } else {
+                pending.push(communication);
+            }
+        }
+        Ok((pending, discarded))
+    }
+
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "The read lock keeps counts and revision coherent across bounded storage snapshot reads; no delivery or model execution runs while it is held."
@@ -333,9 +440,9 @@ impl LocalAgentControl {
                 *self.runtime.work_updates.borrow(),
             )
         };
-        let pending_mail = crate::agent::api::AgentControl::pending_mail(self, agent)
-            .await?
-            .len();
+        // A summary needs only raw durable data. Attaching or pruning live handles
+        // here could run extension destructors while the snapshot lock is held.
+        let pending_mail = self.pending_mail_data(agent).await?.0.len();
         let waiting_tasks = if let Some(task_ids) = barrier {
             let total = task_ids.len();
             let snapshot = store

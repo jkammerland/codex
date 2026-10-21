@@ -4162,6 +4162,9 @@ impl Session {
                 .was_mail_submitted(&metadata.message_id)
                 .await
             {
+                if let Some(delivery) = &communication.delivery {
+                    delivery.consumed(self.thread_id);
+                }
                 return;
             }
             let history = self.clone_history().await;
@@ -4171,6 +4174,9 @@ impl Session {
                 }
                 _ => false,
             }) {
+                if let Some(delivery) = &communication.delivery {
+                    delivery.consumed(self.thread_id);
+                }
                 // History can survive a crash before its separate mailbox receipt.
                 // Repair that receipt without appending the same input again.
                 if self.features.enabled(Feature::WakeOnAgentMessages) {

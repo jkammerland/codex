@@ -931,7 +931,7 @@ async fn agent_message_wakes_preserve_mail_while_team_execution_is_held(
     super::super::handlers::inter_agent_communication(
         &session,
         "held-message".to_string(),
-        communication.clone(),
+        communication.clone().into(),
         Default::default(),
     )
     .await;
@@ -948,7 +948,7 @@ async fn agent_message_wakes_preserve_mail_while_team_execution_is_held(
     assert!(session.reserve_pending_work_turn().await.is_some());
     assert_eq!(
         session.input_queue.drain_mailbox_input_items().await.0,
-        vec![TurnInput::InterAgentCommunication(communication)]
+        vec![TurnInput::InterAgentCommunication(communication.into())]
     );
 }
 
@@ -1038,7 +1038,7 @@ async fn submitted_duplicate_cannot_reserve_another_successful_turn(trigger_turn
     // the now-successful idle session. It cannot reserve an extra turn.
     session
         .input_queue
-        .enqueue_mailbox_communication(consumed, Default::default())
+        .enqueue_mailbox_communication(consumed.into(), Default::default())
         .await;
     assert!(session.reserve_pending_work_turn().await.is_none());
     assert!(session.active_turn.lock().await.is_none());
@@ -1048,12 +1048,12 @@ async fn submitted_duplicate_cannot_reserve_another_successful_turn(trigger_turn
     let fresh = mail("new-work");
     session
         .input_queue
-        .enqueue_mailbox_communication(fresh.clone(), Default::default())
+        .enqueue_mailbox_communication(fresh.clone().into(), Default::default())
         .await;
     assert!(session.reserve_pending_work_turn().await.is_some());
     assert_eq!(
         session.input_queue.drain_mailbox_input_items().await.0,
-        vec![TurnInput::InterAgentCommunication(fresh)]
+        vec![TurnInput::InterAgentCommunication(fresh.into())]
     );
 }
 
@@ -1107,7 +1107,7 @@ async fn submitted_assignment_duplicate_cannot_release_interrupt_with_fresh_mail
     super::super::handlers::inter_agent_communication(
         &session,
         "fresh-delivery".to_string(),
-        fresh.clone(),
+        fresh.clone().into(),
         Default::default(),
     )
     .await;
@@ -1119,7 +1119,7 @@ async fn submitted_assignment_duplicate_cannot_release_interrupt_with_fresh_mail
     super::super::handlers::inter_agent_communication(
         &session,
         "duplicate-delivery".to_string(),
-        assignment,
+        assignment.into(),
         Default::default(),
     )
     .await;
@@ -1127,7 +1127,7 @@ async fn submitted_assignment_duplicate_cannot_release_interrupt_with_fresh_mail
     assert!(session.active_turn.lock().await.is_none());
     assert_eq!(
         session.input_queue.drain_mailbox_input_items().await.0,
-        vec![TurnInput::InterAgentCommunication(fresh)]
+        vec![TurnInput::InterAgentCommunication(fresh.into())]
     );
 }
 

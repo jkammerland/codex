@@ -124,6 +124,10 @@ impl PartialEq for PendingAgentMessage {
 }
 
 impl PendingAgentMessage {
+    pub(crate) fn into_parts(self) -> (InterAgentCommunication, Option<MessageDelivery>) {
+        (self.communication, self.delivery)
+    }
+
     pub(crate) fn new(
         communication: InterAgentCommunication,
         delivery: Option<MessageDelivery>,
@@ -164,6 +168,17 @@ impl MessageDelivery {
             observers: observers.into(),
         };
         Self(Arc::new(Mutex::new(Some(publication))))
+    }
+
+    pub(crate) fn same_delivery(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
     }
 
     /// Commit this delivery and release its publication state, even if clones remain.

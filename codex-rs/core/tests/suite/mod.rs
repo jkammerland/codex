@@ -44,6 +44,8 @@ mod additional_context;
 mod agent_control;
 mod agent_execution;
 mod agent_mail_runtime;
+#[path = "agent_task_barrier_steering_tests.rs"]
+mod agent_task_barrier_steering;
 mod agent_task_barriers;
 mod agent_websocket;
 mod agents_md;

@@ -10,6 +10,8 @@ path = "src/lib.rs"
 doctest = false
 
 [features]
+# Match the runtime and Bazel defaults when Cargo unifies the V8 dependency.
+default = ["sandbox"]
 sandbox = ["v8/v8_enable_sandbox"]
 
 [lints]

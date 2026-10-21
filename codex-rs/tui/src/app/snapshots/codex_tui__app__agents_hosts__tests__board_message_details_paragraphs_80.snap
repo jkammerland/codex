@@ -1,0 +1,24 @@
+---
+source: tui/src/app/agents_hosts_tests.rs
+expression: output
+---
+  reviews · Board · NextTurn · Intake accepted at coordinator
+  Release headline
+
+  First paragraph.
+  Second line.
+
+  Final paragraph.
+  From release leader · Current observation
+  release leader: Processing uncertain · Current observation
+  Turn original-turn
+  Input is durable; inspect the original turn before continuing.
+  0 related replies · replying is optional
+  Admitted input may not have reached the model. Turn ended does not mean task
+  fulfilled.
+
+
+› 1. Reply · next turn (preferred)
+  2. Reply · safe boundary
+
+  enter select · esc back

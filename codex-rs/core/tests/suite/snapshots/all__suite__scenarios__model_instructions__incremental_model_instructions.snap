@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios_model_instructions.rs
+assertion_line: 95
 expression: "context_snapshot::format_request_history_snapshot(\"A same-model catalog refresh appends replacement instructions once without changing tools or the prefix. Compaction starts a new window with the latest base.\",\n&mock.requests(),\n&ContextSnapshotOptions::default().include_request_settings(),)"
 ---
 Scenario: A same-model catalog refresh appends replacement instructions once without changing tools or the prefix. Compaction starts a new window with the latest base.
@@ -15,9 +16,10 @@ Settings:
   stream: true
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (2; hash=946019c94afdd69a):
-        - namespace/functions; hash=ce01915b77cef9ee
+00:additional_tools/developer (2; hash=4ac342f2f045c671):
+        - namespace/functions; hash=4747e90d8f2de0fd
           - function/exec_command
+          - function/wait_process
           - function/write_stdin
           - function/request_user_input
           - function/view_image
@@ -62,9 +64,10 @@ Settings:
 ## Window 2 (after request 4: input diverged at item 01)
 Settings: same as window 1
 -- request 5 (turn) --
-00:additional_tools/developer (2; hash=946019c94afdd69a):
-        - namespace/functions; hash=ce01915b77cef9ee
+00:additional_tools/developer (2; hash=4ac342f2f045c671):
+        - namespace/functions; hash=4747e90d8f2de0fd
           - function/exec_command
+          - function/wait_process
           - function/write_stdin
           - function/request_user_input
           - function/view_image

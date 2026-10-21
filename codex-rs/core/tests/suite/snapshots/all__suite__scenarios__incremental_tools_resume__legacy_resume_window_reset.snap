@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios_incremental_tools_resume.rs
+assertion_line: 135
 expression: "context_snapshot::format_request_history_snapshot(\"A resumed legacy window retains its generated prefix; rebuilding the next window emits no incremental notice. A later update appends one developer notice, changed definitions, then the removal notice. Unchanged turns and another restart preserve that pair without duplication.\",\n&requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
 ---
 Scenario: A resumed legacy window retains its generated prefix; rebuilding the next window emits no incremental notice. A later update appends one developer notice, changed definitions, then the removal notice. Unchanged turns and another restart preserve that pair without duplication.
@@ -16,11 +17,12 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (2; hash=30feffe01b108a65):
-        - namespace/functions; hash=dfb4b8684addc20d
+00:additional_tools/developer (2; hash=fc6e8970b8f8b4c6):
+        - namespace/functions; hash=b62485e676e0478c
           - custom/exec
           - function/wait
           - function/exec_command
+          - function/wait_process
           - function/write_stdin
           - function/request_user_input
           - function/new_context
@@ -53,11 +55,12 @@ Settings:
 ## Window 2 (after request 2: input diverged at item 03)
 Settings: same as window 1
 -- request 3 (turn) --
-00:additional_tools/developer (2; hash=30feffe01b108a65):
-        - namespace/functions; hash=dfb4b8684addc20d
+00:additional_tools/developer (2; hash=fc6e8970b8f8b4c6):
+        - namespace/functions; hash=b62485e676e0478c
           - custom/exec
           - function/wait
           - function/exec_command
+          - function/wait_process
           - function/write_stdin
           - function/request_user_input
           - function/new_context
@@ -98,6 +101,7 @@ Settings: same as window 1
 11:message/developer:
     The following tools are no longer available. Do not call them:
     - functions.exec_command
+    - functions.wait_process
     - functions.write_stdin
 12:message/user:
     <ENVIRONMENT_CONTEXT>

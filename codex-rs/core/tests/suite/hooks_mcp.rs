@@ -646,6 +646,21 @@ async fn mcp_tool_hook_starts_cached_model_hidden_tools(
         .expect("hook context in the model request");
     assert_eq!(
         hint["internal_chat_message_metadata_passthrough"]["content_item_metadata"],
+        serde_json::Value::Null,
+        "Responses requests must omit unsupported per-content provenance",
+    );
+
+    // Wire compatibility must not discard the hook's internal tool attribution.
+    let history = subagent.thread.conversation_history_snapshot().await;
+    let history = serde_json::to_value(history.items().collect::<Vec<_>>())?;
+    let hint = history
+        .as_array()
+        .expect("history items")
+        .iter()
+        .find(|item| item["content"][0]["text"] == expected_context)
+        .expect("hook context in internal history");
+    assert_eq!(
+        hint["internal_chat_message_metadata_passthrough"]["content_item_metadata"],
         json!([ContentItemMetadata::tool(Some(
             RMCP_PREFIXED_NAMESPACE.to_string().into()
         ))]),

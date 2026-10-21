@@ -365,21 +365,38 @@ fn portable_tool_schema_normalizes_embedded_code_mode_shell_guidance() {
             { "type": "function", "name": "exec_command", "description": shell_description }
         ] })
     };
-    let unix = nested(description(
-        base.to_string(),
-        "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.",
-    ));
-    let windows = nested(description(
-        format!("{base}\n\n{windows_guidance}"),
-        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms.",
-    ));
-    assert_eq!(portable_tool_schema(&unix), portable_tool_schema(&windows));
+    let session_guidance = format!(
+        "{base} For a still-running session, use wait_process to wait for events. Use write_stdin to send input or explicitly request a bounded poll. In code mode, preserve session_id and continue the original session instead of projecting only output or starting a surrogate watcher."
+    );
+    for shared in [base, session_guidance.as_str()] {
+        let unix = nested(description(
+            shared.to_string(),
+            "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.",
+        ));
+        let windows = nested(description(
+            format!("{shared}\n\n{windows_guidance}"),
+            "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms.",
+        ));
+        assert_eq!(portable_tool_schema(&unix), portable_tool_schema(&windows));
 
-    let changed = nested(description(
-        format!("{base}\n\n{windows_guidance}\nA new restriction."),
-        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms.",
-    ));
-    assert_ne!(portable_tool_schema(&unix), portable_tool_schema(&changed));
+        // Ordinary function schemas have no embedded declaration to delimit the suffix.
+        let plain = |text: String| json!({ "type": "function", "name": "exec_command", "description": text });
+        assert_eq!(
+            portable_tool_schema(&plain(shared.to_string())),
+            portable_tool_schema(&plain(format!("{shared}\n\n{windows_guidance}")))
+        );
+
+        for changed_shell in [
+            format!("{shared}\n\n{windows_guidance}\nA new restriction."),
+            format!("{shared} Changed shared guidance.\n\n{windows_guidance}"),
+        ] {
+            let changed = nested(description(
+                changed_shell,
+                "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms.",
+            ));
+            assert_ne!(portable_tool_schema(&unix), portable_tool_schema(&changed));
+        }
+    }
 }
 
 #[test]

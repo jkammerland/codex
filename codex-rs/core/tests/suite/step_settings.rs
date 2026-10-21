@@ -67,6 +67,7 @@ use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_protocol::team_model::TeamSelectionOrigin;
 use codex_protocol::user_input::UserInput;
 use codex_tools::ConversationHistory;
 use codex_tools::JsonToolOutput;
@@ -829,6 +830,8 @@ async fn settings_updates_preserve_turn_identity_and_target(target: SettingsTarg
     assert_eq!(new_turns, Vec::<String>::new());
 
     let mut changed_settings = original_settings.clone();
+    changed_settings.team_model_policy.model_origin = TeamSelectionOrigin::Explicit;
+    changed_settings.team_model_policy.effort_origin = TeamSelectionOrigin::Explicit;
     changed_settings.model = MODEL_B.to_string();
     changed_settings.reasoning_effort = Some(ReasoningEffort::High);
     changed_settings.reasoning_summary = Some(ReasoningSummary::Detailed);
@@ -2803,20 +2806,15 @@ async fn captured_step_controls_exec_completion_and_write_stdin_output() -> Resu
     let exec = requests[2]
         .function_call_output_text("exec-b")
         .expect("exec output");
-    // The response budget also reserves space for command metadata and truncation notices.
+    // This 1,000-byte output fills the captured model's 400-byte budget plus its
+    // serialization allowance, including metadata and the running-session guidance.
     assert_eq!(exec.matches("chars truncated").count(), 1, "{exec}");
-    assert!(
-        (15..30).contains(&exec.matches("abcdefghij").count()),
-        "{exec}"
-    );
+    assert_eq!(exec.len(), 480, "{exec}");
     let stdin = requests[4]
         .function_call_output_text("stdin-c")
         .expect("stdin output");
     assert_eq!(stdin.matches("chars truncated").count(), 1, "{stdin}");
-    assert!(
-        (60..85).contains(&stdin.matches("abcdefghij").count()),
-        "{stdin}"
-    );
+    assert_eq!(stdin.len(), 960, "{stdin}");
     assert_eq!(end.exit_code, 7);
     assert!(end.aggregated_output.contains(&output));
     Ok(())

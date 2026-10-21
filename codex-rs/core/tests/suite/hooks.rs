@@ -3074,10 +3074,10 @@ async fn permission_request_hook_allows_exec_command_without_user_approval() -> 
 
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);
-    requests[1].function_call_output(call_id);
+    let output = requests[1].function_call_output(call_id);
     assert!(
         !marker.exists(),
-        "approved command should remove marker file"
+        "approved command should remove marker file: {output}"
     );
 
     let hook_inputs = assert_single_permission_request_hook_input(

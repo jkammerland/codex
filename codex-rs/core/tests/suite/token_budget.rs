@@ -873,19 +873,33 @@ async fn token_budget_context_injects_plain_thread_hint_text(cached_subagent: bo
         namespace_child_tool(&tools[0], "mcp__notes", "thread_hint").is_none(),
         "thread_hint should be hidden from model tool exposure"
     );
-    let metadata = request.input().into_iter().find_map(|item| {
-        let index = item["content"].as_array()?.iter().position(|content| {
-            content["text"]
-                .as_str()
-                .is_some_and(|text| text.starts_with("manual history hint for thread "))
-        })?;
-        Some(
-            item["internal_chat_message_metadata_passthrough"]["content_item_metadata"][index]
-                .clone(),
-        )
-    });
+    let hint_metadata = |items: Vec<serde_json::Value>| {
+        items.into_iter().find_map(|item| {
+            let index = item["content"].as_array()?.iter().position(|content| {
+                content["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("manual history hint for thread "))
+            })?;
+            Some(
+                item["internal_chat_message_metadata_passthrough"]["content_item_metadata"][index]
+                    .clone(),
+            )
+        })
+    };
     assert_eq!(
-        metadata,
+        hint_metadata(request.input()),
+        Some(serde_json::Value::Null),
+        "Responses requests must omit unsupported per-content provenance"
+    );
+
+    // Preserve attribution in history even though the request copy omits it.
+    let history = thread.conversation_history_snapshot().await;
+    let history = history
+        .items()
+        .map(serde_json::to_value)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(
+        hint_metadata(history),
         Some(json!(ContentItemMetadata::tool(Some(
             "mcp__notes".to_string().into()
         )))),

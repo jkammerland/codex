@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios.rs
+assertion_line: 2520
 expression: "context_snapshot::format_request_history_snapshot(\"A parent pins high request effort, then selects low. Its ephemeral prediction fork inherits the context and baseline, then selects medium on its first turn. Continuing the parent at medium produces the same request.\",\n&requests, &ContextSnapshotOptions::default().include_request_settings(),)"
 ---
 Scenario: A parent pins high request effort, then selects low. Its ephemeral prediction fork inherits the context and baseline, then selects medium on its first turn. Continuing the parent at medium produces the same request.
@@ -16,9 +17,10 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (2; hash=44f4cad2ce4ab17d):
-        - namespace/functions; hash=101d32aa59ea258b
+00:additional_tools/developer (2; hash=39ceaf2bc908755c):
+        - namespace/functions; hash=afae0ab165d239d4
           - function/exec_command
+          - function/wait_process
           - function/write_stdin
           - function/request_user_input
           - custom/apply_patch
@@ -89,9 +91,10 @@ Settings:
 ## Window 2 (after request 3: input repeated)
 Settings: same as window 1
 -- request 4 (turn) --
-00:additional_tools/developer (2; hash=44f4cad2ce4ab17d):
-        - namespace/functions; hash=101d32aa59ea258b
+00:additional_tools/developer (2; hash=39ceaf2bc908755c):
+        - namespace/functions; hash=afae0ab165d239d4
           - function/exec_command
+          - function/wait_process
           - function/write_stdin
           - function/request_user_input
           - custom/apply_patch

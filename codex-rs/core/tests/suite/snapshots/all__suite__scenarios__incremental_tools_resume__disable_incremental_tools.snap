@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios_incremental_tools_resume.rs
+assertion_line: 206
 expression: "context_snapshot::format_request_history_snapshot(\"Disabling incremental tools preserves updates in the existing window; after compaction the generated catalog survives resume.\",\n&requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
 ---
 Scenario: Disabling incremental tools preserves updates in the existing window; after compaction the generated catalog survives resume.
@@ -16,9 +17,10 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (2; hash=44f4cad2ce4ab17d):
-        - namespace/functions; hash=101d32aa59ea258b
+00:additional_tools/developer (2; hash=39ceaf2bc908755c):
+        - namespace/functions; hash=afae0ab165d239d4
           - function/exec_command
+          - function/wait_process
           - function/write_stdin
           - function/request_user_input
           - custom/apply_patch
@@ -41,6 +43,7 @@ Settings:
 07:message/developer:
     The following tools are no longer available. Do not call them:
     - functions.exec_command
+    - functions.wait_process
     - functions.write_stdin
 08:message/user:
     <ENVIRONMENT_CONTEXT>

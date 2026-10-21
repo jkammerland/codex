@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios_partial_answers.rs
+assertion_line: 335
 expression: "context_snapshot::format_request_history_snapshot(\"A forked worker receives both stable answer fragments, with their phases preserved and parent commentary filtered out.\",\n&child_requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
 ---
 Scenario: A forked worker receives both stable answer fragments, with their phases preserved and parent commentary filtered out.
@@ -29,7 +30,7 @@ Scenario: A forked worker receives both stable answer fragments, with their phas
     Child agents can also spawn their own sub-agents.
 
     When you provide a response in the final channel, that content is immediately delivered back to your parent agent.
-    <OMITTED 15 LINES; ~225 TOKENS; hash=fa366829bdb214be>
+    <OMITTED 17 LINES; ~444 TOKENS; hash=0b9855bd4a9f58bd>
     - All agents use the same current working directory.
     - As a result, edits made by one agent are immediately visible to all other agents.
 

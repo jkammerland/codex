@@ -1227,10 +1227,13 @@ async fn child_completion_wakes_parent_after_final_answer() -> Result<()> {
     let parent_id = test.session_configured.thread_id.to_string();
     let mut created = test.thread_manager.subscribe_thread_created();
 
+    // Durable mail is accepted on response.created, including the child's
+    // assignment and the result that starts the parent's later wake turn.
     responses::mount_sse_once_match(
         &server,
         header("thread-id", parent_id.clone()),
         sse(vec![
+            ev_response_created("parent-spawn"),
             ev_function_call_with_namespace(
                 "spawn-worker",
                 "collaboration",
@@ -1245,7 +1248,7 @@ async fn child_completion_wakes_parent_after_final_answer() -> Result<()> {
     let mut final_answer =
         ev_assistant_message("parent-final", "I have delegated the release check.");
     final_answer["item"]["phase"] = json!("final_answer");
-    let parent_finished = responses::mount_sse_once_match(
+    responses::mount_sse_once_match(
         &server,
         move |request: &wiremock::Request| {
             request
@@ -1254,7 +1257,11 @@ async fn child_completion_wakes_parent_after_final_answer() -> Result<()> {
                 .is_some_and(|id| id == expected_parent.as_str())
                 && String::from_utf8_lossy(&request.body).contains("spawn-worker")
         },
-        sse(vec![final_answer, ev_completed("parent-finished")]),
+        sse(vec![
+            ev_response_created("parent-finished"),
+            final_answer,
+            ev_completed("parent-finished"),
+        ]),
     )
     .await;
     let expected_parent = parent_id.clone();
@@ -1267,6 +1274,7 @@ async fn child_completion_wakes_parent_after_final_answer() -> Result<()> {
                 .is_some_and(|id| id != expected_parent.as_str())
         },
         sse(vec![
+            ev_response_created("child-check"),
             responses::ev_function_call("worker-check", "check_release", "{}"),
             ev_completed("child-check"),
         ]),
@@ -1289,15 +1297,17 @@ async fn child_completion_wakes_parent_after_final_answer() -> Result<()> {
         &server,
         header("thread-id", child_id.to_string()),
         sse(vec![
+            ev_response_created("child-finished"),
             ev_assistant_message("child-final", "All release checks passed."),
             ev_completed("child-finished"),
         ]),
     )
     .await;
-    let wake = responses::mount_sse_once_match(
+    responses::mount_sse_once_match(
         &server,
         header("thread-id", parent_id.clone()),
         sse(vec![
+            ev_response_created("parent-woken"),
             ev_assistant_message(
                 "parent-update",
                 "The worker confirmed that the release is ready.",
@@ -1323,13 +1333,42 @@ async fn child_completion_wakes_parent_after_final_answer() -> Result<()> {
     })
     .await;
     ThreadIdle::wait(&test.codex).await;
-    assert_ne!(
-        parent_finished.single_request().body_json()["client_metadata"]["turn_id"],
-        wake.single_request().body_json()["client_metadata"]["turn_id"],
-    );
-
     let mut requests = responses::received_responses_requests(&server).await;
-    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests.len(),
+        5,
+        "captured requests: {:#?}",
+        requests
+            .iter()
+            .map(|request| (
+                request.header("thread-id"),
+                request.body_json()["client_metadata"].clone(),
+                request
+                    .input()
+                    .into_iter()
+                    .filter(|item| item["type"] != "additional_tools"
+                        && (item["type"] != "message" || item["role"] == "assistant"))
+                    .collect::<Vec<_>>()
+            ))
+            .collect::<Vec<_>>()
+    );
+    // ResponseMock records before its extra matcher runs. Select the actual
+    // parent's three requests so child traffic cannot impersonate a wake.
+    let parent_requests = requests
+        .iter()
+        .filter(|request| request.header("thread-id").as_deref() == Some(parent_id.as_str()))
+        .collect::<Vec<_>>();
+    let [_, parent_finished, wake] = parent_requests.as_slice() else {
+        panic!(
+            "expected three parent requests, got {}",
+            parent_requests.len()
+        );
+    };
+    assert_ne!(
+        parent_finished.body_json()["client_metadata"]["turn_id"],
+        wake.body_json()["client_metadata"]["turn_id"],
+    );
+    let wake = (**wake).clone();
     // Preserve each complete stream while removing parent/child scheduling order.
     requests
         .sort_by_key(|request| request.header("thread-id").as_deref() != Some(parent_id.as_str()));
@@ -1343,7 +1382,7 @@ async fn child_completion_wakes_parent_after_final_answer() -> Result<()> {
     // The shared formatter labels agent messages without rendering their payload.
     let mut mailbox =
         responses::strip_metadata_from_json(responses::strip_response_item_ids_from_json(
-            serde_json::Value::Array(wake.single_request().inputs_of_type("agent_message")),
+            serde_json::Value::Array(wake.inputs_of_type("agent_message")),
         ));
     mailbox.sort_all_objects();
     insta::assert_snapshot!(format!(
@@ -2980,7 +3019,15 @@ async fn astra_async_compaction_keeps_work_added_after_its_snapshot(
             .enumerate()
             .filter_map(|(i, item)| item.to_string().contains(text).then_some(i))
             .collect::<Vec<_>>();
-        assert_eq!(positions.len(), 1, "{text}");
+        assert_eq!(
+            positions.len(),
+            1,
+            "{text}: {:?}",
+            positions
+                .iter()
+                .map(|index| &input[*index])
+                .collect::<Vec<_>>()
+        );
         positions[0]
     };
     let default = position("# Collaboration Mode: Default");
@@ -3000,7 +3047,17 @@ async fn astra_async_compaction_keeps_work_added_after_its_snapshot(
             )
         );
     } else {
-        let tool = position("delegated work");
+        // Team guidance also mentions delegated work; identify the exact client tool result.
+        let tool_positions = input
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                (item["type"] == "function_call_output" && item["output"] == retained_output)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_positions.len(), 1);
+        let tool = tool_positions[0];
         if matches!(
             suffix,
             LiveSuffix::RetainedTool | LiveSuffix::OverBudgetRetainedTool

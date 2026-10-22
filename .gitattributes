@@ -2,3 +2,7 @@ codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated
 third_party/voice/sources.json text eol=lf
 patches/v8_array_sort_elements_kind.patch text eol=lf
+
+# Embedded migration checksums must not depend on the builder's checkout settings.
+codex-rs/state/*migrations/*.sql text eol=lf
+codex-rs/team-store/migrations/*.sql text eol=lf

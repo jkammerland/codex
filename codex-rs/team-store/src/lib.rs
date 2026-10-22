@@ -49,7 +49,7 @@ impl TeamStore {
             Err(error) => return Err(error.into()),
         }
         let pool = sqlite.open_read_write_pool(path).await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        codex_state::run_migrations(&pool, &sqlx::migrate!("./migrations")).await?;
         Ok(Self {
             pool,
             changed: Arc::new(watch::channel(0).0),

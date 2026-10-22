@@ -4,10 +4,59 @@ use codex_state::SqliteConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use sqlx::AssertSqlSafe;
+use sqlx::SqlSafeStr;
 use sqlx::migrate::MigrateError;
+use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 
 use crate::TeamStore;
+
+#[tokio::test]
+async fn opening_crlf_team_store_preserves_board_rows_and_migration_history() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path())?);
+    let path = home.path().join("team.sqlite");
+    let pool = sqlite.open_read_write_pool(&path).await?;
+    let all = sqlx::migrate!("./migrations");
+    let old = Migrator::with_migrations(
+        all.iter()
+            .map(|migration| {
+                Migration::new(
+                    migration.version,
+                    migration.description.clone(),
+                    migration.migration_type,
+                    AssertSqlSafe(migration.sql.as_str().replace('\n', "\r\n")).into_sql_str(),
+                    migration.no_tx,
+                )
+            })
+            .collect(),
+    );
+    old.run(&pool).await?;
+    sqlx::query("INSERT INTO record VALUES ('board_entry', 'entry', '{\"body\":\"keep me\"}')")
+        .execute(&pool)
+        .await?;
+    let read_records = || {
+        sqlx::query_as::<_, (i64, String, String, bool, Vec<u8>, i64)>(
+            "SELECT version, description, installed_on, success, checksum, execution_time FROM _sqlx_migrations ORDER BY version",
+        )
+    };
+    let before = read_records().fetch_all(&pool).await?;
+    assert!(!before.is_empty());
+
+    let store = TeamStore::open(&sqlite, &path).await?;
+    assert_eq!(
+        store
+            .get::<serde_json::Value>("board_entry", "entry")
+            .await?,
+        Some(json!({"body":"keep me"}))
+    );
+    assert_eq!(read_records().fetch_all(&pool).await?, before);
+    old.run(&pool).await?;
+    assert_eq!(read_records().fetch_all(&pool).await?, before);
+    pool.close().await;
+    Ok(())
+}
 
 #[tokio::test]
 async fn migration_preserves_legacy_delivery_modes_and_fences_downgrade() -> Result<()> {

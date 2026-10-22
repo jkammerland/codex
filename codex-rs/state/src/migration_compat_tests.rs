@@ -8,6 +8,7 @@ use sqlx::SqlitePool;
 use sqlx::migrate::Migration;
 use sqlx::migrate::MigrationType;
 use sqlx::migrate::Migrator;
+use sqlx::sqlite::SqlitePoolOptions;
 
 use super::alternate_line_endings;
 use super::run_migrations;
@@ -282,4 +283,118 @@ async fn crlf_recency_migration_keeps_its_checksum_when_relocated() {
     assert_eq!(&after[..before.len() - 1], &before[..before.len() - 1]);
     assert_eq!(after.iter().find(|row| row.0 == 39), Some(&expected));
     reopened.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_crlf_writer_commits_before_newline_compatibility_snapshot() {
+    let (_cleanup, _sqlite, pool) = database().await;
+    let first = migration(1, CREATE.replace('\n', "\r\n"));
+    Migrator::with_migrations(vec![first.clone()])
+        .run(&pool)
+        .await
+        .unwrap();
+    let second = "CREATE TABLE added (value TEXT);\nINSERT INTO added VALUES ('keep me');\n";
+    let old = Migrator::with_migrations(vec![first, migration(2, second.replace('\n', "\r\n"))]);
+    let mut writer = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    old.run_direct(None, &mut *writer, false).await.unwrap();
+    let expected = sqlx::query_as::<_, MigrationRecord>(
+        "SELECT version, description, installed_on, success, checksum, execution_time FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(&mut *writer)
+    .await
+    .unwrap();
+
+    // Release the old writer only when the new opener reaches real SQLite
+    // contention. The SQLite callback blocks on an explicit channel, not time.
+    struct AdmissionGate {
+        waiting: Option<tokio::sync::oneshot::Sender<()>>,
+        released: std::sync::mpsc::Receiver<()>,
+    }
+    unsafe extern "C" fn notify_writer_wait(
+        context: *mut std::ffi::c_void,
+        _attempt: std::ffi::c_int,
+    ) -> std::ffi::c_int {
+        // The box outlives this single-connection pool; only its SQLite worker
+        // accesses the gate, and pool.close() joins that worker before drop.
+        let gate = unsafe { &mut *context.cast::<AdmissionGate>() };
+        let Some(waiting) = gate.waiting.take() else {
+            return 0;
+        };
+        if waiting.send(()).is_err() {
+            return 0;
+        }
+        i32::from(gate.released.recv().is_ok())
+    }
+    let (waiting, notified) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let mut gate = Box::new(AdmissionGate {
+        waiting: Some(waiting),
+        released,
+    });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "The contention fixture requires a single connection so its SQLite busy handler observes every migration attempt."
+    )]
+    let reader = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let mut connection = reader.acquire().await.unwrap();
+    {
+        let mut handle = connection.lock_handle().await.unwrap();
+        // Install the callback while SQLx's worker is excluded from the handle.
+        let result = unsafe {
+            libsqlite3_sys::sqlite3_busy_handler(
+                handle.as_raw_handle().as_ptr(),
+                Some(notify_writer_wait),
+                std::ptr::from_mut(gate.as_mut()).cast(),
+            )
+        };
+        assert_eq!(result, libsqlite3_sys::SQLITE_OK);
+    }
+    drop(connection);
+    let current = Migrator::with_migrations(vec![
+        migration(1, CREATE.into()),
+        migration(2, second.into()),
+    ]);
+    let opening = run_migrations(&reader, &current);
+    tokio::pin!(opening);
+    let result = tokio::select! {
+        result = &mut opening => {
+            // A stale read-to-write upgrade may fail before invoking SQLite's
+            // busy handler. Complete cleanup before reporting that regression.
+            writer.commit().await.unwrap();
+            result
+        }
+        notification = notified => {
+            notification.unwrap();
+            writer.commit().await.unwrap();
+            release.send(()).unwrap();
+            opening.await
+        }
+    };
+    reader.close().await;
+    drop(gate);
+    result.expect("new opener must observe the concurrent committed CRLF migration");
+    assert_eq!(records(&pool).await, expected);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT value FROM added")
+            .fetch_all(&pool)
+            .await
+            .unwrap(),
+        vec!["keep me".to_string()]
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn explicitly_nontransactional_migrations_remain_unwrapped() {
+    let (_cleanup, _sqlite, pool) = database().await;
+    let mut vacuum = migration(1, "VACUUM;\n".into());
+    vacuum.no_tx = true;
+    let migrator = Migrator::with_migrations(vec![vacuum]);
+    run_migrations(&pool, &migrator).await.unwrap();
+    assert_eq!(records(&pool).await.len(), 1);
+    pool.close().await;
 }

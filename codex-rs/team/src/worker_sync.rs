@@ -31,8 +31,8 @@ impl Coordinator {
             })
             .await?;
         ensure!(
-            host.protocol_version == 4,
-            "worker team protocol {} is incompatible with coordinator protocol 4; install matching coordinator and worker builds",
+            host.protocol_version == 5,
+            "worker team protocol {} is incompatible with coordinator protocol 5; install matching coordinator and worker builds",
             host.protocol_version
         );
         if let Some(expected) = self.store.get::<String>("installation", &key).await? {
@@ -56,12 +56,17 @@ impl Coordinator {
                 "worker control is newer than coordinator storage; restore the coordinator database"
             );
         }
-        peer.verified
-            .store(true, std::sync::atomic::Ordering::Release);
         if let Some(status) = self.statuses.write().await.get_mut(&key) {
-            status.installation_id = Some(host.installation_id);
+            status.installation_id = Some(host.installation_id.clone());
             status.applied_revision = host.control.as_ref().map(|control| control.revision);
         }
+        // Remove cached mail before releasing startup reconciliation or replaying
+        // a queued Resume. The control lane cannot race this initial handshake.
+        if host.control.is_some() && self.has_pending_board_purges(&host.installation_id).await? {
+            self.synchronize_board(machine, server, peer).await?;
+        }
+        peer.verified
+            .store(true, std::sync::atomic::Ordering::Release);
         self.notify();
         // Reapply the matching revision once to release the startup
         // reconciliation gate. Missing revisions, including Stop, stay ordered.
@@ -230,48 +235,132 @@ impl Coordinator {
         self.refresh_enrollments(machine, server, peer, false)
             .await?;
         self.inherit_models(machine, server, peer).await?;
+        let installation = self
+            .store
+            .get::<String>("installation", &server_key(&machine.id, &server.id))
+            .await?
+            .context("worker installation is not verified")?;
+        if self.has_pending_board_purges(&installation).await? {
+            self.synchronize_board(machine, server, peer).await?;
+        }
         self.drain_outbox(machine, server, peer).await?;
         self.publish().await?;
-        {
-            let board_state = self.board_snapshot().await?;
-            let synchronized_board = board_state
-                .entries
-                .iter()
-                .map(|entry| (entry.message.id.clone(), entry.append_seq))
-                .collect::<std::collections::HashMap<_, _>>();
-            let board = board_state
-                .entries
-                .iter()
-                .map(|entry| entry.message.clone())
-                .collect();
-            let mut message_status = self.message_status_snapshot().await?;
-            message_status.data.retain(|status| {
-                (status.sender.machine_id == machine.id && status.sender.server_id == server.id)
-                    || status.recipients.iter().any(|recipient| {
-                        recipient.address.machine_id == machine.id
-                            && recipient.address.server_id == server.id
-                    })
-            });
-            let _: TeamSyncResponse = peer
-                .handle
-                .request_typed(ClientRequest::TeamSync {
-                    request_id: request_id(),
-                    params: TeamSyncParams {
-                        coordinator_id: self.current_control().await?.coordinator_id,
-                        directory: self.directory_snapshot().await?,
-                        board,
-                        board_state,
-                        cancellation_adapters: server.cancellation_adapters.clone(),
-                        message_status,
-                    },
-                })
+        let synchronized_board = self.synchronize_board(machine, server, peer).await?;
+        self.resume_member_creations(&machine.id, &server.id, peer)
+            .await?;
+        if self.current_control().await?.mode == TeamExecutionMode::Running {
+            self.deliver_to(&machine.id, &server.id, peer, &synchronized_board)
                 .await?;
-            if self.current_control().await?.mode == TeamExecutionMode::Running {
-                self.deliver_to(&machine.id, &server.id, peer, &synchronized_board)
-                    .await?;
-            }
         }
         Ok(())
+    }
+
+    async fn has_pending_board_purges(&self, installation: &str) -> Result<bool> {
+        for journal in self.store.board_purge_journal().await? {
+            if self
+                .store
+                .board_purge_operation(&journal.operation_id)
+                .await?
+                .is_some_and(|operation| {
+                    operation.workers.iter().any(|worker| {
+                        worker.installation_id == installation && !worker.acknowledged
+                    })
+                })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn synchronize_board(
+        &self,
+        machine: &Machine,
+        server: &Server,
+        peer: &Peer,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        let board_state = self.board_snapshot().await?;
+        let synchronized_board = board_state
+            .entries
+            .iter()
+            .map(|entry| (entry.message.id.clone(), entry.append_seq))
+            .collect::<std::collections::HashMap<_, _>>();
+        let board = board_state
+            .entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect();
+        let mut message_status = self.message_status_snapshot().await?;
+        message_status.data.retain(|status| {
+            (status.sender.machine_id == machine.id && status.sender.server_id == server.id)
+                || status.recipients.iter().any(|recipient| {
+                    recipient.address.machine_id == machine.id
+                        && recipient.address.server_id == server.id
+                })
+        });
+        let installation = self
+            .store
+            .get::<String>("installation", &server_key(&machine.id, &server.id))
+            .await?
+            .context("worker installation is not verified")?;
+        let mut board_purges = Vec::new();
+        for journal in self.store.board_purge_journal().await? {
+            if self
+                .store
+                .board_purge_operation(&journal.operation_id)
+                .await?
+                .is_some_and(|operation| {
+                    operation.workers.iter().any(|worker| {
+                        worker.installation_id == installation && !worker.acknowledged
+                    })
+                })
+            {
+                board_purges.push(journal);
+            }
+        }
+        let sent_purges = board_purges
+            .iter()
+            .map(|journal| journal.operation_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let response: TeamSyncResponse = peer
+            .handle
+            .request_typed(ClientRequest::TeamSync {
+                request_id: request_id(),
+                params: TeamSyncParams {
+                    coordinator_id: self.current_control().await?.coordinator_id,
+                    board_purges,
+                    directory: self.directory_snapshot().await?,
+                    board,
+                    board_state,
+                    cancellation_adapters: server.cancellation_adapters.clone(),
+                    message_status,
+                },
+            })
+            .await?;
+
+        let installation = self
+            .store
+            .get::<String>("installation", &server_key(&machine.id, &server.id))
+            .await?
+            .context("worker installation is not verified")?;
+        let acknowledged = response
+            .board_purge_acknowledgements
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        ensure!(
+            acknowledged == sent_purges,
+            "worker did not acknowledge the complete Board purge batch"
+        );
+        if !response.board_purge_acknowledgements.is_empty()
+            && self
+                .store
+                .acknowledge_board_purges(&installation, &response.board_purge_acknowledgements)
+                .await?
+        {
+            self.notify();
+        }
+        Ok(synchronized_board)
     }
 
     #[expect(

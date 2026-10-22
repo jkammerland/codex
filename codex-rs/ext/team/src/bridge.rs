@@ -61,9 +61,18 @@ impl TeamHostService {
         clippy::await_holding_invalid_type,
         reason = "publishes a committed Board snapshot before dispatch observes it"
     )]
-    pub async fn sync(&self, params: TeamSyncParams) -> Result<TeamSyncResponse> {
+    pub async fn sync(&self, mut params: TeamSyncParams) -> Result<TeamSyncResponse> {
         let _operation = self.operations.lock().await;
         let store = self.require_coordinator(&params.coordinator_id).await?;
+        // Purge admission shares the dispatch lock. Only content-free receipt
+        // updates may survive after this transaction acknowledges removal.
+        let board_purge_acknowledgements = store.apply_board_purges(&params.board_purges).await?;
+        store
+            .filter_removed_board_snapshot(&mut params.board_state)
+            .await?;
+        store
+            .filter_removed_message_status(&mut params.message_status)
+            .await?;
         if let Some(previous) = store
             .get::<TeamMessageStatusSnapshot>("message_status_cache", "current")
             .await?
@@ -136,6 +145,9 @@ impl TeamHostService {
             .put("message_status_cache", "current", &params.message_status)
             .await?;
         for message in params.board {
+            if store.board_message_removed(&message.id).await? {
+                continue;
+            }
             if let Some(topic) = &message.topic {
                 store
                     .put(&format!("board:{topic}"), &message.id, &message)
@@ -150,7 +162,9 @@ impl TeamHostService {
         if entries_changed {
             let _ = self.events.send(crate::lifecycle::HostEvent::Dispatch);
         }
-        Ok(TeamSyncResponse {})
+        Ok(TeamSyncResponse {
+            board_purge_acknowledgements,
+        })
     }
 
     pub async fn agent_credential(

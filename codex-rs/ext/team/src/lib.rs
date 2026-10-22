@@ -15,12 +15,14 @@ mod delivery_evidence;
 mod jobs;
 mod leave;
 mod lifecycle;
+mod member_create;
 mod message_status;
 mod models;
 mod runtime;
 mod service;
 mod tools;
 
+pub use member_create::MemberCreateIntent;
 pub use service::PreparedTeamHost;
 pub use service::TeamHostService;
 

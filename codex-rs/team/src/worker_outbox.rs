@@ -152,24 +152,23 @@ impl Coordinator {
         .await;
         let writes = match prepared {
             Ok(effects) => effects,
-            Err(error) => vec![(
-                "rejected_outbox",
-                id.clone(),
-                serde_json::to_value(RejectedOutbox {
-                    machine_id: machine.id.clone(),
-                    server_id: server.id.clone(),
-                    entry: entry.clone(),
-                    reason: error.to_string(),
-                })?,
-            )],
+            Err(error) => {
+                // The store scrubs removed replies and any previously rejected
+                // descendants together with the durable intake receipt.
+                vec![(
+                    "rejected_outbox",
+                    id.clone(),
+                    serde_json::to_value(RejectedOutbox {
+                        machine_id: machine.id.clone(),
+                        server_id: server.id.clone(),
+                        entry: entry.clone(),
+                        reason: error.to_string(),
+                    })?,
+                )]
+            }
         };
         self.store
-            .put_record_once(
-                "outbox_intake",
-                &id,
-                &digest,
-                &crate::board::borrowed_writes(&writes),
-            )
+            .put_outbox_intake(&id, &digest, &crate::board::borrowed_writes(&writes))
             .await?;
         self.notify();
         Ok(())

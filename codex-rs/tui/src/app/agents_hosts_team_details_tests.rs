@@ -86,6 +86,7 @@ async fn action_explanations_show_queueing_separately_from_execution() {
         servers: Vec::new(),
         messages: Vec::new(),
         board: Default::default(),
+        operations: Vec::new(),
         rejected_outbox: Vec::new(),
     });
     app.open_agents_team_explanations(target);

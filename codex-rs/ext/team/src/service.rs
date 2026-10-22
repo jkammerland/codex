@@ -57,6 +57,30 @@ impl PreparedTeamHost {
                     gate.hold_manually(ThreadId::from_string(&thread_id)?);
                 }
             }
+            // Unenrolled creation reservations retain their admission fence after restart.
+            if let Some(control) = store.control().await? {
+                for (_, intent) in store
+                    .list::<crate::MemberCreateIntent>("member_create", "", u32::MAX)
+                    .await?
+                {
+                    if store.enrollment(&intent.thread_id).await?.is_none()
+                        && !store
+                            .get::<bool>("member_creation_enrolled", &intent.thread_id)
+                            .await?
+                            .unwrap_or(false)
+                        && !intent.outcome.as_ref().is_some_and(|outcome| {
+                            outcome.phase
+                                == codex_app_server_protocol::TeamMemberCreatePhase::Failed
+                        })
+                    {
+                        gate.restore(
+                            ThreadId::from_string(&intent.thread_id)?,
+                            u64::try_from(control.revision)?,
+                            execution_mode(control.mode),
+                        );
+                    }
+                }
+            }
             for (_, member) in store
                 .list::<codex_app_server_protocol::TeamAgentRuntime>("member", "", u32::MAX)
                 .await?
@@ -97,6 +121,7 @@ pub struct TeamHostService {
     pub(crate) operations: Mutex<()>,
     pub(crate) control_updates: Mutex<()>,
     pub(crate) model_updates: Mutex<()>,
+    pub(crate) member_create_updates: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
     // Stored Running state needs a fresh coordinator confirmation after restart.
     pub(crate) confirmed_control_revision: std::sync::atomic::AtomicI64,
     pub(crate) control_events: mpsc::UnboundedSender<()>,
@@ -104,7 +129,7 @@ pub struct TeamHostService {
     pub(crate) changed: watch::Sender<i64>,
     path: PathBuf,
     sqlite: SqliteConfig,
-    installation_id: String,
+    pub(crate) installation_id: String,
 }
 
 impl TeamHostService {
@@ -121,6 +146,7 @@ impl TeamHostService {
             operations: Mutex::new(()),
             control_updates: Mutex::new(()),
             model_updates: Mutex::new(()),
+            member_create_updates: Mutex::new(std::collections::HashMap::new()),
             confirmed_control_revision: std::sync::atomic::AtomicI64::new(-1),
             control_events,
             events,
@@ -205,7 +231,7 @@ impl TeamHostService {
         let runtime = self.runtime(&data).await?;
         Ok(TeamHostReadResponse {
             installation_id: self.installation_id.clone(),
-            protocol_version: 4,
+            protocol_version: 5,
             control,
             data,
             runtime,
@@ -336,3 +362,7 @@ impl TeamHostService {
 #[cfg(test)]
 #[path = "control_worker_tests.rs"]
 mod control_worker_tests;
+
+#[cfg(test)]
+#[path = "member_create_recovery_tests.rs"]
+mod member_create_recovery_tests;

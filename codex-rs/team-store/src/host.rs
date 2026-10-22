@@ -180,6 +180,12 @@ impl TeamStore {
             "enrolled thread address cannot be reassigned"
         );
         current.alias.clone_from(&enrollment.alias);
+        // Keep first enrollment durable after leave, so a completed creation
+        // reservation cannot reinstate its pre-enrollment fence on restart.
+        sqlx::query("INSERT INTO record(namespace, id, payload) VALUES ('member_creation_enrolled', ?, 'true') ON CONFLICT(namespace, id) DO NOTHING")
+            .bind(&current.address.thread_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("UPDATE enrollment SET payload = ? WHERE thread_id = ?")
             .bind(serde_json::to_string(&current)?)
             .bind(&current.address.thread_id)
@@ -362,15 +368,24 @@ impl TeamStore {
     /// Repeated deliveries return their original receipt. Conflicting reuse of
     /// an identity is rejected rather than becoming a second agent action.
     pub async fn receive(&self, delivery: &TeamDelivery) -> Result<TeamReceipt> {
-        let initial = TeamReceipt {
+        let mut initial = TeamReceipt {
             delivery_id: delivery.id.clone(),
             thread_id: delivery.thread_id.clone(),
             state: TeamReceiptState::Pending,
             turn_id: None,
             detail: None,
         };
-        let payload = serde_json::to_string(delivery)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let removed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM record WHERE namespace = 'board_removed_message' AND id = ?)",
+        ).bind(&delivery.message.id).fetch_one(&mut *tx).await?;
+        let mut stored_delivery = delivery.clone();
+        if removed {
+            stored_delivery.message.body.clear();
+            initial.state = TeamReceiptState::Rejected;
+            initial.detail = Some("Removed before delivery.".into());
+        }
+        let payload = serde_json::to_string(&stored_delivery)?;
         sqlx::query("INSERT INTO delivery(id, thread_id, payload, receipt) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING")
             .bind(&delivery.id).bind(&delivery.thread_id).bind(&payload).bind(serde_json::to_string(&initial)?)
             .execute(&mut *tx).await?;
@@ -407,8 +422,16 @@ impl TeamStore {
     }
 
     pub async fn update_receipt(&self, receipt: &TeamReceipt) -> Result<()> {
-        let payload = serde_json::to_string(receipt)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut receipt = receipt.clone();
+        // Work admitted before removal may finish later; its status remains
+        // useful, but diagnostics must not restore the removed content.
+        let removed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery JOIN record ON record.namespace = 'board_removed_message' AND record.id = json_extract(delivery.payload, '$.message.id') WHERE delivery.id = ?)")
+            .bind(&receipt.delivery_id).fetch_one(&mut *tx).await?;
+        if removed {
+            receipt.detail = None;
+        }
+        let payload = serde_json::to_string(&receipt)?;
         let previous: Option<String> =
             sqlx::query_scalar("SELECT receipt FROM delivery WHERE id = ? AND thread_id = ?")
                 .bind(&receipt.delivery_id)

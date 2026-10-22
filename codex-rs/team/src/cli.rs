@@ -28,6 +28,12 @@ pub struct TeamCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TeamAction {
+    /// Create a persistent member of the existing shared team.
+    Member(crate::MemberCommand),
+    /// Inspect durable member creation or Board cleanup progress.
+    OperationStatus {
+        operation_id: String,
+    },
     /// Inspect message transport and turn receipts; replies are optional.
     MessageStatus {
         #[arg(long)]
@@ -218,11 +224,23 @@ pub(crate) async fn run(command: TeamCommand) -> Result<()> {
     if matches!(command.command, TeamAction::Serve) {
         return crate::http::serve(Manifest::load(&manifest).await?).await;
     }
+    if let TeamAction::Board(crate::BoardCommand {
+        action: crate::BoardAction::Purge(args),
+    }) = command.command
+    {
+        let response = crate::maintenance_cli::run(&manifest, args, command.operation_id).await?;
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
     let client = TeamClient::from_manifest(&manifest).await?;
     if matches!(command.command, TeamAction::ControlMcp) {
         return crate::operator_mcp::run(client).await;
     }
     let request = match command.command {
+        TeamAction::Member(member) => member.into_request(),
+        TeamAction::OperationStatus { operation_id } => {
+            TeamRequest::OperationStatus { operation_id }
+        }
         TeamAction::MessageStatus {
             message_id,
             cursor,

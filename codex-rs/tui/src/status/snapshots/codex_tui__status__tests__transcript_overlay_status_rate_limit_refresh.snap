@@ -1,13 +1,13 @@
 ---
 source: tui/src/status/tests.rs
-assertion_line: 1914
+assertion_line: 1925
 expression: "format!(\"before:\\n{before}\\n\\nafter:\\n{after}\")"
 ---
 before:
 / T R A N S C R I P T / / / / / / / / / / / / / / / / / / / / / / / / / / / / /
 /status
 
-  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.team.3)
+  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.team.5)
 
   Visit https://chatgpt.com/settings/usage for up-to-date
   information on rate limits and credits
@@ -39,7 +39,7 @@ after:
 / T R A N S C R I P T / / / / / / / / / / / / / / / / / / / / / / / / / / / / /
 /status
 
-  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.team.3)
+  >_ OpenAI Codex (v0.163.0+jkammerland.mcp.25.team.5)
 
   Visit https://chatgpt.com/settings/usage for up-to-date
   information on rate limits and credits

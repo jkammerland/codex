@@ -63,12 +63,15 @@ pub struct TeamSyncParams {
     pub board_state: super::TeamBoardSnapshot,
     pub cancellation_adapters: Vec<super::TeamCancellationAdapter>,
     pub message_status: super::TeamMessageStatusSnapshot,
+    pub board_purges: Vec<super::TeamBoardPurgeJournal>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
-pub struct TeamSyncResponse {}
+pub struct TeamSyncResponse {
+    pub board_purge_acknowledgements: Vec<String>,
+}
 
 /// Agent actions deliberately omit execution controls and model settings.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

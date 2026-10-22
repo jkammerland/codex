@@ -21,6 +21,8 @@ pub struct BoardCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum BoardAction {
+    /// Permanently remove whole conversations through exclusive offline maintenance.
+    Purge(crate::BoardPurgeArgs),
     /// List conversations, with optional topic, text and personal filters.
     List {
         #[arg(long, value_enum, default_value = "all")]
@@ -173,6 +175,9 @@ impl std::str::FromStr for MentionArgument {
 impl BoardCommand {
     pub(crate) fn into_request(self) -> Result<TeamBoardParams> {
         Ok(match self.action {
+            BoardAction::Purge(_) => {
+                anyhow::bail!("offline maintenance does not use the agent Board interface")
+            }
             BoardAction::List {
                 filter,
                 query,

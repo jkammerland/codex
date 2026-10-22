@@ -4,6 +4,11 @@ mod daemon_continuation;
 #[path = "daemon_snapshot.rs"]
 mod daemon_snapshot;
 
+#[path = "team_member_create.rs"]
+mod team_member_create;
+
+use team_member_create::ThreadStartupTarget;
+
 use super::persisted_resume_settings::PersistedResumeSettings;
 use super::persisted_resume_settings::latest_persisted_resume_settings;
 use super::thread_enrichment::enrich_loaded_threads;
@@ -1412,6 +1417,7 @@ impl ThreadRequestProcessor {
                 experimental_raw_events,
                 request_trace,
                 initial_config_warnings,
+                ThreadStartupTarget::Client,
             )
             .await
             {
@@ -1494,7 +1500,8 @@ impl ThreadRequestProcessor {
         experimental_raw_events: bool,
         request_trace: Option<W3cTraceContext>,
         initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
-    ) -> Result<(), JSONRPCErrorError> {
+        startup_target: ThreadStartupTarget,
+    ) -> Result<ThreadStartResponse, JSONRPCErrorError> {
         let thread_start_started_at = std::time::Instant::now();
         let requested_cwd = typesafe_overrides.cwd.clone();
         let mut config = config_manager
@@ -1573,6 +1580,8 @@ impl ThreadRequestProcessor {
                 .map_err(|err| config_load_error(&err))?;
         }
 
+        startup_target.validate_config(&config).await?;
+
         // Thread config can include project-local warnings absent at initialization.
         let mut config_warnings = config
             .startup_warnings
@@ -1627,7 +1636,9 @@ impl ThreadRequestProcessor {
             thread_extension_init.insert(selected_capability_roots);
         }
         let mut start_options = StartThreadOptions::new(config);
-        let reserved_thread_id = if start_options.config.ephemeral {
+        let reserved_thread_id = if let Some(thread_id) = startup_target.reserved_thread_id()? {
+            Some(thread_id)
+        } else if start_options.config.ephemeral {
             None
         } else {
             stage_pending_thread_metadata(
@@ -1652,6 +1663,7 @@ impl ThreadRequestProcessor {
             .try_add_connection_to_thread(thread_id, request_id.connection_id)
             .await;
         let create_thread_started_at = std::time::Instant::now();
+        startup_target.mark_starting().await?;
         let new_thread = listener_task_context
             .thread_manager
             .start_thread(StartThreadOptions {
@@ -1713,6 +1725,32 @@ impl ThreadRequestProcessor {
             app_server_client_version,
         )
         .await?;
+
+        if matches!(startup_target, ThreadStartupTarget::Member(_)) {
+            thread_store
+                .persist_thread(thread_id, PersistContext::Standard)
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to materialize team member: {error}"))
+                })?;
+            // Materializing the store alone leaves the live root's initial
+            // metadata deferred until its first turn. Flush it through the live
+            // metadata path so an idle member can be read and attached now.
+            thread
+                .update_thread_metadata(
+                    StoreThreadMetadataPatch::default(),
+                    /*include_archived*/ true,
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!(
+                        "failed to materialize team member metadata: {error}"
+                    ))
+                })?;
+            thread.flush_rollout().await.map_err(|error| {
+                internal_error(format!("failed to materialize team member: {error}"))
+            })?;
+        }
 
         let instruction_sources = thread.legacy_instruction_sources().await;
         let config_snapshot = thread
@@ -1802,14 +1840,20 @@ impl ThreadRequestProcessor {
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         };
         let notif = thread_started_notification(thread);
-        listener_task_context
-            .outgoing
-            .send_response_with_thread_originator(request_id, response, thread_originator)
-            .instrument(tracing::info_span!(
-                "app_server.thread_start.send_response",
-                otel.name = "app_server.thread_start.send_response",
-            ))
-            .await;
+        if matches!(startup_target, ThreadStartupTarget::Client) {
+            listener_task_context
+                .outgoing
+                .send_response_with_thread_originator(
+                    request_id,
+                    response.clone(),
+                    thread_originator,
+                )
+                .instrument(tracing::info_span!(
+                    "app_server.thread_start.send_response",
+                    otel.name = "app_server.thread_start.send_response",
+                ))
+                .await;
+        }
 
         listener_task_context
             .outgoing
@@ -1832,7 +1876,7 @@ impl ThreadRequestProcessor {
             thread_start_started_at.elapsed(),
             Some("ready"),
         );
-        Ok(())
+        Ok(response)
     }
 
     #[allow(clippy::too_many_arguments)]

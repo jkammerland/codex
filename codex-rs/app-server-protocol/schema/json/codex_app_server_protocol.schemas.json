@@ -22128,6 +22128,37 @@
           }
         ]
       },
+      "TeamBoardPurgeJournal": {
+        "description": "Content-free removal evidence is replayed before normal worker intake.",
+        "properties": {
+          "conversationIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "messageIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversationIds",
+          "messageIds",
+          "operationId",
+          "revision"
+        ],
+        "type": "object"
+      },
       "TeamBoardReadState": {
         "properties": {
           "appendSeq": {
@@ -22578,6 +22609,14 @@
           "cancellationPending",
           "cancelled",
           "unconfirmed"
+        ],
+        "type": "string"
+      },
+      "TeamMemberCreatePhase": {
+        "enum": [
+          "created",
+          "failed",
+          "needsInspection"
         ],
         "type": "string"
       },

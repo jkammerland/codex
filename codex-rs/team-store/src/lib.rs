@@ -12,11 +12,15 @@ use sqlx::SqlitePool;
 use tokio::sync::watch;
 
 mod board;
+mod board_purge;
+mod board_purge_content;
+mod board_purge_worker;
 mod board_query;
 mod host;
 mod outbox;
 
 pub use board::BoardClock;
+pub use board_purge::BoardPurgeCommit;
 pub use board_query::query_board;
 pub use board_query::topic_overviews;
 pub use outbox::OutboxEntry;
@@ -28,6 +32,16 @@ pub struct TeamStore {
 }
 
 impl TeamStore {
+    /// Maintenance preview opens an existing ledger without schema or data writes.
+    pub async fn open_read_only(sqlite: &SqliteConfig, path: &Path) -> Result<Self> {
+        Ok(Self {
+            pool: sqlite
+                .open_read_only_pool(path, /*busy_timeout*/ None)
+                .await?,
+            changed: Arc::new(watch::channel(0).0),
+        })
+    }
+
     pub async fn open(sqlite: &SqliteConfig, path: &Path) -> Result<Self> {
         let parent = path
             .parent()
@@ -99,6 +113,30 @@ impl TeamStore {
         digest: &str,
         writes: &[(&str, &str, serde_json::Value)],
     ) -> Result<bool> {
+        self.commit_records_once(receipt_namespace, receipt_key, digest, writes, false)
+            .await
+    }
+
+    /// Intake and rejection cleanup share a commit, so late disconnected replies
+    /// cannot retain erased content in the coordinator's diagnostic ledger.
+    pub async fn put_outbox_intake(
+        &self,
+        receipt_key: &str,
+        digest: &str,
+        writes: &[(&str, &str, serde_json::Value)],
+    ) -> Result<bool> {
+        self.commit_records_once("outbox_intake", receipt_key, digest, writes, true)
+            .await
+    }
+
+    async fn commit_records_once(
+        &self,
+        receipt_namespace: &str,
+        receipt_key: &str,
+        digest: &str,
+        writes: &[(&str, &str, serde_json::Value)],
+        purge_rejected: bool,
+    ) -> Result<bool> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let previous: Option<String> =
             sqlx::query_scalar("SELECT payload FROM record WHERE namespace = ? AND id = ?")
@@ -121,6 +159,13 @@ impl TeamStore {
             sqlx::query("INSERT INTO record(namespace, id, payload) VALUES (?, ?, ?) ON CONFLICT(namespace, id) DO UPDATE SET payload = excluded.payload")
                 .bind(namespace).bind(id).bind(serde_json::to_string(value)?)
                 .execute(&mut *tx).await?;
+        }
+        if purge_rejected
+            && writes
+                .iter()
+                .any(|(namespace, _, _)| *namespace == "rejected_outbox")
+        {
+            board_purge_content::purge_removed_rejected_outboxes(&mut tx).await?;
         }
         sqlx::query("INSERT INTO record(namespace, id, payload) VALUES (?, ?, ?)")
             .bind(receipt_namespace)

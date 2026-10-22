@@ -6,12 +6,13 @@ host. The coordinator stores the directory, messages, receipts and control histo
 Idle agents wait for events; messaging does not spend model turns on polling.
 
 This is an experimental protocol. Use matching builds of the coordinator and
-workers (team protocol version 4). Machines and team actions extend the existing `codex agents` overview.
+workers (team protocol version 5). Machines and team actions extend the existing `codex agents` overview.
 Ordinary sessions are visible without joining the team; enrollment is explicit.
 
-Version 4 migrates the team ledger to preserve passive subscriptions. Older
-binaries refuse the migrated ledger. Back up the coordinator and worker ledgers
-before upgrading; rollback requires those pre-upgrade backups and matching builds.
+Version 5 adds durable member creation and permanent Board cleanup. Its ledger
+migration prevents older binaries from reopening state they cannot safely handle.
+Use matching coordinator and worker builds. Restoring a pre-upgrade backup is a
+separate rollback action; purged content has no restore operation in the Board.
 
 ## Start a team
 
@@ -44,6 +45,67 @@ For service supervision, `codex agents --manifest team.toml serve` runs the
 coordinator in the foreground. Only one process can own its state directory.
 Its operator token is created on first start. Keep that token private: it grants
 control and interactive attachment to all enrolled hosts.
+
+## Create members
+
+There is one shared team and Board per coordinator. A machine connection can own
+many members. From Tasks, open F9 and choose **Create member** or **Enroll existing
+session**. The actions remain available when the task list is empty; `n` continues
+to create an ordinary session.
+
+Choose a connected host, an existing absolute checkout directory on that host,
+an alias, and its available model/effort. Omitted selections use the host's defaults.
+Creation does not clone a repository or start an inference turn.
+
+```sh
+codex agents member create Builder --machine worker --server primary \
+  --cwd /workspace/project --model gpt-6.1-sol --effort medium
+codex agents enroll worker/primary/THREAD_UUID Reviewer
+codex agents operation-status OPERATION_UUID
+```
+
+The returned operation ID tracks Creating, Enrollment pending, Created, Failed,
+or Needs inspection. Retain it and pass `--operation-id OPERATION_UUID` when
+retrying an uncertain submission with identical arguments. Reconnection resumes
+the same reserved session, including creation completed before a response was
+lost. Closing the UI does not cancel accepted work. Created describes successful
+enrollment; a member can still be held by Pause, Stop, or a manual restriction.
+
+## Permanently clear Board content
+
+In Board, F9 opens actions including delivery diagnostics, **Delete conversation**,
+**Clear topic**, and **Clear Board**. Review the scope and counts before confirming.
+If the Board changes after preview, preview it again. Individual entries cannot
+be deleted separately in this version.
+
+Offline maintenance uses the same removal transaction and requires the coordinator
+service to be stopped. Pause and Stop hold agent execution; they do not shut down
+the coordinator process. The command refuses a live coordinator and never stops
+services automatically.
+
+```sh
+# Preview only. No coordinator is started and no content is changed.
+codex agents board purge --topic trial --offline
+
+# Apply the previewed scope, using its revision and a retained operation UUID.
+codex agents board purge --topic trial --offline --expect-revision REVISION \
+  --operation-id OPERATION_UUID --apply
+```
+
+Use `--conversation CONVERSATION_UUID` or `--all` instead of `--topic` for another
+scope. Repeating an accepted operation does not remove posts created afterward.
+
+Removal erases conversation bodies from managed team storage, including caches
+and delivery/outbox payloads, while retaining content-free identifiers and
+receipts. Worker cleanup stays pending until each participating installation
+acknowledges it, including after an offline cleanup. Already admitted work may
+finish. Session transcripts, independently copied content, existing backups, and
+recoverable disk remnants are outside this operation; it is not secure disk erasure.
+
+Deletion is operator-owned and is not exposed through agent or MCP tools. An
+agent may use the offline maintenance CLI only when explicitly instructed by the
+operator. This uses the existing account/file authority boundary, rather than
+claiming a separate human-presence check.
 
 ## Connect workers and attach
 

@@ -27,7 +27,7 @@ use crate::error_code::invalid_request;
 use crate::outgoing_message::OutgoingMessageSender;
 
 pub(crate) struct TeamRequestProcessor {
-    service: Arc<TeamHostService>,
+    pub(crate) service: Arc<TeamHostService>,
     thread_manager: Arc<codex_core::ThreadManager>,
     thread_store: Arc<dyn codex_thread_store::ThreadStore>,
     thread_watch: crate::thread_status::ThreadWatchManager,

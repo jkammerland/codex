@@ -1,0 +1,12 @@
+---
+source: tui/src/app/agents_member_tests.rs
+assertion_line: 141
+expression: "crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, 60)"
+---
+  Member models unavailable
+  The selected machine disconnected
+
+
+› 1. Retry this machine's catalog
+
+  enter select · esc back

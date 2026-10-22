@@ -201,6 +201,7 @@ mod agent_navigation;
 mod agent_picker;
 mod agent_status_feed;
 mod agents_board;
+pub(crate) mod agents_board_purge;
 mod agents_board_subscriptions;
 #[cfg(any(unix, windows))]
 pub(crate) mod agents_hosts;
@@ -216,6 +217,8 @@ mod agents_hosts_revert_preparation;
 pub(crate) mod agents_hosts_team;
 mod agents_hosts_team_details;
 mod agents_hosts_usage;
+pub(crate) mod agents_member;
+mod agents_operator_operations;
 mod agents_overview;
 mod agents_overview_actions;
 mod agents_overview_agent_work;

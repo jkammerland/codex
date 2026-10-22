@@ -18,6 +18,7 @@ async fn synchronized_directory_replaces_removed_teammates_without_echo_or_regre
         next_effort: None,
     };
     let params = |revision, data| TeamSyncParams {
+        board_purges: Vec::new(),
         coordinator_id: "coordinator".into(),
         directory: TeamDirectorySnapshot { revision, data },
         board: Vec::new(),

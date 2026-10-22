@@ -156,7 +156,7 @@ async fn enroll_and_rejoin_windows_thread(initial: InitialThreadState) -> Result
                     json!({"enrollment": enrolled})
                 }
                 "team/hostRead" => json!({
-                    "installationId": "windows-fixture", "protocolVersion": 4,
+                    "installationId": "windows-fixture", "protocolVersion": 5,
                     "control": null, "data": [enrollment.as_ref().unwrap()],
                     "runtime": [], "nextCursor": null
                 }),

@@ -18,7 +18,14 @@ pub struct OutboxEntry {
 impl TeamStore {
     pub async fn enqueue<T: Serialize>(&self, id: &str, kind: &str, payload: &T) -> Result<()> {
         let payload = serde_json::to_string(payload)?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        crate::board_purge_content::ensure_board_payload_live(
+            &mut tx,
+            id,
+            kind,
+            &serde_json::from_str(&payload)?,
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO outbox(id, kind, payload) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING",
         )
@@ -67,6 +74,7 @@ impl TeamStore {
             );
             return Ok(previous["result"].clone());
         }
+        crate::board_purge_content::ensure_board_payload_live(&mut tx, id, kind, payload).await?;
         sqlx::query("INSERT INTO outbox(id, kind, payload) VALUES (?, ?, ?)")
             .bind(id)
             .bind(kind)

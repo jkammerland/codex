@@ -6,7 +6,6 @@ use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::RemoteAppServerClient;
 use codex_app_server_client::RemoteAppServerConnectArgs;
 use codex_app_server_client::RemoteAppServerEndpoint;
-use codex_app_server_protocol::*;
 use futures::SinkExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;

@@ -250,6 +250,7 @@ fn enrolled_unloaded_thread_remains_visible_without_fabricating_history() {
         agents: vec![agent],
         messages: vec![],
         board: Default::default(),
+        operations: Vec::new(),
         rejected_outbox: vec![],
     };
     let mut rows = Vec::new();
@@ -293,6 +294,7 @@ fn enrolled_row_renders_unknown_history_and_discovery_at_wide_and_narrow_widths(
         agents: vec![agent],
         messages: vec![],
         board: Default::default(),
+        operations: Vec::new(),
         rejected_outbox: vec![],
     };
     let mut rows = Vec::new();
@@ -383,6 +385,7 @@ async fn enrollment_snapshot_does_not_resurrect_removed_foreground_task() {
         agents: vec![agent],
         messages: vec![],
         board: Default::default(),
+        operations: Vec::new(),
         rejected_outbox: vec![],
     });
     assert_eq!(

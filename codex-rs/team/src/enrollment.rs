@@ -16,13 +16,13 @@ use crate::thread_metadata::ThreadReadMetadata;
 #[derive(Default)]
 pub(crate) struct AliasReservations(Mutex<HashSet<String>>);
 
-struct AliasReservation<'a> {
+pub(crate) struct AliasReservation<'a> {
     owner: &'a AliasReservations,
     alias: String,
 }
 
 impl AliasReservations {
-    fn reserve(&self, alias: String) -> Result<AliasReservation<'_>> {
+    pub(crate) fn reserve(&self, alias: String) -> Result<AliasReservation<'_>> {
         let mut reservations = self
             .0
             .lock()
@@ -62,8 +62,39 @@ impl Coordinator {
         ensure!(!alias.trim().is_empty(), "an agent alias is required");
         ensure!(!self.agents().await?.iter().any(|agent| agent.enrollment.alias == alias && agent.enrollment.address != address), "agent alias is already in use");
         let _reservation = self.enrollments.reserve(alias.clone())?;
+        self.ensure_creation_alias_available(&alias, Some(&address))
+            .await?;
         self.enrollment_intent(&address, &alias, operation_id)
             .await?;
+        // An enrollment retry must retain the original control payload. Newer
+        // controls travel independently and the worker applies them monotonically.
+        let params = {
+            let _mutation = self.mutations.lock().await;
+            let proposed = TeamEnrollParams {
+                operation_id: operation_id.map(str::to_owned),
+                address: address.clone(),
+                alias,
+                control: self.current_control().await?,
+            };
+            if let Some(id) = operation_id {
+                if let Some(saved) = self
+                    .store
+                    .get::<TeamEnrollParams>("enrollment_request", id)
+                    .await?
+                {
+                    ensure!(
+                        saved.address == proposed.address && saved.alias == proposed.alias,
+                        "operation identity has conflicting content"
+                    );
+                    saved
+                } else {
+                    self.store.put("enrollment_request", id, &proposed).await?;
+                    proposed
+                }
+            } else {
+                proposed
+            }
+        };
         let peer = self.peer(&address.machine_id, &address.server_id).await?;
         let mut cursor = None;
         let loaded = loop {
@@ -101,12 +132,7 @@ impl Coordinator {
             .handle
             .request_typed(ClientRequest::TeamEnroll {
                 request_id: request_id(),
-                params: TeamEnrollParams {
-                    operation_id: operation_id.map(str::to_owned),
-                    address: address.clone(),
-                    alias,
-                    control: self.current_control().await?,
-                },
+                params,
             })
             .await?;
         let key = address_key(&address);

@@ -1,0 +1,33 @@
+---
+source: tui/src/app/agents_operator_operations_tests.rs
+assertion_line: 76
+expression: "format!(\"Pending\\n{pending}\\n\\nComplete\\n{complete}\")"
+---
+Pending
+  Entire shared Board · coordinator cleared · 1
+  worker cleanup pending
+  3 conversations · 17 posts and replies
+  laptop / primary · cleanup pending
+  Offline workers finish after reconnecting.
+  Existing session histories remain.
+  Operation: purge-42
+  Team operation
+
+
+› 1. Close
+
+  enter select · esc back
+
+Complete
+  Entire shared Board · cleanup complete
+  3 conversations · 17 posts and replies
+  laptop / primary · cleared
+  Offline workers finish after reconnecting.
+  Existing session histories remain.
+  Operation: purge-42
+  Team operation
+
+
+› 1. Close
+
+  enter select · esc back

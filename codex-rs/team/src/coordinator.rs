@@ -180,6 +180,7 @@ impl Coordinator {
             .collect::<Vec<_>>();
         servers.sort_by_key(|server| server_key(&server.machine_id, &server.server_id));
         Ok(TeamSnapshot {
+            operations: self.operator_operations().await?,
             control: self.current_control().await?,
             servers,
             agents: self.agents().await?,
@@ -207,6 +208,17 @@ impl Coordinator {
     )]
     pub async fn execute(&self, request: TeamRequest) -> Result<TeamResponse> {
         match request {
+            TeamRequest::CreateMember { .. } | TeamRequest::BoardPurge { .. } => {
+                // A durable operation identity is required even for older HTTP
+                // clients which submit an unwrapped request.
+                Box::pin(self.execute_operation(TeamOperation::new(request))).await
+            }
+            TeamRequest::OperationStatus { operation_id } => Ok(TeamResponse::Operation {
+                operation: self.operator_operation(&operation_id).await?,
+            }),
+            TeamRequest::BoardPurgePreview { scope } => Ok(TeamResponse::BoardPurgePreview {
+                preview: self.preview_board_purge(&scope).await?,
+            }),
             TeamRequest::MessageStatus { query } => Ok(TeamResponse::MessageStatus {
                 response: self.message_status(query).await?,
             }),

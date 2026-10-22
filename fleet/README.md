@@ -20,16 +20,24 @@ separate controller change.
 
 ## Windows daemon qualification
 
-The worker installed the matching MCP.25 daemon using
-`codex app-server daemon update --from-cli --yes` and started it from a local
-non-elevated PowerShell console. CLI, managed package, and running daemon all
-report `0.163.0+jkammerland.mcp.25`; worker auto-start is enabled. SSH junction
-traversal remains blocked under RedirectionGuard. Local-console success does
-not establish SSH lifecycle support or terminal-close survival.
+Both Windows accounts have matching team.5 CLI and managed packages. Their
+running daemons report `0.163.0+jkammerland.mcp.25.team.5` through live JSON-RPC
+after starting from local, non-elevated PowerShell consoles. Worker auto-start
+remains enabled; the administrator account retains its disabled
+`daemon_auto_start` setting. An explicit daemon start is still allowed with
+that setting disabled. `--no-daemon` is the per-invocation bypass.
 
-The administrator account remains parked with `daemon_auto_start` disabled
-using `codex features disable daemon_auto_start`. Preserve that override
-while the account remains parked. `--no-daemon` is the per-invocation bypass.
+SSH junction traversal remains blocked under RedirectionGuard. A remote
+version probe can therefore return a null `managedCodexVersion` even when the
+live daemon reports its version successfully. Verify the managed package from
+a local console or its physical release path; do not loosen its ACLs.
+
+InteractiveToken scheduled tasks can install the package, but their launch
+context rejected persistent daemon startup. Complete that step from a local,
+non-elevated console. When changing versions, stop with the old executable
+before running the new packaged executable's
+`app-server daemon update --from-cli --yes`, then start the new daemon.
+Preserve the complete previous package and any pre-migration team ledgers.
 
 ## Historical controller
 

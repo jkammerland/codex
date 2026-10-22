@@ -26,7 +26,9 @@ in effect. Packages follow the current upstream layout without bundled zsh.
 
 The retired history migration repair remains narrowly checksum-matched and
 transactional, without replaying destructive SQL or bypassing validation.
-Windows builders must retain the historically qualified migration byte format.
+Embedded migration SQL is pinned to LF. SQLite startup accepts exact historical
+LF/CRLF checksum variants outside quoted values and identifiers without rewriting
+applied records or replaying SQL, preserving compatibility with retained binaries.
 
 Outgoing Responses requests, including Responses Lite, omit unsupported
 `content_item_metadata` to avoid backend rejection. Internal history provenance

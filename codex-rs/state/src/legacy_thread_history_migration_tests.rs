@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
+use sqlx::AssertSqlSafe;
+use sqlx::SqlSafeStr;
 use sqlx::SqlitePool;
 use sqlx::migrate::Migration;
 use sqlx::migrate::MigrationType;
@@ -44,13 +46,13 @@ async fn history_before_seven() -> (impl Drop, SqliteConfig, SqlitePool) {
     (cleanup, sqlite, pool)
 }
 
-async fn apply_legacy_seven(pool: &SqlitePool, sql: &'static str) {
+async fn apply_legacy_seven(pool: &SqlitePool, sql: &str) {
     let mut migrator = runtime_thread_history_migrator();
     migrator.migrations = Cow::Owned(vec![Migration::new(
         /*version*/ 7,
         "reproject terminal agent status".into(),
         MigrationType::Simple,
-        sqlx::SqlStr::from_static(sql),
+        AssertSqlSafe(sql.to_string()).into_sql_str(),
         /*no_tx*/ false,
     )]);
     migrator.run(pool).await.unwrap();
@@ -58,8 +60,17 @@ async fn apply_legacy_seven(pool: &SqlitePool, sql: &'static str) {
 
 #[tokio::test]
 async fn legacy_history_seven_is_relocated_without_replaying_or_losing_rows() {
+    assert_legacy_history_relocation(LEGACY_SQL).await;
+}
+
+#[tokio::test]
+async fn crlf_legacy_history_seven_is_relocated_without_replaying_or_losing_rows() {
+    assert_legacy_history_relocation(&LEGACY_SQL.replace('\n', "\r\n")).await;
+}
+
+async fn assert_legacy_history_relocation(legacy_sql: &str) {
     let (_cleanup, sqlite, pool) = history_before_seven().await;
-    apply_legacy_seven(&pool, LEGACY_SQL).await;
+    apply_legacy_seven(&pool, legacy_sql).await;
     sqlx::raw_sql(
         "INSERT INTO thread_turns (thread_id, turn_id, rollout_ordinal, status)
          VALUES ('thread', 'turn', 10, 'completed');

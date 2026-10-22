@@ -347,7 +347,7 @@ impl SqliteConfig {
             if matches!(spec.kind, DbKind::State) {
                 repair_legacy_recency_migration_version(&pool, migrator).await?;
             }
-            migrator.run(&pool).await.map_err(anyhow::Error::from)
+            crate::run_migrations(&pool, migrator).await
         }
         .await;
         telemetry::record_init_result(

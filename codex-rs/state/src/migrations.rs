@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use crate::migration_compat::alternate_checksum;
+use crate::migration_compat::with_legacy_newline_checksums;
 use crate::sqlite::SqliteWriteQueryExt;
 use sqlx::migrate::Migrator;
 use sqlx_sqlite::SqlitePool;
@@ -59,10 +61,14 @@ pub(crate) async fn migrate_thread_history(
     pool: &SqlitePool,
     migrator: &Migrator,
 ) -> anyhow::Result<()> {
+    let compatible = with_legacy_newline_checksums(pool, migrator).await?;
+    let migrator = compatible.as_ref().unwrap_or(migrator);
+
     // The retired fork migration 7 only cleared a projection. Preserve its
     // completed record under its release date, without replaying the DELETEs,
     // so upstream's migration 7 keeps its original number and checksum.
     const LEGACY_CHECKSUM: &str = "EC16C397FD4AD4138AEDE7F3CB37E9301E780D77F1D7944B61B5D11C43A6C4A7206F2102C11DC75312F0337F2ED576E7";
+    const LEGACY_CRLF_CHECKSUM: &str = "3AFD5DC0C2DABFBF1D7243A9C10A8D5DE99A374F021168D7A4613D83A4AFCF8FF09B8C181C578F72131EED815F06476E";
     let has_upstream_seven = migrator.migrations.iter().any(|migration| {
         migration.version == 7 && migration.description == "thread item lifecycle timestamps"
     });
@@ -78,7 +84,10 @@ pub(crate) async fn migrate_thread_history(
         )
         .fetch_optional(pool)
         .await?;
-        if checksum.as_deref() == Some(LEGACY_CHECKSUM) {
+        if matches!(
+            checksum.as_deref(),
+            Some(LEGACY_CHECKSUM | LEGACY_CRLF_CHECKSUM)
+        ) {
             // Serialize concurrent repairs and commit the renumbering together
             // with upstream's schema change. Any migration error rolls both back.
             let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -87,7 +96,7 @@ pub(crate) async fn migrate_thread_history(
                  WHERE version = 7 AND success = 1 AND hex(checksum) = ?
                    AND NOT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 202608300007)",
             )
-            .bind(LEGACY_CHECKSUM)
+            .bind(checksum.as_deref())
             .execute(&mut *tx)
             .await?;
             migrator
@@ -127,7 +136,7 @@ pub(crate) async fn repair_legacy_recency_migration_version(
 SELECT 1
 FROM _sqlx_migrations
 WHERE version = ?
-  AND checksum = ?
+  AND (checksum = ? OR checksum = ?)
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
@@ -135,6 +144,7 @@ WHERE version = ?
     )
     .bind(38_i64)
     .bind(recency_migration.checksum.as_ref())
+    .bind(alternate_checksum(recency_migration).as_deref())
     .bind(recency_migration.version)
     .fetch_optional(pool)
     .await?
@@ -148,7 +158,7 @@ WHERE version = ?
 UPDATE _sqlx_migrations
 SET version = ?, description = ?
 WHERE version = ?
-  AND checksum = ?
+  AND (checksum = ? OR checksum = ?)
   AND NOT EXISTS (
       SELECT 1 FROM _sqlx_migrations WHERE version = ?
   )
@@ -158,6 +168,7 @@ WHERE version = ?
     .bind(recency_migration.description.as_ref())
     .bind(38_i64)
     .bind(recency_migration.checksum.as_ref())
+    .bind(alternate_checksum(recency_migration).as_deref())
     .bind(recency_migration.version)
     .execute_with_busy_retry(pool)
     .await?;

@@ -379,6 +379,7 @@ fn team_snapshot(id: ThreadId) -> TeamSnapshot {
                 },
             )]),
         }],
+        operations: Vec::new(),
         rejected_outbox: vec![codex_team::RejectedOutbox {
             machine_id: "beta".into(),
             server_id: "main".into(),
@@ -569,6 +570,11 @@ async fn offline_machines_render_in_the_existing_overview_and_keep_navigation_av
     .await?;
     let mut view = app.agents_overview_view(Vec::new(), None);
     insta::assert_snapshot!("agents_machines_all_offline", render(&view));
+    view.handle_key_event(crossterm::event::KeyCode::F(9).into());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(AppEvent::AgentsTeamGeneralMenu)
+    ));
     view.handle_key_event(crossterm::event::KeyCode::Char('n').into());
     assert!(matches!(
         events.try_recv(),

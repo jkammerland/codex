@@ -1,0 +1,13 @@
+---
+source: tui/src/app/agents_member_tests.rs
+assertion_line: 51
+expression: "crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, 52)"
+---
+  Create member · machine
+  No machines are available yet. Open Machines and
+  connections to check the configured hosts.
+
+
+no matches
+
+  enter select · esc back

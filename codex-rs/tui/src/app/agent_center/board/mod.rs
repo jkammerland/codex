@@ -126,6 +126,18 @@ impl BoardState {
             composer.set_board_mentions(&snapshot.members);
         }
         self.snapshot = snapshot;
+        // A purged conversation must return to the feed instead of retaining an empty reader.
+        if self.opened.as_ref().is_some_and(|opened| {
+            !self
+                .snapshot
+                .entries
+                .iter()
+                .any(|entry| &entry.conversation_id == opened)
+        }) {
+            self.opened = None;
+            self.scroll = 0;
+            self.scroll_anchor = None;
+        }
         self.confirm_subscriptions();
         self.reconcile_topic_selection();
         for pending in self.pending_reads.values_mut() {

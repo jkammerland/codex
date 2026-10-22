@@ -210,6 +210,10 @@ impl Coordinator {
         actor: TeamBoardIdentity,
         id: &str,
     ) -> Result<(TeamBoardResponse, BoardWrites)> {
+        ensure!(
+            !self.store.board_message_removed(id).await?,
+            "Board content was permanently removed"
+        );
         let mut clock = self.store.board_clock().await?;
         let mut writes = Vec::new();
         let mut conversation_id = None;
@@ -401,6 +405,10 @@ impl Coordinator {
     }
 
     pub(crate) async fn require_conversation(&self, conversation: &str) -> Result<()> {
+        ensure!(
+            !self.store.board_conversation_removed(conversation).await?,
+            "conversation was permanently removed"
+        );
         let root = self
             .store
             .get::<TeamBoardEntry>("board_entry", conversation)

@@ -297,7 +297,7 @@ impl Renderable for BoardView {
                 ("v", "followers"),
                 ("F", "manage"),
                 ("d", "details"),
-                ("F9", "deliveries"),
+                ("F9", "actions"),
                 ("o", "topics"),
             ];
             if state.opened.is_some() {

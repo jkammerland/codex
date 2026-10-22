@@ -1,0 +1,18 @@
+---
+source: tui/src/app/agents_board_purge_tests.rs
+assertion_line: 29
+expression: rendered
+---
+  Board actions
+  Deletion previews the affected conversations before confirmation.
+
+
+› 1. Delivery diagnostics
+     Delete conversation (disabled)         Select a conversation or
+                                            topic first (disabled: No
+                                            selection)
+  2. Clear topic                            Topic #visible-topic
+  3. Clear Board                            Entire shared Board
+  4. Cleanup and member operation progress
+
+  enter select · esc back

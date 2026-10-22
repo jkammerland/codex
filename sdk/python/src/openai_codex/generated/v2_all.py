@@ -5193,6 +5193,16 @@ class TopicFollowTeamBoardParams(BaseModel):
     type: Annotated[Literal["topicFollow"], Field(title="TopicFollowTeamBoardParamsType")]
 
 
+class TeamBoardPurgeJournal(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    conversation_ids: Annotated[list[str], Field(alias="conversationIds")]
+    message_ids: Annotated[list[str], Field(alias="messageIds")]
+    operation_id: Annotated[str, Field(alias="operationId")]
+    revision: int
+
+
 class TeamBoardReadState(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -5350,6 +5360,12 @@ class TeamJobStatus(Enum):
     cancellation_pending = "cancellationPending"
     cancelled = "cancelled"
     unconfirmed = "unconfirmed"
+
+
+class TeamMemberCreatePhase(Enum):
+    created = "created"
+    failed = "failed"
+    needs_inspection = "needsInspection"
 
 
 class TeamMessageIntake(Enum):

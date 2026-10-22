@@ -89,6 +89,16 @@ impl Coordinator {
             .reply_to
             .map(|id| Uuid::parse_str(&id).map(|id| id.to_string()))
             .transpose()?;
+        ensure!(
+            !self.store.board_message_removed(&message.id).await?,
+            "Board content was permanently removed"
+        );
+        if let Some(parent) = &message.reply_to {
+            ensure!(
+                !self.store.board_message_removed(parent).await?,
+                "conversation was permanently removed"
+            );
+        }
         if message.kind == TeamMessageKind::Board {
             ensure!(
                 message.recipient.is_none()
@@ -281,10 +291,16 @@ impl Coordinator {
             .list::<MessageRecord>("message", "", u32::MAX)
             .await?;
         for (id, record) in ordered_delivery_records(records, synchronized_board) {
-            if !record.published || record.error.is_some() {
+            if !record.published
+                || record.error.is_some()
+                || self.store.board_message_removed(&id).await?
+            {
                 continue;
             }
             for address in record.targets.as_deref().unwrap_or_default() {
+                if self.store.board_message_removed(&id).await? {
+                    break;
+                }
                 if address.machine_id != machine_id || address.server_id != server_id {
                     continue;
                 }
@@ -378,7 +394,7 @@ impl Coordinator {
         &self,
         machine_id: &str,
         server_id: &str,
-        receipt: TeamReceipt,
+        mut receipt: TeamReceipt,
     ) -> Result<(String, MessageRecord)> {
         let message_id = receipt
             .delivery_id
@@ -403,6 +419,9 @@ impl Coordinator {
                 && receipt.delivery_id == format!("{message_id}:{}", address_key(&address)),
             "receipt does not belong to this worker"
         );
+        if self.store.board_message_removed(message_id).await? {
+            receipt.detail = None;
+        }
         if record.receipts.get(&receipt.delivery_id) == Some(&receipt) {
             return Ok((message_id.to_owned(), record));
         }

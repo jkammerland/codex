@@ -82,6 +82,7 @@ async fn fixture() -> Result<(
 async fn sync(service: &TeamHostService, board_state: TeamBoardSnapshot) -> Result<()> {
     service
         .sync(TeamSyncParams {
+            board_purges: Vec::new(),
             message_status: Default::default(),
             coordinator_id: "coordinator".into(),
             directory: Default::default(),
@@ -91,6 +92,110 @@ async fn sync(service: &TeamHostService, board_state: TeamBoardSnapshot) -> Resu
         })
         .await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn purge_sync_suppresses_pending_mail_and_filters_stale_cache_and_delivery() -> Result<()> {
+    let (_home, service, address, snapshot) = fixture().await?;
+    let store = service.enable().await?;
+    let message = snapshot.entries[0].message.clone();
+    store.put("board:general", &message.id, &message).await?;
+    let delivery = TeamDelivery {
+        id: "pending-purge-delivery".into(),
+        thread_id: address.thread_id.clone(),
+        message: message.clone(),
+        mode: TeamDeliveryMode::NextTurn,
+        wake: true,
+    };
+    assert_eq!(
+        service
+            .deliver(TeamDeliverParams {
+                coordinator_id: "coordinator".into(),
+                delivery: delivery.clone(),
+            })
+            .await?
+            .receipt
+            .state,
+        TeamReceiptState::Pending
+    );
+    let mut removed_snapshot = snapshot.clone();
+    removed_snapshot.revision += 1;
+    removed_snapshot.entries.clear();
+    let response = service
+        .sync(TeamSyncParams {
+            coordinator_id: "coordinator".into(),
+            directory: Default::default(),
+            board: Vec::new(),
+            board_state: removed_snapshot,
+            cancellation_adapters: Vec::new(),
+            message_status: Default::default(),
+            board_purges: vec![TeamBoardPurgeJournal {
+                operation_id: "purge".into(),
+                revision: snapshot.revision + 1,
+                conversation_ids: vec![message.id.clone()],
+                message_ids: vec![message.id.clone()],
+            }],
+        })
+        .await?;
+    assert_eq!(response.board_purge_acknowledgements, vec!["purge"]);
+    assert_eq!(
+        store.deliveries(&address.thread_id).await?[0].1.state,
+        TeamReceiptState::Rejected
+    );
+    assert!(
+        store
+            .get::<TeamMessage>("board:general", &message.id)
+            .await?
+            .is_none()
+    );
+
+    // An old sender can race purge acknowledgement. Higher transport/snapshot
+    // revisions do not authorize resurrecting the removed content.
+    let mut stale = snapshot;
+    stale.revision += 2;
+    service
+        .sync(TeamSyncParams {
+            coordinator_id: "coordinator".into(),
+            directory: Default::default(),
+            board: vec![message.clone()],
+            board_state: stale,
+            cancellation_adapters: Vec::new(),
+            message_status: Default::default(),
+            board_purges: Vec::new(),
+        })
+        .await?;
+    assert!(
+        store
+            .get::<TeamBoardSnapshot>("board_cache", "current")
+            .await?
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let receipt = service
+        .deliver(TeamDeliverParams {
+            coordinator_id: "coordinator".into(),
+            delivery,
+        })
+        .await?
+        .receipt;
+    assert_eq!(receipt.state, TeamReceiptState::Rejected);
+    assert_eq!(receipt.detail.as_deref(), Some("Removed before delivery."));
+    assert!(
+        store.deliveries(&address.thread_id).await?[0]
+            .0
+            .message
+            .body
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn purge_is_not_an_agent_board_action() {
+    let action =
+        serde_json::json!({"type":"boardAction","request":{"type":"purge","scope":{"type":"all"}}});
+    assert!(serde_json::from_value::<TeamAgentAction>(action).is_err());
 }
 
 fn list() -> TeamAgentAction {

@@ -73,6 +73,12 @@ impl TeamHostService {
             if receipt.state != TeamReceiptState::Pending {
                 continue;
             }
+            if store.board_message_removed(&delivery.message.id).await? {
+                receipt.state = TeamReceiptState::Rejected;
+                receipt.detail = Some("Removed before delivery.".into());
+                store.update_receipt(&receipt).await?;
+                continue;
+            }
             // A notification may arrive before its metadata after reconnect. Keep
             // it pending until sync commits the complete author and thread context.
             let board = if delivery.message.kind == TeamMessageKind::Board {
@@ -299,9 +305,14 @@ impl TeamHostService {
                 {
                     // Cancellation has settled and no live queue or history
                     // copy remains. Only this proven unsampled input may retry.
-                    receipt.state = TeamReceiptState::Pending;
+                    receipt.state = if store.board_message_removed(&delivery.message.id).await? {
+                        TeamReceiptState::Rejected
+                    } else {
+                        TeamReceiptState::Pending
+                    };
                     receipt.turn_id = None;
-                    receipt.detail = None;
+                    receipt.detail = (receipt.state == TeamReceiptState::Rejected)
+                        .then(|| "Removed before delivery.".into());
                 } else {
                     receipt.state = TeamReceiptState::NeedsReconciliation;
                     receipt.detail = Some("Dispatch or model outcome is uncertain; inspect the original attempt before continuing.".into());

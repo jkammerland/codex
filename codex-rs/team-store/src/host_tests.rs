@@ -24,7 +24,7 @@ async fn receipt_reserves_the_writer_before_reading_its_previous_value() -> anyh
         .create_collation("receipt_gate", str::cmp)?;
     // A comparison gates the exact SELECT after SQLite has read its snapshot.
     // The other connection can then attempt writer admission deterministically.
-    sqlx::raw_sql("CREATE TABLE delivery(id TEXT PRIMARY KEY, thread_id TEXT COLLATE receipt_gate, receipt TEXT); CREATE TABLE outbox(sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, kind TEXT, payload TEXT, acknowledged INTEGER NOT NULL DEFAULT 0); CREATE TABLE record(namespace TEXT, id TEXT, payload TEXT);")
+    sqlx::raw_sql("CREATE TABLE delivery(id TEXT PRIMARY KEY, thread_id TEXT COLLATE receipt_gate, payload TEXT, receipt TEXT); CREATE TABLE outbox(sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, kind TEXT, payload TEXT, acknowledged INTEGER NOT NULL DEFAULT 0); CREATE TABLE record(namespace TEXT, id TEXT, payload TEXT);")
         .execute(&mut *connection).await?;
     let initial = TeamReceipt {
         delivery_id: "delivery".into(),
@@ -33,9 +33,10 @@ async fn receipt_reserves_the_writer_before_reading_its_previous_value() -> anyh
         turn_id: None,
         detail: None,
     };
-    sqlx::query("INSERT INTO delivery VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO delivery VALUES (?, ?, ?, ?)")
         .bind(&initial.delivery_id)
         .bind(&initial.thread_id)
+        .bind(serde_json::json!({"message":{"id":"message"}}).to_string())
         .bind(serde_json::to_string(&initial)?)
         .execute(&mut *connection)
         .await?;
@@ -73,12 +74,20 @@ async fn receipt_reserves_the_writer_before_reading_its_previous_value() -> anyh
         turn_id: Some("turn".into()),
         ..initial
     };
-    let update = tokio::spawn({
+    let mut update = tokio::spawn({
         let store = store.clone();
         let accepted = accepted.clone();
         async move { store.update_receipt(&accepted).await }
     });
-    at_read.await?;
+    // Surface an earlier SQL error immediately instead of waiting forever for
+    // a gate the failed operation can no longer reach.
+    tokio::select! {
+        reached = at_read => reached?,
+        completed = &mut update => {
+            completed??;
+            anyhow::bail!("receipt update completed without reaching the gated SELECT");
+        }
+    }
     let contention = writer.begin_with("BEGIN IMMEDIATE").await;
     let writer_was_blocked = match contention {
         Err(error) => error

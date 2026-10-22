@@ -79,6 +79,9 @@ pub(super) struct AgentsHosts {
     pub(super) notice: Option<String>,
     pub(super) team_operations: BTreeMap<String, codex_team::TeamOperation>,
     pub(super) failed_team_operations: std::collections::BTreeSet<String>,
+    pub(super) member_catalog_request: Option<Uuid>,
+    pub(super) purge_preview_request: Option<Uuid>,
+    pub(super) operator_operation: Option<String>,
     pub(super) started: bool,
     pub(super) configuration_generation: u64,
     pub(super) tasks: tokio::task::JoinSet<()>,
@@ -105,6 +108,9 @@ impl Default for AgentsHosts {
             tasks: tokio::task::JoinSet::new(),
             team_operations: BTreeMap::new(),
             failed_team_operations: std::collections::BTreeSet::new(),
+            member_catalog_request: None,
+            purge_preview_request: None,
+            operator_operation: None,
         }
     }
 }
@@ -768,7 +774,10 @@ impl App {
                         self.agents_hosts.team_operations.remove(&id);
                         self.agents_hosts.failed_team_operations.remove(&id);
                     }
+                    self.update_agents_operator_notice(&snapshot);
+                    let selected_operation = self.selected_agents_operator_list_operation();
                     self.agents_hosts.snapshot = Some(snapshot);
+                    self.refresh_agents_operator_operation(selected_operation.as_deref());
                     self.sync_chat_team_execution();
                 }
             }

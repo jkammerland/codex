@@ -50,6 +50,7 @@ async fn unchanged_board_sync_and_consumed_dispatch_do_not_echo_team_changed() -
 
     service
         .sync(TeamSyncParams {
+            board_purges: Vec::new(),
             message_status: Default::default(),
             coordinator_id: "coordinator".into(),
             directory: Default::default(),

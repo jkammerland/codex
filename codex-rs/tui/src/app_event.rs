@@ -303,6 +303,10 @@ pub(crate) enum AppEvent {
     AgentsHostUpdate(Box<crate::app::agents_hosts::HostUpdate>),
     AgentsHostModel(Box<crate::app::agents_hosts_models::ModelAction>),
     AgentsTeamMenu(crate::app::agents_hosts::ThreadTarget),
+    AgentsTeamGeneralMenu,
+    AgentsMember(Box<crate::app::agents_member::MemberAction>),
+    AgentsOperatorOperations,
+    AgentsOperatorOperation(String),
     AgentsTeamExplain(crate::app::agents_hosts::ThreadTarget),
     AgentsTeamOpenApproval {
         target: crate::app::agents_hosts::ThreadTarget,
@@ -313,6 +317,8 @@ pub(crate) enum AppEvent {
     AgentsTeamRequest(codex_team::TeamRequest),
     AgentsTeamBoard,
     AgentsBoardDiagnostics,
+    AgentsBoardActions,
+    AgentsBoardPurge(Box<crate::app::agents_board_purge::PurgeAction>),
     AgentsBoardManageFollowers(String),
     AgentsBoardManageTopic(String),
     AgentsBoardSubscriptionMode {

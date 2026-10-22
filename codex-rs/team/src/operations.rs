@@ -20,6 +20,8 @@ impl Coordinator {
         if matches!(
             &operation.request,
             TeamRequest::Snapshot
+                | TeamRequest::OperationStatus { .. }
+                | TeamRequest::BoardPurgePreview { .. }
                 | TeamRequest::MessageStatus { .. }
                 | TeamRequest::ExplainAction { .. }
                 | TeamRequest::Models { .. }
@@ -33,7 +35,29 @@ impl Coordinator {
             "{:x}",
             Sha256::digest(serde_json::to_vec(&operation.request)?)
         ))?;
-        if let Some(response) = self.operation_result(&id, &digest).await? {
+        let previous = self.operation_result(&id, &digest).await?;
+        // Long-lived operations report current progress on replay, rather than
+        // returning the initial acceptance receipt forever.
+        match &operation.request {
+            TeamRequest::CreateMember { request } => {
+                return Ok(TeamResponse::Operation {
+                    operation: self.create_member(&id, &digest, request.clone()).await?,
+                });
+            }
+            TeamRequest::BoardPurge {
+                scope,
+                expected_revision,
+            } => {
+                return Ok(TeamResponse::Operation {
+                    operation: crate::TeamOperatorOperation::BoardPurge(
+                        self.purge_board(scope.clone(), *expected_revision, &id, &digest)
+                            .await?,
+                    ),
+                });
+            }
+            _ => {}
+        }
+        if let Some(response) = previous {
             return Ok(response);
         }
         match operation.request {
@@ -205,6 +229,10 @@ impl Coordinator {
                 if let Some(response) = self.operation_result(&id, &digest).await? {
                     return Ok(response);
                 }
+                ensure!(
+                    !self.store.board_message_removed(&message_id).await?,
+                    "Board content was permanently removed"
+                );
                 let mut record = self
                     .store
                     .get::<MessageRecord>("message", &message_id)
@@ -230,12 +258,17 @@ impl Coordinator {
                 Ok(response)
             }
             TeamRequest::Snapshot
+            | TeamRequest::OperationStatus { .. }
+            | TeamRequest::BoardPurgePreview { .. }
             | TeamRequest::MessageStatus { .. }
             | TeamRequest::ExplainAction { .. }
             | TeamRequest::Models { .. }
             | TeamRequest::GiteaInspect { .. }
             | TeamRequest::AgentCredential { .. } => {
                 unreachable!("read-only operations returned above")
+            }
+            TeamRequest::CreateMember { .. } | TeamRequest::BoardPurge { .. } => {
+                unreachable!("durable operations returned above")
             }
         }
     }

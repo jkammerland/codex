@@ -69,7 +69,12 @@ impl TeamClient {
             // abandoning this draft's operation identity safe. Legacy errors,
             // commit failures and incomplete responses remain uncertain.
             if status == reqwest::StatusCode::BAD_REQUEST
-                && matches!(&operation.request, TeamRequest::Board { .. })
+                && matches!(
+                    &operation.request,
+                    TeamRequest::Board { .. }
+                        | TeamRequest::BoardPurge { .. }
+                        | TeamRequest::CreateMember { .. }
+                )
                 && let Ok(error) = serde_json::from_str::<serde_json::Value>(&body)
                 && error["outcome"].as_str() == Some("rejected")
                 && error["operationId"].as_str() == Some(operation.operation_id.as_str())

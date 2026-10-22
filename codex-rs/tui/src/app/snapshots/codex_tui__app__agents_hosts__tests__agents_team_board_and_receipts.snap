@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 446
+assertion_line: 450
 expression: "format!(\"{board}\\n\\nDelivery details:\\n{detail}\")"
 ---
 Agent command center   t Tasks   b Board  Team Stopped · 1/1 hosts applied
@@ -26,7 +26,7 @@ j/k ↑/↓ move · l/→/Enter open · Tab filter · / search · # set post top
 
 
                                           Preview does not mark replies read · l/Enter opens convers
-n post · r reply · f follow · v followers · F manage · d details · F9 deliveries · o topics
+n post · r reply · f follow · v followers · F manage · d details · F9 actions · o topics
 
 Delivery details:
   reviews · Board · NextTurn · Intake accepted at coordinator

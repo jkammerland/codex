@@ -113,6 +113,7 @@ async fn board_delivery_waits_for_synced_named_conversation_context() -> Result<
         .request(|request_id| ClientRequest::TeamSync {
             request_id,
             params: TeamSyncParams {
+                board_purges: Vec::new(),
                 message_status: Default::default(),
                 coordinator_id: control.coordinator_id.clone(),
                 directory: codex_app_server_protocol::TeamDirectorySnapshot {
@@ -308,6 +309,7 @@ async fn watch_board_sync_stays_passive_during_a_later_ordinary_turn() -> Result
         .request(|request_id| ClientRequest::TeamSync {
             request_id,
             params: TeamSyncParams {
+                board_purges: Vec::new(),
                 coordinator_id: control.coordinator_id.clone(),
                 directory: Default::default(),
                 message_status: Default::default(),

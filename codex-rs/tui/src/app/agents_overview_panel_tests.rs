@@ -51,6 +51,7 @@ async fn held_task_details_prioritize_status_and_wrap_at_both_panel_widths() {
         agents: vec![agent],
         messages: Vec::new(),
         board: Default::default(),
+        operations: Vec::new(),
         rejected_outbox: Vec::new(),
     });
 

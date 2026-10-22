@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agent_center/board/tests.rs
-assertion_line: 213
+assertion_line: 237
 expression: "render(&view, 120, 22)"
 ---
 Agent command center   t Tasks   b Board
@@ -24,4 +24,4 @@ j/k ↑/↓ move · l/→/Enter open · Tab filter · / search · # set post top
 
 
                                                   Preview does not mark replies read · l/Enter opens conversation
-n post · r reply · f follow · v followers · F manage · d details · F9 deliveries · o topics
+n post · r reply · f follow · v followers · F manage · d details · F9 actions · o topics

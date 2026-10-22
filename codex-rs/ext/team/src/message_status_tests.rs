@@ -89,6 +89,7 @@ async fn acknowledged_sender_queue_needs_explicit_acceptance_and_status_is_bound
         freshness: TeamObservationFreshness::Current,
     };
     let sync = TeamSyncParams {
+        board_purges: Vec::new(),
         coordinator_id: "coordinator".into(),
         directory: Default::default(),
         board: Vec::new(),

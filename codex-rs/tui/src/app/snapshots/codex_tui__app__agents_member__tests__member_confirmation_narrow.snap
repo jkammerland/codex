@@ -1,0 +1,17 @@
+---
+source: tui/src/app/agents_member_tests.rs
+assertion_line: 84
+expression: "crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, 46)"
+---
+  Builder · Windows / primary
+  Checkout: C:\repos\project
+  Model: gpt-6.1-sol
+  Effort: ultra
+  Creates an idle member. Existing team
+  holds still apply.
+  Create idle team member
+
+
+› 1. Create member
+
+  enter select · esc back

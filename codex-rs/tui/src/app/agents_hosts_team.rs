@@ -28,6 +28,8 @@ use std::cell::RefCell;
 
 #[derive(Clone, Debug)]
 pub(crate) enum TeamCompose {
+    MemberAlias(super::agents_member::MemberDraft),
+    MemberCheckout(super::agents_member::MemberDraft),
     Alias(ThreadTarget),
     Message(ThreadTarget, TeamMessageKind, TeamDeliveryMode),
     Topic,
@@ -56,12 +58,37 @@ struct ComposeView {
 }
 
 impl ComposeView {
+    fn heading(&self, width: u16) -> Vec<ratatui::text::Line<'static>> {
+        crate::wrapping::word_wrap_lines(
+            &[ratatui::text::Line::from(self.title.clone().bold())],
+            usize::from(width),
+        )
+    }
+
     fn submit(&mut self) {
         let body = self.input.text().trim().to_owned();
         if body.is_empty() {
             return;
         }
         let request = match &self.kind {
+            TeamCompose::MemberAlias(draft) => {
+                let mut draft = draft.clone();
+                draft.request.alias = body;
+                self.sender.send(AppEvent::AgentsMember(Box::new(
+                    super::agents_member::MemberAction::Checkout(draft),
+                )));
+                self.completion = Some(ViewCompletion::Accepted);
+                return;
+            }
+            TeamCompose::MemberCheckout(draft) => {
+                let mut draft = draft.clone();
+                draft.request.cwd = body;
+                self.sender.send(AppEvent::AgentsMember(Box::new(
+                    super::agents_member::MemberAction::LoadModels(draft),
+                )));
+                self.completion = Some(ViewCompletion::Accepted);
+                return;
+            }
             TeamCompose::Alias(target) => TeamRequest::Enroll {
                 address: target.team_address(),
                 alias: body,
@@ -144,19 +171,24 @@ impl BottomPaneView for ComposeView {
 
 impl Renderable for ComposeView {
     fn desired_height(&self, width: u16) -> u16 {
-        self.input.desired_height(width).saturating_add(2)
+        self.input
+            .desired_height(width)
+            .saturating_add(self.heading(width).len() as u16)
+            .saturating_add(1)
     }
     fn render(&self, area: Rect, buffer: &mut Buffer) {
         if area.height < 2 {
             return;
         }
-        Paragraph::new(self.title.clone().bold())
-            .render(Rect::new(area.x, area.y, area.width, 1), buffer);
+        let heading = self.heading(area.width);
+        let header_height = (heading.len() as u16).min(area.height.saturating_sub(1));
+        Paragraph::new(heading)
+            .render(Rect::new(area.x, area.y, area.width, header_height), buffer);
         let input = Rect::new(
             area.x,
-            area.y + 1,
+            area.y + header_height,
             area.width,
-            area.height.saturating_sub(2),
+            area.height.saturating_sub(header_height + 1),
         );
         StatefulWidgetRef::render_ref(
             &&self.input,
@@ -164,16 +196,26 @@ impl Renderable for ComposeView {
             buffer,
             &mut self.input_state.borrow_mut(),
         );
-        Paragraph::new("Enter send · Esc cancel".dim())
+        let hint = if matches!(
+            self.kind,
+            TeamCompose::MemberAlias(_) | TeamCompose::MemberCheckout(_)
+        ) {
+            "Enter next · Esc cancel"
+        } else {
+            "Enter send · Esc cancel"
+        };
+        Paragraph::new(hint.dim())
             .render(Rect::new(area.x, area.bottom() - 1, area.width, 1), buffer);
     }
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let header_height =
+            (self.heading(area.width).len() as u16).min(area.height.saturating_sub(1));
         self.input.cursor_pos_with_state(
             Rect::new(
                 area.x,
-                area.y + 1,
+                area.y + header_height,
                 area.width,
-                area.height.saturating_sub(2),
+                area.height.saturating_sub(header_height + 1),
             ),
             *self.input_state.borrow(),
         )
@@ -196,7 +238,7 @@ impl App {
                 .iter()
                 .any(|agent| agent.enrollment.address == target.team_address())
         });
-        let mut items = Vec::new();
+        let mut items = self.agents_member_menu_items();
         let explain_target = target.clone();
         items.push(SelectionItem {
             name: "Action availability and restrictions".into(),
@@ -403,23 +445,31 @@ impl App {
 
     pub(super) fn open_agents_team_compose(&mut self, kind: TeamCompose) {
         let title = match &kind {
-            TeamCompose::Alias(_) => "Team alias",
+            TeamCompose::MemberAlias(draft) => {
+                format!("Create member · alias on {}", draft.host_label)
+            }
+            TeamCompose::MemberCheckout(draft) => format!(
+                "Create {} · existing absolute checkout path on {}",
+                draft.request.alias, draft.host_label
+            ),
+            TeamCompose::Alias(_) => "Team alias".into(),
             TeamCompose::Message(_, TeamMessageKind::Request, TeamDeliveryMode::NextTurn) => {
-                "Request · deliver at the next turn"
+                "Request · deliver at the next turn".into()
             }
             TeamCompose::Message(_, TeamMessageKind::Request, _) => {
-                "Request · deliver at a safe boundary"
+                "Request · deliver at a safe boundary".into()
             }
-            TeamCompose::Message(_, _, _) => "Passive note",
-            TeamCompose::Topic => "Board topic",
-            TeamCompose::Post(_) => "Post to board",
-            TeamCompose::Reply(_, TeamDeliveryMode::NextTurn) => "Reply · deliver at the next turn",
+            TeamCompose::Message(_, _, _) => "Passive note".into(),
+            TeamCompose::Topic => "Board topic".into(),
+            TeamCompose::Post(_) => "Post to board".into(),
+            TeamCompose::Reply(_, TeamDeliveryMode::NextTurn) => {
+                "Reply · deliver at the next turn".into()
+            }
             TeamCompose::Reply(_, TeamDeliveryMode::SafeBoundary) => {
-                "Reply · deliver at a safe boundary"
+                "Reply · deliver at a safe boundary".into()
             }
-            TeamCompose::Subscribe(_) => "Subscribe to topic",
-        }
-        .into();
+            TeamCompose::Subscribe(_) => "Subscribe to topic".into(),
+        };
         let mut input = TextArea::new();
         input.set_keymap_bindings(&self.keymap);
         input.set_vim_enabled(self.chat_widget.composer_is_vim_enabled());

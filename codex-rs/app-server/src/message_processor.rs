@@ -1448,6 +1448,19 @@ impl MessageProcessor {
                 .read(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::TeamMemberCreate { params, .. } => {
+                self.thread_processor
+                    .team_member_create(
+                        request_id.clone(),
+                        params,
+                        Arc::clone(&self.team_processor.service),
+                        app_server_client_name.clone(),
+                        client_version.clone(),
+                        client_mcp_extensions.clone(),
+                        request_context,
+                    )
+                    .await
+            }
             ClientRequest::TeamEnroll { params, .. } => self
                 .team_processor
                 .enroll(params)

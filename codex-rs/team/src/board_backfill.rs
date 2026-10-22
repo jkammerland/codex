@@ -29,6 +29,9 @@ impl Coordinator {
         let mut clock = self.store.board_clock().await?;
         let mut writes = Vec::new();
         for id in ids {
+            if self.store.board_message_removed(&id).await? {
+                continue;
+            }
             if self
                 .store
                 .get::<TeamBoardEntry>("board_entry", &id)

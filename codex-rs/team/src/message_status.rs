@@ -167,6 +167,7 @@ impl Coordinator {
         // This projection does not need Board state, whose read acquires the
         // same mutation fence. Read only message evidence while holding it.
         let data = message_statuses(&TeamSnapshot {
+            operations: Vec::new(),
             control: self.current_control().await?,
             servers,
             agents,

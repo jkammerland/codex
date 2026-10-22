@@ -676,6 +676,12 @@ client_request_definitions! {
         serialization: global("team"),
         response: v2::TeamHostReadResponse,
     },
+    #[experimental("team/memberCreate")]
+    TeamMemberCreate => "team/memberCreate" {
+        params: v2::TeamMemberCreateParams,
+        serialization: global("team-member-create"),
+        response: v2::TeamMemberCreateResponse,
+    },
     #[experimental("team/enroll")]
     TeamEnroll => "team/enroll" {
         params: v2::TeamEnrollParams,

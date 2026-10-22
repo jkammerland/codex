@@ -54,6 +54,8 @@ pub struct TeamSnapshot {
     pub board: codex_app_server_protocol::TeamBoardSnapshot,
     #[serde(default)]
     pub rejected_outbox: Vec<RejectedOutbox>,
+    #[serde(default)]
+    pub operations: Vec<crate::TeamOperatorOperation>,
 }
 
 /// Durable rejected intake, retained for correction without blocking later mail.
@@ -103,6 +105,19 @@ impl TeamOperation {
     rename_all_fields = "camelCase"
 )]
 pub enum TeamRequest {
+    CreateMember {
+        request: crate::TeamMemberCreateRequest,
+    },
+    OperationStatus {
+        operation_id: String,
+    },
+    BoardPurgePreview {
+        scope: codex_app_server_protocol::TeamBoardPurgeScope,
+    },
+    BoardPurge {
+        scope: codex_app_server_protocol::TeamBoardPurgeScope,
+        expected_revision: i64,
+    },
     MessageStatus {
         query: codex_app_server_protocol::TeamMessageStatusParams,
     },
@@ -177,6 +192,15 @@ pub enum TeamRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum TeamResponse {
+    Operation {
+        operation: crate::TeamOperatorOperation,
+    },
+    BoardPurgePreview {
+        preview: codex_app_server_protocol::TeamBoardPurgePreview,
+    },
+    Removed {
+        message_id: String,
+    },
     MessageStatus {
         response: codex_app_server_protocol::TeamMessageStatusResponse,
     },

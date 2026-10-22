@@ -817,7 +817,7 @@ impl BottomPaneView for AgentsOverviewView {
                         },
                     ));
                 } else {
-                    self.app_event_tx.send(AppEvent::AgentsMachinesMenu);
+                    self.app_event_tx.send(AppEvent::AgentsTeamGeneralMenu);
                 }
                 return;
             }

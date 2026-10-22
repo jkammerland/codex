@@ -95,6 +95,7 @@ async fn stop_cancels_only_the_owned_structured_job_and_confirms_its_result() ->
         .request(|request_id| ClientRequest::TeamSync {
             request_id,
             params: TeamSyncParams {
+                board_purges: Vec::new(),
                 message_status: Default::default(),
                 board_state: Default::default(),
                 coordinator_id: control.coordinator_id.clone(),
@@ -324,6 +325,7 @@ async fn late_pre_stop_launch_is_cancelled_while_a_resumed_launch_survives() -> 
         .request(|request_id| ClientRequest::TeamSync {
             request_id,
             params: TeamSyncParams {
+                board_purges: Vec::new(),
                 message_status: Default::default(),
                 board_state: Default::default(),
                 coordinator_id: control.coordinator_id.clone(),

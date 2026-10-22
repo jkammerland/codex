@@ -24,6 +24,29 @@ fn address() -> TeamAddress {
     }
 }
 
+#[test]
+fn board_actions_keep_diagnostics_shortcut_and_close_purged_reader() {
+    let (mut view, mut events) = fixture();
+    view.handle_key_event(KeyCode::F(9).into());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(AppEvent::AgentsBoardActions)
+    ));
+    view.handle_key_event(KeyCode::Char('D').into());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(AppEvent::AgentsBoardDiagnostics)
+    ));
+    view.handle_key_event(KeyCode::Enter.into());
+    assert_eq!(view.state().opened.as_deref(), Some("root"));
+    let mut snapshot = view.state().snapshot.clone();
+    snapshot.entries.clear();
+    snapshot.revision += 1;
+    view.state().update(snapshot);
+    assert_eq!(view.state().opened, None);
+    assert_eq!(view.state().selected, None);
+}
+
 fn entry(id: &str, root: &str, seq: i64, body: &str, user: bool) -> TeamBoardEntry {
     TeamBoardEntry {
         message: TeamMessage {
@@ -166,6 +189,7 @@ fn board_team_control_status_updates_preserve_composer_and_geometry() {
         agents: vec![],
         messages: vec![],
         board: view.state().snapshot.clone(),
+        operations: Vec::new(),
         rejected_outbox: vec![],
     };
     let mut frames = Vec::new();

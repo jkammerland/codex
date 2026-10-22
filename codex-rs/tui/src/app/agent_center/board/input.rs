@@ -277,9 +277,8 @@ impl BottomPaneView for BoardView {
                     });
                 }
             }
-            KeyCode::Char('D') | KeyCode::F(9) => {
-                self.sender.send(AppEvent::AgentsBoardDiagnostics)
-            }
+            KeyCode::Char('D') => self.sender.send(AppEvent::AgentsBoardDiagnostics),
+            KeyCode::F(9) => self.sender.send(AppEvent::AgentsBoardActions),
             KeyCode::Char('d') => {
                 if let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) {
                     let target = state.reply_targets.get(&id).cloned().unwrap_or(id);

@@ -61,7 +61,10 @@ pub(crate) async fn migrate_thread_history(
     pool: &SqlitePool,
     migrator: &Migrator,
 ) -> anyhow::Result<()> {
-    let compatible = with_legacy_newline_checksums(pool, migrator).await?;
+    // Keep compatibility selection, legacy repair and migration execution under
+    // one writer reservation, including when another binary is starting.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let compatible = with_legacy_newline_checksums(&mut tx, migrator).await?;
     let migrator = compatible.as_ref().unwrap_or(migrator);
 
     // The retired fork migration 7 only cleared a projection. Preserve its
@@ -75,14 +78,14 @@ pub(crate) async fn migrate_thread_history(
     let has_migrations = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
     .is_some();
     if has_upstream_seven && has_migrations {
         let checksum = sqlx::query_scalar::<_, String>(
             "SELECT hex(checksum) FROM _sqlx_migrations WHERE version = 7 AND success = 1",
         )
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
         if matches!(
             checksum.as_deref(),
@@ -90,7 +93,6 @@ pub(crate) async fn migrate_thread_history(
         ) {
             // Serialize concurrent repairs and commit the renumbering together
             // with upstream's schema change. Any migration error rolls both back.
-            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query(
                 "UPDATE _sqlx_migrations SET version = 202608300007
                  WHERE version = 7 AND success = 1 AND hex(checksum) = ?
@@ -106,7 +108,10 @@ pub(crate) async fn migrate_thread_history(
             return Ok(());
         }
     }
-    migrator.run(pool).await?;
+    migrator
+        .run_direct(/*target*/ None, &mut *tx, /*skip*/ false)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 

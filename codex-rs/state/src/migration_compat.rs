@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use sqlx::AssertSqlSafe;
 use sqlx::SqlSafeStr;
+use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
@@ -14,14 +15,38 @@ use sqlx::migrate::Migrator;
 /// Only the in-memory checksum of an already-applied migration can change. Its
 /// persisted record and SQL are untouched, so old binaries can still validate
 /// their migration history. Unknown changes retain SQLx's checksum rejection.
+/// Transactional migrations reserve the SQLite writer before reading history.
 pub async fn run_migrations(pool: &SqlitePool, migrator: &Migrator) -> anyhow::Result<()> {
-    let compatible = with_legacy_newline_checksums(pool, migrator).await?;
-    compatible.as_ref().unwrap_or(migrator).run(pool).await?;
+    // No shipped migration opts out of transactions. Preserve SQLx's opt-out
+    // behavior for callers using statements such as VACUUM instead of silently
+    // executing those statements inside a transaction.
+    if migrator.no_tx || migrator.iter().any(|migration| migration.no_tx) {
+        let mut connection = pool.acquire().await?;
+        let compatible = with_legacy_newline_checksums(&mut connection, migrator).await?;
+        compatible
+            .as_ref()
+            .unwrap_or(migrator)
+            .run_direct(None, &mut *connection, false)
+            .await?;
+        return Ok(());
+    }
+
+    // A concurrent older binary may commit CRLF history while this LF build is
+    // starting. Read checksums only after acquiring the same writer reservation
+    // that protects execution; SQLx's SQLite migration lock itself is a no-op.
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let compatible = with_legacy_newline_checksums(&mut transaction, migrator).await?;
+    compatible
+        .as_ref()
+        .unwrap_or(migrator)
+        .run_direct(None, &mut *transaction, false)
+        .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
 pub(crate) async fn with_legacy_newline_checksums(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     migrator: &Migrator,
 ) -> anyhow::Result<Option<Migrator>> {
     // All shipped stores use SQLx's default table. Leave custom migrators alone.
@@ -29,7 +54,7 @@ pub(crate) async fn with_legacy_newline_checksums(
         || sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
         )
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?
         .is_none()
     {
@@ -39,7 +64,7 @@ pub(crate) async fn with_legacy_newline_checksums(
     let applied = sqlx::query_as::<_, (i64, Vec<u8>)>(
         "SELECT version, checksum FROM _sqlx_migrations WHERE success = 1",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?
     .into_iter()
     .collect::<BTreeMap<_, _>>();

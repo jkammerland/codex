@@ -4,7 +4,7 @@
     "version": "0.163.0+jkammerland.mcp.25.team.5",
     "stagedSourceCommit": "21e617a0c026b9fa9b82380401b2e6ccdd1b5e3a",
     "sourceRef": "integration/upstream-20261021",
-    "activation": "remote_hosts_active_local_client_exit_pending"
+    "activation": "remote_hosts_active_local_clients_exit_pending"
   },
   "hosts": [
     {
@@ -15,7 +15,7 @@
       "staging": "ready",
       "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.4",
       "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.4",
-      "daemonRestart": "queued_after_current_client_exit",
+      "daemonRestart": "queued_after_all_normal_clients_exit",
       "previousPackageRetained": true,
       "stagedVersion": "0.163.0+jkammerland.mcp.25.team.5",
       "deferredUpgradeService": "codex-team5-deferred-upgrade.service",

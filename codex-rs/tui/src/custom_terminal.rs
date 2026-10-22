@@ -868,6 +868,8 @@ mod tests {
 
     impl CaptureBackend {
         fn new(width: u16, height: u16) -> Self {
+            // Captured ANSI frames describe a color-capable terminal regardless of the test runner's environment.
+            crossterm::style::force_color_output(true);
             Self {
                 output: Vec::new(),
                 size: Size { width, height },

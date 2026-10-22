@@ -2,7 +2,7 @@
 
 This integration candidate rebases the MCP.25 multi-machine team trial onto
 upstream main `d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4`. It uses
-`0.163.0+jkammerland.mcp.25.team.3` for CLI, app-server, and package manifests,
+`0.163.0+jkammerland.mcp.25.team.4` for CLI, app-server, and package manifests,
 and retains the `0.163.0`
 Cargo workspace version used by model discovery. Build the client and server
 from this branch together; changing package metadata alone does not update the

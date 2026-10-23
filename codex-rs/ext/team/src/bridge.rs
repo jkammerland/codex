@@ -400,9 +400,15 @@ impl TeamHostService {
         operation: Option<&(String, String)>,
     ) -> Result<Value> {
         ensure!(!body.trim().is_empty(), "message body is required");
-        if let Some(recipient) = &mut recipient {
+
+        // External inbox IDs are not agent thread UUIDs. The coordinator
+        // validates operator identity and Gitea conversation provenance.
+        if let Some(recipient) = &mut recipient
+            && !matches!(recipient.machine_id.as_str(), "operator" | "gitea")
+        {
             recipient.thread_id = ThreadId::from_string(&recipient.thread_id)?.to_string();
         }
+
         let message = TeamMessage {
             id: Uuid::now_v7().to_string(),
             sender,

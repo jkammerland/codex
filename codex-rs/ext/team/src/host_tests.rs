@@ -50,7 +50,7 @@ fn delivery(thread_id: &str) -> TeamDelivery {
 }
 
 #[tokio::test]
-async fn native_and_mcp_reply_actions_keep_delivery_mode_in_the_durable_outbox()
+async fn native_and_mcp_reply_actions_preserve_destinations_and_delivery_in_the_durable_outbox()
 -> anyhow::Result<()> {
     let (_home, service) = host().await?;
     let store = service.store.get().unwrap();
@@ -63,7 +63,7 @@ async fn native_and_mcp_reply_actions_keep_delivery_mode_in_the_durable_outbox()
     store
         .enroll(
             &TeamEnrollment {
-                address,
+                address: address.clone(),
                 alias: "reviewer".into(),
                 manually_held: false,
                 continuation_turn_id: None,
@@ -71,20 +71,43 @@ async fn native_and_mcp_reply_actions_keep_delivery_mode_in_the_durable_outbox()
             "credential",
         )
         .await?;
+    let coordinator_id = uuid::Uuid::new_v4().to_string();
     service
         .control(TeamControlParams {
             control: TeamControlState {
-                coordinator_id: "coordinator".into(),
+                coordinator_id: coordinator_id.clone(),
                 revision: 1,
                 mode: TeamExecutionMode::Running,
             },
         })
         .await?;
 
-    for board in [false, true] {
+    for conversation in ["agent", "operator", "board", "gitea"] {
+        let board = conversation == "board";
         let mut original = delivery(&root.to_string());
         original.id = uuid::Uuid::new_v4().to_string();
         original.message.id = uuid::Uuid::new_v4().to_string();
+        let recipient = match conversation {
+            "agent" => TeamAddress {
+                thread_id: ThreadId::new().to_string(),
+                ..address.clone()
+            },
+            "operator" | "board" => TeamAddress {
+                machine_id: "operator".into(),
+                server_id: coordinator_id.clone(),
+                thread_id: "operator".into(),
+            },
+            "gitea" => TeamAddress {
+                machine_id: "gitea".into(),
+                server_id: "example/project".into(),
+                thread_id: "12".into(),
+            },
+            _ => unreachable!(),
+        };
+        original.message.sender = recipient.clone();
+        if conversation == "agent" {
+            original.message.sender.thread_id = recipient.thread_id.replace('-', "").to_uppercase();
+        }
         if board {
             original.message.kind = TeamMessageKind::Board;
             original.message.recipient = None;
@@ -101,7 +124,7 @@ async fn native_and_mcp_reply_actions_keep_delivery_mode_in_the_durable_outbox()
             let action: TeamAgentAction = serde_json::from_value(action)?;
             assert_eq!(serde_json::to_value(&action)?, serialized);
             let operation = uuid::Uuid::new_v4().to_string();
-            let legacy_result = if !board && mode == TeamDeliveryMode::NextTurn {
+            let legacy_result = if conversation == "agent" && mode == TeamDeliveryMode::NextTurn {
                 // Model the committed receipt/outbox from the previous wire
                 // contract, then retry it through the current reply handler.
                 let digest = format!(
@@ -110,6 +133,8 @@ async fn native_and_mcp_reply_actions_keep_delivery_mode_in_the_durable_outbox()
                 );
                 let mut previous = original.message.clone();
                 previous.id = uuid::Uuid::new_v4().to_string();
+                previous.sender = address.clone();
+                previous.recipient = Some(recipient.clone());
                 previous.kind = TeamMessageKind::Reply;
                 previous.body = "Reviewed".into();
                 previous.reply_to = Some(original.message.id.clone());
@@ -150,18 +175,63 @@ async fn native_and_mcp_reply_actions_keep_delivery_mode_in_the_durable_outbox()
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].payload["delivery"], serde_json::to_value(mode)?);
             let reply: TeamMessage = serde_json::from_value(entries[0].payload["message"].clone())?;
-            assert_eq!(reply.reply_to.as_ref(), Some(&original.message.id));
-            assert_eq!(reply.topic, original.message.topic);
             assert_eq!(
-                reply.kind,
-                if board {
-                    TeamMessageKind::Board
-                } else {
-                    TeamMessageKind::Reply
+                reply,
+                TeamMessage {
+                    id: entries[0].id.clone(),
+                    sender: address.clone(),
+                    recipient: (!board).then_some(recipient.clone()),
+                    kind: if board {
+                        TeamMessageKind::Board
+                    } else {
+                        TeamMessageKind::Reply
+                    },
+                    body: "Reviewed".into(),
+                    reply_to: Some(original.message.id.clone()),
+                    topic: original.message.topic.clone(),
+                    created_at: reply.created_at,
                 }
             );
         }
     }
+
+    // Only the exact reserved machine names bypass UUID validation; malformed
+    // agent destinations must fail before entering the durable outbox.
+    let queued = store.outbox(0, 100).await?.len();
+    for machine_id in ["machine", "OPERATOR", "GITEA"] {
+        let recipient = TeamAddress {
+            machine_id: machine_id.into(),
+            server_id: coordinator_id.clone(),
+            thread_id: "operator".into(),
+        };
+        let mut original = delivery(&root.to_string());
+        original.id = uuid::Uuid::new_v4().to_string();
+        original.message.id = uuid::Uuid::new_v4().to_string();
+        original.message.sender = recipient.clone();
+        store.receive(&original).await?;
+
+        for action in [
+            TeamAgentAction::Send {
+                recipient,
+                body: "Reviewed".into(),
+                kind: TeamMessageKind::Reply,
+                reply_to: Some(original.message.id.clone()),
+                delivery: TeamDeliveryMode::NextTurn,
+            },
+            TeamAgentAction::Reply {
+                message_id: original.message.id,
+                body: "Reviewed".into(),
+                delivery: TeamDeliveryMode::NextTurn,
+            },
+        ] {
+            let error = service
+                .agent_action(root, action, /*operation_id*/ None)
+                .await
+                .unwrap_err();
+            assert!(error.downcast_ref::<uuid::Error>().is_some(), "{error}");
+        }
+    }
+    assert_eq!(store.outbox(0, 100).await?.len(), queued);
     Ok(())
 }
 

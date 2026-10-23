@@ -1,0 +1,56 @@
+---
+source: tui/src/app/agents_hosts_history_tests.rs
+expression: "render_with_height(&view, 52)"
+---
+  Agent command center   t Tasks   b Board  Group: Project  g
+   All 12   Needs you 0   Working 0   Idle 1   Inactive 11                         tab/⇧tab filter
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+      Tasks                                               │ Task details
+  History host                                            │
+  Pinned · main  1                                        │ Loaded teammate
+    ○ Saved task 23                                       │ ○ Idle
+                                                          │
+  /tmp/project · main  11                                 │ Model:  Unknown
+    ○ Saved task 00                                       │ Effort: Unknown
+    ○ Saved task 01                                       │
+    ○ Saved task 02                                       │ Connection
+    ○ Saved task 03                                       │ Server    main
+    ○ Saved task 04                                       │
+    ○ Saved task 05                                       │ Project
+    ○ Saved task 06                                       │ /tmp/project
+    ○ Saved task 07                                       │
+    ○ Saved task 08                                       │ Prompt
+    ○ Saved task 09                                       │ No prompt available.
+  › ○ Loaded teammate                                     │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+                                                          │
+  ? help  esc back  ↑/↓ move  enter open  n new

@@ -4,7 +4,7 @@ assertion_line: 517
 expression: transition
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 0   Needs you 0   Working 0   Idle 0   Inactive 0                                          tab/shift+tab filter
+   All 0   Needs you 0   Working 0   Idle 0   Inactive 0                                           tab/shift+tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   No tasks yet                                                        │
                                                                       │
@@ -42,7 +42,7 @@ expression: transition
                                                                       │
                                                                       │
                                                                       │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ^d quit  tab/shift+tab focus  ↑/↓ move  enter open  n new
 
 --- Start a task ---
 

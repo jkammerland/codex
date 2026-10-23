@@ -134,7 +134,7 @@ impl Terminal {
     }
 
     async fn exit(&mut self) -> Result<()> {
-        self.session.writer_sender().send(b"\x03".to_vec()).await?;
+        self.session.writer_sender().send(b"\x04".to_vec()).await?;
         // Detect a blocked shutdown without imposing a deadline on product connections.
         let code = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
             let mut output_open = true;
@@ -151,10 +151,10 @@ impl Terminal {
                 }
             }
         }).await
-            .with_context(|| format!("Ctrl+C did not exit; final screen:\n{}", self.parser.screen().contents()))??;
+            .with_context(|| format!("Ctrl+D did not exit; final screen:\n{}", self.parser.screen().contents()))??;
         ensure!(
             code == 0,
-            "Ctrl+C exited with status {code}; final screen:\n{}",
+            "Ctrl+D exited with status {code}; final screen:\n{}",
             self.parser.screen().contents()
         );
         Ok(())

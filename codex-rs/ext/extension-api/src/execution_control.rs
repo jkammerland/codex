@@ -32,15 +32,36 @@ struct State {
     roots: HashMap<ThreadId, ExecutionControlSnapshot>,
     turn_starts: HashMap<ThreadId, usize>,
     manual_holds: HashSet<ThreadId>,
+    retiring: HashSet<ThreadId>,
+    retirement_checkpoints: HashSet<ThreadId>,
 }
 
 #[derive(Clone, Copy)]
 enum ExecutionPermitKind {
     Operation,
     TurnStart,
+    Recovery,
 }
 
 impl State {
+    fn retirement_blocker(&self, root: ThreadId) -> Option<&'static str> {
+        let entry = self.roots.get(&root)?;
+        if entry.mode != ExecutionMode::Running || entry.reconciling {
+            return Some("Waiting for the operator hold or reconciliation to clear.");
+        }
+        if self
+            .manual_holds
+            .iter()
+            .any(|thread| self.root(*thread) == Some(root))
+        {
+            return Some("Waiting for an operator manual hold to clear.");
+        }
+        if entry.in_flight != 0 || self.turn_starts.get(&root).copied().unwrap_or_default() != 0 {
+            return Some("Waiting for admitted operations to finish.");
+        }
+        None
+    }
+
     fn manually_held(&self, mut thread_id: ThreadId) -> bool {
         let mut visited = HashSet::new();
         while visited.insert(thread_id) {
@@ -202,7 +223,74 @@ impl ExecutionControl {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.roots.remove(&root);
         state.turn_starts.remove(&root);
+        state.retiring.remove(&root);
+        state.retirement_checkpoints.remove(&root);
         self.changed.send_replace(());
+    }
+
+    /// Retirement fences only new turns; tools in admitted turns can finish.
+    pub fn begin_retirement(&self, root: ThreadId) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.retiring.insert(root) {
+            self.changed.send_replace(());
+        }
+    }
+
+    pub fn is_retiring(&self, thread_id: ThreadId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .root(thread_id)
+            .is_some_and(|root| state.retiring.contains(&root))
+    }
+
+    pub fn retirement_blocker(&self, root: ThreadId) -> Option<&'static str> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retirement_blocker(root)
+    }
+
+    /// Reserve the final idle check against new recovery starts. The caller
+    /// keeps this short: history checkpoints precede this reservation.
+    pub fn try_checkpoint_retirement(&self, root: ThreadId) -> Option<RetirementCheckpoint> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.retiring.contains(&root)
+            || state.retirement_blocker(root).is_some()
+            || !state.retirement_checkpoints.insert(root)
+        {
+            return None;
+        }
+        self.changed.send_replace(());
+        Some(RetirementCheckpoint {
+            control: self.clone(),
+            root,
+        })
+    }
+
+    /// The final boundary check shares the same lock as hold and turn admission.
+    pub fn complete_retirement(&self, root: ThreadId) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.retiring.contains(&root) || state.retirement_blocker(root).is_some() {
+            return false;
+        }
+        state.roots.remove(&root);
+        state.turn_starts.remove(&root);
+        state.retiring.remove(&root);
+        state.retirement_checkpoints.remove(&root);
+        self.changed.send_replace(());
+        true
     }
 
     /// Return the controlling root, if this thread belongs to an enrolled family.
@@ -235,6 +323,12 @@ impl ExecutionControl {
         self.try_enter_kind(thread_id, ExecutionPermitKind::TurnStart)
     }
 
+    /// Resume already-admitted work after an explicit operator recovery action.
+    /// Retirement blocks new work, while existing holds still block recovery.
+    pub fn try_resume_turn(&self, thread_id: ThreadId) -> Option<ExecutionPermit> {
+        self.try_enter_kind(thread_id, ExecutionPermitKind::Recovery)
+    }
+
     /// Number of admitted startups still able to register a task in this family.
     pub fn pending_turn_starts(&self, thread_id: ThreadId) -> usize {
         let state = self
@@ -258,6 +352,14 @@ impl ExecutionControl {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = state.root(thread_id);
         if let Some(root) = root {
+            if (matches!(kind, ExecutionPermitKind::TurnStart) && state.retiring.contains(&root))
+                || (matches!(
+                    kind,
+                    ExecutionPermitKind::TurnStart | ExecutionPermitKind::Recovery
+                ) && state.retirement_checkpoints.contains(&root))
+            {
+                return None;
+            }
             if state.manually_held(thread_id) {
                 return None;
             }
@@ -266,7 +368,10 @@ impl ExecutionControl {
                 return None;
             }
             entry.in_flight += 1;
-            if matches!(kind, ExecutionPermitKind::TurnStart) {
+            if matches!(
+                kind,
+                ExecutionPermitKind::TurnStart | ExecutionPermitKind::Recovery
+            ) {
                 *state.turn_starts.entry(root).or_default() += 1;
             }
             self.changed.send_replace(());
@@ -295,6 +400,26 @@ impl ExecutionControl {
     /// Observe admission and completion changes without running an agent turn.
     pub fn subscribe(&self) -> watch::Receiver<()> {
         self.changed.subscribe()
+    }
+}
+
+/// Holds the final runtime idle check against concurrent recovery admission.
+/// Dropping it preserves retirement and wakes pending recovery owners.
+pub struct RetirementCheckpoint {
+    control: ExecutionControl,
+    root: ThreadId,
+}
+
+impl Drop for RetirementCheckpoint {
+    fn drop(&mut self) {
+        let mut state = self
+            .control
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.retirement_checkpoints.remove(&self.root) {
+            self.control.changed.send_replace(());
+        }
     }
 }
 
@@ -401,8 +526,10 @@ impl Drop for ExecutionPermit {
         if let Some(entry) = state.roots.get_mut(&root) {
             entry.in_flight = entry.in_flight.saturating_sub(1);
         }
-        if matches!(self.kind, ExecutionPermitKind::TurnStart)
-            && let Some(starting) = state.turn_starts.get_mut(&root)
+        if matches!(
+            self.kind,
+            ExecutionPermitKind::TurnStart | ExecutionPermitKind::Recovery
+        ) && let Some(starting) = state.turn_starts.get_mut(&root)
         {
             *starting = starting.saturating_sub(1);
             if *starting == 0 {

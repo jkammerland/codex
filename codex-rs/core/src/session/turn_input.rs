@@ -325,6 +325,16 @@ pub(super) async fn handle_recovery(
     start_options: TurnStartOptions,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    // Explicit recovery may finish already-admitted work during retirement.
+    // All operator holds still apply; ordinary starts use the stricter permit.
+    let Some(_startup) = session
+        .services
+        .extensions
+        .execution_control()
+        .try_resume_turn(session.thread_id)
+    else {
+        return Err(CodexErrorDetails::TeamExecutionHeld.into());
+    };
     let WithTurnExtensionData {
         request: thread_settings,
         turn_extension_init,
@@ -487,9 +497,7 @@ async fn start_if_idle(
     kind: TurnStartKind,
     expected_previous_turn_id: Option<String>,
 ) -> CodexResult<TurnInputSubmission> {
-    let Some(_startup) = session.try_enter_turn_start() else {
-        return Err(CodexErrorDetails::TeamExecutionHeld.into());
-    };
+    // The input handler retains the appropriate startup permit through registration.
     let WithTurnExtensionData {
         request,
         turn_extension_init,

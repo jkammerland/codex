@@ -233,6 +233,7 @@ mod stream_no_completed;
 mod subagent_dynamic_tools;
 mod subagent_notifications;
 mod subagent_service_tier;
+mod team_retirement;
 mod token_budget;
 mod token_usage_rollout;
 mod tool_harness;

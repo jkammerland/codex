@@ -15,6 +15,7 @@ pub use execution_control::ExecutionControlSnapshot;
 pub use execution_control::ExecutionMode;
 pub use execution_control::ExecutionPermit;
 pub use execution_control::RetainedToolResults;
+pub use execution_control::RetirementCheckpoint;
 pub use message_lifecycle::MessageLifecycleContributor;
 pub use message_lifecycle::MessageLifecycleInput;
 pub use session_isolation::IsolatedSessionExtensions;

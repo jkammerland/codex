@@ -1124,6 +1124,9 @@ async fn parked_host_discovery_includes_loaded_threads_without_user_previews() -
                 "thread/list" if params["sectionId"] == codex_state::PINNED_THREAD_SECTION_ID => {
                     json!({"data": [], "nextCursor": null})
                 }
+                "thread/list" if params["sourceKinds"] != json!([]) => {
+                    json!({"data": [], "nextCursor": null})
+                }
                 "thread/list" => {
                     round += 1;
                     json!({"data": [server_listed], "nextCursor": null})
@@ -1783,3 +1786,6 @@ mod execution;
 
 #[path = "agents_hosts_backend_identity_tests.rs"]
 mod backend_identity;
+
+#[path = "agents_hosts_history_tests.rs"]
+mod history;

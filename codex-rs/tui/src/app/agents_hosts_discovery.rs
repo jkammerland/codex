@@ -5,11 +5,11 @@ use super::agents_hosts::ConnectionScope;
 use super::agents_hosts::HostKey;
 use super::agents_hosts::HostState;
 use super::agents_hosts::HostUpdate;
+use super::agents_overview_discovery::AgentsOverviewDiscovery;
+use super::agents_overview_discovery::list_pinned_threads;
 use super::*;
 use codex_app_server_client::RemoteAppServerEndpoint;
 use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::ThreadListParams;
-use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadReadParams;
@@ -248,34 +248,23 @@ impl App {
             let sender = self.app_event_tx.unscoped();
             self.agents_hosts.tasks.spawn(async move {
                 // Read metadata only. Discovery never resumes or hydrates a thread.
+                let pins = list_pinned_threads(&handle).await;
                 let result = async {
-                    let mut threads = Vec::new();
-                    let mut cursor = None;
-                    loop {
-                        let response: ThreadListResponse = handle.request_typed(ClientRequest::ThreadList {
-                            request_id: RequestId::String(uuid::Uuid::new_v4().to_string()),
-                            params: ThreadListParams {
-                                cursor, limit: Some(100), model_providers: Some(Vec::new()),
-                                archived: Some(false), source_kinds: Some(vec![
-                                    codex_app_server_protocol::ThreadSourceKind::Cli,
-                                    codex_app_server_protocol::ThreadSourceKind::VsCode,
-                                    codex_app_server_protocol::ThreadSourceKind::Exec,
-                                    codex_app_server_protocol::ThreadSourceKind::AppServer,
-                                    codex_app_server_protocol::ThreadSourceKind::SubAgentThreadSpawn,
-                                    codex_app_server_protocol::ThreadSourceKind::Unknown,
-                                ]),
-                                excluded_thread_ids: None, originators: None, sort_key: None, sort_direction: None,
-                                section_id: None, project_id: None, parent_thread_id: None, ancestor_thread_id: None,
-                                cwd: None, use_state_db_only: false, search_term: None,
-                            },
-                        }).await.map_err(|_| "Machine thread listing failed".to_string())?;
-                        threads.extend(response.data.into_iter().filter(|thread| !thread.ephemeral));
-                        let Some(next) = response.next_cursor else { break };
-                        cursor = Some(next);
+                    // Match foreground discovery instead of filling a parked host's cache
+                    // with all saved history. Its foreground pager handles explicit Show more.
+                    let mut discovery = AgentsOverviewDiscovery::default();
+                    let (mut threads, complete) = discovery.next_batch(&handle, /*limit*/ 10).await;
+                    if !complete {
+                        return Err("Machine thread listing failed".to_string());
+                    }
+
+                    // Pins outside the recent window remain visible without loading history.
+                    let mut seen: HashSet<_> = threads.iter().map(|thread| thread.id.clone()).collect();
+                    if let Ok(Some(pins)) = &pins {
+                        threads.extend(pins.iter().filter(|thread| seen.insert(thread.id.clone())).cloned());
                     }
 
                     // Loaded Board recipients can lack the user preview required by thread/list.
-                    let mut seen: HashSet<_> = threads.iter().map(|thread| thread.id.clone()).collect();
                     let mut cursor = None;
                     loop {
                         let response = handle.request_typed::<ThreadLoadedListResponse>(ClientRequest::ThreadLoadedList {
@@ -309,7 +298,7 @@ impl App {
                     Ok(threads)
                 }.await;
                 sender.send(AppEvent::AgentsHostUpdate(Box::new(HostUpdate::Listed { scope: scope.clone(), generation, revision, result })));
-                if let Ok(pins) = super::agents_overview_discovery::list_pinned_threads(&handle).await {
+                if let Ok(pins) = pins {
                     sender.send(AppEvent::AgentsHostUpdate(Box::new(HostUpdate::PinsListed {
                         scope, generation, pins: pins.map(|threads| threads.iter().filter_map(|thread| ThreadId::from_string(&thread.id).ok()).collect()),
                     })));

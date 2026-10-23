@@ -4,25 +4,25 @@
     "version": "0.163.0+jkammerland.mcp.25.team.6",
     "stagedSourceCommit": "328ea3f360d0b31eb20ed15a4f470eedb66e2829",
     "sourceRef": "integration/upstream-20261021",
-    "activation": "partially_active_deferred_hosts"
+    "activation": "all_hosts_active"
   },
   "hosts": [
     {
       "name": "local",
       "platform": "linux",
       "endpoint": "local-offload",
-      "installedVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "installedVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "staging": "ready",
-      "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
-      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
-      "daemonRestart": "deferred",
+      "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "daemonRestart": "completed",
       "previousPackageRetained": true,
       "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
-      "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamProtocolVersion": 5,
       "teamLedgerBackupRetained": true,
-      "activation": "deferred",
-      "activationReason": "shutdown_check_fixed_reactivation_prepared"
+      "activation": "completed",
+      "gpt61SolVerified": true
     },
     {
       "name": "mac",
@@ -103,7 +103,7 @@
     }
   ],
   "sharedTeam": {
-    "coordinatorVersion": "0.163.0+jkammerland.mcp.25.team.5",
+    "coordinatorVersion": "0.163.0+jkammerland.mcp.25.team.6",
     "protocolVersion": 5,
     "controlMode": "stopped",
     "connectedHosts": 4,

@@ -145,7 +145,8 @@ impl Coordinator {
             .into_iter()
             .map(|(_, agent)| agent)
             .collect::<Vec<_>>();
-        let statuses = self.statuses.read().await;
+        // Release cached status access before reading retirement state from storage.
+        let statuses = self.statuses.read().await.clone();
         for agent in &mut agents {
             let address = &agent.enrollment.address;
             let declarations = self
@@ -166,6 +167,25 @@ impl Coordinator {
                 &control,
                 declarations,
             );
+            if self.member_is_retiring(address).await? {
+                agent.status = "retiring".into();
+                agent.discovery.availability.readiness = TeamReadiness::Held;
+                let mut root = address.clone();
+                if let Some(runtime) = &agent.runtime {
+                    root.thread_id.clone_from(&runtime.root_thread_id);
+                }
+                let reason = self
+                    .store
+                    .get::<TeamMemberRetirement>("retirement", &address_key(&root))
+                    .await?
+                    .and_then(|state| state.waiting_reason)
+                    .unwrap_or_else(|| "Waiting for admitted work to finish.".into());
+                agent
+                    .discovery
+                    .availability
+                    .reasons
+                    .insert(0, format!("Retiring: {reason}"));
+            }
         }
         Ok(agents)
     }

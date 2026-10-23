@@ -4,7 +4,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::TeamAddress;
 use super::TeamDeliveryMode;
 use super::TeamMessage;
 use super::TeamMessageKind;
@@ -64,6 +63,12 @@ pub struct TeamSyncParams {
     pub cancellation_adapters: Vec<super::TeamCancellationAdapter>,
     pub message_status: super::TeamMessageStatusSnapshot,
     pub board_purges: Vec<super::TeamBoardPurgeJournal>,
+    #[serde(default)]
+    #[ts(as = "Option<_>", optional)]
+    pub administration: Vec<super::TeamAdministrationOperation>,
+    #[serde(default)]
+    #[ts(as = "Option<_>", optional)]
+    pub retirements: Vec<super::TeamMemberRetirement>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -86,7 +91,7 @@ pub struct TeamSyncResponse {
     rename_all_fields = "camelCase",
     export_to = "v2/"
 )]
-pub enum TeamAgentAction {
+pub enum TeamAgentActionParams {
     MessageStatus {
         query: super::TeamMessageStatusParams,
     },
@@ -96,35 +101,70 @@ pub enum TeamAgentAction {
     BoardAction {
         request: super::TeamBoardParams,
     },
+    Publish {
+        body: String,
+        #[ts(optional = nullable)]
+        topic: Option<String>,
+        #[ts(optional = nullable)]
+        conversation_id: Option<String>,
+        #[ts(optional = nullable)]
+        reply_to: Option<String>,
+        #[ts(optional = nullable)]
+        mentions: Option<Vec<super::TeamAgentMentionParams>>,
+    },
+    Member {
+        request: super::TeamMemberActionParams,
+    },
+    Cleanup {
+        request: super::TeamCleanupParams,
+    },
     Reply {
         message_id: String,
         body: String,
         #[serde(default)]
+        #[ts(as = "Option<_>", optional)]
         delivery: TeamDeliveryMode,
     },
     Directory {
+        #[ts(optional = nullable)]
         cursor: Option<String>,
+        #[ts(optional = nullable)]
         limit: Option<u32>,
+        #[ts(optional = nullable)]
+        query: Option<String>,
+        #[serde(default)]
+        #[ts(as = "Option<_>", optional)]
+        details: bool,
     },
     Inbox {
+        #[ts(optional = nullable)]
         cursor: Option<String>,
+        #[ts(optional = nullable)]
         limit: Option<u32>,
     },
     Send {
-        recipient: TeamAddress,
+        recipient: super::TeamAgentTarget,
         body: String,
+        #[serde(default = "default_message_kind")]
+        #[ts(as = "Option<_>", optional)]
         kind: TeamMessageKind,
+        #[ts(optional = nullable)]
         reply_to: Option<String>,
+        #[serde(default)]
+        #[ts(as = "Option<_>", optional)]
         delivery: TeamDeliveryMode,
     },
     Post {
         topic: String,
         body: String,
+        #[ts(optional = nullable)]
         reply_to: Option<String>,
     },
     Board {
         topic: String,
+        #[ts(optional = nullable)]
         cursor: Option<String>,
+        #[ts(optional = nullable)]
         limit: Option<u32>,
     },
     Subscribe {
@@ -133,47 +173,8 @@ pub enum TeamAgentAction {
     },
 }
 
-/// Shared native/MCP tool schema. Production protocol derives are intentionally
-/// disabled, so the small agent-facing contract has an explicit runtime schema.
-pub fn team_agent_tool_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "type": {"type": "string", "enum": ["directory", "inbox", "send", "reply", "post", "board", "subscribe", "boardAction", "messageStatus", "explainAction"]},
-            "query": {"type":"object", "description":"messageStatus: messageId, cursor, limit. explainAction: action and optional target address.", "properties": {
-                "messageId":{"type":"string"}, "cursor":{"type":"string"}, "limit":{"type":"integer", "minimum":1,"maximum":1000},
-                "action":{"type":"string","enum":["enroll","queueMessage","processMessages","post","subscribe","selectModel","pause","resume","stop","leave"]},
-                "target":{"type":"object","properties":{"machineId":{"type":"string"},"serverId":{"type":"string"},"threadId":{"type":"string"}},"required":["machineId","serverId","threadId"],"additionalProperties":false}
-            },"additionalProperties":false},
-            "request": super::team_board_tool_schema(),
-            "messageId": {"type": "string", "description": "Message from your inbox to reply to, including its original Gitea conversation."},
-            "cursor": {"type": "string", "description": "Cursor from a directory, inbox or board page."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
-            "recipient": {"type": "object", "properties": {
-                "machineId": {"type": "string"}, "serverId": {"type": "string"}, "threadId": {"type": "string"}
-            }, "required": ["machineId", "serverId", "threadId"], "additionalProperties": false},
-            "body": {"type": "string"},
-            "kind": {"type": "string", "enum": ["request", "reply", "note"]},
-            "replyTo": {"type": "string", "description": "Original message id when replying."},
-            "delivery": {"type": "string", "enum": ["nextTurn", "safeBoundary"], "description": "Choose when a request or reply enters the recipient's input. Replies default to nextTurn when omitted; safeBoundary may steer active work at a safe boundary."},
-            "topic": {"type": "string"},
-            "enabled": {"type": "boolean"}
-        },
-        "required": ["type"],
-        "oneOf": [
-            {"properties":{"type":{"const":"messageStatus"}},"required":["query"]},
-            {"properties":{"type":{"const":"explainAction"},"query":{"required":["action"]}},"required":["query"]},
-            {"properties": {"type": {"const": "boardAction"}}, "required": ["request"]},
-            {"properties": {"type": {"const": "reply"}}, "required": ["messageId", "body"]},
-            {"properties": {"type": {"const": "directory"}}},
-            {"properties": {"type": {"const": "inbox"}}},
-            {"properties": {"type": {"const": "send"}}, "required": ["recipient", "body", "kind", "delivery"]},
-            {"properties": {"type": {"const": "post"}}, "required": ["topic", "body"]},
-            {"properties": {"type": {"const": "board"}}, "required": ["topic"]},
-            {"properties": {"type": {"const": "subscribe"}}, "required": ["topic", "enabled"]}
-        ],
-        "additionalProperties": false
-    })
+fn default_message_kind() -> TeamMessageKind {
+    TeamMessageKind::Request
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -185,7 +186,7 @@ pub struct TeamAgentRequestParams {
     /// Stable logical operation identity for clients that retry mutations.
     #[ts(optional = nullable)]
     pub operation_id: Option<String>,
-    pub action: TeamAgentAction,
+    pub action: TeamAgentActionParams,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

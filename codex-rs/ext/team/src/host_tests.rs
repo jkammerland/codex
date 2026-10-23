@@ -16,6 +16,9 @@ use crate::service::TeamHostService;
 #[path = "message_status_tests.rs"]
 mod message_status_tests;
 
+#[path = "contract_tests.rs"]
+mod contract_tests;
+
 async fn host() -> anyhow::Result<(tempfile::TempDir, std::sync::Arc<TeamHostService>)> {
     let home = tempfile::tempdir()?;
     let config = core_test_support::load_default_config_for_test(&home).await;
@@ -121,7 +124,7 @@ async fn native_and_mcp_reply_actions_preserve_destinations_and_delivery_in_the_
             }
             let mut serialized = action.clone();
             serialized["delivery"] = serde_json::to_value(mode)?;
-            let action: TeamAgentAction = serde_json::from_value(action)?;
+            let action: TeamAgentActionParams = serde_json::from_value(action)?;
             assert_eq!(serde_json::to_value(&action)?, serialized);
             let operation = uuid::Uuid::new_v4().to_string();
             let legacy_result = if conversation == "agent" && mode == TeamDeliveryMode::NextTurn {
@@ -211,14 +214,14 @@ async fn native_and_mcp_reply_actions_preserve_destinations_and_delivery_in_the_
         store.receive(&original).await?;
 
         for action in [
-            TeamAgentAction::Send {
-                recipient,
+            TeamAgentActionParams::Send {
+                recipient: recipient.into(),
                 body: "Reviewed".into(),
                 kind: TeamMessageKind::Reply,
                 reply_to: Some(original.message.id.clone()),
                 delivery: TeamDeliveryMode::NextTurn,
             },
-            TeamAgentAction::Reply {
+            TeamAgentActionParams::Reply {
                 message_id: original.message.id,
                 body: "Reviewed".into(),
                 delivery: TeamDeliveryMode::NextTurn,
@@ -423,3 +426,6 @@ async fn stop_and_resume_acknowledge_while_ordinary_work_is_blocked_and_resume_r
     assert!(service.gate.try_enter(root).is_some());
     Ok(())
 }
+
+#[path = "retirement_tests.rs"]
+mod retirement_tests;

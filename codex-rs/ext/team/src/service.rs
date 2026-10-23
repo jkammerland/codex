@@ -57,6 +57,32 @@ impl PreparedTeamHost {
                     gate.hold_manually(ThreadId::from_string(&thread_id)?);
                 }
             }
+            // A manual hold can win the final detach check after credentials
+            // were revoked. Retirement remains the durable execution boundary.
+            if let Some(control) = store.control().await? {
+                for (_, retirement) in store
+                    .list::<codex_app_server_protocol::TeamMemberRetirement>(
+                        "retirement",
+                        "",
+                        u32::MAX,
+                    )
+                    .await?
+                {
+                    if retirement.state
+                        == codex_app_server_protocol::TeamMemberRetirementState::Retiring
+                    {
+                        let root = ThreadId::from_string(&retirement.address.thread_id)?;
+                        if gate.root(root).is_none() {
+                            gate.restore(
+                                root,
+                                u64::try_from(control.revision)?,
+                                execution_mode(control.mode),
+                            );
+                        }
+                        gate.begin_retirement(root);
+                    }
+                }
+            }
             // Unenrolled creation reservations retain their admission fence after restart.
             if let Some(control) = store.control().await? {
                 for (_, intent) in store
@@ -231,10 +257,11 @@ impl TeamHostService {
         let runtime = self.runtime(&data).await?;
         Ok(TeamHostReadResponse {
             installation_id: self.installation_id.clone(),
-            protocol_version: 5,
+            protocol_version: 6,
             control,
             data,
             runtime,
+            retirements: self.retirement_states().await?,
             next_cursor,
         })
     }
@@ -266,6 +293,12 @@ impl TeamHostService {
             }
             return Ok(TeamEnrollResponse { enrollment });
         }
+        ensure!(
+            !self
+                .gate
+                .is_retiring(ThreadId::from_string(&params.address.thread_id)?),
+            "member is retiring; wait for removal before enrolling again"
+        );
         let manager = self
             .manager
             .upgrade()
@@ -353,6 +386,27 @@ impl TeamHostService {
                     execution_mode(control.mode),
                     reconciling,
                 );
+            }
+            for retirement in self.retirement_states().await? {
+                if retirement.state
+                    != codex_app_server_protocol::TeamMemberRetirementState::Retiring
+                {
+                    continue;
+                }
+                let root = ThreadId::from_string(&retirement.address.thread_id)?;
+                if store
+                    .enrollment(&retirement.address.thread_id)
+                    .await?
+                    .is_none()
+                {
+                    self.gate.apply_reconciling(
+                        root,
+                        u64::try_from(control.revision)?,
+                        execution_mode(control.mode),
+                        stopping || unconfirmed,
+                    );
+                }
+                self.gate.begin_retirement(root);
             }
         }
         Ok(())

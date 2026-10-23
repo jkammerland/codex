@@ -5100,57 +5100,75 @@ class TeamAddress(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
 
 
-class DirectoryTeamAgentAction(BaseModel):
+class TeamAdministrationState(Enum):
+    queued = "queued"
+    running = "running"
+    waiting = "waiting"
+    succeeded = "succeeded"
+    rejected = "rejected"
+
+
+class DirectoryTeamAgentActionParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cursor: str | None = None
+    details: bool | None = False
+    limit: Annotated[int | None, Field(ge=0)] = None
+    query: str | None = None
+    type: Annotated[Literal["directory"], Field(title="DirectoryTeamAgentActionParamsType")]
+
+
+class InboxTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     cursor: str | None = None
     limit: Annotated[int | None, Field(ge=0)] = None
-    type: Annotated[Literal["directory"], Field(title="DirectoryTeamAgentActionType")]
+    type: Annotated[Literal["inbox"], Field(title="InboxTeamAgentActionParamsType")]
 
 
-class InboxTeamAgentAction(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    cursor: str | None = None
-    limit: Annotated[int | None, Field(ge=0)] = None
-    type: Annotated[Literal["inbox"], Field(title="InboxTeamAgentActionType")]
-
-
-class PostTeamAgentAction(BaseModel):
+class PostTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     body: str
     reply_to: str | None = None
     topic: str
-    type: Annotated[Literal["post"], Field(title="PostTeamAgentActionType")]
+    type: Annotated[Literal["post"], Field(title="PostTeamAgentActionParamsType")]
 
 
-class BoardTeamAgentAction(BaseModel):
+class BoardTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     cursor: str | None = None
     limit: Annotated[int | None, Field(ge=0)] = None
     topic: str
-    type: Annotated[Literal["board"], Field(title="BoardTeamAgentActionType")]
+    type: Annotated[Literal["board"], Field(title="BoardTeamAgentActionParamsType")]
 
 
-class SubscribeTeamAgentAction(BaseModel):
+class SubscribeTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     enabled: bool
     topic: str
-    type: Annotated[Literal["subscribe"], Field(title="SubscribeTeamAgentActionType")]
+    type: Annotated[Literal["subscribe"], Field(title="SubscribeTeamAgentActionParamsType")]
+
+
+class TeamAgentTarget(RootModel[TeamAddress | str]):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: TeamAddress | str
 
 
 class TeamBoardFilter(Enum):
     all = "all"
     following = "following"
     mentions = "mentions"
+    unread = "unread"
 
 
 class UserTeamBoardIdentity(BaseModel):
@@ -5216,6 +5234,14 @@ class ReadTeamBoardParams(BaseModel):
     identity: TeamBoardIdentity | None = None
     limit: Annotated[int | None, Field(ge=0)] = None
     type: Annotated[Literal["read"], Field(title="ReadTeamBoardParamsType")]
+
+
+class AcknowledgeTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    token: str
+    type: Annotated[Literal["acknowledge"], Field(title="AcknowledgeTeamBoardParamsType")]
 
 
 class PostTeamBoardParams(BaseModel):
@@ -5308,6 +5334,44 @@ class TeamBoardPurgeJournal(BaseModel):
     revision: int
 
 
+class ConversationTeamBoardPurgeScope(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    conversation_id: str
+    type: Annotated[Literal["conversation"], Field(title="ConversationTeamBoardPurgeScopeType")]
+
+
+class TopicTeamBoardPurgeScope(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    topic: str
+    type: Annotated[Literal["topic"], Field(title="TopicTeamBoardPurgeScopeType")]
+
+
+class AllTeamBoardPurgeScope(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["all"], Field(title="AllTeamBoardPurgeScopeType")]
+
+
+class TeamBoardPurgeScope(
+    RootModel[ConversationTeamBoardPurgeScope | TopicTeamBoardPurgeScope | AllTeamBoardPurgeScope]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: ConversationTeamBoardPurgeScope | TopicTeamBoardPurgeScope | AllTeamBoardPurgeScope
+
+
+class TeamBoardReadMode(Enum):
+    unread = "unread"
+    history = "history"
+    around = "around"
+
+
 class TeamBoardReadState(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -5386,6 +5450,43 @@ class TeamChangedNotification(BaseModel):
         populate_by_name=True,
     )
     revision: int
+
+
+class PreviewTeamCleanupParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    scope: TeamBoardPurgeScope
+    type: Annotated[Literal["preview"], Field(title="PreviewTeamCleanupParamsType")]
+
+
+class ApplyTeamCleanupParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    expected_revision: int
+    scope: TeamBoardPurgeScope
+    type: Annotated[Literal["apply"], Field(title="ApplyTeamCleanupParamsType")]
+
+
+class StatusTeamCleanupParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    operation_id: str
+    type: Annotated[Literal["status"], Field(title="StatusTeamCleanupParamsType")]
+
+
+class TeamCleanupParams(
+    RootModel[PreviewTeamCleanupParams | ApplyTeamCleanupParams | StatusTeamCleanupParams]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: PreviewTeamCleanupParams | ApplyTeamCleanupParams | StatusTeamCleanupParams
 
 
 class TeamDeliveryMode(Enum):
@@ -5467,10 +5568,86 @@ class TeamJobStatus(Enum):
     unconfirmed = "unconfirmed"
 
 
+class CreateTeamMemberActionParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    alias: str
+    cwd: str
+    machine_id: str
+    server_id: str
+    type: Annotated[Literal["create"], Field(title="CreateTeamMemberActionParamsType")]
+
+
+class EnrollTeamMemberActionParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    address: TeamAddress
+    alias: str
+    type: Annotated[Literal["enroll"], Field(title="EnrollTeamMemberActionParamsType")]
+
+
+class RenameTeamMemberActionParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    address: TeamAgentTarget
+    alias: str
+    type: Annotated[Literal["rename"], Field(title="RenameTeamMemberActionParamsType")]
+
+
+class RemoveTeamMemberActionParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    address: TeamAgentTarget
+    type: Annotated[Literal["remove"], Field(title="RemoveTeamMemberActionParamsType")]
+
+
+class StatusTeamMemberActionParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    operation_id: str
+    type: Annotated[Literal["status"], Field(title="StatusTeamMemberActionParamsType")]
+
+
+class TeamMemberActionParams(
+    RootModel[
+        CreateTeamMemberActionParams
+        | EnrollTeamMemberActionParams
+        | RenameTeamMemberActionParams
+        | RemoveTeamMemberActionParams
+        | StatusTeamMemberActionParams
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: (
+        CreateTeamMemberActionParams
+        | EnrollTeamMemberActionParams
+        | RenameTeamMemberActionParams
+        | RemoveTeamMemberActionParams
+        | StatusTeamMemberActionParams
+    )
+
+
 class TeamMemberCreatePhase(Enum):
     created = "created"
     failed = "failed"
     needs_inspection = "needsInspection"
+
+
+class TeamMemberRetirementState(Enum):
+    retiring = "retiring"
+    removed = "removed"
 
 
 class TeamMessageIntake(Enum):
@@ -10600,34 +10777,83 @@ class SubAgentSource(
     root: SubAgentSourceValue | ThreadSpawnSubAgentSource | OtherSubAgentSource
 
 
-class MessageStatusTeamAgentAction(BaseModel):
+class MemberTeamAdministrationRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    request: TeamMemberActionParams
+    type: Annotated[Literal["member"], Field(title="MemberTeamAdministrationRequestType")]
+
+
+class CleanupTeamAdministrationRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    request: TeamCleanupParams
+    type: Annotated[Literal["cleanup"], Field(title="CleanupTeamAdministrationRequestType")]
+
+
+class TeamAdministrationRequest(
+    RootModel[MemberTeamAdministrationRequest | CleanupTeamAdministrationRequest]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: MemberTeamAdministrationRequest | CleanupTeamAdministrationRequest
+
+
+class MessageStatusTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     query: TeamMessageStatusParams
-    type: Annotated[Literal["messageStatus"], Field(title="MessageStatusTeamAgentActionType")]
+    type: Annotated[Literal["messageStatus"], Field(title="MessageStatusTeamAgentActionParamsType")]
 
 
-class ReplyTeamAgentAction(BaseModel):
+class MemberTeamAgentActionParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    request: TeamMemberActionParams
+    type: Annotated[Literal["member"], Field(title="MemberTeamAgentActionParamsType")]
+
+
+class CleanupTeamAgentActionParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    request: TeamCleanupParams
+    type: Annotated[Literal["cleanup"], Field(title="CleanupTeamAgentActionParamsType")]
+
+
+class ReplyTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     body: str
     delivery: TeamDeliveryMode | None = "nextTurn"
     message_id: str
-    type: Annotated[Literal["reply"], Field(title="ReplyTeamAgentActionType")]
+    type: Annotated[Literal["reply"], Field(title="ReplyTeamAgentActionParamsType")]
 
 
-class SendTeamAgentAction(BaseModel):
+class SendTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     body: str
-    delivery: TeamDeliveryMode
-    kind: TeamMessageKind
-    recipient: TeamAddress
+    delivery: TeamDeliveryMode | None = "nextTurn"
+    kind: TeamMessageKind | None = "request"
+    recipient: TeamAgentTarget
     reply_to: str | None = None
-    type: Annotated[Literal["send"], Field(title="SendTeamAgentActionType")]
+    type: Annotated[Literal["send"], Field(title="SendTeamAgentActionParamsType")]
+
+
+class TeamAgentMentionParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    display: str | None = None
+    target: TeamAgentTarget
 
 
 class TeamAgentRuntime(BaseModel):
@@ -10718,6 +10944,19 @@ class TeamBoardNotification(BaseModel):
     reasons: list[TeamBoardNotificationReason]
 
 
+class ReadPageTeamBoardParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    anchor_message_id: str | None = None
+    conversation_id: str
+    cursor: str | None = None
+    identity: TeamBoardIdentity | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+    mode: TeamBoardReadMode | None = "unread"
+    type: Annotated[Literal["readPage"], Field(title="ReadPageTeamBoardParamsType")]
+
+
 class SubscriptionSetTeamBoardParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10732,6 +10971,8 @@ class TeamBoardParams(
     RootModel[
         ListTeamBoardParams
         | ReadTeamBoardParams
+        | ReadPageTeamBoardParams
+        | AcknowledgeTeamBoardParams
         | PostTeamBoardParams
         | ReplyTeamBoardParams
         | FollowTeamBoardParams
@@ -10749,6 +10990,8 @@ class TeamBoardParams(
     root: (
         ListTeamBoardParams
         | ReadTeamBoardParams
+        | ReadPageTeamBoardParams
+        | AcknowledgeTeamBoardParams
         | PostTeamBoardParams
         | ReplyTeamBoardParams
         | FollowTeamBoardParams
@@ -10776,6 +11019,16 @@ class TeamExplainActionParams(BaseModel):
     )
     action: TeamExplainableAction
     target: TeamAddress | None = None
+
+
+class TeamMemberRetirement(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    address: TeamAddress
+    operation_id: Annotated[str, Field(alias="operationId")]
+    state: TeamMemberRetirementState
+    waiting_reason: Annotated[str | None, Field(alias="waitingReason")] = None
 
 
 class TeamMessage(BaseModel):
@@ -12513,50 +12766,80 @@ class SessionSource(RootModel[SessionSourceValue | CustomSessionSource | SubAgen
     root: SessionSourceValue | CustomSessionSource | SubAgentSessionSource
 
 
-class ExplainActionTeamAgentAction(BaseModel):
+class TeamAdministrationOperation(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    actor: TeamAddress
+    operation_id: Annotated[str, Field(alias="operationId")]
+    request: TeamAdministrationRequest
+    result: Any | None = None
+    state: TeamAdministrationState
+    waiting_reason: Annotated[str | None, Field(alias="waitingReason")] = None
+
+
+class ExplainActionTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     query: TeamExplainActionParams
-    type: Annotated[Literal["explainAction"], Field(title="ExplainActionTeamAgentActionType")]
+    type: Annotated[Literal["explainAction"], Field(title="ExplainActionTeamAgentActionParamsType")]
 
 
-class BoardActionTeamAgentAction(BaseModel):
+class BoardActionTeamAgentActionParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     request: TeamBoardParams
-    type: Annotated[Literal["boardAction"], Field(title="BoardActionTeamAgentActionType")]
+    type: Annotated[Literal["boardAction"], Field(title="BoardActionTeamAgentActionParamsType")]
 
 
-class TeamAgentAction(
+class PublishTeamAgentActionParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    body: str
+    conversation_id: str | None = None
+    mentions: list[TeamAgentMentionParams] | None = None
+    reply_to: str | None = None
+    topic: str | None = None
+    type: Annotated[Literal["publish"], Field(title="PublishTeamAgentActionParamsType")]
+
+
+class TeamAgentActionParams(
     RootModel[
-        MessageStatusTeamAgentAction
-        | ExplainActionTeamAgentAction
-        | BoardActionTeamAgentAction
-        | ReplyTeamAgentAction
-        | DirectoryTeamAgentAction
-        | InboxTeamAgentAction
-        | SendTeamAgentAction
-        | PostTeamAgentAction
-        | BoardTeamAgentAction
-        | SubscribeTeamAgentAction
+        MessageStatusTeamAgentActionParams
+        | ExplainActionTeamAgentActionParams
+        | BoardActionTeamAgentActionParams
+        | PublishTeamAgentActionParams
+        | MemberTeamAgentActionParams
+        | CleanupTeamAgentActionParams
+        | ReplyTeamAgentActionParams
+        | DirectoryTeamAgentActionParams
+        | InboxTeamAgentActionParams
+        | SendTeamAgentActionParams
+        | PostTeamAgentActionParams
+        | BoardTeamAgentActionParams
+        | SubscribeTeamAgentActionParams
     ]
 ):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     root: Annotated[
-        MessageStatusTeamAgentAction
-        | ExplainActionTeamAgentAction
-        | BoardActionTeamAgentAction
-        | ReplyTeamAgentAction
-        | DirectoryTeamAgentAction
-        | InboxTeamAgentAction
-        | SendTeamAgentAction
-        | PostTeamAgentAction
-        | BoardTeamAgentAction
-        | SubscribeTeamAgentAction,
+        MessageStatusTeamAgentActionParams
+        | ExplainActionTeamAgentActionParams
+        | BoardActionTeamAgentActionParams
+        | PublishTeamAgentActionParams
+        | MemberTeamAgentActionParams
+        | CleanupTeamAgentActionParams
+        | ReplyTeamAgentActionParams
+        | DirectoryTeamAgentActionParams
+        | InboxTeamAgentActionParams
+        | SendTeamAgentActionParams
+        | PostTeamAgentActionParams
+        | BoardTeamAgentActionParams
+        | SubscribeTeamAgentActionParams,
         Field(description="Agent actions deliberately omit execution controls and model settings."),
     ]
 

@@ -39,8 +39,8 @@ async fn acknowledged_sender_queue_needs_explicit_acceptance_and_status_is_bound
     let result = service
         .agent_action(
             root,
-            TeamAgentAction::Send {
-                recipient: other.clone(),
+            TeamAgentActionParams::Send {
+                recipient: other.clone().into(),
                 body: "Please review".into(),
                 kind: TeamMessageKind::Request,
                 reply_to: None,
@@ -89,6 +89,8 @@ async fn acknowledged_sender_queue_needs_explicit_acceptance_and_status_is_bound
         freshness: TeamObservationFreshness::Current,
     };
     let sync = TeamSyncParams {
+        administration: Vec::new(),
+        retirements: Vec::new(),
         board_purges: Vec::new(),
         coordinator_id: "coordinator".into(),
         directory: Default::default(),

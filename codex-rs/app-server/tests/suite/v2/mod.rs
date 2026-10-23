@@ -142,6 +142,7 @@ mod team_boundaries;
 mod team_jobs;
 mod team_member_create;
 mod team_model_wake;
+mod team_retirement;
 mod thread_agent_work;
 mod thread_archive;
 mod thread_attachments;

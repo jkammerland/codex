@@ -6,6 +6,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::TeamAddress;
+use super::TeamBoardReadMode;
+use super::TeamBoardReadPage;
+use super::TeamBoardThreadSummary;
 use super::TeamMessage;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, JsonSchema, TS)]
@@ -221,6 +224,7 @@ pub enum TeamBoardFilter {
     All,
     Following,
     Mentions,
+    Unread,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -260,6 +264,22 @@ pub enum TeamBoardParams {
         limit: Option<u32>,
         #[ts(optional = nullable)]
         identity: Option<TeamBoardIdentity>,
+    },
+    ReadPage {
+        conversation_id: String,
+        #[serde(default)]
+        mode: TeamBoardReadMode,
+        #[ts(optional = nullable)]
+        anchor_message_id: Option<String>,
+        #[ts(optional = nullable)]
+        cursor: Option<String>,
+        #[ts(optional = nullable)]
+        limit: Option<u32>,
+        #[ts(optional = nullable)]
+        identity: Option<TeamBoardIdentity>,
+    },
+    Acknowledge {
+        token: String,
     },
     #[serde(rename_all = "camelCase")]
     Post {
@@ -351,6 +371,15 @@ pub enum TeamBoardMutationState {
     export_to = "v2/"
 )]
 pub enum TeamBoardResponse {
+    Threads {
+        #[ts(type = "number")]
+        revision: i64,
+        data: Vec<TeamBoardThreadSummary>,
+        next_cursor: Option<String>,
+    },
+    ReadPage {
+        page: Box<TeamBoardReadPage>,
+    },
     #[serde(rename_all = "camelCase")]
     List {
         #[ts(type = "number")]
@@ -399,63 +428,40 @@ pub enum TeamBoardResponse {
 
 /// Native and MCP callers use one schema and the same host-bound identity.
 pub fn team_board_tool_schema() -> serde_json::Value {
-    let identity = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "type": {"type": "string", "enum": ["user", "agent"]},
-            "address": {"type": "object", "properties": {
-                "machineId": {"type": "string"}, "serverId": {"type": "string"}, "threadId": {"type": "string"}
-            }, "required": ["machineId", "serverId", "threadId"], "additionalProperties": false}
-        },
-        "required": ["type"],
-        "oneOf": [
-            {"properties": {"type": {"const": "user"}}},
-            {"properties": {"type": {"const": "agent"}}, "required": ["address"]}
-        ],
-        "additionalProperties": false
-    });
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "type": {"type": "string", "enum": ["list", "read", "post", "reply", "follow", "followers", "markRead", "topics", "topicFollow", "topicOverview", "subscriptionSet"]},
-            "filter": {"type": "string", "enum": ["all", "following", "mentions"]},
-            "query": {"type": "string"}, "topic": {"type": "string"},
-            "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1},
-            "identity": identity,
-            "mode": {"type": "string", "enum": ["off", "watch", "wake"]},
-            "target": {"type": "object", "properties": {
-                "type": {"type": "string", "enum": ["conversation", "topic"]},
-                "conversationId": {"type": "string"}, "topic": {"type": "string"}
-            }, "required": ["type"], "oneOf": [
-                {"properties": {"type": {"const": "conversation"}}, "required": ["conversationId"]},
-                {"properties": {"type": {"const": "topic"}}, "required": ["topic"]}
-            ], "additionalProperties": false},
-            "conversationId": {"type": "string"}, "replyTo": {"type": "string"},
-            "body": {"type": "string"}, "enabled": {"type": "boolean"},
-            "appendSeq": {"type": "integer", "minimum": 0},
-            "mentions": {"type": "array", "items": {
-                "type": "object", "properties": {
-                    "identity": identity, "display": {"type": "string"},
-                    "start": {"type": "integer", "minimum": 0}, "end": {"type": "integer", "minimum": 1}
-                }, "required": ["identity", "display", "start", "end"], "additionalProperties": false
-            }}
-        },
-        "required": ["type"],
-        "oneOf": [
-            {"properties": {"type": {"const": "list"}}},
-            {"properties": {"type": {"const": "read"}}, "required": ["conversationId"]},
-            {"properties": {"type": {"const": "post"}}, "required": ["topic", "body", "mentions"]},
-            {"properties": {"type": {"const": "reply"}}, "required": ["conversationId", "body", "mentions"]},
-            {"properties": {"type": {"const": "follow"}}, "required": ["conversationId", "enabled"]},
-            {"properties": {"type": {"const": "followers"}}, "required": ["conversationId"]},
-            {"properties": {"type": {"const": "markRead"}}, "required": ["conversationId", "appendSeq"]},
-            {"properties": {"type": {"const": "topics"}}},
-            {"properties": {"type": {"const": "topicFollow"}}, "required": ["topic", "enabled"]},
-            {"properties": {"type": {"const": "topicOverview"}}},
-            {"properties": {"type": {"const": "subscriptionSet"}}, "required": ["target", "mode"]}
-        ],
-        "additionalProperties": false
-    })
+    use super::team_tool_object;
+    use serde_json::json;
+
+    let cursor =
+        json!({"type":"string", "description":"Continuation returned by the preceding page."});
+    let limit = json!({"type":"integer", "minimum":1, "description":"Page size; defaults to 20."});
+    let target = json!({"oneOf":[
+        team_tool_object(json!({"type":{"const":"conversation"},"conversationId":{"type":"string"}}), &["type","conversationId"]),
+        team_tool_object(json!({"type":{"const":"topic"},"topic":{"type":"string"}}), &["type","topic"])
+    ]});
+    json!({"oneOf":[
+        team_tool_object(json!({
+            "type":{"const":"list"}, "filter":{"type":"string","enum":["all","following","mentions","unread"]},
+            "query":{"type":"string","description":"Words match across the thread; #topic selects an exact topic."},
+            "topic":{"type":"string"}, "cursor":cursor, "limit":limit
+        }), &["type"]),
+        team_tool_object(json!({
+            "type":{"const":"readPage"}, "conversationId":{"type":"string"},
+            "mode":{"type":"string","enum":["unread","history","around"],"description":"First page only; defaults to unread. History starts at root; around needs anchorMessageId. A cursor carries its original mode and anchor."},
+            "anchorMessageId":{"type":"string","description":"First-page around anchor; ignored when cursor is supplied."}, "cursor":cursor, "limit":limit
+        }), &["type","conversationId"]),
+        team_tool_object(json!({
+            "type":{"const":"acknowledge"},
+            "token":{"type":"string","description":"acknowledgementToken from a page you have used; acknowledge pages in order."}
+        }), &["type","token"]),
+        team_tool_object(json!({
+            "type":{"const":"followers"}, "conversationId":{"type":"string"}, "cursor":cursor, "limit":limit
+        }), &["type","conversationId"]),
+        team_tool_object(json!({"type":{"const":"topicOverview"},"cursor":cursor,"limit":limit}), &["type"]),
+        team_tool_object(json!({
+            "type":{"const":"subscriptionSet"}, "target":target,
+            "mode":{"type":"string","enum":["off","watch","wake"],"description":"Watch is passive. Wake delivers future thread replies or topic root posts. Mentions deliver independently."}
+        }), &["type","target","mode"])
+    ]})
 }
 
 #[cfg(test)]

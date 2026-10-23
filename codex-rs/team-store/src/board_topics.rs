@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use anyhow::ensure;
 use codex_app_server_protocol::*;
 
 /// Return topics in recent coordinator activity order, with exact topic identity.
@@ -118,18 +117,20 @@ pub(super) fn query_topic_overviews(
     cursor: Option<&str>,
     limit: Option<u32>,
 ) -> Result<TeamBoardResponse> {
-    let mut data = topic_overviews(snapshot, viewer);
-    if let Some(cursor) = cursor {
-        let (revision, sequence, topic): (i64, i64, String) = serde_json::from_str(cursor)?;
-        ensure!(
-            revision == snapshot.revision,
-            "board changed; restart topics from the first page"
-        );
+    let (position, prefix) = super::paging::PageCursor::open(
+        snapshot,
+        viewer,
+        "topicOverview".into(),
+        cursor,
+        super::paging::Membership::Topics,
+    )?;
+    let mut data = topic_overviews(&prefix, viewer);
+    if cursor.is_some() {
         data.retain(|entry| {
             (
                 entry.latest.as_ref().map_or(0, |latest| latest.append_seq),
                 entry.topic.as_str(),
-            ) < (sequence, topic.as_str())
+            ) < (position.sequence, position.key.as_str())
         });
     }
     let size = super::page_size(limit)?;
@@ -138,11 +139,10 @@ pub(super) fn query_topic_overviews(
     let next_cursor = if more {
         data.last()
             .map(|entry| {
-                serde_json::to_string(&(
-                    snapshot.revision,
+                position.after(
                     entry.latest.as_ref().map_or(0, |latest| latest.append_seq),
                     &entry.topic,
-                ))
+                )
             })
             .transpose()?
     } else {
@@ -155,7 +155,7 @@ pub(super) fn query_topic_overviews(
     })
 }
 
-fn entry_preview(entry: &TeamBoardEntry) -> TeamBoardEntryPreview {
+pub(super) fn entry_preview(entry: &TeamBoardEntry) -> TeamBoardEntryPreview {
     let line = entry
         .message
         .body

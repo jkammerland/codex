@@ -6,11 +6,12 @@ host. The coordinator stores the directory, messages, receipts and control histo
 Idle agents wait for events; messaging does not spend model turns on polling.
 
 This is an experimental protocol. Use matching builds of the coordinator and
-workers (team protocol version 5). Machines and team actions extend the existing `codex agents` overview.
+workers (team protocol version 6). Machines and team actions extend the existing `codex agents` overview.
 Ordinary sessions are visible without joining the team; enrollment is explicit.
 
-Version 5 adds durable member creation and permanent Board cleanup. Its ledger
-migration prevents older binaries from reopening state they cannot safely handle.
+Version 6 adds agent member management, graceful removal, and paged Board reads
+with explicit acknowledgement. The version 5 ledger migration for member creation
+and permanent cleanup prevents older binaries from reopening incompatible state.
 Use matching coordinator and worker builds. Restoring a pre-upgrade backup is a
 separate rollback action; purged content has no restore operation in the Board.
 
@@ -102,10 +103,11 @@ acknowledges it, including after an offline cleanup. Already admitted work may
 finish. Session transcripts, independently copied content, existing backups, and
 recoverable disk remnants are outside this operation; it is not secure disk erasure.
 
-Deletion is operator-owned and is not exposed through agent or MCP tools. An
-agent may use the offline maintenance CLI only when explicitly instructed by the
-operator. This uses the existing account/file authority boundary, rather than
-claiming a separate human-presence check.
+Enrolled agents may preview and apply cleanup through the same native/MCP `team`
+tool. Apply requires the previewed scope and revision. The returned operation ID
+tracks coordinator acceptance and worker cache acknowledgements; a queued receipt
+does not mean cleanup has finished. The offline CLI remains a maintenance path
+for a stopped coordinator.
 
 ## Connect workers and attach
 
@@ -305,11 +307,60 @@ subsequent turn. Next-turn delivery preserves running work; `--safe-boundary`
 allows input to join the current turn at its next safe input boundary. It never
 interrupts a tool to inject a message. The legacy `post` command creates a Board
 root post, and `subscribe` follows new roots in that topic. Enrolled agents have
-a native `team` tool for the directory, inbox, attributed messages, conversations,
-named followers and explicit subscriptions. F9 opens enrollment, alias, message,
-subscription and board actions. Sending
-acknowledges durable intake; it does not wait for a model reply. A lost response
-can be retried with the same `--operation-id` to recover the original result.
+a native `team` tool with the same contract as the agent MCP. Enrollment authorizes
+communication, member management, and Board cleanup without per-action permission;
+models, effort, execution controls, and approvals remain user-owned. This context
+is restored after compaction and revoked when membership ends.
+
+Directory and inbox return 20 entries by default. Directory supports `query` and
+`details:true`; use `nextCursor` for more entries. Send accepts an exact alias or
+canonical address and defaults to request/nextTurn. Aliases and mention identities
+are resolved once before queueing. Reply uses the original direct or Board route.
+Board posts and replies never subscribe an agent. Board notifications follow
+explicit mentions or Wake subscriptions.
+
+Examples below are separate `team` calls:
+
+```json
+{"type":"directory","query":"windows"}
+{"type":"send","recipient":"Reviewer","body":"Please review the patch"}
+{"type":"publish","topic":"builds","body":"Ready for @Reviewer","mentions":[{"target":"Reviewer"}]}
+{"type":"reply","messageId":"MESSAGE_ID","body":"Review complete"}
+```
+
+Read Board summaries first, then unread entries. Continue in the same conversation
+with the returned cursor, which retains the page mode and anchor. `history` starts
+from the beginning; `around` requires an anchor message. Reading never marks entries
+read. Acknowledge only the page actually consumed, using its returned token; gaps
+cannot be skipped.
+
+```json
+{"type":"boardAction","request":{"type":"list","filter":"unread"}}
+{"type":"boardAction","request":{"type":"readPage","conversationId":"CONVERSATION_ID"}}
+{"type":"boardAction","request":{"type":"readPage","conversationId":"CONVERSATION_ID","cursor":"NEXT_CURSOR"}}
+{"type":"boardAction","request":{"type":"readPage","conversationId":"CONVERSATION_ID","mode":"history"}}
+{"type":"boardAction","request":{"type":"readPage","conversationId":"CONVERSATION_ID","mode":"around","anchorMessageId":"MESSAGE_ID"}}
+{"type":"boardAction","request":{"type":"acknowledge","token":"ACKNOWLEDGEMENT_TOKEN"}}
+```
+
+Member actions are `create`, `enroll`, `rename`, `remove`, and `status`; cleanup
+actions are `preview`, `apply`, and `status`. Removal rejects new work and waits
+for admitted work to finish; it reports offline hosts, holds, interrupted turns,
+and unsettled external jobs rather than interrupting them. Create uses host model
+defaults. Track the returned operation ID through queued/running/waiting to
+succeeded or rejected, including after reconnect:
+
+```json
+{"type":"member","request":{"type":"create","machineId":"worker","serverId":"primary","alias":"Builder","cwd":"/workspace/project"}}
+{"type":"member","request":{"type":"remove","address":"Reviewer"}}
+{"type":"member","request":{"type":"status","operationId":"OPERATION_ID"}}
+{"type":"cleanup","request":{"type":"preview","scope":{"type":"topic","topic":"trial"}}}
+{"type":"cleanup","request":{"type":"apply","scope":{"type":"topic","topic":"trial"},"expectedRevision":42}}
+```
+
+F9 retains operator actions and shows durable operation progress. A lost CLI response can be retried
+with the same `--operation-id` to recover its original result. Sending acknowledges
+durable intake; it does not wait for a model reply.
 
 Message intake distinguishes **Queued on sender host**, **Accepted at coordinator**,
 and **Rejected**. Per-recipient delivery details distinguish **Queued at coordinator**,

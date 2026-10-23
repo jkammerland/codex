@@ -1,4 +1,4 @@
-//! Operator-only removal shares one transaction with offline maintenance.
+//! Online removal shares one transaction with offline maintenance.
 
 use anyhow::Context;
 use anyhow::Result;

@@ -2247,6 +2247,7 @@ version = "0.163.0"
 dependencies = [
  "anyhow",
  "codex-app-server-protocol-noop-macros",
+ "codex-code-mode-protocol",
  "codex-experimental-api-macros",
  "codex-extension-items",
  "codex-history",

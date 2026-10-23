@@ -1,6 +1,7 @@
 //! Opt-in team coordinator and operator clients. Worker history stays on its host.
 
 mod action_explanation;
+mod administration;
 mod board;
 mod board_backfill;
 mod board_cli;
@@ -37,6 +38,7 @@ mod purge_order_tests;
 #[cfg(test)]
 #[path = "purge_outbox_tests.rs"]
 mod purge_outbox_tests;
+mod retirement;
 mod routing;
 mod startup;
 mod thread_metadata;
@@ -87,3 +89,7 @@ mod board_tests;
 #[cfg(test)]
 #[path = "operation_error_tests.rs"]
 mod operation_error_tests;
+
+#[cfg(test)]
+#[path = "administration_tests.rs"]
+mod administration_tests;

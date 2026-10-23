@@ -8,6 +8,9 @@ use crate::model::*;
 use crate::tests::agent;
 use crate::tests::manifest;
 
+#[path = "board_navigation_tests.rs"]
+mod navigation;
+
 async fn post(coordinator: &Coordinator, body: &str) -> Result<String> {
     let response = coordinator
         .execute_operation(TeamOperation::new(TeamRequest::Board {

@@ -58,6 +58,10 @@ impl Coordinator {
         operation_id: Option<&str>,
     ) -> Result<Agent> {
         let address = canonical_address(address)?;
+        ensure!(
+            !self.member_is_retiring(&address).await?,
+            "member is retiring; wait for removal before enrolling again"
+        );
         // Alias reservation spans the worker RPC without holding the control
         // lock: an unreachable worker must never prevent a team-wide Pause.
         ensure!(!alias.trim().is_empty(), "an agent alias is required");

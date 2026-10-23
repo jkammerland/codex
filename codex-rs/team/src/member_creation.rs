@@ -36,7 +36,12 @@ impl Coordinator {
                 previous == digest,
                 "operation identity has conflicting content"
             );
-            return self.operator_operation(operation_id).await;
+            let operation = self
+                .store
+                .get("member_create", operation_id)
+                .await?
+                .context("member creation operation is missing")?;
+            return Ok(TeamOperatorOperation::MemberCreate(operation));
         }
         ensure!(
             self.store
@@ -166,6 +171,9 @@ impl Coordinator {
         &self,
         operation_id: &str,
     ) -> Result<TeamOperatorOperation> {
+        if let Some(operation) = self.store.get("administration", operation_id).await? {
+            return Ok(TeamOperatorOperation::Administration(operation));
+        }
         if let Some(operation) = self.store.get("member_create", operation_id).await? {
             return Ok(TeamOperatorOperation::MemberCreate(operation));
         }
@@ -177,14 +185,23 @@ impl Coordinator {
     }
 
     pub(crate) async fn operator_operations(&self) -> Result<Vec<TeamOperatorOperation>> {
+        let administration = self.administration_operations().await?;
+        let administration_ids = administration
+            .iter()
+            .map(|operation| operation.operation_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
         let mut operations = self
             .store
             .list::<TeamMemberCreateOperation>("member_create", "", u32::MAX)
             .await?
             .into_iter()
+            .filter(|(_, operation)| !administration_ids.contains(operation.operation_id.as_str()))
             .map(|(_, operation)| TeamOperatorOperation::MemberCreate(operation))
             .collect::<Vec<_>>();
         for journal in self.store.board_purge_journal().await? {
+            if administration_ids.contains(journal.operation_id.as_str()) {
+                continue;
+            }
             if let Some(operation) = self
                 .store
                 .board_purge_operation(&journal.operation_id)
@@ -193,6 +210,11 @@ impl Coordinator {
                 operations.push(TeamOperatorOperation::BoardPurge(operation));
             }
         }
+        operations.extend(
+            administration
+                .into_iter()
+                .map(TeamOperatorOperation::Administration),
+        );
         Ok(operations)
     }
 

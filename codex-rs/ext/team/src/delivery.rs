@@ -42,7 +42,17 @@ impl TeamHostService {
                 .is_some(),
             "recipient is not enrolled"
         );
-        let receipt = store.receive(&params.delivery).await?;
+        let mut receipt = store.receive(&params.delivery).await?;
+        if self
+            .gate
+            .is_retiring(ThreadId::from_string(&params.delivery.thread_id)?)
+            && receipt.state == TeamReceiptState::Pending
+        {
+            receipt.state = TeamReceiptState::Rejected;
+            receipt.detail =
+                Some("Recipient is being removed; this input was not admitted.".into());
+            store.update_receipt(&receipt).await?;
+        }
         let _ = self.events.send(HostEvent::Dispatch);
         self.notify();
         Ok(TeamDeliverResponse { receipt })
@@ -57,6 +67,9 @@ impl TeamHostService {
         thread_id: ThreadId,
         boundary: DeliveryBoundary<'_>,
     ) -> Result<()> {
+        if self.gate.is_retiring(thread_id) {
+            return self.reject_retiring_deliveries(thread_id).await;
+        }
         if self.model_selection_pending(thread_id).await? {
             return Ok(());
         }

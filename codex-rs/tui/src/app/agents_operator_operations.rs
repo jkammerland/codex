@@ -6,6 +6,11 @@ use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::render::renderable::Renderable;
 use crate::wrapping::word_wrap_lines;
+use codex_app_server_protocol::TeamAdministrationRequest;
+use codex_app_server_protocol::TeamAdministrationState;
+use codex_app_server_protocol::TeamAgentTarget;
+use codex_app_server_protocol::TeamCleanupParams;
+use codex_app_server_protocol::TeamMemberActionParams;
 use codex_team::TeamMemberCreateState;
 use codex_team::TeamOperatorOperation;
 use codex_team::TeamSnapshot;
@@ -42,6 +47,7 @@ fn operation_id(operation: &TeamOperatorOperation) -> &str {
     match operation {
         TeamOperatorOperation::MemberCreate(operation) => &operation.operation_id,
         TeamOperatorOperation::BoardPurge(operation) => &operation.operation_id,
+        TeamOperatorOperation::Administration(operation) => &operation.operation_id,
     }
 }
 
@@ -71,6 +77,16 @@ fn operation_summary(operation: &TeamOperatorOperation) -> String {
                     scope_label(&operation.scope)
                 )
             }
+        }
+        TeamOperatorOperation::Administration(operation) => {
+            let state = match operation.state {
+                TeamAdministrationState::Queued => "Queued",
+                TeamAdministrationState::Running => "Running",
+                TeamAdministrationState::Waiting => "Waiting",
+                TeamAdministrationState::Succeeded => "Complete",
+                TeamAdministrationState::Rejected => "Rejected",
+            };
+            format!("{} · {state}", administration_label(&operation.request))
         }
     }
 }
@@ -147,6 +163,53 @@ fn operation_lines(operation: &TeamOperatorOperation) -> Vec<Line<'static>> {
                     .into(),
             );
         }
+        TeamOperatorOperation::Administration(operation) => {
+            lines.push(
+                format!(
+                    "Requested by: {} / {} / {}",
+                    operation.actor.machine_id,
+                    operation.actor.server_id,
+                    operation.actor.thread_id
+                )
+                .dim()
+                .into(),
+            );
+            if let Some(reason) = &operation.waiting_reason {
+                lines.push(if operation.state == TeamAdministrationState::Rejected {
+                    reason.clone().red().into()
+                } else {
+                    reason
+                        .clone()
+                        .set_style(crate::style::status_style(
+                            crate::style::StatusTone::Attention,
+                        ))
+                        .into()
+                });
+            }
+            if matches!(
+                operation.request,
+                TeamAdministrationRequest::Member(TeamMemberActionParams::Remove { .. })
+            ) {
+                match operation.state {
+                    TeamAdministrationState::Succeeded => lines.push(
+                        "Member removed. Existing session history remains."
+                            .dim()
+                            .into(),
+                    ),
+                    TeamAdministrationState::Rejected => {}
+                    TeamAdministrationState::Queued
+                    | TeamAdministrationState::Running
+                    | TeamAdministrationState::Waiting => {
+                        lines.push(
+                            "Admitted work finishes before removal. New work is blocked."
+                                .dim()
+                                .into(),
+                        );
+                        lines.push("Operator holds remain in effect.".dim().into());
+                    }
+                }
+            }
+        }
     }
     lines.push(
         format!("Operation: {}", operation_id(operation))
@@ -154,6 +217,40 @@ fn operation_lines(operation: &TeamOperatorOperation) -> Vec<Line<'static>> {
             .into(),
     );
     lines
+}
+
+fn administration_label(request: &TeamAdministrationRequest) -> String {
+    let target_label = |target: &TeamAgentTarget| match target {
+        TeamAgentTarget::Alias(alias) => alias.clone(),
+        TeamAgentTarget::Address(address) => format!(
+            "{} / {} / {}",
+            address.machine_id, address.server_id, address.thread_id
+        ),
+    };
+    match request {
+        TeamAdministrationRequest::Member(TeamMemberActionParams::Create { alias, .. }) => {
+            format!("Create {alias}")
+        }
+        TeamAdministrationRequest::Member(TeamMemberActionParams::Enroll { alias, .. }) => {
+            format!("Enroll {alias}")
+        }
+        TeamAdministrationRequest::Member(TeamMemberActionParams::Rename { alias, .. }) => {
+            format!("Rename to {alias}")
+        }
+        TeamAdministrationRequest::Member(TeamMemberActionParams::Remove { address }) => {
+            format!("Remove {}", target_label(address))
+        }
+        TeamAdministrationRequest::Cleanup(TeamCleanupParams::Preview { scope }) => {
+            format!("Preview cleanup · {}", scope_label(scope))
+        }
+        TeamAdministrationRequest::Cleanup(TeamCleanupParams::Apply { scope, .. }) => {
+            format!("Cleanup · {}", scope_label(scope))
+        }
+        TeamAdministrationRequest::Member(TeamMemberActionParams::Status { .. })
+        | TeamAdministrationRequest::Cleanup(TeamCleanupParams::Status { .. }) => {
+            "Operation status".into()
+        }
+    }
 }
 
 impl App {

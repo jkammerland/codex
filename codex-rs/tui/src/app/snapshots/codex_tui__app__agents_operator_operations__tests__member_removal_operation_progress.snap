@@ -1,0 +1,30 @@
+---
+source: tui/src/app/agents_operator_operations_tests.rs
+assertion_line: 32
+expression: "format!(\"Waiting\\n{pending}\\n\\nComplete\\n{complete}\")"
+---
+Waiting
+  Remove Builder · Waiting
+  Requested by: laptop / primary / reviewer
+  Waiting for the current turn to finish.
+  Admitted work finishes before removal. New work is blocked.
+  Operator holds remain in effect.
+  Operation: remove-42
+  Team operation
+
+
+› 1. Close
+
+  enter select · esc back
+
+Complete
+  Remove Builder · Complete
+  Requested by: laptop / primary / reviewer
+  Member removed. Existing session history remains.
+  Operation: remove-42
+  Team operation
+
+
+› 1. Close
+
+  enter select · esc back

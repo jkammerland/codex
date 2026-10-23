@@ -285,11 +285,12 @@ async fn two_hosts_exchange_mail_through_relay_and_replay_offline_controls() -> 
                     operation_id: Some(uuid::Uuid::new_v4().to_string()),
                     thread_id: address_a.thread_id.clone(),
                     credential: credential.credential.clone(),
-                    action: TeamAgentAction::Send {
+                    action: TeamAgentActionParams::Send {
                         recipient: TeamAddress {
                             thread_id: uuid::Uuid::new_v4().to_string(),
                             ..address_b.clone()
-                        },
+                        }
+                        .into(),
                         body: "Invalid recipient".into(),
                         kind: TeamMessageKind::Request,
                         reply_to: None,
@@ -305,8 +306,8 @@ async fn two_hosts_exchange_mail_through_relay_and_replay_offline_controls() -> 
                     operation_id: Some(uuid::Uuid::new_v4().to_string()),
                     thread_id: address_a.thread_id.clone(),
                     credential: credential.credential,
-                    action: TeamAgentAction::Send {
-                        recipient: address_b.clone(),
+                    action: TeamAgentActionParams::Send {
+                        recipient: address_b.clone().into(),
                         body: "Please review".into(),
                         kind: TeamMessageKind::Request,
                         reply_to: None,

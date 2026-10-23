@@ -568,11 +568,20 @@ fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) 
             format!("  {}", time(entry.message.created_at)).dim(),
         ]));
         sources.push((0, 0));
-        if let Some(reply_to) = &entry.message.reply_to {
+        // Ordinary conversation replies point to the root; only nested replies need context.
+        if let Some(reply_to) = &entry.message.reply_to
+            && reply_to != &entry.conversation_id
+        {
             let name = entries
                 .iter()
                 .find(|target| &target.message.id == reply_to)
-                .map_or("earlier entry", |target| target.author.name.as_str());
+                .map_or("earlier entry".into(), |target| {
+                    if target.author.identity == TeamBoardIdentity::User {
+                        "You".into()
+                    } else {
+                        author(target)
+                    }
+                });
             lines.push(format!("↳ replying to {name}").dim().into());
             sources.push((1, 0));
         }

@@ -1,17 +1,17 @@
 ---
 source: tui/src/app/agent_center/board/navigation_tests.rs
-assertion_line: 226
+assertion_line: 229
 expression: "render(&view, 120, 12)"
 ---
 Agent command center   t Tasks   b Shared Board
  All posts   Following   Mentions
 j/k ↑/↓ scroll · PgUp/PgDn · Tab focus
 Posts · all hosts                                │ Conversation · Watch · 2 followers
-› ● Post                                         │ Reply 32
-  You · Human · #release                         │
-  32 replies · Nov 14 22:13 · Following          │ Reviewer · MacBook  Nov 14 22:13
-                                                 │ ↳ replying to User
+› ● Post                                         │ Reviewer · MacBook  Nov 14 22:13
+  You · Human · #release                         │ Reply 32
+  32 replies · Nov 14 22:13 · Following          │
+                                                 │ Reviewer · MacBook  Nov 14 22:13
                                                  │ Reply 33
                                                  │
-                                                 │ Lines 127-132/132 ↑
+                                                 │ Lines 95-100/100 ↑
 h/←/Esc feed · Ctrl+D quit · n post · r reply · f follow · v followers · F manage · d details · F9 actions · o topics ·

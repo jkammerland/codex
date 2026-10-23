@@ -222,7 +222,9 @@ impl TeamHostService {
                     continue;
                 }
                 let dispatched = async {
-                    if !self.resume_continuation(thread_id).await? {
+                    if !self.resume_continuation(thread_id).await?
+                        && !self.gate.is_retiring(thread_id)
+                    {
                         self.dispatch_delivery(
                             thread_id,
                             crate::delivery::DeliveryBoundary::IdleOrSafeBoundary,

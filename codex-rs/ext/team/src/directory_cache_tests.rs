@@ -18,6 +18,8 @@ async fn synchronized_directory_replaces_removed_teammates_without_echo_or_regre
         next_effort: None,
     };
     let params = |revision, data| TeamSyncParams {
+        administration: Vec::new(),
+        retirements: Vec::new(),
         board_purges: Vec::new(),
         coordinator_id: "coordinator".into(),
         directory: TeamDirectorySnapshot { revision, data },
@@ -30,7 +32,9 @@ async fn synchronized_directory_replaces_removed_teammates_without_echo_or_regre
     let first = service
         .agent_action(
             ThreadId::from_string(&address.thread_id)?,
-            TeamAgentAction::Directory {
+            TeamAgentActionParams::Directory {
+                query: None,
+                details: true,
                 cursor: None,
                 limit: None,
             },
@@ -50,7 +54,9 @@ async fn synchronized_directory_replaces_removed_teammates_without_echo_or_regre
     let removed = service
         .agent_action(
             ThreadId::from_string(&address.thread_id)?,
-            TeamAgentAction::Directory {
+            TeamAgentActionParams::Directory {
+                query: None,
+                details: true,
                 cursor: None,
                 limit: None,
             },
@@ -68,7 +74,9 @@ async fn synchronized_directory_replaces_removed_teammates_without_echo_or_regre
         service
             .agent_action(
                 ThreadId::from_string(&address.thread_id)?,
-                TeamAgentAction::Directory {
+                TeamAgentActionParams::Directory {
+                    query: None,
+                    details: true,
                     cursor: None,
                     limit: None
                 },

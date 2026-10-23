@@ -68,6 +68,8 @@ pub struct TeamHostReadResponse {
     pub data: Vec<TeamEnrollment>,
     /// Runtime state of the listed roots and their descendants.
     pub runtime: Vec<TeamAgentRuntime>,
+    #[serde(default)]
+    pub retirements: Vec<super::TeamMemberRetirement>,
     pub next_cursor: Option<String>,
 }
 

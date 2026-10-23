@@ -143,6 +143,10 @@ impl Coordinator {
                 );
             } else {
                 ensure!(
+                    !self.member_is_retiring(recipient).await?,
+                    "recipient is retiring and does not accept new work"
+                );
+                ensure!(
                     self.store
                         .get::<Agent>("agent", &address_key(recipient))
                         .await?

@@ -1,4 +1,4 @@
-//! Operator-owned Board maintenance. These types are not agent tool actions.
+//! Board maintenance shared by operator commands and enrolled team members.
 
 use crate::JsonSchema;
 use crate::TS;

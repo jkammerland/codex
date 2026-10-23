@@ -32,6 +32,10 @@ impl TeamHostService {
             "only root sessions may leave a team"
         );
         let store = self.require_coordinator(&params.coordinator_id).await?;
+        ensure!(
+            !self.gate.is_retiring(root),
+            "member is retiring; resolve its reported blockers before detachment"
+        );
         if let Some((id, digest)) = &operation
             && let Some(response) = store.host_operation_result(id, digest).await?
         {

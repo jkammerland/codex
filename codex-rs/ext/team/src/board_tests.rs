@@ -82,6 +82,8 @@ async fn fixture() -> Result<(
 async fn sync(service: &TeamHostService, board_state: TeamBoardSnapshot) -> Result<()> {
     service
         .sync(TeamSyncParams {
+            administration: Vec::new(),
+            retirements: Vec::new(),
             board_purges: Vec::new(),
             message_status: Default::default(),
             coordinator_id: "coordinator".into(),
@@ -123,6 +125,8 @@ async fn purge_sync_suppresses_pending_mail_and_filters_stale_cache_and_delivery
     removed_snapshot.entries.clear();
     let response = service
         .sync(TeamSyncParams {
+            administration: Vec::new(),
+            retirements: Vec::new(),
             coordinator_id: "coordinator".into(),
             directory: Default::default(),
             board: Vec::new(),
@@ -155,6 +159,8 @@ async fn purge_sync_suppresses_pending_mail_and_filters_stale_cache_and_delivery
     stale.revision += 2;
     service
         .sync(TeamSyncParams {
+            administration: Vec::new(),
+            retirements: Vec::new(),
             coordinator_id: "coordinator".into(),
             directory: Default::default(),
             board: vec![message.clone()],
@@ -195,11 +201,11 @@ async fn purge_sync_suppresses_pending_mail_and_filters_stale_cache_and_delivery
 fn purge_is_not_an_agent_board_action() {
     let action =
         serde_json::json!({"type":"boardAction","request":{"type":"purge","scope":{"type":"all"}}});
-    assert!(serde_json::from_value::<TeamAgentAction>(action).is_err());
+    assert!(serde_json::from_value::<TeamAgentActionParams>(action).is_err());
 }
 
-fn list() -> TeamAgentAction {
-    TeamAgentAction::BoardAction {
+fn list() -> TeamAgentActionParams {
+    TeamAgentActionParams::BoardAction {
         request: TeamBoardParams::List {
             filter: TeamBoardFilter::All,
             query: None,
@@ -233,9 +239,11 @@ async fn native_and_credential_tools_share_committed_board_and_queued_follow_rec
         .await?;
     assert_eq!(native, bridge);
     assert_eq!(native.result["revision"], 10);
-    assert_eq!(native.result["data"][0]["following"], false);
+    assert_eq!(native.result["data"][0]["subscriptionMode"], "off");
+    assert_eq!(native.result["type"], "threads");
+    assert_eq!(native.result["data"][0]["unreadCount"], 1);
 
-    let action = TeamAgentAction::BoardAction {
+    let action = TeamAgentActionParams::BoardAction {
         request: TeamBoardParams::Follow {
             conversation_id: "conversation".into(),
             identity: None,
@@ -287,7 +295,7 @@ async fn native_and_credential_tools_share_committed_board_and_queued_follow_rec
     sync(&service, snapshot).await?;
     let confirmed = service.agent_action(thread_id, list(), None).await?;
     assert_eq!(confirmed.result["revision"], 11);
-    assert_eq!(confirmed.result["data"][0]["following"], true);
+    assert_eq!(confirmed.result["data"][0]["subscriptionMode"], "wake");
     Ok(())
 }
 
@@ -326,7 +334,11 @@ async fn board_identity_override_cannot_follow_or_read_as_the_operator() -> Resu
         },
     ] {
         let error = service
-            .agent_action(thread_id, TeamAgentAction::BoardAction { request }, None)
+            .agent_action(
+                thread_id,
+                TeamAgentActionParams::BoardAction { request },
+                None,
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -388,7 +400,7 @@ async fn descendant_board_mutations_keep_the_bound_child_identity() -> Result<()
         .unwrap()
         .put("member_credential", &child.to_string(), &"child-credential")
         .await?;
-    let action = TeamAgentAction::BoardAction {
+    let action = TeamAgentActionParams::BoardAction {
         request: TeamBoardParams::Post {
             topic: "general".into(),
             body: "A child report".into(),
@@ -433,7 +445,7 @@ async fn malformed_unicode_mention_never_enters_the_durable_outbox() -> Result<(
     let error = service
         .agent_action(
             ThreadId::from_string(&address.thread_id)?,
-            TeamAgentAction::BoardAction {
+            TeamAgentActionParams::BoardAction {
                 request: TeamBoardParams::Post {
                     topic: "general".into(),
                     body: "é @Reviewer".into(),
@@ -468,3 +480,88 @@ async fn malformed_unicode_mention_never_enters_the_durable_outbox() -> Result<(
 
 #[path = "directory_cache_tests.rs"]
 mod directory_cache_tests;
+
+#[tokio::test]
+async fn unread_pages_queue_ordered_acknowledgements_before_the_next_sync() -> Result<()> {
+    let (_home, service, address, mut snapshot) = fixture().await?;
+    let thread_id = ThreadId::from_string(&address.thread_id)?;
+    let mut reply = snapshot.entries[0].clone();
+    reply.message.id = "reply".into();
+    reply.message.reply_to = Some("conversation".into());
+    reply.message.body = "Later reply".into();
+    reply.append_seq = 8;
+    snapshot.entries.push(reply);
+    snapshot.revision += 1;
+    sync(&service, snapshot.clone()).await?;
+    let read = |cursor| TeamAgentActionParams::BoardAction {
+        request: TeamBoardParams::ReadPage {
+            conversation_id: "conversation".into(),
+            mode: TeamBoardReadMode::Unread,
+            anchor_message_id: None,
+            cursor,
+            limit: Some(1),
+            identity: None,
+        },
+    };
+    let first = service
+        .agent_action(thread_id, read(None), None)
+        .await?
+        .result;
+    let next_cursor = first["page"]["nextCursor"]
+        .as_str()
+        .expect("first page cursor")
+        .to_owned();
+    let second = service
+        .agent_action(thread_id, read(Some(next_cursor)), None)
+        .await?
+        .result;
+    assert_eq!(first["page"]["data"][0]["id"], "conversation");
+    assert_eq!(second["page"]["data"][0]["id"], "reply");
+    let store = service.store.get().expect("store");
+    assert!(store.outbox(0, 100).await?.is_empty());
+
+    for (operation, page) in [("ack-first", first), ("ack-second", second)] {
+        let action = TeamAgentActionParams::BoardAction {
+            request: TeamBoardParams::Acknowledge {
+                token: page["page"]["acknowledgementToken"]
+                    .as_str()
+                    .expect("page token")
+                    .into(),
+            },
+        };
+        let queued = service
+            .agent_action(thread_id, action.clone(), Some(operation.into()))
+            .await?;
+        assert_eq!(queued.result["state"], "queued");
+        assert_eq!(queued.result["route"]["conversationId"], "conversation");
+        assert_eq!(
+            service
+                .agent_action(thread_id, action, Some(operation.into()))
+                .await?,
+            queued
+        );
+    }
+    let outbox = store.outbox(0, 100).await?;
+    assert_eq!(outbox.len(), 2);
+    let acknowledged = outbox
+        .iter()
+        .map(|entry| {
+            let token = entry.payload["request"]["token"]
+                .as_str()
+                .expect("ack token");
+            serde_json::from_str::<serde_json::Value>(token).map(|token| token["through"].clone())
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(
+        acknowledged,
+        vec![serde_json::json!(3), serde_json::json!(8)]
+    );
+    // Fetching and queueing do not mutate the synchronized read marker.
+    assert_eq!(
+        store
+            .get::<TeamBoardSnapshot>("board_cache", "current")
+            .await?,
+        Some(snapshot)
+    );
+    Ok(())
+}

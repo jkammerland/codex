@@ -31,8 +31,8 @@ impl Coordinator {
             })
             .await?;
         ensure!(
-            host.protocol_version == 5,
-            "worker team protocol {} is incompatible with coordinator protocol 5; install matching coordinator and worker builds",
+            host.protocol_version == 6,
+            "worker team protocol {} is incompatible with coordinator protocol 6; install matching coordinator and worker builds",
             host.protocol_version
         );
         if let Some(expected) = self.store.get::<String>("installation", &key).await? {
@@ -244,6 +244,8 @@ impl Coordinator {
             self.synchronize_board(machine, server, peer).await?;
         }
         self.drain_outbox(machine, server, peer).await?;
+        self.observe_retirements(&machine.id, &server.id, &host.retirements)
+            .await?;
         self.publish().await?;
         let synchronized_board = self.synchronize_board(machine, server, peer).await?;
         self.resume_member_creations(&machine.id, &server.id, peer)
@@ -334,6 +336,8 @@ impl Coordinator {
                     board_state,
                     cancellation_adapters: server.cancellation_adapters.clone(),
                     message_status,
+                    administration: self.administration_operations().await?,
+                    retirements: self.retirement_intents(&machine.id, &server.id).await?,
                 },
             })
             .await?;
@@ -544,6 +548,7 @@ impl Coordinator {
                 if address.machine_id == machine.id
                     && address.server_id == server.id
                     && !present.contains(&key)
+                    && !self.member_is_retiring(address).await?
                 {
                     departed.insert(key);
                 }

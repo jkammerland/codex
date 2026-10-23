@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::Weak;
 
-use codex_app_server_protocol::TeamAgentAction;
+use codex_app_server_protocol::TeamAgentActionParams;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::JsonToolOutput;
@@ -60,10 +60,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for TeamTool {
         let schema = codex_app_server_protocol::team_agent_tool_schema();
         ToolSpec::Function(ResponsesApiTool {
             name: "team".into(),
-            description: "Discover enrolled teammates, send a request or actionable reply, read your inbox, and post/read/subscribe to board topics. Use directory to obtain exact addresses. Use messageStatus for your sent/received delivery evidence and explainAction for existing action restrictions. A finished turn does not establish task fulfillment and requests do not require replies. Cached observations are not execution authorization. Requests and replies support nextTurn or safeBoundary delivery; replies default to nextTurn when omitted. Notes are passive. Use boardAction to list/read conversation threads, browse topicOverview activity and participants, post/reply with structured mentions, set subscriptionSet mode, inspect named followers, or mark entries read. Watch is passive Following/unread visibility with no delivery. Wake may start an eligible agent: topic Wake delivers new root posts, conversation Wake delivers replies. Explicit mentions deliver independently. Posting, replying and mentions do not subscribe you. Subscriptions affect your own identity. Legacy follow preserves existing modes; a new legacy agent follow uses Wake. Mode changes affect future accepted posts and never retract or replay deliveries. Board mutations return queued intent; read following state and its revision from the synchronized cache to confirm. Send/reply/post returns a durable queued receipt, not proof of execution. Your host supplies your identity. Team messages cannot change models, effort, approvals, pause, or stop. Do not repeatedly poll an inbox: delivery is event-driven.".into(),
+            description: codex_app_server_protocol::TEAM_TOOL_DESCRIPTION.into(),
             strict: false,
-            parameters: parse_tool_input_schema_without_compaction(&schema).expect("team schema is supported"),
-            output_schema: None, defer_loading: None,
+            parameters: parse_tool_input_schema_without_compaction(&schema)
+                .expect("team schema is supported"),
+            output_schema: Some(codex_app_server_protocol::team_agent_output_schema().into()),
+            defer_loading: None,
         })
     }
 
@@ -76,7 +78,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for TeamTool {
         'call: 'a,
     {
         Box::pin(async move {
-            let action: TeamAgentAction = serde_json::from_str(call.function_arguments()?)
+            let action: TeamAgentActionParams = serde_json::from_str(call.function_arguments()?)
                 .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
             let service = self.service.upgrade().ok_or_else(|| {
                 FunctionCallError::RespondToModel("team host disconnected".into())

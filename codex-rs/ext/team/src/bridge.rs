@@ -11,14 +11,9 @@ use uuid::Uuid;
 
 use crate::TeamHostService;
 
-/// A single cached record keeps directory content and its freshness observation atomic.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct CachedDirectory {
-    #[serde(flatten)]
-    directory: TeamDirectorySnapshot,
-    #[serde(default, rename = "lastSynchronizedAt")]
-    last_synchronized_at: Option<i64>,
-}
+use crate::discovery::CachedDirectory;
+use crate::discovery::page;
+use crate::publish::Publication;
 
 impl TeamHostService {
     pub async fn outbox_list(
@@ -157,6 +152,8 @@ impl TeamHostService {
         store
             .put("board_cache", "current", &params.board_state)
             .await?;
+        self.sync_administration(&params.administration, &params.retirements)
+            .await?;
         // Sync acknowledges coordinator state; echoing TeamChanged would feed
         // another sync indefinitely. Only new entry metadata can unblock mail.
         if entries_changed {
@@ -208,7 +205,7 @@ impl TeamHostService {
     pub(crate) async fn agent_action(
         &self,
         thread_id: ThreadId,
-        action: TeamAgentAction,
+        action: TeamAgentActionParams,
         operation_id: Option<String>,
     ) -> Result<TeamAgentRequestResponse> {
         let operation = operation_id
@@ -231,18 +228,59 @@ impl TeamHostService {
             thread_id: thread_id.to_string(),
             ..enrollment.address
         };
+        // Resolve aliases only once. Retrying a durable call must recover the
+        // original result even when the alias has since changed or disappeared.
+        if let Some((id, digest)) = &operation
+            && let Some(previous) = store.get::<Value>("agent_operation", id).await?
+        {
+            ensure!(
+                previous["digest"].as_str() == Some(digest),
+                "operation identity has conflicting content"
+            );
+            return Ok(TeamAgentRequestResponse {
+                result: previous["result"].clone(),
+            });
+        }
         let result = match action {
-            TeamAgentAction::MessageStatus { query } => {
+            TeamAgentActionParams::Publish {
+                body,
+                topic,
+                conversation_id,
+                reply_to,
+                mentions,
+            } => {
+                self.publish(
+                    sender,
+                    Publication {
+                        body,
+                        topic,
+                        conversation_id,
+                        reply_to,
+                        mentions: mentions.unwrap_or_default(),
+                    },
+                    operation.as_ref(),
+                )
+                .await?
+            }
+            TeamAgentActionParams::Member { request } => {
+                self.agent_member_action(&sender, request, operation.as_ref())
+                    .await?
+            }
+            TeamAgentActionParams::Cleanup { request } => {
+                self.agent_cleanup_action(&sender, request, operation.as_ref())
+                    .await?
+            }
+            TeamAgentActionParams::MessageStatus { query } => {
                 serde_json::to_value(self.agent_message_status(&sender, query).await?)?
             }
-            TeamAgentAction::ExplainAction { query } => {
+            TeamAgentActionParams::ExplainAction { query } => {
                 serde_json::to_value(self.agent_action_explanation(&sender, query).await?)?
             }
-            TeamAgentAction::BoardAction { request } => {
+            TeamAgentActionParams::BoardAction { request } => {
                 self.board_action(sender, request, operation.as_ref())
                     .await?
             }
-            TeamAgentAction::Reply {
+            TeamAgentActionParams::Reply {
                 message_id,
                 body,
                 delivery,
@@ -273,25 +311,13 @@ impl TeamHostService {
                 )
                 .await?
             }
-            TeamAgentAction::Directory { cursor, limit } => {
-                let cached = store
-                    .get::<CachedDirectory>("directory_cache", "current")
-                    .await?
-                    .unwrap_or_default();
-                let snapshot = cached.directory;
-                let mut entries = snapshot
-                    .data
-                    .into_iter()
-                    .map(|entry| serde_json::to_string(&entry.address).map(|key| (key, entry)))
-                    .collect::<serde_json::Result<Vec<_>>>()?;
-                entries.retain(|(key, _)| cursor.as_ref().is_none_or(|cursor| key > cursor));
-                entries.sort_by(|left, right| left.0.cmp(&right.0));
-                let mut result = page(entries, limit);
-                result["revision"] = json!(snapshot.revision);
-                result["lastSynchronizedAt"] = json!(cached.last_synchronized_at);
-                result
-            }
-            TeamAgentAction::Board {
+            TeamAgentActionParams::Directory {
+                cursor,
+                limit,
+                query,
+                details,
+            } => self.agent_directory(cursor, limit, query, details).await?,
+            TeamAgentActionParams::Board {
                 topic,
                 cursor,
                 limit,
@@ -305,18 +331,11 @@ impl TeamHostService {
                     .await?,
                 limit,
             ),
-            TeamAgentAction::Inbox { cursor, limit } => {
-                let mut messages = store
-                    .deliveries(&thread_id.to_string())
+            TeamAgentActionParams::Inbox { cursor, limit } => {
+                self.agent_inbox(&thread_id.to_string(), cursor, limit)
                     .await?
-                    .into_iter()
-                    .map(|(delivery, _)| (delivery.message.id.clone(), delivery.message))
-                    .filter(|(id, _)| cursor.as_ref().is_none_or(|cursor| id > cursor))
-                    .collect::<Vec<_>>();
-                messages.sort_by(|left, right| left.0.cmp(&right.0));
-                page(messages, limit)
             }
-            TeamAgentAction::Send {
+            TeamAgentActionParams::Send {
                 recipient,
                 body,
                 kind,
@@ -325,8 +344,13 @@ impl TeamHostService {
             } => {
                 ensure!(
                     kind != TeamMessageKind::Board,
-                    "use post for board messages"
+                    "use publish for Board messages"
                 );
+                ensure!(
+                    kind != TeamMessageKind::Note || delivery == TeamDeliveryMode::NextTurn,
+                    "passive notes require nextTurn delivery"
+                );
+                let (recipient, _) = self.resolve_team_target(&recipient).await?;
                 self.queue_message(
                     sender,
                     Some(recipient),
@@ -339,7 +363,7 @@ impl TeamHostService {
                 )
                 .await?
             }
-            TeamAgentAction::Post {
+            TeamAgentActionParams::Post {
                 topic,
                 body,
                 reply_to,
@@ -357,7 +381,7 @@ impl TeamHostService {
                 )
                 .await?
             }
-            TeamAgentAction::Subscribe { topic, enabled } => {
+            TeamAgentActionParams::Subscribe { topic, enabled } => {
                 ensure!(!topic.trim().is_empty(), "board topic is required");
                 let id = Uuid::now_v7().to_string();
                 let payload = json!({"sender": sender, "topic": topic, "enabled": enabled});
@@ -427,7 +451,59 @@ impl TeamHostService {
             .get()
             .ok_or_else(|| anyhow::anyhow!("team host is not enrolled"))?;
         let payload = json!({"message": message, "delivery": delivery});
-        let result = json!({"id": message.id, "state": "queued"});
+        let mut result = json!({
+            "id":message.id,"state":"queued","delivery":delivery,
+            "route":if let Some(recipient) = &message.recipient { json!({"type":"direct","recipient":recipient}) } else {
+                json!({"type":"board","conversationId":message.reply_to,"topic":message.topic})
+            }
+        });
+        if message.kind == TeamMessageKind::Board {
+            let snapshot = store
+                .get::<TeamBoardSnapshot>("board_cache", "current")
+                .await?
+                .unwrap_or_default();
+            let conversation_id = message
+                .reply_to
+                .as_ref()
+                .and_then(|id| {
+                    snapshot
+                        .entries
+                        .iter()
+                        .find(|entry| &entry.message.id == id)
+                })
+                .map(|entry| entry.conversation_id.clone());
+            let conversation_id =
+                conversation_id.or_else(|| message.reply_to.is_none().then(|| message.id.clone()));
+            result["route"]["conversationId"] = json!(conversation_id);
+            result["route"]["replyTo"] = json!(message.reply_to);
+            let identity = TeamBoardIdentity::Agent {
+                address: message.sender.clone(),
+            };
+            result["subscriptionMode"] = json!(
+                conversation_id
+                    .as_ref()
+                    .and_then(|id| snapshot
+                        .followers
+                        .iter()
+                        .find(|follower| &follower.conversation_id == id
+                            && follower.identity == identity))
+                    .map_or(TeamBoardSubscriptionMode::Off, |follower| follower.mode)
+            );
+            result["topicSubscriptionMode"] = json!(
+                snapshot
+                    .topic_subscriptions
+                    .iter()
+                    .find(
+                        |subscription| Some(&subscription.topic) == message.topic.as_ref()
+                            && subscription.identity == identity
+                    )
+                    .map_or(TeamBoardSubscriptionMode::Off, |subscription| subscription
+                        .mode)
+            );
+            result["notificationPolicy"] = json!("mentionsOrWakeSubscriptions");
+            result["revision"] = json!(snapshot.revision);
+            result["freshness"] = json!("lastSynchronized");
+        }
         let result = if let Some((operation_id, digest)) = operation {
             store
                 .enqueue_agent_operation(
@@ -448,10 +524,10 @@ impl TeamHostService {
     }
 }
 
-fn agent_operation_digest(action: &TeamAgentAction) -> Result<String> {
+fn agent_operation_digest(action: &TeamAgentActionParams) -> Result<String> {
     // Durable operation receipts used this exact field order before replies
     // could choose a boundary. Keep that identity across an upgrade/retry.
-    if let TeamAgentAction::Reply {
+    if let TeamAgentActionParams::Reply {
         message_id,
         body,
         delivery: TeamDeliveryMode::NextTurn,
@@ -472,15 +548,4 @@ fn agent_operation_digest(action: &TeamAgentAction) -> Result<String> {
         })?);
     }
     Ok(serde_json::to_string(action)?)
-}
-
-fn page<T: serde::Serialize>(mut data: Vec<(String, T)>, limit: Option<u32>) -> Value {
-    let limit = limit.unwrap_or(100).clamp(1, 1000) as usize;
-    let next_cursor = if data.len() > limit {
-        data.truncate(limit);
-        data.last().map(|entry| entry.0.clone())
-    } else {
-        None
-    };
-    json!({"data": data.into_iter().map(|(_, value)| value).collect::<Vec<_>>(), "nextCursor": next_cursor})
 }

@@ -9,8 +9,14 @@ use anyhow::bail;
 use anyhow::ensure;
 use codex_app_server_protocol::*;
 
+#[path = "board_navigation.rs"]
+mod navigation;
+#[path = "board_paging.rs"]
+mod paging;
 #[path = "board_topics.rs"]
 mod topics;
+pub use navigation::query_agent_board;
+pub use navigation::validate_board_acknowledgement;
 pub use topics::topic_overviews;
 
 pub fn query_board(
@@ -29,8 +35,15 @@ pub fn query_board(
             identity,
         } => {
             let viewer = identity.as_ref().unwrap_or(viewer);
-            let query = query.as_ref().map(|query| query.to_lowercase());
-            let mut data = conversations(snapshot, viewer)
+            let scope = serde_json::to_string(&("list", filter, query, topic))?;
+            let membership = if *filter == TeamBoardFilter::Following {
+                paging::Membership::Following
+            } else {
+                paging::Membership::None
+            };
+            let (position, prefix) =
+                paging::PageCursor::open(snapshot, viewer, scope, cursor.as_deref(), membership)?;
+            let mut data = conversations(&prefix, viewer)
                 .into_iter()
                 .filter(|conversation| {
                     let matches_filter = match filter {
@@ -41,33 +54,31 @@ pub fn query_board(
                                     != TeamBoardSubscriptionMode::Off
                         }
                         TeamBoardFilter::Mentions => conversation.mentioned,
+                        TeamBoardFilter::Unread => conversation.unread,
                     };
+                    let entries = prefix
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.conversation_id == conversation.id)
+                        .collect::<Vec<_>>();
                     matches_filter
                         && topic.as_ref().is_none_or(|topic| {
                             conversation.root.message.topic.as_ref() == Some(topic)
                         })
                         && query.as_ref().is_none_or(|query| {
-                            snapshot.entries.iter().any(|entry| {
-                                entry.conversation_id == conversation.id
-                                    && (entry.message.body.to_lowercase().contains(query)
-                                        || entry.author.name.to_lowercase().contains(query)
-                                        || entry.message.topic.as_ref().is_some_and(|topic| {
-                                            topic.to_lowercase().contains(query)
-                                        }))
-                            })
+                            team_board_matches_query(
+                                conversation.root.message.topic.as_deref(),
+                                &entries,
+                                query,
+                            )
                         })
                 })
                 .collect::<Vec<_>>();
             data.sort_by(|a, b| (b.latest.append_seq, &b.id).cmp(&(a.latest.append_seq, &a.id)));
-            if let Some(cursor) = cursor {
-                let (expected_revision, sequence, id): (i64, i64, String) =
-                    serde_json::from_str(cursor)?;
-                ensure!(
-                    expected_revision == revision,
-                    "board changed; restart the list from its first page"
-                );
+            if cursor.is_some() {
                 data.retain(|entry| {
-                    (entry.latest.append_seq, entry.id.as_str()) < (sequence, id.as_str())
+                    (entry.latest.append_seq, entry.id.as_str())
+                        < (position.sequence, position.key.as_str())
                 });
             }
             let size = page_size(*limit)?;
@@ -75,9 +86,7 @@ pub fn query_board(
             data.truncate(size);
             let next_cursor = if more {
                 data.last()
-                    .map(|entry| {
-                        serde_json::to_string(&(revision, entry.latest.append_seq, &entry.id))
-                    })
+                    .map(|entry| position.after(entry.latest.append_seq, &entry.id))
                     .transpose()?
             } else {
                 None
@@ -88,6 +97,7 @@ pub fn query_board(
                 next_cursor,
             })
         }
+        TeamBoardParams::ReadPage { .. } => navigation::read_page(snapshot, viewer, request),
         TeamBoardParams::Read {
             conversation_id,
             cursor,
@@ -200,6 +210,7 @@ pub fn query_board(
         | TeamBoardParams::Reply { .. }
         | TeamBoardParams::Follow { .. }
         | TeamBoardParams::MarkRead { .. }
+        | TeamBoardParams::Acknowledge { .. }
         | TeamBoardParams::TopicFollow { .. }
         | TeamBoardParams::SubscriptionSet { .. } => {
             bail!("board mutation requires coordinator acceptance")

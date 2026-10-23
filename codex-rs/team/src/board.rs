@@ -36,6 +36,7 @@ pub(crate) fn is_board_query(request: &TeamBoardParams) -> bool {
         request,
         TeamBoardParams::List { .. }
             | TeamBoardParams::Read { .. }
+            | TeamBoardParams::ReadPage { .. }
             | TeamBoardParams::Followers { .. }
             | TeamBoardParams::Topics { .. }
             | TeamBoardParams::TopicOverview { .. }
@@ -107,7 +108,8 @@ impl Coordinator {
             let available = statuses
                 .get(&server_key(&address.machine_id, &address.server_id))
                 .is_some_and(|status| status.connected)
-                && agent.status != "archived";
+                && agent.status != "archived"
+                && !self.member_is_retiring(&address).await?;
             let identity = TeamBoardIdentity::Agent { address };
             snapshot.members.push(TeamBoardMember {
                 author: self.board_author(&identity, false).await?,
@@ -297,6 +299,34 @@ impl Coordinator {
                     .await?;
                 conversation_id = Some(conversation);
             }
+            TeamBoardParams::Acknowledge { token } => {
+                // The coordinator validates coverage against its current marker,
+                // not a worker cache that may lag a preceding acknowledgement.
+                let snapshot = self.store.board_snapshot().await?;
+                let read =
+                    codex_team_store::validate_board_acknowledgement(&snapshot, &actor, &token)?;
+                conversation_id = Some(read.conversation_id.clone());
+                let previous = snapshot.reads.iter().find(|previous| {
+                    previous.conversation_id == read.conversation_id
+                        && previous.identity == read.identity
+                });
+                if previous.is_some_and(|previous| previous.append_seq == read.append_seq) {
+                    return Ok((
+                        TeamBoardResponse::Mutation {
+                            revision: clock.revision,
+                            state: TeamBoardMutationState::Applied,
+                            id: id.into(),
+                            conversation_id,
+                        },
+                        writes,
+                    ));
+                }
+                writes.push((
+                    "board_read",
+                    subscription_key(&read.conversation_id, &read.identity)?,
+                    serde_json::to_value(read)?,
+                ));
+            }
             TeamBoardParams::MarkRead {
                 conversation_id: conversation,
                 identity,
@@ -370,6 +400,7 @@ impl Coordinator {
             }
             TeamBoardParams::List { .. }
             | TeamBoardParams::Read { .. }
+            | TeamBoardParams::ReadPage { .. }
             | TeamBoardParams::Followers { .. }
             | TeamBoardParams::Topics { .. }
             | TeamBoardParams::TopicOverview { .. } => {
@@ -446,6 +477,12 @@ impl Coordinator {
             validate_mentions(&record.message.body, &mentions)?;
             for mention in &mentions {
                 self.board_author(&mention.identity, false).await?;
+                if let TeamBoardIdentity::Agent { address } = &mention.identity {
+                    ensure!(
+                        !self.member_is_retiring(address).await?,
+                        "member is retiring and does not accept new work"
+                    );
+                }
             }
             let conversation_id = if let Some(parent) = &record.message.reply_to {
                 let parent = self
@@ -586,12 +623,12 @@ impl Coordinator {
                 TeamBoardNotificationReason::Mention,
             )?;
         }
-        let enrolled = self
-            .agents()
-            .await?
-            .into_iter()
-            .map(|agent| address_key(&agent.enrollment.address))
-            .collect::<std::collections::HashSet<_>>();
+        let mut enrolled = std::collections::HashSet::new();
+        for agent in self.agents().await? {
+            if !self.member_is_retiring(&agent.enrollment.address).await? {
+                enrolled.insert(address_key(&agent.enrollment.address));
+            }
+        }
         Ok(targets
             .into_values()
             .filter(|notification| match &notification.identity {

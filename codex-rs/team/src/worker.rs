@@ -32,6 +32,21 @@ pub(crate) fn start(coordinator: &Arc<Coordinator>) -> tokio::task::JoinSet<()> 
             }
         }
     });
+    // Administrative RPCs have their own owner so a slow enrollment never
+    // blocks ordinary mail publication or priority execution controls.
+    let administrator = coordinator.clone();
+    let mut administration_changed = coordinator.changed.subscribe();
+    tasks.spawn(async move {
+        loop {
+            administration_changed.borrow_and_update();
+            if let Err(error) = administrator.advance_administration().await {
+                tracing::error!(%error, "team administration requires reconciliation");
+            }
+            if administration_changed.changed().await.is_err() {
+                break;
+            }
+        }
+    });
     for machine in &coordinator.manifest.machines {
         for server in &machine.servers {
             tasks.spawn(run(coordinator.clone(), machine.clone(), server.clone()));

@@ -4,7 +4,7 @@ use pretty_assertions::assert_eq;
 
 use super::query_board;
 
-fn entry(id: &str, conversation: &str, sequence: i64, body: &str) -> TeamBoardEntry {
+pub(super) fn entry(id: &str, conversation: &str, sequence: i64, body: &str) -> TeamBoardEntry {
     TeamBoardEntry {
         message: TeamMessage {
             id: id.into(),
@@ -116,7 +116,18 @@ fn board_pages_use_coordinator_order_and_search_all_replies() -> Result<()> {
     );
     let mut newer = snapshot;
     newer.revision += 1;
-    assert!(query_board(&newer, &TeamBoardIdentity::User, &next).is_err());
+    // Read/subscription revisions do not change immutable discovery ordering.
+    let TeamBoardResponse::List { data, .. } =
+        query_board(&newer, &TeamBoardIdentity::User, &next)?
+    else {
+        panic!("list response");
+    };
+    assert_eq!(
+        data.iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["second"]
+    );
     Ok(())
 }
 
@@ -309,7 +320,17 @@ fn topic_overview_pages_are_revision_bound_and_ordered_by_append_sequence() -> R
     );
     assert_eq!(next_cursor, None);
     snapshot.revision += 1;
-    assert!(query_board(&snapshot, &TeamBoardIdentity::User, &query).is_err());
+    let TeamBoardResponse::TopicOverview { data, .. } =
+        query_board(&snapshot, &TeamBoardIdentity::User, &query)?
+    else {
+        panic!("topic overview response");
+    };
+    assert_eq!(
+        data.iter()
+            .map(|topic| topic.topic.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z"]
+    );
     Ok(())
 }
 

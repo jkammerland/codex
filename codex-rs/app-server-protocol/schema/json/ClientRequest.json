@@ -4385,7 +4385,91 @@
       ],
       "type": "object"
     },
-    "TeamAgentAction": {
+    "TeamAdministrationOperation": {
+      "properties": {
+        "actor": {
+          "$ref": "#/definitions/TeamAddress"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/definitions/TeamAdministrationRequest"
+        },
+        "result": true,
+        "state": {
+          "$ref": "#/definitions/TeamAdministrationState"
+        },
+        "waitingReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "actor",
+        "operationId",
+        "request",
+        "state"
+      ],
+      "type": "object"
+    },
+    "TeamAdministrationRequest": {
+      "oneOf": [
+        {
+          "properties": {
+            "request": {
+              "$ref": "#/definitions/TeamMemberActionParams"
+            },
+            "type": {
+              "enum": [
+                "member"
+              ],
+              "title": "MemberTeamAdministrationRequestType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "request",
+            "type"
+          ],
+          "title": "MemberTeamAdministrationRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "request": {
+              "$ref": "#/definitions/TeamCleanupParams"
+            },
+            "type": {
+              "enum": [
+                "cleanup"
+              ],
+              "title": "CleanupTeamAdministrationRequestType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "request",
+            "type"
+          ],
+          "title": "CleanupTeamAdministrationRequest",
+          "type": "object"
+        }
+      ]
+    },
+    "TeamAdministrationState": {
+      "enum": [
+        "queued",
+        "running",
+        "waiting",
+        "succeeded",
+        "rejected"
+      ],
+      "type": "string"
+    },
+    "TeamAgentActionParams": {
       "description": "Agent actions deliberately omit execution controls and model settings.",
       "oneOf": [
         {
@@ -4397,7 +4481,7 @@
               "enum": [
                 "messageStatus"
               ],
-              "title": "MessageStatusTeamAgentActionType",
+              "title": "MessageStatusTeamAgentActionParamsType",
               "type": "string"
             }
           },
@@ -4405,7 +4489,7 @@
             "query",
             "type"
           ],
-          "title": "MessageStatusTeamAgentAction",
+          "title": "MessageStatusTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4417,7 +4501,7 @@
               "enum": [
                 "explainAction"
               ],
-              "title": "ExplainActionTeamAgentActionType",
+              "title": "ExplainActionTeamAgentActionParamsType",
               "type": "string"
             }
           },
@@ -4425,7 +4509,7 @@
             "query",
             "type"
           ],
-          "title": "ExplainActionTeamAgentAction",
+          "title": "ExplainActionTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4437,7 +4521,7 @@
               "enum": [
                 "boardAction"
               ],
-              "title": "BoardActionTeamAgentActionType",
+              "title": "BoardActionTeamAgentActionParamsType",
               "type": "string"
             }
           },
@@ -4445,7 +4529,94 @@
             "request",
             "type"
           ],
-          "title": "BoardActionTeamAgentAction",
+          "title": "BoardActionTeamAgentActionParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "conversation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mentions": {
+              "items": {
+                "$ref": "#/definitions/TeamAgentMentionParams"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "reply_to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "topic": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "publish"
+              ],
+              "title": "PublishTeamAgentActionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "type"
+          ],
+          "title": "PublishTeamAgentActionParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "request": {
+              "$ref": "#/definitions/TeamMemberActionParams"
+            },
+            "type": {
+              "enum": [
+                "member"
+              ],
+              "title": "MemberTeamAgentActionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "request",
+            "type"
+          ],
+          "title": "MemberTeamAgentActionParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "request": {
+              "$ref": "#/definitions/TeamCleanupParams"
+            },
+            "type": {
+              "enum": [
+                "cleanup"
+              ],
+              "title": "CleanupTeamAgentActionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "request",
+            "type"
+          ],
+          "title": "CleanupTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4468,7 +4639,7 @@
               "enum": [
                 "reply"
               ],
-              "title": "ReplyTeamAgentActionType",
+              "title": "ReplyTeamAgentActionParamsType",
               "type": "string"
             }
           },
@@ -4477,7 +4648,7 @@
             "message_id",
             "type"
           ],
-          "title": "ReplyTeamAgentAction",
+          "title": "ReplyTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4488,6 +4659,10 @@
                 "null"
               ]
             },
+            "details": {
+              "default": false,
+              "type": "boolean"
+            },
             "limit": {
               "format": "uint32",
               "minimum": 0.0,
@@ -4496,18 +4671,24 @@
                 "null"
               ]
             },
+            "query": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "directory"
               ],
-              "title": "DirectoryTeamAgentActionType",
+              "title": "DirectoryTeamAgentActionParamsType",
               "type": "string"
             }
           },
           "required": [
             "type"
           ],
-          "title": "DirectoryTeamAgentAction",
+          "title": "DirectoryTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4530,14 +4711,14 @@
               "enum": [
                 "inbox"
               ],
-              "title": "InboxTeamAgentActionType",
+              "title": "InboxTeamAgentActionParamsType",
               "type": "string"
             }
           },
           "required": [
             "type"
           ],
-          "title": "InboxTeamAgentAction",
+          "title": "InboxTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4546,13 +4727,23 @@
               "type": "string"
             },
             "delivery": {
-              "$ref": "#/definitions/TeamDeliveryMode"
+              "allOf": [
+                {
+                  "$ref": "#/definitions/TeamDeliveryMode"
+                }
+              ],
+              "default": "nextTurn"
             },
             "kind": {
-              "$ref": "#/definitions/TeamMessageKind"
+              "allOf": [
+                {
+                  "$ref": "#/definitions/TeamMessageKind"
+                }
+              ],
+              "default": "request"
             },
             "recipient": {
-              "$ref": "#/definitions/TeamAddress"
+              "$ref": "#/definitions/TeamAgentTarget"
             },
             "reply_to": {
               "type": [
@@ -4564,18 +4755,16 @@
               "enum": [
                 "send"
               ],
-              "title": "SendTeamAgentActionType",
+              "title": "SendTeamAgentActionParamsType",
               "type": "string"
             }
           },
           "required": [
             "body",
-            "delivery",
-            "kind",
             "recipient",
             "type"
           ],
-          "title": "SendTeamAgentAction",
+          "title": "SendTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4596,7 +4785,7 @@
               "enum": [
                 "post"
               ],
-              "title": "PostTeamAgentActionType",
+              "title": "PostTeamAgentActionParamsType",
               "type": "string"
             }
           },
@@ -4605,7 +4794,7 @@
             "topic",
             "type"
           ],
-          "title": "PostTeamAgentAction",
+          "title": "PostTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4631,7 +4820,7 @@
               "enum": [
                 "board"
               ],
-              "title": "BoardTeamAgentActionType",
+              "title": "BoardTeamAgentActionParamsType",
               "type": "string"
             }
           },
@@ -4639,7 +4828,7 @@
             "topic",
             "type"
           ],
-          "title": "BoardTeamAgentAction",
+          "title": "BoardTeamAgentActionParams",
           "type": "object"
         },
         {
@@ -4654,7 +4843,7 @@
               "enum": [
                 "subscribe"
               ],
-              "title": "SubscribeTeamAgentActionType",
+              "title": "SubscribeTeamAgentActionParamsType",
               "type": "string"
             }
           },
@@ -4663,7 +4852,7 @@
             "topic",
             "type"
           ],
-          "title": "SubscribeTeamAgentAction",
+          "title": "SubscribeTeamAgentActionParams",
           "type": "object"
         }
       ]
@@ -4685,6 +4874,33 @@
         "environments"
       ],
       "type": "object"
+    },
+    "TeamAgentMentionParams": {
+      "properties": {
+        "display": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/definitions/TeamAgentTarget"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    },
+    "TeamAgentTarget": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TeamAddress"
+        },
+        {
+          "type": "string"
+        }
+      ]
     },
     "TeamAvailability": {
       "properties": {
@@ -4787,7 +5003,8 @@
       "enum": [
         "all",
         "following",
-        "mentions"
+        "mentions",
+        "unread"
       ],
       "type": "string"
     },
@@ -5027,6 +5244,84 @@
             "type"
           ],
           "title": "ReadTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "anchor_message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "conversation_id": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limit": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "mode": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/TeamBoardReadMode"
+                }
+              ],
+              "default": "unread"
+            },
+            "type": {
+              "enum": [
+                "readPage"
+              ],
+              "title": "ReadPageTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversation_id",
+            "type"
+          ],
+          "title": "ReadPageTeamBoardParams",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "token": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "acknowledge"
+              ],
+              "title": "AcknowledgeTeamBoardParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "token",
+            "type"
+          ],
+          "title": "AcknowledgeTeamBoardParams",
           "type": "object"
         },
         {
@@ -5371,6 +5666,74 @@
       ],
       "type": "object"
     },
+    "TeamBoardPurgeScope": {
+      "oneOf": [
+        {
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "conversation"
+              ],
+              "title": "ConversationTeamBoardPurgeScopeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversation_id",
+            "type"
+          ],
+          "title": "ConversationTeamBoardPurgeScope",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "topic": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "topic"
+              ],
+              "title": "TopicTeamBoardPurgeScopeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "topic",
+            "type"
+          ],
+          "title": "TopicTeamBoardPurgeScope",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "all"
+              ],
+              "title": "AllTeamBoardPurgeScopeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "AllTeamBoardPurgeScope",
+          "type": "object"
+        }
+      ]
+    },
+    "TeamBoardReadMode": {
+      "enum": [
+        "unread",
+        "history",
+        "around"
+      ],
+      "type": "string"
+    },
     "TeamBoardReadState": {
       "properties": {
         "appendSeq": {
@@ -5553,6 +5916,78 @@
         "server"
       ],
       "type": "object"
+    },
+    "TeamCleanupParams": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "scope": {
+              "$ref": "#/definitions/TeamBoardPurgeScope"
+            },
+            "type": {
+              "enum": [
+                "preview"
+              ],
+              "title": "PreviewTeamCleanupParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope",
+            "type"
+          ],
+          "title": "PreviewTeamCleanupParams",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expected_revision": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "scope": {
+              "$ref": "#/definitions/TeamBoardPurgeScope"
+            },
+            "type": {
+              "enum": [
+                "apply"
+              ],
+              "title": "ApplyTeamCleanupParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "expected_revision",
+            "scope",
+            "type"
+          ],
+          "title": "ApplyTeamCleanupParams",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "status"
+              ],
+              "title": "StatusTeamCleanupParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id",
+            "type"
+          ],
+          "title": "StatusTeamCleanupParams",
+          "type": "object"
+        }
+      ]
     },
     "TeamControlState": {
       "properties": {
@@ -5772,6 +6207,167 @@
         "resume",
         "stop",
         "leave"
+      ],
+      "type": "string"
+    },
+    "TeamMemberActionParams": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "alias": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "machine_id": {
+              "type": "string"
+            },
+            "server_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "create"
+              ],
+              "title": "CreateTeamMemberActionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "alias",
+            "cwd",
+            "machine_id",
+            "server_id",
+            "type"
+          ],
+          "title": "CreateTeamMemberActionParams",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "$ref": "#/definitions/TeamAddress"
+            },
+            "alias": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "enroll"
+              ],
+              "title": "EnrollTeamMemberActionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "address",
+            "alias",
+            "type"
+          ],
+          "title": "EnrollTeamMemberActionParams",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "$ref": "#/definitions/TeamAgentTarget"
+            },
+            "alias": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "rename"
+              ],
+              "title": "RenameTeamMemberActionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "address",
+            "alias",
+            "type"
+          ],
+          "title": "RenameTeamMemberActionParams",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "$ref": "#/definitions/TeamAgentTarget"
+            },
+            "type": {
+              "enum": [
+                "remove"
+              ],
+              "title": "RemoveTeamMemberActionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "address",
+            "type"
+          ],
+          "title": "RemoveTeamMemberActionParams",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "status"
+              ],
+              "title": "StatusTeamMemberActionParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id",
+            "type"
+          ],
+          "title": "StatusTeamMemberActionParams",
+          "type": "object"
+        }
+      ]
+    },
+    "TeamMemberRetirement": {
+      "properties": {
+        "address": {
+          "$ref": "#/definitions/TeamAddress"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/TeamMemberRetirementState"
+        },
+        "waitingReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "operationId",
+        "state"
+      ],
+      "type": "object"
+    },
+    "TeamMemberRetirementState": {
+      "enum": [
+        "retiring",
+        "removed"
       ],
       "type": "string"
     },

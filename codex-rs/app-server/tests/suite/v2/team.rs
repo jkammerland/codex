@@ -131,6 +131,27 @@ async fn paused_host_queues_one_delivery_and_resumes_the_original_thread() -> Re
         .find(|item| item.to_string().contains("Please review the change"))
         .expect("peer input reaches model");
     assert_eq!(peer["role"], "assistant");
+
+    // Enrollment supplies authorization once through trusted context, while
+    // incoming mail keeps its attributed peer role.
+    let authorization = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item.to_string().contains("<team_authorization>"))
+        .collect::<Vec<_>>();
+    assert_eq!(authorization.len(), 1);
+    assert_eq!(authorization[0]["role"], "developer");
+    assert!(
+        authorization[0]
+            .to_string()
+            .contains("Board cleanup through team tools are authorized")
+    );
+    assert!(
+        authorization[0]
+            .to_string()
+            .contains("Models, execution controls, and approvals remain user-owned")
+    );
     Ok(())
 }
 
@@ -335,7 +356,9 @@ async fn agent_credential_cannot_impersonate_another_enrolled_session() -> Resul
                 operation_id: None,
                 thread_id: second.id.clone(),
                 credential: credential.credential.clone(),
-                action: TeamAgentAction::Directory {
+                action: TeamAgentActionParams::Directory {
+                    query: None,
+                    details: true,
                     cursor: None,
                     limit: None,
                 },
@@ -353,7 +376,9 @@ async fn agent_credential_cannot_impersonate_another_enrolled_session() -> Resul
                 operation_id: None,
                 thread_id: first.id,
                 credential: credential.credential,
-                action: TeamAgentAction::Directory {
+                action: TeamAgentActionParams::Directory {
+                    query: None,
+                    details: true,
                     cursor: None,
                     limit: None,
                 },

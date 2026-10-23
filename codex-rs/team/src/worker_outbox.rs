@@ -87,6 +87,17 @@ impl Coordinator {
         }
         let prepared: Result<crate::board::BoardWrites> = async {
             match entry.kind.as_str() {
+                "administration" => {
+                    let operation: TeamAdministrationOperation =
+                        serde_json::from_value(entry.payload.clone())?;
+                    ensure!(
+                        operation.operation_id == entry.id
+                            && operation.actor.machine_id == machine.id
+                            && operation.actor.server_id == server.id,
+                        "administration actor belongs to another worker"
+                    );
+                    self.prepare_administration(operation).await
+                }
                 "message" => {
                     let outbound: OutboundMessage = serde_json::from_value(entry.payload.clone())?;
                     ensure!(
@@ -155,7 +166,7 @@ impl Coordinator {
             Err(error) => {
                 // The store scrubs removed replies and any previously rejected
                 // descendants together with the durable intake receipt.
-                vec![(
+                let mut writes = vec![(
                     "rejected_outbox",
                     id.clone(),
                     serde_json::to_value(RejectedOutbox {
@@ -164,7 +175,35 @@ impl Coordinator {
                         entry: entry.clone(),
                         reason: error.to_string(),
                     })?,
-                )]
+                )];
+                // A valid host-origin operation still gets terminal status when
+                // its actor was removed before coordinator intake.
+                if entry.kind == "administration"
+                    && let Ok(mut operation) =
+                        serde_json::from_value::<TeamAdministrationOperation>(entry.payload.clone())
+                    && operation.operation_id == entry.id
+                    && operation.actor.machine_id == machine.id
+                    && operation.actor.server_id == server.id
+                    && uuid::Uuid::parse_str(&operation.operation_id).is_ok()
+                    && self
+                        .store
+                        .get::<TeamAdministrationOperation>(
+                            "administration",
+                            &operation.operation_id,
+                        )
+                        .await?
+                        .is_none()
+                {
+                    operation.state = TeamAdministrationState::Rejected;
+                    operation.waiting_reason = Some(error.to_string());
+                    operation.result = None;
+                    writes.push((
+                        "administration",
+                        operation.operation_id.clone(),
+                        serde_json::to_value(operation)?,
+                    ));
+                }
+                writes
             }
         };
         self.store

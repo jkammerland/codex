@@ -5,6 +5,42 @@ use codex_app_server_protocol::TeamBoardPurgeWorker;
 use crossterm::event::KeyCode;
 use pretty_assertions::assert_eq;
 
+#[tokio::test]
+async fn retirement_progress_shows_why_removal_is_waiting() {
+    let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
+    let mut operation = codex_app_server_protocol::TeamAdministrationOperation {
+        operation_id: "remove-42".into(),
+        actor: codex_app_server_protocol::TeamAddress {
+            machine_id: "laptop".into(),
+            server_id: "primary".into(),
+            thread_id: "reviewer".into(),
+        },
+        request: TeamAdministrationRequest::Member(TeamMemberActionParams::Remove {
+            address: TeamAgentTarget::Alias("Builder".into()),
+        }),
+        state: TeamAdministrationState::Waiting,
+        waiting_reason: Some("Waiting for the current turn to finish.".into()),
+        result: None,
+    };
+    app.agents_hosts.snapshot = Some(snapshot(vec![TeamOperatorOperation::Administration(
+        operation.clone(),
+    )]));
+    app.open_agents_operator_operation(operation.operation_id.clone());
+    let pending = crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, 70);
+
+    operation.state = TeamAdministrationState::Succeeded;
+    operation.waiting_reason = None;
+    app.agents_hosts.snapshot = Some(snapshot(vec![TeamOperatorOperation::Administration(
+        operation,
+    )]));
+    app.refresh_agents_operator_operation(None);
+    let complete = crate::chatwidget::tests::helpers::render_bottom_popup(&app.chat_widget, 70);
+    insta::assert_snapshot!(
+        "member_removal_operation_progress",
+        format!("Waiting\n{pending}\n\nComplete\n{complete}")
+    );
+}
+
 fn purge() -> TeamOperatorOperation {
     TeamOperatorOperation::BoardPurge(TeamBoardPurgeOperation {
         operation_id: "purge-42".into(),

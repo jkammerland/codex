@@ -32,16 +32,20 @@ impl TeamHostService {
             freshness: TeamObservationFreshness::LastSynchronized,
         };
         match query.action {
-            TeamExplainableAction::Enroll
-            | TeamExplainableAction::SelectModel
+            TeamExplainableAction::SelectModel
             | TeamExplainableAction::Pause
             | TeamExplainableAction::Resume
-            | TeamExplainableAction::Stop
-            | TeamExplainableAction::Leave => {
+            | TeamExplainableAction::Stop => {
                 result.availability = TeamActionAvailability::Blocked;
                 result.reason = "This control belongs to the user/operator and is not exposed to the agent team tool.".into();
                 result.resolution = Some("The user can apply the existing control in /agents or the operator CLI. Tool approval does not grant this authority.".into());
                 result.freshness = TeamObservationFreshness::Current;
+            }
+            TeamExplainableAction::Enroll => {
+                result.reason = "Team members can create or enroll teammates; new members inherit user-configured model and effort.".into();
+            }
+            TeamExplainableAction::Leave => {
+                result.reason = "Use member/remove to retire a teammate. New work is rejected; admitted work drains before removal. Offline or held workers wait for the existing restriction to be resolved.".into();
             }
             TeamExplainableAction::ProcessMessages => {
                 result.owner = "Selected worker host".into();

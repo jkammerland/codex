@@ -41,4 +41,5 @@ pub struct TeamMemberCreateOperation {
 pub enum TeamOperatorOperation {
     MemberCreate(TeamMemberCreateOperation),
     BoardPurge(TeamBoardPurgeOperation),
+    Administration(codex_app_server_protocol::TeamAdministrationOperation),
 }

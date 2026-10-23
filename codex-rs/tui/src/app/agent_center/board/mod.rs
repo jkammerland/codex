@@ -251,19 +251,11 @@ impl BoardState {
                         .topic_filter
                         .as_ref()
                         .is_none_or(|topic| root.message.topic.as_ref() == Some(topic))
-                    && self.query.split_whitespace().all(|word| {
-                        if let Some(topic) = word.strip_prefix('#') {
-                            root.message.topic.as_deref().is_some_and(|value| {
-                                value.trim_start_matches('#').eq_ignore_ascii_case(topic)
-                            })
-                        } else {
-                            let word = word.to_lowercase();
-                            entries.iter().any(|entry| {
-                                entry.message.body.to_lowercase().contains(&word)
-                                    || entry.author.name.to_lowercase().contains(&word)
-                            })
-                        }
-                    })
+                    && codex_app_server_protocol::team_board_matches_query(
+                        root.message.topic.as_deref(),
+                        &entries,
+                        &self.query,
+                    )
             })
             .collect();
         roots.sort_by_key(|root| {

@@ -34,6 +34,7 @@ impl TeamHostService {
         let requested_identity = match &request {
             TeamBoardParams::List { identity, .. }
             | TeamBoardParams::Read { identity, .. }
+            | TeamBoardParams::ReadPage { identity, .. }
             | TeamBoardParams::Follow { identity, .. }
             | TeamBoardParams::MarkRead { identity, .. }
             | TeamBoardParams::TopicFollow { identity, .. }
@@ -42,7 +43,8 @@ impl TeamHostService {
             TeamBoardParams::Post { .. }
             | TeamBoardParams::Reply { .. }
             | TeamBoardParams::Followers { .. }
-            | TeamBoardParams::Topics { .. } => None,
+            | TeamBoardParams::Topics { .. }
+            | TeamBoardParams::Acknowledge { .. } => None,
         };
         ensure!(
             requested_identity.is_none_or(|requested| requested == &identity),
@@ -52,12 +54,15 @@ impl TeamHostService {
         match &request {
             TeamBoardParams::List { .. }
             | TeamBoardParams::Read { .. }
+            | TeamBoardParams::ReadPage { .. }
             | TeamBoardParams::Followers { .. }
             | TeamBoardParams::Topics { .. }
             | TeamBoardParams::TopicOverview { .. } => {
-                return Ok(serde_json::to_value(codex_team_store::query_board(
+                let mut result = serde_json::to_value(codex_team_store::query_agent_board(
                     &snapshot, &identity, &request,
-                )?)?);
+                )?)?;
+                result["freshness"] = json!("lastSynchronized");
+                return Ok(result);
             }
             TeamBoardParams::Post {
                 topic,
@@ -74,6 +79,9 @@ impl TeamHostService {
             TeamBoardParams::MarkRead { append_seq, .. } => {
                 ensure!(*append_seq >= 0, "read sequence must not be negative")
             }
+            TeamBoardParams::Acknowledge { token } => {
+                ensure!(!token.is_empty(), "read acknowledgement token is required");
+            }
             TeamBoardParams::Follow { .. } => {}
             TeamBoardParams::SubscriptionSet { target, .. } => {
                 if let TeamBoardSubscriptionTarget::Topic { topic } = target {
@@ -83,6 +91,10 @@ impl TeamHostService {
         }
 
         let conversation_id = match &request {
+            TeamBoardParams::Acknowledge { token } => serde_json::from_str::<Value>(token)?
+                .get("conversation")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             TeamBoardParams::Reply {
                 conversation_id, ..
             }
@@ -99,16 +111,54 @@ impl TeamHostService {
             _ => None,
         };
         let id = Uuid::now_v7().to_string();
-        let result = serde_json::to_value(TeamBoardResponse::Mutation {
+        let conversation_id = if matches!(request, TeamBoardParams::Post { .. }) {
+            Some(id.clone())
+        } else {
+            conversation_id
+        };
+        let topic = match &request {
+            TeamBoardParams::Post { topic, .. }
+            | TeamBoardParams::TopicFollow { topic, .. }
+            | TeamBoardParams::SubscriptionSet {
+                target: TeamBoardSubscriptionTarget::Topic { topic },
+                ..
+            } => Some(topic.clone()),
+            _ => snapshot
+                .entries
+                .iter()
+                .find(|entry| Some(&entry.message.id) == conversation_id.as_ref())
+                .and_then(|entry| entry.message.topic.clone()),
+        };
+        let subscription_mode = snapshot
+            .followers
+            .iter()
+            .find(|follower| {
+                Some(&follower.conversation_id) == conversation_id.as_ref()
+                    && follower.identity == identity
+            })
+            .map_or(TeamBoardSubscriptionMode::Off, |follower| follower.mode);
+        let topic_subscription_mode = snapshot
+            .topic_subscriptions
+            .iter()
+            .find(|subscription| {
+                Some(&subscription.topic) == topic.as_ref() && subscription.identity == identity
+            })
+            .map_or(TeamBoardSubscriptionMode::Off, |subscription| {
+                subscription.mode
+            });
+        let mut result = serde_json::to_value(TeamBoardResponse::Mutation {
             revision: snapshot.revision,
             state: TeamBoardMutationState::Queued,
-            conversation_id: if matches!(request, TeamBoardParams::Post { .. }) {
-                Some(id.clone())
-            } else {
-                conversation_id
-            },
+            conversation_id: conversation_id.clone(),
             id: id.clone(),
         })?;
+        // These observations are captured with the receipt. A lost-response retry
+        // must not claim a newer route or subscription was the original outcome.
+        result["route"] = json!({"type":"board", "conversationId":conversation_id, "topic":topic});
+        result["subscriptionMode"] = serde_json::to_value(subscription_mode)?;
+        result["topicSubscriptionMode"] = serde_json::to_value(topic_subscription_mode)?;
+        result["notificationPolicy"] = json!("mentionsOrWakeSubscriptions");
+        result["freshness"] = json!("lastSynchronized");
         let payload = json!({"sender": sender, "request": request});
         let result = if let Some((operation_id, digest)) = operation {
             store

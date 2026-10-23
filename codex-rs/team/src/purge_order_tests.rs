@@ -136,7 +136,7 @@ async fn reconnect(acknowledgements: Acknowledgements) -> Result<Outcome> {
                     json!({"userAgent":"fixture/1","codexHome":"/fixture","platformFamily":"unix","platformOs":"linux"})
                 }
                 "team/hostRead" => json!({
-                    "installationId":"installation","protocolVersion":5,
+                    "installationId":"installation","protocolVersion":6,
                     "control":control,"data":[],"runtime":[],"nextCursor":null,
                 }),
                 "team/sync" => {

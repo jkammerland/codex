@@ -581,6 +581,12 @@ async fn offline_machines_render_in_the_existing_overview_and_keep_navigation_av
         Ok(AppEvent::AgentsMachinesMenu)
     ));
     view.handle_key_event(crossterm::event::KeyCode::Esc.into());
+    assert!(!view.is_complete());
+    assert!(events.try_recv().is_err());
+    view.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('d'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
     assert!(matches!(
         events.try_recv(),
         Ok(AppEvent::Exit(ExitMode::Immediate))
@@ -955,6 +961,67 @@ async fn reconstructed_widget_callbacks_keep_their_origin_scope() -> Result<()> 
     };
     assert_eq!((actual, generation), (scope, 4));
     Ok(())
+}
+
+#[tokio::test]
+async fn team_menu_uses_tall_terminal_and_keeps_short_terminal_actions_reachable() {
+    let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
+    let id = ThreadId::from_u128(42);
+    let target = ThreadTarget {
+        host: key("alpha"),
+        thread_id: id,
+    };
+    app.agents_hosts.snapshot = Some(team_snapshot(id));
+    app.open_agents_team_menu(target.clone());
+
+    // The final model action used to be hidden despite ample vertical space.
+    let tall = render_with_height(&app.chat_widget, 40);
+    assert!(tall.contains("Create member"));
+    assert!(tall.contains("Reset task model to configured default"));
+    insta::assert_snapshot!("agents_team_menu_tall", tall);
+
+    // A short viewport still scrolls to the same action and retains its target.
+    let short = render_with_height(&app.chat_widget, 12);
+    assert!(!short.contains("Reset task model to configured default"));
+    app.chat_widget
+        .handle_key_event_with_activation_key(KeyCode::End.into(), None);
+    let short_end = render_with_height(&app.chat_widget, 12);
+    assert!(short_end.contains("Reset task model to configured default"));
+    insta::assert_snapshot!("agents_team_menu_short_end", short_end);
+    app.chat_widget
+        .handle_key_event_with_activation_key(KeyCode::Enter.into(), None);
+    let action = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            AppEvent::AgentsHostModel(action) => Some(action),
+            _ => None,
+        })
+        .expect("the model policy remains accessible after scrolling");
+    let super::super::agents_hosts_models::ModelAction::Policy {
+        target: actual,
+        model,
+        effort,
+    } = *action
+    else {
+        panic!("expected the final model policy action")
+    };
+    assert_eq!(actual, target);
+    assert_eq!(model, codex_app_server_protocol::TeamSelection::Default);
+    assert_eq!(effort, codex_app_server_protocol::TeamSelection::Keep);
+}
+
+#[tokio::test]
+async fn machine_menu_shows_more_than_eight_actions_when_space_allows() {
+    let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
+    for machine in ["alpha", "beta", "delta", "epsilon", "gamma"] {
+        app.agents_hosts
+            .hosts
+            .insert(key(machine), host(&format!("{machine} / main")));
+    }
+    app.open_agents_machines_menu();
+    let output = render_with_height(&app.chat_widget, 40);
+    assert!(output.contains("New task · alpha / main"));
+    assert!(output.contains("New task · gamma / main"));
+    insta::assert_snapshot!("agents_machines_menu_tall", output);
 }
 
 #[tokio::test]

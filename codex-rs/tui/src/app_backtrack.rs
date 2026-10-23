@@ -181,10 +181,13 @@ impl App {
                 self.local_settings.tui.copy_on_select_clear_selection,
             ),
         );
-        if self.scrollback_has_older_history
-            && let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut()
-        {
-            overlay.set_history_state(TranscriptHistoryState::Partial);
+        let escape_closes =
+            self.agent_center_session_navigation() || self.chat_widget.is_external_writer_view();
+        if let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut() {
+            overlay.escape_closes = escape_closes;
+            if self.scrollback_has_older_history {
+                overlay.set_history_state(TranscriptHistoryState::Partial);
+            }
         }
         tui.frame_requester().schedule_frame();
     }

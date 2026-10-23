@@ -10,6 +10,53 @@ use crate::keymap::bindings_for_action;
 use crate::keymap::keymap_action_ids;
 
 impl App {
+    pub(crate) fn agent_center_session_navigation(&self) -> bool {
+        self.agents_hosts.enabled()
+            || self
+                .agents_overview
+                .view_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .session_navigation
+    }
+
+    pub(super) fn refresh_agent_center_offline_hint(&mut self) {
+        if self.reconnect.offline && self.agent_center_session_navigation() {
+            let hints = if self.chat_widget.composer_is_empty() {
+                vec![
+                    (
+                        crate::key_hint::plain(KeyCode::Esc).display_label(),
+                        "agents".into(),
+                    ),
+                    (
+                        crate::key_hint::ctrl(KeyCode::Char('d')).display_label(),
+                        "quit".into(),
+                    ),
+                ]
+            } else {
+                vec![(
+                    crate::key_hint::ctrl(KeyCode::Char('c')).display_label(),
+                    "cancel input".into(),
+                )]
+            };
+            self.chat_widget.set_footer_hint_override(Some(hints));
+        }
+    }
+
+    pub(super) fn agent_center_back_key(&self, key: KeyEvent) -> bool {
+        self.agent_center_session_navigation()
+            && self.chat_widget.no_modal_or_popup_active()
+            && !self.chat_widget.shortcut_overlay_visible()
+            && !self.chat_widget.should_handle_vim_insert_escape(key)
+            && (crate::key_hint::plain(KeyCode::Esc).is_press(key)
+                && (self.chat_widget.composer_is_empty()
+                    || self.chat_widget.is_external_writer_view())
+                || self.chat_widget.is_external_writer_view()
+                    && (crate::key_hint::plain(KeyCode::Char('h')).is_press(key)
+                        || crate::key_hint::plain(KeyCode::Left).is_press(key)
+                            && self.chat_widget.agents_navigation_key_available()))
+    }
+
     pub(super) fn should_recover_vim_insert_escape(&self, key_event: KeyEvent) -> bool {
         let active_contexts = self.active_keymap_contexts();
         let rename_active = self
@@ -394,6 +441,10 @@ impl App {
         if self.chat_widget.fork_in_progress {
             return;
         }
+        if self.overlay.is_none() && self.agent_center_back_key(key_event) {
+            self.open_agents_overview(app_server);
+            return;
+        }
         if self.chat_widget.is_external_writer_view()
             && self.overlay.is_none()
             && self.chat_widget.no_modal_or_popup_active()
@@ -412,10 +463,7 @@ impl App {
                 KeyCode::Char('q' | 'Q') => {
                     modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT
                 }
-                KeyCode::Char('c' | 'C') => {
-                    modifiers == KeyModifiers::CONTROL
-                        || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-                }
+                KeyCode::Char('d' | 'D') => modifiers == KeyModifiers::CONTROL,
                 _ => false,
             };
             if quit {

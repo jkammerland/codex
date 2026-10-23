@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agent_center_tests.rs
-assertion_line: 838
+assertion_line: 868
 expression: "screen(&view, 80, 12)"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
@@ -13,5 +13,5 @@ expression: "screen(&view, 80, 12)"
 
 
 
-
   Error loading tasks
+  esc back  enter open

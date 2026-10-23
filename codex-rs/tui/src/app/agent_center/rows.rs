@@ -11,7 +11,13 @@ use crate::resume_picker::format_relative_time;
 use crate::status::format_directory_display;
 
 fn columns(area: Rect) -> (Rect, Rect, Rect) {
-    let metadata = if area.width >= 56 { 24 } else { 0 };
+    let metadata = if area.width >= 56 {
+        24
+    } else if area.width >= 30 {
+        13
+    } else {
+        0
+    };
     let gutter = area.width.min(/*other*/ 4);
     let title = Rect::new(
         area.x + gutter,
@@ -20,15 +26,15 @@ fn columns(area: Rect) -> (Rect, Rect, Rect) {
         area.height,
     );
     let updated = Rect::new(
-        area.right() - metadata.min(/*other*/ 9),
+        area.right() - if metadata == 24 { 9 } else { 0 },
         area.y,
-        metadata.min(/*other*/ 9),
+        if metadata == 24 { 9 } else { 0 },
         area.height,
     );
     let status = Rect::new(
         title.right() + metadata.min(/*other*/ 2),
         area.y,
-        if metadata == 24 { 11 } else { 0 },
+        if metadata > 0 { 11 } else { 0 },
         area.height,
     );
     (title, status, updated)
@@ -99,7 +105,15 @@ impl AgentsOverviewView {
         let viewport = row(area, padding, area.height - padding * 2);
         if padding > 0 {
             let (title, status, updated) = columns(row(area, /*offset*/ 0, /*height*/ 1));
-            line("Tasks".dim(), title, buf);
+            line(
+                if state.filters_focused || state.hosts_focused {
+                    "Tasks".bold()
+                } else {
+                    "Tasks".bold().underlined()
+                },
+                title,
+                buf,
+            );
             line("Status".dim(), status, buf);
             Line::from("Updated".dim())
                 .right_aligned()
@@ -163,14 +177,47 @@ impl AgentsOverviewView {
             let task = &self.rows[index];
             let rect = row(viewport, offset as u16, /*height*/ 1);
             if matches!(entry, CenterRow::Machine(_)) {
-                line(
-                    task.machine_label
-                        .clone()
-                        .unwrap_or_else(|| "Machine".into())
-                        .bold(),
-                    rect,
-                    buf,
+                let host = state
+                    .hosts
+                    .iter()
+                    .find(|host| Some(&host.key) == task.host.as_ref());
+                let count = indices
+                    .iter()
+                    .filter(|&&candidate| {
+                        candidate != usize::MAX && self.rows[candidate].host == task.host
+                    })
+                    .count();
+                let label = host.map_or_else(
+                    || {
+                        task.host.as_ref().map_or_else(
+                            || "Host".into(),
+                            |key| {
+                                let machine =
+                                    task.machine_label.as_deref().unwrap_or(&key.machine_id);
+                                format!("{machine} / {}", key.server_id)
+                            },
+                        )
+                    },
+                    |host| host.label.clone(),
                 );
+                let connection = host.map_or("Unknown", |host| {
+                    if host.connected {
+                        "Connected"
+                    } else {
+                        "Offline"
+                    }
+                });
+                let suffix = if rect.width < 56 {
+                    format!(" · {count} · {connection}")
+                } else {
+                    format!(" · {connection} · {count} tasks")
+                };
+                let mut heading = crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
+                    Line::from(label.bold()),
+                    usize::from(rect.width).saturating_sub(suffix.width()),
+                );
+                heading.spans.push(suffix.dim());
+                line(heading, rect, buf);
                 continue;
             }
             if matches!(entry, CenterRow::Group(_)) {
@@ -220,11 +267,6 @@ impl AgentsOverviewView {
                 } else {
                     group
                 };
-                let group = if let Some(host) = &task.host {
-                    format!("{group} · {}", host.server_id)
-                } else {
-                    group
-                };
                 line(format!("{group}  {count}").dim(), rect, buf);
                 continue;
             }
@@ -241,9 +283,17 @@ impl AgentsOverviewView {
                 style,
             );
             let (status, mut dot) = Self::status(task);
-            if index == self.selected {
-                dot.style = style;
-            }
+            let (status, status_style) = if state
+                .hosts
+                .iter()
+                .any(|host| Some(&host.key) == task.host.as_ref() && !host.connected)
+            {
+                dot = "○".dim();
+                ("Offline", Style::default().dim())
+            } else {
+                (status, dot.style)
+            };
+            dot.style = style.patch(status_style);
             line(
                 Line::from(if index == self.selected { "›" } else { " " }).style(style),
                 rect,
@@ -280,7 +330,11 @@ impl AgentsOverviewView {
                 title,
                 buf,
             );
-            line(Line::from(status).style(style), status_area, buf);
+            line(
+                Line::from(status).style(style.patch(status_style)),
+                status_area,
+                buf,
+            );
             if !updated.is_empty() {
                 let age = if task.thread.updated_at == 0 {
                     "Unknown".into()

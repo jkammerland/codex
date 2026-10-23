@@ -1,0 +1,11 @@
+---
+source: tui/src/app/agent_center_visual_tests.rs
+assertion_line: 125
+expression: "evidence.join(\"\\n\")"
+---
+(20, 20, 20) | ○ | Style::new().green().bg(Color::Rgb(99, 168, 248)).underline_color(Color::Reset).bold()
+(20, 20, 20) | ● | Style::new().cyan().bg(Color::Rgb(99, 168, 248)).underline_color(Color::Reset).bold()
+(20, 20, 20) | ! | Style::new().red().bg(Color::Rgb(99, 168, 248)).underline_color(Color::Reset).bold()
+(250, 250, 250) | ○ | Style::new().green().bg(Color::Rgb(164, 205, 251)).underline_color(Color::Reset).bold()
+(250, 250, 250) | ● | Style::new().cyan().bg(Color::Rgb(164, 205, 251)).underline_color(Color::Reset).bold()
+(250, 250, 250) | ! | Style::new().red().bg(Color::Rgb(164, 205, 251)).underline_color(Color::Reset).bold()

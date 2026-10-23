@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/tests/disconnect_tests.rs
-assertion_line: 250
+assertion_line: 255
 expression: searching
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
@@ -25,5 +25,5 @@ expression: searching
                                                           │
                                                           │
                                                           │
-                                                          │
   Reconnecting — agent list is stale
+  esc back  enter open

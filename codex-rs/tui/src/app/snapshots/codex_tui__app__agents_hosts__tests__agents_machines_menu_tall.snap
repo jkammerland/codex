@@ -1,0 +1,23 @@
+---
+source: tui/src/app/agents_hosts_tests.rs
+assertion_line: 1024
+expression: output
+---
+
+
+  Machines and connections
+
+
+› 1. Reload configured machines  Retry the coordinator connection
+  2. New task · alpha / main     Use this server's configured defaults
+  3. alpha / main                Connected · select to reconnect
+  4. New task · beta / main      Use this server's configured defaults
+  5. beta / main                 Connected · select to reconnect
+  6. New task · delta / main     Use this server's configured defaults
+  7. delta / main                Connected · select to reconnect
+  8. New task · epsilon / main   Use this server's configured defaults
+  9. epsilon / main              Connected · select to reconnect
+  10. New task · gamma / main    Use this server's configured defaults
+  11. gamma / main               Connected · select to reconnect
+
+  enter select · esc back

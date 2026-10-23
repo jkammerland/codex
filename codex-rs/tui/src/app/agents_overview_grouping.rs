@@ -88,6 +88,10 @@ impl AgentsOverviewView {
                 )
                 .to_lowercase();
                 ((search.is_empty() || searchable.contains(&search))
+                    && state
+                        .host_filter
+                        .as_ref()
+                        .is_none_or(|host| row.host.as_ref() == Some(host))
                     && (state.rename_target == Some(row.thread_id)
                         || status_group.is_none_or(|group| group == row.group)))
                 .then_some(index)

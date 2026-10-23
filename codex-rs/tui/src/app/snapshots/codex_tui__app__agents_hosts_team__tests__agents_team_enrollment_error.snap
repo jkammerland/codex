@@ -1,0 +1,15 @@
+---
+source: tui/src/app/agents_hosts_team_tests.rs
+assertion_line: 89
+expression: error_screen
+---
+  Team action needs attention
+  Team action outcome is unknown: operation operation-id:
+  coordinator returned 400 Bad Request: {"error":"Session was not found on workstation/
+  private. Enroll it on its owning server."} · F9 offers a retry with the same operation
+  ID
+
+
+› 1. Return to command center
+
+  enter select · esc back

@@ -85,10 +85,17 @@ impl App {
         let explicit_input = matches!(event, TuiEvent::Key(_))
             || matches!(&event, TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved);
         let interaction_active = matches!(&self.overlay, Some(Overlay::Transcript(overlay)) if overlay.has_active_interaction());
-        if interaction_active || (self.is_offline() && !self.backtrack.overlay_preview_active) {
+        let escape_closes = matches!(&self.overlay, Some(Overlay::Transcript(overlay)) if overlay.escape_closes)
+            && matches!(&event, TuiEvent::Key(key) if crate::key_hint::plain(KeyCode::Esc).is_press(*key));
+        // Search, selection and an existing prompt preview keep their innermost Escape.
+        if interaction_active {
             self.overlay_forward_event(tui, event)?;
         } else if self.backtrack.overlay_preview_active {
             self.handle_backtrack_preview_event(tui, event)?;
+        } else if escape_closes {
+            self.close_transcript_overlay(tui);
+        } else if self.is_offline() {
+            self.overlay_forward_event(tui, event)?;
         } else {
             match event {
                 TuiEvent::Key(KeyEvent {

@@ -3,30 +3,30 @@ source: tui/src/app/agents_hosts_tests.rs
 assertion_line: 450
 expression: "format!(\"{board}\\n\\nDelivery details:\\n{detail}\")"
 ---
-Agent command center   t Tasks   b Board  Team Stopped · 1/1 hosts applied
+Agent command center   t Tasks   b Shared Board  Team Stopped · 1/1 hosts applied
  All posts   Following   Mentions
-j/k ↑/↓ move · l/→/Enter open · Tab filter · / search · # set post topic · o topics
-› ● Review the compiler change and reply  Preview · Off · 0 followers
-  release leader · Alpha · #reviews       release leader · Alpha  Jan 01 00:00
-  0 replies · Jan 01 00:00                Review the compiler change and reply here.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                                          Preview does not mark replies read · l/Enter opens convers
-n post · r reply · f follow · v followers · F manage · d details · F9 actions · o topics
+j/k ↑/↓ move · l/→/Enter open · Tab focus · / search · # set post topic · o topics
+Posts · all hosts                        │ Preview · Off · 0 followers
+› ● Review the compiler change and reply │ release leader · Alpha  Jan 01 00:00
+  release leader · Alpha · #reviews      │ Review the compiler change and reply here.
+  0 replies · Jan 01 00:00               │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │ Preview does not mark replies read · l/Enter opens conver
+Esc Tasks · Ctrl+D quit · n post · r reply · f follow · v followers · F manage · d details · F9 acti
 
 Delivery details:
   reviews · Board · NextTurn · Intake accepted at coordinator

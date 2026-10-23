@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/rendering_tests.rs
+assertion_line: 248
 expression: "rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>().join(\"\\n\")"
 ---
 
@@ -7,4 +8,4 @@ expression: "rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>().join(\"\\
   🔒   This conversation is open in another app  r to retry
       Close it there and press R to continue here.
 
-   r retry   f fork   esc/⌃c/q exit   ⌃t transcript
+   r retry   f fork   esc/⌃d/q exit   ⌃t transcript

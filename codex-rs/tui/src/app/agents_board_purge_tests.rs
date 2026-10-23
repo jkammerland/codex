@@ -93,3 +93,34 @@ async fn cancelled_preview_cannot_open_a_late_confirmation() {
     assert!(app.chat_widget.no_modal_or_popup_active());
     assert!(app.agents_hosts.team_operations.is_empty());
 }
+
+#[tokio::test]
+async fn board_actions_delete_the_focused_region_conversation() {
+    for conversation_focused in [false, true] {
+        let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
+        {
+            let mut board = app.agents_hosts.board.lock().unwrap();
+            board.selected = Some("selected-in-feed".into());
+            board.opened = Some("opened-in-reader".into());
+            board.conversation_focused = conversation_focused;
+        }
+        app.open_agents_board_actions();
+        app.chat_widget.handle_key_event(KeyCode::Down.into());
+        app.chat_widget.handle_key_event(KeyCode::Enter.into());
+        let AppEvent::AgentsBoardPurge(action) = events.try_recv().unwrap() else {
+            panic!("expected conversation cleanup preview")
+        };
+        let PurgeAction::Preview(TeamBoardPurgeScope::Conversation { conversation_id }) = *action
+        else {
+            panic!("expected focused conversation scope")
+        };
+        assert_eq!(
+            conversation_id,
+            if conversation_focused {
+                "opened-in-reader"
+            } else {
+                "selected-in-feed"
+            }
+        );
+    }
+}

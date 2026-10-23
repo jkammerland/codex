@@ -42,6 +42,144 @@ async fn press_key(
 }
 
 #[tokio::test]
+async fn command_center_transcript_escape_closes_innermost_interaction_then_view() -> Result<()> {
+    for offline in [false, true] {
+        let (mut app, mut events, mut operations) = make_test_app_with_channels().await;
+        let mut app_server = start_config_write_test_app_server(&app).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        // The command center requires a shared server, just as the opened session does.
+        app.app_server_target = AppServerTarget::Remote {
+            endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+        };
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .session_navigation = true;
+        app.chat_widget
+            .apply_external_edit("preserved draft".into());
+        app.transcript_cells = vec![plain_line_cell("Navigation transcript")];
+        app.open_transcript_overlay(&mut tui);
+        app.reconnect.offline = offline;
+
+        let area = Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 12,
+        );
+        let mut buffer = Buffer::empty(area);
+        let Some(Overlay::Transcript(overlay)) = app.overlay.as_mut() else {
+            panic!("expected terminal transcript overlay");
+        };
+        overlay.render(area, &mut buffer);
+        let screen = buffer_text(&buffer);
+        assert!(screen.contains("esc back"));
+        assert!(!screen.contains("browse prompts"));
+        if !offline {
+            insta::assert_snapshot!("command_center_transcript_back_hint", screen);
+        }
+        while events.try_recv().is_ok() {}
+        while operations.try_recv().is_ok() {}
+
+        press_key(&mut app, &mut tui, &mut app_server, KeyCode::F(3)).await?;
+        app.handle_tui_event(
+            &mut tui,
+            &mut app_server,
+            TuiEvent::Paste("Navigation".into()),
+        )
+        .await?;
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.is_search_editing())
+        );
+        press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if !overlay.has_active_interaction())
+        );
+
+        app.handle_tui_event(
+            &mut tui,
+            &mut app_server,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+        )
+        .await?;
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.has_active_interaction())
+        );
+        press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if !overlay.has_active_interaction())
+        );
+
+        assert!(matches!(
+            app.handle_tui_event(
+                &mut tui,
+                &mut app_server,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            )
+            .await?,
+            AppRunControl::Continue,
+        ));
+        assert!(app.overlay.is_some());
+        assert_eq!(
+            app.chat_widget.composer_text_with_pending(),
+            "preserved draft"
+        );
+
+        press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
+        assert!(app.overlay.is_none());
+        assert!(!app.backtrack.overlay_preview_active);
+        assert_eq!(
+            app.chat_widget.composer_text_with_pending(),
+            "preserved draft"
+        );
+        assert!(operations.try_recv().is_err());
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, AppEvent::Exit(_)))
+        );
+
+        // Closing a reader does not consume the draft; empty chat Escape then returns to Tasks.
+        app.chat_widget.apply_external_edit(String::new());
+        press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
+        assert!(
+            app.chat_widget
+                .active_view_is(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
+        );
+        app_server.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_center_transcript_escape_preserves_an_existing_prompt_preview() -> Result<()> {
+    let mut app = make_test_app().await;
+    let mut app_server = start_config_write_test_app_server(&app).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.transcript_cells = vec![Arc::new(UserHistoryCell {
+        message: "Existing prompt".into(),
+        text_elements: Vec::new(),
+        local_image_paths: Vec::new(),
+        remote_image_urls: Vec::new(),
+        spoken: false,
+    })];
+    app.open_transcript_overlay(&mut tui);
+
+    // Ordinary chat keeps upstream Escape-to-browse behavior.
+    press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
+    assert!(app.backtrack.overlay_preview_active);
+    let Some(Overlay::Transcript(overlay)) = app.overlay.as_mut() else {
+        panic!("expected prompt preview");
+    };
+    overlay.escape_closes = true;
+
+    press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
+    assert!(app.overlay.is_some());
+    assert!(!app.backtrack.overlay_preview_active);
+    press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
+    assert!(app.overlay.is_none());
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn analytics_preserves_the_draft_and_retains_the_view_on_reopen() -> Result<()> {
     let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let mut app_server = start_config_write_test_app_server(&app).await?;

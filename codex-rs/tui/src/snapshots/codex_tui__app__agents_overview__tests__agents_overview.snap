@@ -1,16 +1,16 @@
 ---
 source: tui/src/app/agents_overview_tests.rs
-assertion_line: 1355
+assertion_line: 1360
 expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{project}  3\"),\n&normalized_project_group).replace(&project, \"/tmp/project\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 3   Needs you 1   Working 1   Idle 0   Inactive 1                       tab/⇧tab filter
+   All 3   Needs you 1   Working 1   Idle 0   Inactive 1                        tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                           │ Task details
+      Tasks                              Status       │ Task details
   /tmp/project  3                                     │
-  › ● Build the dashboard                             │ Build the dashboard
-    ● Repair authentication                           │ ● Needs input
-    ○ Review yesterday's changes                      │
+  › ● Build the dashboard                Needs input  │ Build the dashboard
+    ● Repair authentication              Working      │ ● Needs input
+    ○ Review yesterday's changes         Inactive     │
                                                       │ Model:  gpt-6.1-sol
                                                       │ Effort: Unknown
                                                       │
@@ -26,4 +26,4 @@ expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{proj
                                                       │
                                                       │
                                                       │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

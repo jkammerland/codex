@@ -5134,7 +5134,7 @@ async fn external_writer_escape_preserves_snapshot_and_explicit_quits() -> Resul
         for key in [
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
         ] {
             app.handle_key_event(&mut tui, &mut server, key).await;
             assert_matches!(events.try_recv(), Ok(AppEvent::Exit(ExitMode::Immediate)));

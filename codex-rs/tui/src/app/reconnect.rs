@@ -314,6 +314,7 @@ impl App {
             } else {
                 self.chat_widget.pause_for_disconnect();
             }
+            self.refresh_agent_center_offline_hint();
             self.startup_pending_protected_request = false;
             self.abort_all_thread_event_listeners();
             self.dynamic_tool_origins.clear();

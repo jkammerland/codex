@@ -1,0 +1,16 @@
+---
+source: tui/src/app/tests/transcript_composer.rs
+assertion_line: 66
+expression: screen
+---
+/ T R A N S C R I P T / / / / / / / / / / / / / / / / / / / / / / / / / / / / /
+Navigation transcript
+
+
+
+
+
+
+⌃space select
+ ↑/↓ to scroll · pgup/pgdn to page · home/end to jump
+ q close · f3 find · esc back

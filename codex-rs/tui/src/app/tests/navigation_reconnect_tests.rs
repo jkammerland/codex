@@ -561,17 +561,30 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
             );
             if changed_child_permissions {
                 assert!(app.chat_widget.is_task_running_for_test());
-                // From an empty draft, daemon Ctrl+C offers the existing Cancel task action.
+                // Reconnected command-center sessions interrupt work without opening an exit menu.
+                while events.try_recv().is_ok() {}
                 for key in [
                     KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
                     KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 ] {
                     app.handle_tui_event(&mut tui, &mut session, TuiEvent::Key(key))
                         .await?;
                 }
-                assert!(std::iter::from_fn(|| events.try_recv().ok())
-                    .any(|event| matches!(event, AppEvent::RunningTaskExit { action: RunningTaskExitAction::CancelTask, thread_id } if thread_id == id)));
+                let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| matches!(event, AppEvent::CodexOp(AppCommand::Interrupt)))
+                        .count(),
+                    1,
+                );
+                assert!(!emitted.iter().any(|event| matches!(
+                    event,
+                    AppEvent::Exit(_) | AppEvent::RunningTaskExit { .. }
+                )));
+                assert_eq!(app.current_displayed_thread_id(), Some(id));
+                assert!(app.chat_widget.composer_is_empty());
+                assert!(!app.chat_widget.has_active_view());
                 app.handle_app_server_event(
                     &session,
                     codex_app_server_client::AppServerEvent::ServerNotification(Box::new(

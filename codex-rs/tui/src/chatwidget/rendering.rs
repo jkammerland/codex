@@ -95,7 +95,7 @@ impl ExternalWriterNotice {
         ];
         let escape = crate::key_hint::plain(KeyCode::Esc).display_label();
         let mut quit_keys = vec![
-            crate::key_hint::ctrl(KeyCode::Char('c')).display_label(),
+            crate::key_hint::ctrl(KeyCode::Char('d')).display_label(),
             crate::key_hint::plain(KeyCode::Char('q')).display_label(),
         ];
         if self.command_center_available {

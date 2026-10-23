@@ -1,11 +1,11 @@
 ---
 source: tui/src/app/agent_center/board/tests.rs
-assertion_line: 219
+assertion_line: 246
 expression: "render(&view, 70, 19)"
 ---
-Agent command center   t Tasks   b Board
+Agents  t Tasks  b Shared Board
  All posts   Following   Mentions
-j/k ↑/↓ scroll · PgUp/PgDn · Home/End
+j/k ↑/↓ scroll · PgUp/PgDn · Tab focus
 Conversation · Watch · 2 followers
 You · Human  Nov 14 22:13
 Ready for the release review?
@@ -21,4 +21,4 @@ next.
 
 
 Lines 1-10/10
-h/←/Esc feed · r reply · v followers
+h/←/Esc feed · Ctrl+D quit · r reply

@@ -16,6 +16,9 @@ mod navigation_tests;
 #[path = "topics_tests.rs"]
 mod topics_tests;
 
+#[path = "visual_tests.rs"]
+mod visual_tests;
+
 fn address() -> TeamAddress {
     TeamAddress {
         machine_id: "laptop".into(),

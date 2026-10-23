@@ -23,12 +23,6 @@ fn feed_hjkl_and_arrows_preserve_selection_and_stay_on_board() {
     key(&mut view, KeyCode::Up);
     assert_eq!(view.state().selected.as_deref(), Some("post-9"));
 
-    // The feed has its own boundary; going left must not leave the Board.
-    for code in [KeyCode::Char('h'), KeyCode::Left] {
-        key(&mut view, code);
-        assert!(view.state().active);
-        assert!(events.try_recv().is_err());
-    }
     for _ in 0..12 {
         key(&mut view, KeyCode::Char('j'));
         render(&view, 40, 18);
@@ -51,6 +45,12 @@ fn feed_hjkl_and_arrows_preserve_selection_and_stay_on_board() {
         assert!(view.state().active);
     }
     assert!(events.try_recv().is_err());
+    key(&mut view, KeyCode::Char('h'));
+    assert!(!view.state().active);
+    assert!(matches!(
+        events.try_recv(),
+        Ok(AppEvent::OpenAgentsOverview)
+    ));
 }
 
 #[test]
@@ -268,4 +268,107 @@ fn resizing_wrapped_post_retains_source_text_and_does_not_credit_unseen_rows() {
     assert!(bottom.contains("word199"));
     assert!(view.state().at_bottom);
     assert_eq!(view.state().take_frame_read(true), None);
+}
+
+#[test]
+fn board_cancel_preserves_drafts_and_back_visits_one_level() {
+    for back in [KeyCode::Esc, KeyCode::Char('h'), KeyCode::Left] {
+        let (mut view, mut events) = fixture();
+        key(&mut view, KeyCode::Enter);
+        key(&mut view, KeyCode::Char('r'));
+        view.handle_paste("Keep this reply".into());
+        view.on_ctrl_c();
+        assert!(view.state().composing.is_none());
+        assert_eq!(view.state().opened.as_deref(), Some("root"));
+        key(&mut view, KeyCode::Char('r'));
+        assert_eq!(
+            view.state()
+                .composer
+                .as_ref()
+                .unwrap()
+                .current_text_with_pending(),
+            "Keep this reply"
+        );
+        key(&mut view, KeyCode::Esc);
+
+        key(&mut view, KeyCode::Char('/'));
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!view.state().searching);
+        assert_eq!(view.state().opened.as_deref(), Some("root"));
+        view.on_ctrl_c();
+        assert_eq!(view.state().opened.as_deref(), Some("root"));
+        assert!(events.try_recv().is_err());
+
+        key(&mut view, back);
+        assert!(view.state().opened.is_none());
+        assert!(events.try_recv().is_err());
+        key(&mut view, back);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AppEvent::OpenAgentsOverview)
+        ));
+    }
+}
+
+#[test]
+fn board_tab_focus_does_not_filter_or_scroll_another_region() {
+    let (mut view, mut events) = fixture();
+    key(&mut view, KeyCode::Enter);
+    render(&view, 120, 24);
+    key(&mut view, KeyCode::Tab);
+    assert!(view.state().filters_focused);
+    assert!(view.state().filter == Filter::All);
+    key(&mut view, KeyCode::Tab);
+    assert!(!view.state().conversation_focused);
+    assert!(!view.state().filters_focused);
+    key(&mut view, KeyCode::Down);
+    assert_eq!(view.state().scroll, 0);
+    key(&mut view, KeyCode::BackTab);
+    assert!(view.state().filters_focused);
+    key(&mut view, KeyCode::Down);
+    assert!(view.state().filter == Filter::Following);
+    view.on_ctrl_c();
+    assert!(view.state().active);
+    assert!(events.try_recv().is_err());
+    view.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(matches!(events.try_recv(), Ok(AppEvent::Exit(_))));
+}
+
+#[test]
+fn feed_actions_target_its_selection_while_another_conversation_stays_open() {
+    for action in ['r', 'f', 'F', 'd'] {
+        let (mut view, mut events) = fixture();
+        view.state()
+            .snapshot
+            .entries
+            .push(entry("other", "other", 3, "Other conversation", true));
+        key(&mut view, KeyCode::Enter);
+        render(&view, 120, 24);
+        key(&mut view, KeyCode::Tab);
+        key(&mut view, KeyCode::Tab);
+        key(&mut view, KeyCode::Up);
+        assert_eq!(view.state().selected.as_deref(), Some("other"));
+        assert_eq!(view.state().opened.as_deref(), Some("root"));
+        key(&mut view, KeyCode::Char(action));
+        match action {
+            'r' => {
+                assert_eq!(view.state().composing.as_deref(), Some("other"));
+                assert_eq!(view.state().opened.as_deref(), Some("other"));
+            }
+            'f' => assert!(
+                matches!(events.try_recv(), Ok(AppEvent::AgentsTeamRequest(TeamRequest::Board {
+                request: TeamBoardParams::SubscriptionSet {
+                    target: TeamBoardSubscriptionTarget::Conversation { conversation_id }, ..
+                }
+            })) if conversation_id == "other")
+            ),
+            'F' => assert!(
+                matches!(events.try_recv(), Ok(AppEvent::AgentsBoardManageFollowers(id)) if id == "other")
+            ),
+            'd' => assert!(
+                matches!(events.try_recv(), Ok(AppEvent::AgentsTeamMessage(id)) if id == "other")
+            ),
+            _ => unreachable!(),
+        }
+    }
 }

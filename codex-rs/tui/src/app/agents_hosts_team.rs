@@ -377,6 +377,8 @@ impl App {
             subtitle: Some(
                 "F6 Pause · F7 Resume · F8 Stop. Controls apply to enrolled task families.".into(),
             ),
+            // Use the available terminal height instead of the generic eight-item picker cap.
+            max_visible_rows: items.len().max(1),
             items,
             ..SelectionViewParams::picker()
         });
@@ -438,6 +440,7 @@ impl App {
         }
         self.chat_widget.show_selection_view(SelectionViewParams {
             title: Some("Machines and connections".into()),
+            max_visible_rows: items.len().max(1),
             items,
             ..SelectionViewParams::picker()
         });
@@ -585,7 +588,11 @@ impl App {
                         }
                         Err(TeamOperationFailure::Rejected(reason))
                     } else {
-                        Err(TeamOperationFailure::Unknown("Team action outcome is unknown · F9 offers a retry with the same operation ID".into()))
+                        // Preserve the server's explanation without treating an uncertain
+                        // response as proof that the operation did not take effect.
+                        Err(TeamOperationFailure::Unknown(format!(
+                            "Team action outcome is unknown: {error:#} · F9 offers a retry with the same operation ID"
+                        )))
                     }
                 },
             };

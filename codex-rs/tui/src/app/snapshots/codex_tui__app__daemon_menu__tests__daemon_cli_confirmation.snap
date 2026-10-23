@@ -4,7 +4,7 @@ assertion_line: 126
 expression: "render_bottom_popup(&app.chat_widget,\nwidth).replace(r\"C:\\cli-build\\bin\\codex\", \"/x/cli-build/bin/codex\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 0   Needs you 0   Working 0   Idle 0   Inactive 0                           tab/⇧tab filter
+   All 0   Needs you 0   Working 0   Idle 0   Inactive 0                            tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────
   No tasks yet                                            │
                                                           │
@@ -25,5 +25,5 @@ expression: "render_bottom_popup(&app.chat_widget,\nwidth).replace(r\"C:\\cli-bu
                                                           │
                                                           │
                                                           │
-                                                          │
   Service v0.153.0 < Codex CLI v0.154.0 · /daemon
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

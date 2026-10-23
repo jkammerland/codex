@@ -1,0 +1,30 @@
+---
+source: tui/src/app/agents_hosts_tests.rs
+assertion_line: 981
+expression: tall
+---
+
+
+  Shared team
+  F6 Pause · F7 Resume · F8 Stop. Controls apply to enrolled task families.
+
+
+› 1. Create member                            Choose a machine, checkout, alias, model and effort
+  2. Enroll existing session                  Keep its history and settings; add a team alias
+  3. Team operations                          Member creation and Board cleanup progress
+  4. Action availability and restrictions     Inspect holds, authority, and actual pending approvals
+  5. Edit team alias                          The alias is separate from the saved task title
+  6. Send request · next turn
+  7. Send request · safe boundary
+  8. Send passive note
+  9. Subscribe task to a board topic
+  10. Leave shared team
+  11. Machines and connections
+  12. Message board and delivery receipts
+  13. Post to a board topic
+  14. Choose task model and effort            Use this machine's catalog; leave saved defaults
+                                              unchanged
+  15. Reset task effort to model default
+  16. Reset task model to configured default
+
+  enter select · esc back

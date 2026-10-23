@@ -35,6 +35,7 @@ pub(super) fn preview_markdown(text: &str) -> String {
 
 #[derive(Clone, Default)]
 pub(super) struct AgentsOverviewDetails {
+    pub(super) availability: Option<codex_app_server_protocol::TeamAvailability>,
     pub(super) lines: Vec<Line<'static>>,
     pub(super) environment_lines: Vec<Line<'static>>,
     pub(super) usage_lines: Vec<Line<'static>>,
@@ -217,6 +218,7 @@ impl App {
             .filter(|message| !message.trim().is_empty())
             .map(|message| (message.clone(), source.cwd.clone()));
         AgentsOverviewDetails {
+            availability: None,
             lines,
             environment_lines: Vec::new(),
             usage_lines: ThreadId::from_string(&root.id)

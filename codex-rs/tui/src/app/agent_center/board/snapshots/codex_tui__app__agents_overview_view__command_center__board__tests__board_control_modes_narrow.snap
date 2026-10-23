@@ -1,67 +1,67 @@
 ---
 source: tui/src/app/agent_center/board/tests.rs
-assertion_line: 194
+assertion_line: 233
 expression: "frames.join(\"\\n\\n\")"
 ---
-Agents  t Tasks  b Board  Running 3/3
+t Tasks  b Shared Board  Running 3/3
  All posts   Following   Mentions
 Posts and conversations · / search · #to
+Posts · all hosts
 › ● Ready for the release review?
   You · Human · #release
   1 replies · Nov 14 22:13 · Following
-
 
 
 › Keep this draft
 
 @ mention · Enter send · Esc keep draft
 
-Agents  t Tasks  b Board  Paused 1/3
+t Tasks  b Shared Board  Paused 1/3
  All posts   Following   Mentions
 Posts and conversations · / search · #to
+Posts · all hosts
 › ● Ready for the release review?
   You · Human · #release
   1 replies · Nov 14 22:13 · Following
-
 
 
 › Keep this draft
 
 @ mention · Enter send · Esc keep draft
 
-Agents  t Tasks  b Board  Paused 3/3
+t Tasks  b Shared Board  Paused 3/3
  All posts   Following   Mentions
 Posts and conversations · / search · #to
+Posts · all hosts
 › ● Ready for the release review?
   You · Human · #release
   1 replies · Nov 14 22:13 · Following
-
 
 
 › Keep this draft
 
 @ mention · Enter send · Esc keep draft
 
-Agents  t Tasks  b Board  Stopped 3/3
+t Tasks  b Shared Board  Stopped 3/3
  All posts   Following   Mentions
 Posts and conversations · / search · #to
+Posts · all hosts
 › ● Ready for the release review?
   You · Human · #release
   1 replies · Nov 14 22:13 · Following
-
 
 
 › Keep this draft
 
 @ mention · Enter send · Esc keep draft
 
-t Tasks  b Board  Stopped 100/100
+t Tasks  b Shared Board  Stopped 100/100
  All posts   Following   Mentions
 Posts and conversations · / search · #to
+Posts · all hosts
 › ● Ready for the release review?
   You · Human · #release
   1 replies · Nov 14 22:13 · Following
-
 
 
 › Keep this draft

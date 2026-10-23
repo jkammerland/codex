@@ -4,16 +4,17 @@ assertion_line: 83
 expression: render(&view)
 ---
   Agent command center   t Tasks   b Board  Group: Status  g
-   All 2   Needs you 1   Working 0   Idle 1   Inactive 0                           tab/⇧tab filter
-  ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
-  Alpha                                                   │
-  Idle · main  1                                          │ Local task
-  › ○ Local task                                          │ ○ Idle
-  Beta                                                    │
-                                                          │ Model:  Unknown
-  Needs input · main  1                                   │ Effort: Unknown
-    ! Remote task                                         │
+   All 2   Needs you 1   Working 0   Idle 1   Inactive 0                            tab/⇧tab focus
+  Hosts: All 2 · F9 machines
+      Tasks                                  Status       │ Task details
+  Alpha / main · 1 · Connected                            │
+  Idle  1                                                 │ Local task
+  › ○ Local task                             Idle         │ ○ Idle
+  Beta / main · 1 · Connected                             │ Host: Alpha / main
+                                                          │
+  Needs input  1                                          │ Model:  Unknown
+    ! Remote task                            Error        │ Effort: Unknown
+                                                          │
                                                           │ Connection
                                                           │ Server    main
                                                           │
@@ -25,5 +26,4 @@ expression: render(&view)
                                                           │
                                                           │
                                                           │
-                                                          │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

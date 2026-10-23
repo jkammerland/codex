@@ -38,6 +38,10 @@ impl BottomPaneView for BoardView {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        if crate::key_hint::ctrl(KeyCode::Char('c')).is_press(key) {
+            self.on_ctrl_c();
+            return;
+        }
         let mut state = self.state();
         if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::CONTROL {
             if let Some(id) = state
@@ -213,10 +217,48 @@ impl BottomPaneView for BoardView {
             }
             return;
         }
+        if crate::key_hint::ctrl(KeyCode::Char('d')).is_press(key) {
+            self.sender
+                .send(AppEvent::Exit(crate::app_event::ExitMode::Immediate));
+            return;
+        }
+        // Browser letters must never turn modified editor/global shortcuts into actions.
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return;
+        }
         if state.topics_open && self.handle_topics_key(&mut state, key) {
             return;
         }
+        if state.filters_focused {
+            match key.code {
+                KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') | KeyCode::Right => {
+                    let previous = matches!(key.code, KeyCode::Up | KeyCode::Char('k'));
+                    state.filter = match (state.filter, previous) {
+                        (Filter::All, false) | (Filter::Mentions, true) => Filter::Following,
+                        (Filter::Following, false) | (Filter::All, true) => Filter::Mentions,
+                        (Filter::Mentions, false) | (Filter::Following, true) => Filter::All,
+                    };
+                    state.selected = state
+                        .roots()
+                        .first()
+                        .map(|entry| entry.conversation_id.clone());
+                    state.feed_scroll = 0;
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Char('l' | 'h') | KeyCode::Left | KeyCode::Esc => {
+                    state.filters_focused = false;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
+            KeyCode::Char('q') => self
+                .sender
+                .send(AppEvent::Exit(crate::app_event::ExitMode::Immediate)),
             KeyCode::Char('t') => {
                 state.active = false;
                 self.sender.send(AppEvent::OpenAgentsOverview);
@@ -231,20 +273,30 @@ impl BottomPaneView for BoardView {
                 state.compose(String::new());
             }
             KeyCode::Char('r') => {
-                if let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) {
+                if let Some(id) = state.focused_conversation().cloned() {
+                    if !state.conversation_focused || state.filters_focused {
+                        state.open_selected();
+                    }
                     state.compose(id);
                 }
             }
             KeyCode::Char('/') => state.searching = true,
             KeyCode::Char('#') => state.editing_topic = true,
-            KeyCode::Char('v') => state.followers = !state.followers,
+            KeyCode::Char('v') => {
+                if (!state.conversation_focused || state.filters_focused) && !state.followers {
+                    state.open_selected();
+                }
+                state.followers = !state.followers;
+            }
             KeyCode::Char('F') => {
-                if let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) {
+                if let Some(id) = state.focused_conversation().cloned() {
                     self.sender.send(AppEvent::AgentsBoardManageFollowers(id));
                 }
             }
             KeyCode::Char('[') | KeyCode::Char(']') => {
-                if let Some(id) = state.opened.clone() {
+                if state.conversation_focused
+                    && let Some(id) = state.opened.clone()
+                {
                     let entries = state.entries(&id);
                     let index = entries
                         .iter()
@@ -261,7 +313,7 @@ impl BottomPaneView for BoardView {
                 }
             }
             KeyCode::Char('f') => {
-                if let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) {
+                if let Some(id) = state.focused_conversation().cloned() {
                     let enabled = !state.following(&id);
                     drop(state);
                     self.request(TeamBoardParams::SubscriptionSet {
@@ -280,24 +332,32 @@ impl BottomPaneView for BoardView {
             KeyCode::Char('D') => self.sender.send(AppEvent::AgentsBoardDiagnostics),
             KeyCode::F(9) => self.sender.send(AppEvent::AgentsBoardActions),
             KeyCode::Char('d') => {
-                if let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) {
+                if let Some(id) = state.focused_conversation().cloned() {
                     let target = state.reply_targets.get(&id).cloned().unwrap_or(id);
                     self.sender.send(AppEvent::AgentsTeamMessage(target));
                 }
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                state.filter = match state.filter {
-                    Filter::All => Filter::Following,
-                    Filter::Following => Filter::Mentions,
-                    Filter::Mentions => Filter::All,
+                let split = state.split_visible && state.opened.is_some();
+                let count = if split { 3 } else { 2 };
+                let current = if state.filters_focused {
+                    0
+                } else if split && state.conversation_focused {
+                    2
+                } else {
+                    1
                 };
-                state.selected = state
-                    .roots()
-                    .first()
-                    .map(|entry| entry.conversation_id.clone());
-                state.feed_scroll = 0;
+                let reverse =
+                    key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+                let next = (current + if reverse { count - 1 } else { 1 }) % count;
+                state.filters_focused = next == 0;
+                state.conversation_focused = if split {
+                    next == 2
+                } else {
+                    state.opened.is_some()
+                };
             }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if state.opened.is_none() => {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if !state.conversation_focused => {
                 state.open_selected();
                 if let Some(id) = state
                     .pending_reads
@@ -316,21 +376,23 @@ impl BottomPaneView for BoardView {
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
                 if state.followers {
                     state.followers = false;
+                    return;
                 } else if state.opened.take().is_none() {
                     if state.topic_filter.is_some() {
                         state.show_topics();
-                    } else if key.code == KeyCode::Esc {
+                    } else {
                         state.active = false;
                         self.sender.send(AppEvent::OpenAgentsOverview);
                     }
                 }
+                state.conversation_focused = false;
             }
-            KeyCode::Home if state.opened.is_some() => {
+            KeyCode::Home if state.conversation_focused => {
                 state.scroll = 0;
                 state.scroll_anchor = None;
                 state.at_bottom = false;
             }
-            KeyCode::End if state.opened.is_some() => {
+            KeyCode::End if state.conversation_focused => {
                 state.scroll_anchor = None;
                 state.at_bottom = true;
             }
@@ -341,7 +403,7 @@ impl BottomPaneView for BoardView {
             | KeyCode::PageUp
             | KeyCode::PageDown => {
                 let up = matches!(key.code, KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp);
-                if state.opened.is_some() {
+                if state.conversation_focused {
                     let step = if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
                         state.page_height.max(1)
                     } else {
@@ -405,7 +467,17 @@ impl BottomPaneView for BoardView {
     }
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         let mut state = self.state();
+        if state.searching || state.editing_topic {
+            state.searching = false;
+            state.editing_topic = false;
+            return CancellationEvent::Handled;
+        }
+        let composing = state.composing.is_some();
         if let Some(composer) = state.composer.as_mut() {
+            if composing && composer.popup_active() {
+                composer.handle_key_event(KeyCode::Esc.into());
+                return CancellationEvent::Handled;
+            }
             composer.flush_pending_input();
         }
         state.save_draft();

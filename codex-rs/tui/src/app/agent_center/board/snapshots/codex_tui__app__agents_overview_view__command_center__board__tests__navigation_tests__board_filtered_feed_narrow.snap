@@ -1,14 +1,14 @@
 ---
 source: tui/src/app/agent_center/board/navigation_tests.rs
-assertion_line: 79
+assertion_line: 81
 expression: filtered
 ---
-Agent command center   t Tasks   b Board
+Agents  t Tasks  b Shared Board
  All posts   Following   Mentions
 j/k ↑/↓ move · l/→/Enter open
+Posts · all hosts
 No matching conversations.
 Press / to change the search.
-
 
 
 

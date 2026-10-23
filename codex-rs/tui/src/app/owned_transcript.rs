@@ -536,6 +536,12 @@ impl App {
         // Search and selection still consume Escape first to dismiss their interaction.
         if let TuiEvent::Key(key) = event
             && !self.transcript_view.has_active_interaction()
+            && self.agent_center_back_key(*key)
+        {
+            return Ok(false);
+        }
+        if let TuiEvent::Key(key) = event
+            && !self.transcript_view.has_active_interaction()
             && self.chat_widget.is_external_writer_view()
             && crate::key_hint::plain(KeyCode::Esc).is_press(*key)
         {

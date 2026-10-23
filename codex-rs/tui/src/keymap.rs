@@ -1962,7 +1962,7 @@ impl RuntimeKeymap {
                 stop: default_bindings![plain(KeyCode::Char('x'))],
                 archive: default_bindings![plain(KeyCode::Char('a'))],
                 delete: default_bindings![plain(KeyCode::Backspace)],
-                hide: default_bindings![plain(KeyCode::Char('h'))],
+                hide: default_bindings![shift(KeyCode::Char('h'))],
                 toggle_pin: default_bindings![plain(KeyCode::Char('p'))],
                 toggle_grouping: default_bindings![plain(KeyCode::Char('g'))],
                 chord_hints: Arc::default(),

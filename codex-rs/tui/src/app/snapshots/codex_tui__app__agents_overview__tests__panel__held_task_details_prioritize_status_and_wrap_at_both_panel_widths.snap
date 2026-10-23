@@ -1,13 +1,13 @@
 ---
 source: tui/src/app/agents_overview_panel_tests.rs
-assertion_line: 110
+assertion_line: 136
 expression: "snapshots.join(\"\\n---\\n\")"
 ---
 100x40
 Task details
 
 Review the parser
-○ Idle
+● Held
 
 Model:  gpt-6.1-sol
 Effort: medium
@@ -39,13 +39,12 @@ Review the parser
 
 
 
-
 ---
 160x40
 Task details
 
 Review the parser
-○ Idle
+● Held
 
 Model:  gpt-6.1-sol
 Effort: medium
@@ -77,13 +76,12 @@ Review the parser
 
 
 
-
 ---
 100x24
 Task details
 
 Review the parser
-○ Idle
+● Held
 
 Model:  gpt-6.1-sol
 Effort: medium
@@ -98,14 +96,13 @@ Server    @current
 
 Project
 /workspace/project-with-a-long-name/
-components/parser
 …
 ---
 100x18
 Task details
 
 Review the parser
-○ Idle
+● Held
 
 Model:  gpt-6.1-sol
 Effort: medium
@@ -114,5 +111,4 @@ Team · Reviewer
 Readiness Held · Activity  Idle
 Sync      Current
 ↳ Team is stopped
-↳ An interrupted turn has priority
 …

@@ -2771,6 +2771,8 @@ fn image_preparation_keeps_input_responsive_and_preserves_pending_input() {
         "external_writer",
         "escape",
         "ctrl_c",
+        "agent_center_ctrl_c",
+        "agent_center_idle_ctrl_c",
     ] {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2844,13 +2846,17 @@ fn image_preparation_keeps_input_responsive_and_preserves_pending_input() {
                     chat.model_catalog = Arc::new(ModelCatalog::new(models));
                     chat.on_images_prepared(id);
                     assert_eq!(chat.bottom_pane.composer_text(), "describe\nnew draft");
-                } else if scenario == "escape" || scenario == "ctrl_c" {
+                } else if matches!(scenario, "escape" | "ctrl_c" | "agent_center_ctrl_c") {
                     chat.on_task_started();
-                    chat.handle_key_event(if scenario == "escape" {
-                        KeyEvent::from(KeyCode::Esc)
+                    if scenario == "agent_center_ctrl_c" {
+                        chat.cancel_agent_center_input();
                     } else {
-                        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
-                    });
+                        chat.handle_key_event(if scenario == "escape" {
+                            KeyEvent::from(KeyCode::Esc)
+                        } else {
+                            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+                        });
+                    }
                     next_interrupt_op(&mut ops);
                     if scenario == "escape" {
                         chat.on_interrupted_turn(TurnAbortReason::Interrupted);
@@ -2862,6 +2868,15 @@ fn image_preparation_keeps_input_responsive_and_preserves_pending_input() {
                         );
                         assert_eq!(chat.input_queue.queued_user_messages.len(), 2);
                     }
+                    chat.on_images_prepared(id);
+                } else if scenario == "agent_center_idle_ctrl_c" {
+                    chat.cancel_agent_center_input();
+                    assert_eq!(chat.bottom_pane.composer_text(), "describe");
+                    assert_eq!(
+                        chat.bottom_pane.composer_draft_snapshot().local_images,
+                        message.local_images
+                    );
+                    assert_eq!(chat.input_queue.queued_user_messages.len(), 1);
                     chat.on_images_prepared(id);
                 } else if scenario == "parent_owned" || scenario == "external_writer" {
                     chat.codex_op_target = CodexOpTarget::AppEvent;
@@ -2905,4 +2920,61 @@ fn image_preparation_keeps_input_responsive_and_preserves_pending_input() {
                 assert!(chat.pending_image_submission.is_none());
             });
     }
+}
+
+#[tokio::test]
+async fn command_center_cancel_dismisses_presets_before_draft_or_running_work() {
+    for running in [false, true] {
+        for draft in ["", "retained draft"] {
+            let (mut chat, mut events, mut operations) =
+                make_chatwidget_manual(/*model_override*/ None).await;
+            chat.thread_id = Some(ThreadId::new());
+            chat.bottom_pane.set_task_running(running);
+            chat.bottom_pane
+                .set_composer_text(draft.to_string(), Vec::new(), Vec::new());
+            chat.open_quick_dial_menu();
+            assert!(chat.quick_dial_menu);
+            while events.try_recv().is_ok() {}
+
+            chat.cancel_agent_center_input();
+
+            assert!(!chat.quick_dial_menu);
+            assert_eq!(chat.bottom_pane.composer_text(), draft);
+            assert_eq!(chat.bottom_pane.is_task_running(), running);
+            assert!(operations.try_recv().is_err());
+            assert!(
+                !std::iter::from_fn(|| events.try_recv().ok())
+                    .any(|event| matches!(event, AppEvent::Exit(_)))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn command_center_cancel_closes_popup_before_draft_and_runs_close_callback() {
+    let (mut chat, mut events, mut operations) =
+        make_chatwidget_manual(/*model_override*/ None).await;
+    chat.input_queue.suppress_queue_autosend = true;
+
+    // Install a completed draft so the initial slash cannot wait in paste detection.
+    chat.bottom_pane
+        .set_composer_text("/".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyCode::End.into());
+    assert!(!chat.bottom_pane.no_modal_or_popup_active());
+    while events.try_recv().is_ok() {}
+
+    chat.cancel_agent_center_input();
+    assert!(chat.bottom_pane.no_modal_or_popup_active());
+    assert_eq!(chat.bottom_pane.composer_text(), "/");
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::SettingsSelectionClosed))
+    );
+    chat.cancel_agent_center_input();
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+    assert_no_submit_op(&mut operations);
+    assert!(
+        !std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::Exit(_)))
+    );
 }

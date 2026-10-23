@@ -748,6 +748,10 @@ impl App {
                         self.agents_hosts
                             .failed_team_operations
                             .insert(operation_id);
+                        self.show_agents_overview_error(
+                            Some("Team action needs attention"),
+                            error.clone(),
+                        );
                         self.agents_hosts.notice = Some(error);
                     }
                 }

@@ -1,17 +1,17 @@
 ---
 source: tui/src/app/agent_center_tests.rs
-assertion_line: 549
+assertion_line: 572
 expression: "screen(&view, 40, 12)"
 ---
   Agents   t Tasks   b Board
   ‹  Working 0   Idle 1   Inactive 1
   ────────────────────────────────────
-      Tasks
+      Tasks               Status
   /tmp/project  1 of 3
-  › ○ Unloaded task
+  › ○ Unloaded task       Inactive
 
 
 
 
 
-  ? help  esc back  ↑/↓ move  enter o…
+  ? help  esc back  ⌃d quit  tab/⇧tab…

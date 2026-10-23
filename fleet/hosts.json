@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "candidate": {
-    "version": "0.163.0+jkammerland.mcp.25.team.5",
-    "stagedSourceCommit": "21e617a0c026b9fa9b82380401b2e6ccdd1b5e3a",
+    "version": "0.163.0+jkammerland.mcp.25.team.6",
+    "stagedSourceCommit": "328ea3f360d0b31eb20ed15a4f470eedb66e2829",
     "sourceRef": "integration/upstream-20261021",
-    "activation": "all_hosts_active"
+    "activation": "partially_active_deferred_hosts"
   },
   "hosts": [
     {
@@ -15,26 +15,31 @@
       "staging": "ready",
       "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
       "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
-      "daemonRestart": "completed",
+      "daemonRestart": "deferred",
       "previousPackageRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.5",
-      "activationService": "codex-team5-window-upgrade.service",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.5",
       "teamProtocolVersion": 5,
-      "teamLedgerBackupRetained": true
+      "teamLedgerBackupRetained": true,
+      "activation": "deferred",
+      "activationReason": "active_clients_and_turns"
     },
     {
       "name": "mac",
       "platform": "darwin",
       "endpoint": "mac-offload",
-      "installedVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "installedVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "staging": "ready",
-      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "previousPackageRetained": true,
-      "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
-      "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamProtocolVersion": 5,
-      "teamLedgerBackupRetained": true
+      "teamLedgerBackupRetained": true,
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "activation": "completed",
+      "daemonRestart": "completed",
+      "gpt61SolVerified": true
     },
     {
       "name": "windows-admin",
@@ -48,7 +53,11 @@
       "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
       "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
       "daemonLaunchContext": "local_non_elevated_console",
-      "sshDaemonQualification": "live_rpc_verified_local_console_start_required"
+      "sshDaemonQualification": "live_rpc_verified_local_console_start_required",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "activation": "deferred",
+      "activationReason": "local_console_required",
+      "daemonRestart": "deferred"
     },
     {
       "name": "windows-worker",
@@ -65,22 +74,30 @@
       "previousPackageRetained": true,
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.5",
       "teamProtocolVersion": 5,
-      "teamLedgerBackupRetained": true
+      "teamLedgerBackupRetained": true,
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "activation": "deferred",
+      "activationReason": "active_exec_job_and_local_console_required",
+      "daemonRestart": "deferred"
     },
     {
       "name": "dnarb",
       "platform": "linux",
       "endpoint": "dnarb-offload",
       "sshTarget": "dnarb",
-      "installedVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "installedVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "staging": "ready",
-      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "mcpServerCommit": "0722feb5c2606c71a3a4339e366896caf805d709",
       "previousPackageRetained": true,
-      "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.5",
-      "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamProtocolVersion": 5,
-      "teamLedgerBackupRetained": true
+      "teamLedgerBackupRetained": true,
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "activation": "completed",
+      "daemonRestart": "completed",
+      "gpt61SolVerified": true
     }
   ],
   "sharedTeam": {

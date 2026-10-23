@@ -22,7 +22,7 @@
       "teamProtocolVersion": 5,
       "teamLedgerBackupRetained": true,
       "activation": "deferred",
-      "activationReason": "active_clients_and_turns"
+      "activationReason": "authorized_interruption_prepared"
     },
     {
       "name": "mac",
@@ -72,13 +72,15 @@
       "daemonLaunchContext": "local_non_elevated_console",
       "sshDaemonQualification": "live_rpc_verified_local_console_start_required",
       "previousPackageRetained": true,
-      "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.5",
+      "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamProtocolVersion": 5,
       "teamLedgerBackupRetained": true,
       "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "activation": "deferred",
-      "activationReason": "active_exec_job_and_local_console_required",
-      "daemonRestart": "deferred"
+      "activationReason": "normal_daemon_local_console_required",
+      "daemonRestart": "deferred",
+      "teamWorkerActivation": "completed",
+      "teamWorkerGpt61SolVerified": true
     },
     {
       "name": "dnarb",
@@ -103,7 +105,7 @@
   "sharedTeam": {
     "coordinatorVersion": "0.163.0+jkammerland.mcp.25.team.5",
     "protocolVersion": 5,
-    "controlMode": "running",
+    "controlMode": "stopped",
     "connectedHosts": 4,
     "boardPreserved": true,
     "preUpgradeLedgerBackupsRetained": true

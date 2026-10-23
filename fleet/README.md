@@ -12,6 +12,12 @@ The inventory records the exact source commit embedded in the staged packages,
 which may precede documentation-only tracking commits. It is tracking data;
 the historical controller does not consume it or automatically update hosts.
 
+Staging creates a separate package and leaves launchers, managed daemons, team
+workers, and the coordinator on their installed versions. Check `stagedVersion`
+separately from `installedVersion` and `runningDaemonVersion`. When a candidate
+changes the team protocol, activate the coordinator and enrolled workers together
+after preserving their ledgers; staging alone does not migrate live state.
+
 `release.json` and the controller instructions below describe the historical
 MCP.20 raw-binary workflow, not the current complete-package deployment process.
 Do not use them to activate the staged MCP.25 packages. The controller only
@@ -20,9 +26,9 @@ separate controller change.
 
 ## Windows daemon qualification
 
-Both Windows accounts have matching team.5 CLI and managed packages. Their
-running daemons report `0.163.0+jkammerland.mcp.25.team.5` through live JSON-RPC
-after starting from local, non-elevated PowerShell consoles. Worker auto-start
+Both Windows accounts were qualified with matching CLI and managed packages,
+verified through live JSON-RPC after starting from local, non-elevated PowerShell
+consoles. Consult the inventory for their current versions. Worker auto-start
 remains enabled; the administrator account retains its disabled
 `daemon_auto_start` setting. An explicit daemon start is still allowed with
 that setting disabled. `--no-daemon` is the per-invocation bypass.

@@ -1,10 +1,11 @@
 {
   "schemaVersion": 1,
   "candidate": {
-    "version": "0.163.0+jkammerland.mcp.25.team.6",
-    "stagedSourceCommit": "328ea3f360d0b31eb20ed15a4f470eedb66e2829",
+    "version": "0.163.0+jkammerland.mcp.25.team.7",
+    "stagedSourceCommit": "b5ceb1acf541c2ee645c1a188ece559ea03cfd73",
     "sourceRef": "integration/upstream-20261021",
-    "activation": "all_hosts_active"
+    "activation": "staged_not_active",
+    "teamProtocolVersion": 6
   },
   "hosts": [
     {
@@ -15,14 +16,17 @@
       "staging": "ready",
       "managedDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
-      "daemonRestart": "completed",
+      "daemonRestart": "not_requested",
       "previousPackageRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.7",
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamProtocolVersion": 5,
       "teamLedgerBackupRetained": true,
-      "activation": "completed",
-      "gpt61SolVerified": true
+      "activation": "not_requested",
+      "gpt61SolVerified": true,
+      "stagedSourceCommit": "b5ceb1acf541c2ee645c1a188ece559ea03cfd73",
+      "stagedTeamProtocolVersion": 6,
+      "stagedGpt61SolVerified": true
     },
     {
       "name": "mac",
@@ -36,10 +40,13 @@
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamProtocolVersion": 5,
       "teamLedgerBackupRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
-      "activation": "completed",
-      "daemonRestart": "completed",
-      "gpt61SolVerified": true
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.7",
+      "activation": "not_requested",
+      "daemonRestart": "not_requested",
+      "gpt61SolVerified": true,
+      "stagedSourceCommit": "b5ceb1acf541c2ee645c1a188ece559ea03cfd73",
+      "stagedTeamProtocolVersion": 6,
+      "stagedGpt61SolVerified": true
     },
     {
       "name": "windows-admin",
@@ -54,10 +61,13 @@
       "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "daemonLaunchContext": "local_non_elevated_console",
       "sshDaemonQualification": "live_rpc_verified_local_console_start_required",
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
-      "activation": "completed",
-      "daemonRestart": "completed",
-      "gpt61SolVerified": true
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.7",
+      "activation": "not_requested",
+      "daemonRestart": "not_requested",
+      "gpt61SolVerified": true,
+      "stagedSourceCommit": "b5ceb1acf541c2ee645c1a188ece559ea03cfd73",
+      "stagedTeamProtocolVersion": 6,
+      "stagedGpt61SolVerified": true
     },
     {
       "name": "windows-worker",
@@ -75,12 +85,15 @@
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamProtocolVersion": 5,
       "teamLedgerBackupRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
-      "activation": "completed",
-      "daemonRestart": "completed",
-      "teamWorkerActivation": "completed",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.7",
+      "activation": "not_requested",
+      "daemonRestart": "not_requested",
+      "teamWorkerActivation": "not_requested",
       "teamWorkerGpt61SolVerified": true,
-      "gpt61SolVerified": true
+      "gpt61SolVerified": true,
+      "stagedSourceCommit": "b5ceb1acf541c2ee645c1a188ece559ea03cfd73",
+      "stagedTeamProtocolVersion": 6,
+      "stagedGpt61SolVerified": true
     },
     {
       "name": "dnarb",
@@ -96,18 +109,22 @@
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.6",
       "teamProtocolVersion": 5,
       "teamLedgerBackupRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.6",
-      "activation": "completed",
-      "daemonRestart": "completed",
-      "gpt61SolVerified": true
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.7",
+      "activation": "not_requested",
+      "daemonRestart": "not_requested",
+      "gpt61SolVerified": true,
+      "stagedSourceCommit": "b5ceb1acf541c2ee645c1a188ece559ea03cfd73",
+      "stagedTeamProtocolVersion": 6,
+      "stagedGpt61SolVerified": true
     }
   ],
   "sharedTeam": {
     "coordinatorVersion": "0.163.0+jkammerland.mcp.25.team.6",
     "protocolVersion": 5,
-    "controlMode": "stopped",
+    "controlMode": "running",
     "connectedHosts": 4,
     "boardPreserved": true,
-    "preUpgradeLedgerBackupsRetained": true
+    "preUpgradeLedgerBackupsRetained": true,
+    "connectedServers": 5
   }
 }

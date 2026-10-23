@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use anyhow::ensure;
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::*;
 
 use crate::coordinator::Coordinator;
@@ -126,7 +127,23 @@ impl Coordinator {
                         ..Default::default()
                     },
                 })
-                .await?;
+                .await
+                .map_err(|error| {
+                    // Only the selected server's explicit missing-session response
+                    // identifies an address problem; transport loss stays uncertain.
+                    if matches!(
+                        &error,
+                        TypedRequestError::Server { source, .. }
+                            if source.message == format!("no rollout found for thread id {}", address.thread_id)
+                    ) {
+                        anyhow::Error::new(error).context(format!(
+                            "Session {} was not found on selected server {}/{}. Enrollment requires an existing session on that server. In /agents, choose the session from its owning host and use Enroll existing session, or retry with that host's machine/server/thread-id address.",
+                            address.thread_id, address.machine_id, address.server_id
+                        ))
+                    } else {
+                        error.into()
+                    }
+                })?;
         }
         let enrolled: TeamEnrollResponse = peer
             .handle

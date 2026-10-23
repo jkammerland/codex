@@ -403,6 +403,12 @@ impl Session {
                 )
                 .instrument(trace_span!("session_task.run"))
                 .await;
+            // Every exit closes team steering before the asynchronous final flush.
+            // Serialize with admission so a rejected message stays with its host.
+            {
+                let _admission = session.active_turn.lock().await;
+                turn_state.lock().await.team_input_closed = true;
+            }
             let sess = Arc::clone(&session);
             // Private reviewers save their transcript together with the terminal event.
             // Errors and cancellation retain their existing save path.

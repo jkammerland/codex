@@ -95,6 +95,8 @@ pub(crate) struct TurnState {
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pub(crate) pending_input: TurnInputQueue,
+    /// Closed at the final input check, before task completion can record leftovers.
+    pub(crate) team_input_closed: bool,
     mailbox_delivery_phase: MailboxDeliveryPhase,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,

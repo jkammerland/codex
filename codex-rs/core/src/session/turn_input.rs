@@ -880,6 +880,20 @@ impl Session {
             });
         }
 
+        // The host must retain late mail rather than credit an unsampled final batch.
+        if matches!(input, SubmittedTurnInput::TeamMessage(_))
+            && (active_turn.turn_state.lock().await.team_input_closed
+                || active_task.cancellation_token.is_cancelled()
+                || active_task
+                    .turn_context
+                    .terminal_error
+                    .lock()
+                    .await
+                    .is_some())
+        {
+            return Err(NotSubmittedReason::NoActiveTurn);
+        }
+
         match active_task.kind {
             crate::state::TaskKind::Regular => {}
             crate::state::TaskKind::Review => {

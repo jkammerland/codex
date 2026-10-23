@@ -31,6 +31,9 @@ use test_case::test_case;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
+#[path = "turn_input_team_tests.rs"]
+mod team_tests;
+
 #[derive(Clone, Copy)]
 struct NeverEndingTask {
     kind: TaskKind,

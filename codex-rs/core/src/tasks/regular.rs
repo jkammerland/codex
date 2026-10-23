@@ -117,7 +117,11 @@ impl SessionTask for RegularTask {
             if ctx.terminal_error.lock().await.is_some() {
                 return Ok(last_agent_message);
             }
-            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
+            if sess
+                .input_queue
+                .close_team_input_if_idle(&sess.active_turn)
+                .await
+            {
                 return Ok(last_agent_message);
             }
             next_input = Vec::new();

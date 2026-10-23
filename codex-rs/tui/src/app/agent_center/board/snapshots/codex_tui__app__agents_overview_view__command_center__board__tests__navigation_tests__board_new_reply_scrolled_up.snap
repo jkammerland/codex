@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agent_center/board/navigation_tests.rs
-assertion_line: 225
+assertion_line: 228
 expression: after
 ---
 Agents  t Tasks  b Shared Board
@@ -8,10 +8,10 @@ Agents  t Tasks  b Shared Board
 j/k ↑/↓ scroll · PgUp/PgDn · Tab focus
 Conversation · Watch · 2 followers
 Reviewer · MacBook  Nov 14 22:13
-↳ replying to User
-Reply 29
+Reply 28
 
 Reviewer · MacBook  Nov 14 22:13
-↳ replying to User
-Lines 113-118/128 ↑ ↓ · 1 new
+Reply 29
+
+Lines 83-88/97 ↑ ↓ · 1 new
 h/←/Esc feed · Ctrl+D quit · r reply

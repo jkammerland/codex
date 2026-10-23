@@ -155,8 +155,11 @@ fn many_replies_require_contiguous_pages_and_keep_new_reply_position() {
         ));
     }
     key(&mut view, KeyCode::Char('l'));
-    render(&view, 40, 12);
-    assert_eq!(view.state().take_frame_read(true), Some(("root".into(), 1)));
+    let top = render(&view, 40, 12);
+    assert_eq!(view.state().displayed.as_ref().unwrap().end, 6);
+    assert_eq!(top.lines().nth(9), Some("Reply 02"));
+    assert!(!top.contains("Reply 03"), "{top}");
+    assert_eq!(view.state().take_frame_read(true), Some(("root".into(), 2)));
     key(&mut view, KeyCode::End);
     let end = render(&view, 40, 12);
     assert!(end.contains("Reply 31"));

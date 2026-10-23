@@ -74,6 +74,8 @@ pub enum TeamAction {
     Status,
     /// Enroll an existing root session, or rename its team alias.
     Enroll {
+        /// Owning machine/server/thread-id. The session must exist on that server;
+        /// use /agents > Enroll existing session to select it from its owning host.
         #[arg(value_parser = address)]
         address: TeamAddress,
         alias: String,

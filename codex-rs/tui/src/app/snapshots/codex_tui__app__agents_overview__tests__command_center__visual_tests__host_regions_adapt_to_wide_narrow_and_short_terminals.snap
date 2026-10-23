@@ -1,25 +1,25 @@
 ---
 source: tui/src/app/agent_center_visual_tests.rs
-assertion_line: 74
+assertion_line: 290
 expression: "frames.join(\"\\n\\n\")"
 ---
 160×27
   Agent command center   t Tasks   b Board  Group: Project  g
    All 4   Needs you 0   Working 1   Idle 3   Inactive 0                                                                                        tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Hosts                      │     Tasks                                          Status         Updated  │ Task details
-  › All hosts · 4            │ Desktop / Normal daemon · Connected · 1 tasks                              │
-    Desktop / Normal daemon  │ /tmp/project  1                                                            │ Daemon conversation
-    normal · 1 tasks         │ › ○ Daemon conversation                            Idle               now  │ ○ Idle
-    ● Connected              │ Desktop / Team worker · Connected · 2 tasks                                │ Host: Desktop / Normal daemon
-    Desktop / Team worker    │                                                                            │
-    primary · 2 tasks        │ /tmp/project  2                                                            │ Model:  Unknown
-    ● Connected              │   ● Native build                                   Working            now  │ Effort: Unknown
-    Laptop / Team worker     │   ● Review held                                    Held               now  │
-    primary · 1 tasks        │ Laptop / Team worker · Offline · 1 tasks                                   │ Project
-    ○ Offline                │                                                                            │ /tmp/project
-    Builder / Team worker    │ /tmp/project  1                                                            │
-    primary · 0 tasks        │   ○ Offline review                                 Offline            now  │ Prompt
+  Hosts                      │       Tasks                                        Status         Updated  │ Task details
+  › All hosts · 4            │ Desktop / Normal daemon · Connected · 1 task                               │
+    Desktop / Normal daemon  │ │ /tmp/project  1                                                          │ Daemon conversation
+    normal · 1 tasks         │ │ › ○ Daemon conversation                          Idle               now  │ ○ Idle
+    ● Connected              │ ─────────────────────────────────────────────────────────────────────────  │ Host: Desktop / Normal daemon
+    Desktop / Team worker    │ Desktop / Team worker · Connected · 2 tasks                                │
+    primary · 2 tasks        │ │ /tmp/project  2                                                          │ Model:  Unknown
+    ● Connected              │ │   ● Native build                                 Working            now  │ Effort: Unknown
+    Laptop / Team worker     │ │   ● Review held                                  Held               now  │
+    primary · 1 tasks        │ ─────────────────────────────────────────────────────────────────────────  │ Project
+    ○ Offline                │ Laptop / Team worker · Offline · 1 task                                    │ /tmp/project
+    Builder / Team worker    │ │ /tmp/project  1                                                          │
+    primary · 0 tasks        │ │   ○ Offline review                               Offline            now  │ Prompt
     ○ Offline                │                                                                            │ Daemon conversation
                              │                                                                            │
                              │                                                                            │
@@ -36,19 +36,19 @@ expression: "frames.join(\"\\n\\n\")"
   Agent command center   t Tasks   b Board  Group: Project  g
    All 4   Needs you 0   Working 1   Idle 3   Inactive 0                            tab/⇧tab focus
   Hosts: All 4 · F9 machines
-      Tasks                                  Status       │ Task details
+        Tasks                                Status       │ Task details
   Desktop / Normal daemon · 1 · Connected                 │
-  /tmp/project  1                                         │ Daemon conversation
-  › ○ Daemon conversation                    Idle         │ ○ Idle
-  Desktop / Team worker · 2 · Connected                   │ Host: Desktop / Normal daemon
-                                                          │
-  /tmp/project  2                                         │ Model:  Unknown
-    ● Native build                           Working      │ Effort: Unknown
-    ● Review held                            Held         │
-  Laptop / Team worker · 1 · Offline                      │ Project
-                                                          │ /tmp/project
-  /tmp/project  1                                         │
-    ○ Offline review                         Offline      │ Prompt
+  │ /tmp/project  1                                       │ Daemon conversation
+  │ › ○ Daemon conversation                  Idle         │ ○ Idle
+  ──────────────────────────────────────────────────────  │ Host: Desktop / Normal daemon
+  Desktop / Team worker · 2 · Connected                   │
+  │ /tmp/project  2                                       │ Model:  Unknown
+  │   ● Native build                         Working      │ Effort: Unknown
+  │   ● Review held                          Held         │
+  ──────────────────────────────────────────────────────  │ Project
+  Laptop / Team worker · 1 · Offline                      │ /tmp/project
+  │ /tmp/project  1                                       │
+  │   ○ Offline review                       Offline      │ Prompt
                                                           │ Daemon conversation
                                                           │
                                                           │
@@ -58,15 +58,15 @@ expression: "frames.join(\"\\n\\n\")"
   Agents   t Tasks   b Board
    All 4   Needs you 0   Working 1        ›
   Hosts: All 4 · F9 machines
-      Tasks                    Status
+        Tasks                  Status
   Desktop / Normal daemon · 1 · Connected
-  /tmp/project  1
-  › ○ Daemon conversation      Idle
+  │ /tmp/project  1
+  │ › ○ Daemon conversation    Idle
+  ────────────────────────────────────────
   Desktop / Team worker · 2 · Connected
-
-  /tmp/project  2
-    ● Native build             Working
-    ● Review held              Held
+  │ /tmp/project  2
+  │   ● Native build           Working
+  │   ● Review held            Held
   ↓
   ? help  esc back  ⌃d quit  tab/⇧tab focu…
 
@@ -74,7 +74,7 @@ expression: "frames.join(\"\\n\\n\")"
   Agent command center   t Tasks   b Board  Group: Project  g
    All 4   Needs you 0   Working 1   Idle 3   Inactive 0                                                        tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Hosts                      │ ↑   Tasks                                 Status       │ Task details
-  › All hosts · 4            │ › ○ Daemon conversation                   Idle         │
+  Hosts                      │ ↑     Tasks                               Status       │ Task details
+  › All hosts · 4            │ │ › ○ Daemon conversation                 Idle         │
     Desktop / Normal daemon  │ ↓                                                      │ …
   ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

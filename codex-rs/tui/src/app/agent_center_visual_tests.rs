@@ -5,6 +5,181 @@ use crate::app::agents_hosts::HostKey;
 use crate::app::agents_overview_view::command_center::hosts::HostSummary;
 use pretty_assertions::assert_eq;
 
+async fn mixed_status_hosts_view() -> AgentsOverviewView {
+    let app = make_test_app().await;
+    app.agents_overview.view_state.lock().unwrap().grouping = AgentsOverviewGrouping::Status;
+    let hosts = [
+        ("a-archive", "primary", "Archive / Private worker", true),
+        ("b-local", "normal", "Local / Normal daemon", true),
+        ("b-local", "primary", "Local / Private worker", true),
+        ("c-laptop", "primary", "Laptop / Private worker", true),
+        ("d-builder", "primary", "Builder / Private worker", true),
+        ("z-offline", "primary", "Offline / Private worker", false),
+    ]
+    .map(|(machine, server, label, connected)| HostSummary {
+        key: HostKey {
+            machine_id: machine.into(),
+            server_id: server.into(),
+        },
+        label: label.into(),
+        connected,
+    });
+    let cases = [
+        (0, "Archived review", ThreadStatus::NotLoaded),
+        (
+            1,
+            "Build library",
+            ThreadStatus::Active {
+                active_flags: Vec::new(),
+            },
+        ),
+        (1, "Review results", ThreadStatus::Idle),
+        (1, "Prior task", ThreadStatus::NotLoaded),
+        (2, "Team backlog", ThreadStatus::NotLoaded),
+        (3, "Laptop backlog", ThreadStatus::NotLoaded),
+        (4, "Builder backlog", ThreadStatus::NotLoaded),
+    ];
+    let threads = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (_, title, status))| {
+            let mut thread = overview_thread(
+                ThreadId::from_u128(index as u128 + 1),
+                None,
+                title,
+                status.clone(),
+            );
+            thread.updated_at = 4_000_000_000;
+            thread
+        })
+        .collect();
+    let mut view = app.agents_overview_view(threads, Some(ThreadId::from_u128(1)));
+    for row in &mut view.rows {
+        let (host, _, _) = cases
+            .iter()
+            .find(|(_, title, _)| row.thread.name.as_deref() == Some(*title))
+            .unwrap();
+        row.host = Some(hosts[*host].key.clone());
+        row.machine_label = Some(hosts[*host].label.clone());
+    }
+    app.agents_overview.view_state.lock().unwrap().hosts = hosts.to_vec();
+    view
+}
+
+#[tokio::test]
+async fn status_groups_preserve_host_boundaries_and_task_hierarchy() {
+    let mut frames = Vec::new();
+    for (width, height) in [(80, 36), (120, 36), (160, 40)] {
+        let view = mixed_status_hosts_view().await;
+        let output = screen(&view, width, height);
+        let lines = output.lines().collect::<Vec<_>>();
+        let first_task = lines
+            .iter()
+            .position(|line| line.contains("○ Archived review"))
+            .expect("the first host's inactive task is visible");
+        let dot_byte = lines[first_task].find("○ Archived review").unwrap();
+        let host_column = lines[first_task][..dot_byte].chars().count() - 4;
+
+        // Each first subgroup belongs directly beneath its host, including adjacent inactive hosts.
+        for (index, (host, group, task)) in [
+            ("Archive / Private worker", "Inactive", "○ Archived review"),
+            ("Local / Normal daemon", "Working", "● Build library"),
+            ("Local / Private worker", "Inactive", "○ Team backlog"),
+            ("Laptop / Private worker", "Inactive", "○ Laptop backlog"),
+            ("Builder / Private worker", "Inactive", "○ Builder backlog"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let task_row = lines.iter().position(|line| line.contains(task)).unwrap();
+            let heading = lines[task_row - 2]
+                .chars()
+                .skip(host_column)
+                .collect::<String>();
+            assert!(heading.starts_with(host), "{output}");
+            let subgroup = lines[task_row - 1]
+                .chars()
+                .skip(host_column)
+                .collect::<String>();
+            assert!(subgroup.starts_with(&format!("│ {group}")), "{output}");
+            let task_line = lines[task_row]
+                .chars()
+                .skip(host_column)
+                .collect::<String>();
+            assert!(task_line.starts_with('│'), "{output}");
+            assert_eq!(
+                task_line
+                    .chars()
+                    .skip(4)
+                    .take(task.chars().count())
+                    .collect::<String>(),
+                task
+            );
+            if index > 0 {
+                assert!(
+                    lines[task_row - 3]
+                        .chars()
+                        .skip(host_column)
+                        .collect::<String>()
+                        .starts_with("────────────"),
+                    "a separator must precede the next host, not split it from its subgroup:\n{output}"
+                );
+            }
+        }
+
+        // Working, idle and inactive remain separate subgroups inside the normal daemon.
+        let task_rows = ["● Build library", "○ Review results", "○ Prior task"]
+            .map(|task| lines.iter().position(|line| line.contains(task)).unwrap());
+        assert_eq!(task_rows[1] - task_rows[0], 3, "{output}");
+        assert_eq!(task_rows[2] - task_rows[1], 3, "{output}");
+        for row in [task_rows[0] + 1, task_rows[1] + 1] {
+            assert_eq!(lines[row].chars().nth(host_column), Some('│'), "{output}");
+        }
+        frames.push(format!("{width}×{height}\n{output}"));
+    }
+    insta::assert_snapshot!(frames.join("\n\n"));
+}
+
+#[tokio::test]
+async fn short_host_sections_keep_paged_task_selection_visible() {
+    let mut frames = Vec::new();
+    for width in [80, 120, 160] {
+        let mut view = mixed_status_hosts_view().await;
+        let before = view.selected_index();
+        let _ = screen(&view, width, 12);
+        for key in [KeyCode::PageDown, KeyCode::End] {
+            view.handle_key_event(key.into());
+            assert_ne!(
+                view.selected_index(),
+                before,
+                "navigation must reach another task"
+            );
+            let output = screen(&view, width, 12);
+            let selected = view.rows[view.selected_index().expect("a task is selected")]
+                .thread
+                .name
+                .as_deref()
+                .unwrap();
+            let selected_row = output.lines().find(|line| {
+                line.contains(selected) && (line.contains("› ○") || line.contains("› ●"))
+            });
+            assert!(
+                selected_row.is_some(),
+                "selected task {selected} must remain visible:\n{output}"
+            );
+            frames.push(format!("{width}×12 {key:?}\n{output}"));
+        }
+        assert_eq!(
+            view.rows[view.selected_index().expect("a task is selected")]
+                .thread
+                .name
+                .as_deref(),
+            Some("Builder backlog")
+        );
+    }
+    insta::assert_snapshot!(frames.join("\n\n"));
+}
+
 #[tokio::test]
 async fn team_status_keeps_navigation_hints_visible_at_full_and_short_heights() {
     let mut app = make_test_app().await;

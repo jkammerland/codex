@@ -6,10 +6,10 @@ expression: output
   Agent command center   t Tasks   b Board  Group: Project  g
    All 1   Needs you 0   Working 0   Idle 1   Inactive 0                            tab/⇧tab focus
   Hosts: All 1 · F9 machines
-      Tasks                                  Status       │ Task details
+        Tasks                                Status       │ Task details
   Alpha · 1 · Connected                                   │
-  /tmp/project  1                                         │ Saved task title
-  › ○ Saved task title                       Idle         │ ○ Idle
+  │ /tmp/project  1                                       │ Saved task title
+  │ › ○ Saved task title                     Idle         │ ○ Idle
                                                           │ Host: Alpha
                                                           │
                                                           │ Model:  Unknown

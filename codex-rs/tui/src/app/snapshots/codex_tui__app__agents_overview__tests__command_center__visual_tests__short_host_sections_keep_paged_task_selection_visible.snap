@@ -1,0 +1,88 @@
+---
+source: tui/src/app/agent_center_visual_tests.rs
+assertion_line: 180
+expression: "frames.join(\"\\n\\n\")"
+---
+80×12 PageDown
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5
+  Hosts: All 6 · F9 machines
+  ↑     Tasks                                          Status         Updated
+  │   ● Build library                                  Working            now
+  │
+  │ Idle  1
+  │ › ○ Review results                                 Idle               now
+  │
+  │ Inactive  1
+  ↓
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new
+
+80×12 End
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5
+  Hosts: All 6 · F9 machines
+  ↑     Tasks                                          Status         Updated
+  │ Inactive  1
+  │   ○ Laptop backlog                                 Inactive           now
+  ───────────────────────────────────────────────────────────────────────────
+  Builder / Private worker · Connected · 1 task
+  │ Inactive  1
+  │ › ○ Builder backlog                                Inactive           now
+
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new
+
+120×12 PageDown
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5                                                tab/⇧tab focus
+  Hosts: All 6 · F9 machines
+  ↑     Tasks                                 Status         Updated  │ Task details
+  │   ● Build library                         Working            now  │
+  │                                                                   │ Review results
+  │ Idle  1                                                           │ ○ Idle
+  │ › ○ Review results                        Idle               now  │ Host: Local / Normal daemon
+  │                                                                   │
+  │ Inactive  1                                                       │ Model:  Unknown
+  ↓                                                                   │ …
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new
+
+120×12 End
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5                                                tab/⇧tab focus
+  Hosts: All 6 · F9 machines
+  ↑     Tasks                                 Status         Updated  │ Task details
+  │ Inactive  1                                                       │
+  │   ○ Laptop backlog                        Inactive           now  │ Builder backlog
+  ──────────────────────────────────────────────────────────────────  │ ○ Inactive
+  Builder / Private worker · Connected · 1 task                       │ Host: Builder / Private worker
+  │ Inactive  1                                                       │
+  │ › ○ Builder backlog                       Inactive           now  │ Model:  Unknown
+                                                                      │ …
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new
+
+160×12 PageDown
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5                                                                                        tab/⇧tab focus
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Hosts                      │ ↑     Tasks                                        Status         Updated  │ Task details
+  › All hosts · 6            │ │   ● Build library                                Working            now  │
+    Archive / Private worker │ │                                                                          │ Review results
+    primary · 1 tasks        │ │ Idle  1                                                                  │ ○ Idle
+    ● Connected              │ │ › ○ Review results                               Idle               now  │ Host: Local / Normal daemon
+    Local / Normal daemon    │ │                                                                          │
+    normal · 3 tasks         │ │ Inactive  1                                                              │ Model:  Unknown
+    ● Connected              │ ↓                                                                          │ …
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new
+
+160×12 End
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5                                                                                        tab/⇧tab focus
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Hosts                      │ ↑     Tasks                                        Status         Updated  │ Task details
+  › All hosts · 6            │ │ Inactive  1                                                              │
+    Archive / Private worker │ │   ○ Laptop backlog                               Inactive           now  │ Builder backlog
+    primary · 1 tasks        │ ─────────────────────────────────────────────────────────────────────────  │ ○ Inactive
+    ● Connected              │ Builder / Private worker · Connected · 1 task                              │ Host: Builder / Private worker
+    Local / Normal daemon    │ │ Inactive  1                                                              │
+    normal · 3 tasks         │ │ › ○ Builder backlog                              Inactive           now  │ Model:  Unknown
+    ● Connected              │                                                                            │ …
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

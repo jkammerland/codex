@@ -10,6 +10,15 @@ use crate::bottom_pane::selection_style;
 use crate::resume_picker::format_relative_time;
 use crate::status::format_directory_display;
 
+fn nested_host_row(area: Rect) -> Rect {
+    let inset = area.width.min(/*other*/ 2);
+    Rect {
+        x: area.x + inset,
+        width: area.width - inset,
+        ..area
+    }
+}
+
 fn columns(area: Rect) -> (Rect, Rect, Rect) {
     let metadata = if area.width >= 56 {
         24
@@ -104,7 +113,16 @@ impl AgentsOverviewView {
         let padding = u16::from(area.height >= 3);
         let viewport = row(area, padding, area.height - padding * 2);
         if padding > 0 {
-            let (title, status, updated) = columns(row(area, /*offset*/ 0, /*height*/ 1));
+            let header = row(area, /*offset*/ 0, /*height*/ 1);
+            let header = if indices
+                .iter()
+                .any(|&index| index != usize::MAX && self.rows[index].host.is_some())
+            {
+                nested_host_row(header)
+            } else {
+                header
+            };
+            let (title, status, updated) = columns(header);
             line(
                 if state.filters_focused || state.hosts_focused {
                     "Tasks".bold()
@@ -138,13 +156,24 @@ impl AgentsOverviewView {
         }
         state.scroll = start;
         for (offset, entry) in entries.iter().skip(start).take(height).enumerate() {
+            let rect = row(viewport, offset as u16, /*height*/ 1);
             let index = match entry {
                 CenterRow::Machine(index) | CenterRow::Group(index) | CenterRow::Task(index) => {
                     *index
                 }
-                CenterRow::Gap => continue,
+                CenterRow::HostSeparator => {
+                    line("─".repeat(usize::from(rect.width)).dim(), rect, buf);
+                    continue;
+                }
+                CenterRow::Gap => {
+                    // A subgroup gap stays inside its host's visual guide.
+                    if matches!(entries.get(start + offset + 1), Some(CenterRow::Group(index)) if self.rows[*index].host.is_some())
+                    {
+                        line("│".dim(), rect, buf);
+                    }
+                    continue;
+                }
                 CenterRow::ShowMore => {
-                    let rect = row(viewport, offset as u16, /*height*/ 1);
                     let selected = self.selected == usize::MAX;
                     let style = if selected {
                         selection_style()
@@ -175,7 +204,6 @@ impl AgentsOverviewView {
                 }
             };
             let task = &self.rows[index];
-            let rect = row(viewport, offset as u16, /*height*/ 1);
             if matches!(entry, CenterRow::Machine(_)) {
                 let host = state
                     .hosts
@@ -210,16 +238,26 @@ impl AgentsOverviewView {
                 let suffix = if rect.width < 56 {
                     format!(" · {count} · {connection}")
                 } else {
-                    format!(" · {connection} · {count} tasks")
+                    let noun = if count == 1 { "task" } else { "tasks" };
+                    format!(" · {connection} · {count} {noun}")
                 };
                 let mut heading = crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
-                    Line::from(label.bold()),
+                    Line::from(label.set_style(crate::style::accent_style()).bold()),
                     usize::from(rect.width).saturating_sub(suffix.width()),
                 );
                 heading.spans.push(suffix.dim());
                 line(heading, rect, buf);
                 continue;
             }
+            // Keep the host boundary visible even through selection and subgroup gaps.
+            let (rect, row_width) = if task.host.is_some() {
+                line("│".dim(), rect, buf);
+                let nested = nested_host_row(rect);
+                let row_width = row_width.saturating_sub(nested.x - rect.x);
+                (nested, row_width)
+            } else {
+                (rect, row_width)
+            };
             if matches!(entry, CenterRow::Group(_)) {
                 let group = if self.is_pinned(index) {
                     "Pinned".to_owned()

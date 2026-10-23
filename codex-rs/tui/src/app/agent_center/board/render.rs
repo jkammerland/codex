@@ -106,7 +106,8 @@ impl Renderable for BoardView {
         }
         let mut state = self.state();
         state.displayed = None;
-        let compact = state.team_control.is_some() && area.width < 80;
+        state.split_visible = false;
+        let compact = area.width < 80;
         let mut title = vec![
             if compact {
                 "Agents"
@@ -120,7 +121,7 @@ impl Renderable for BoardView {
                 "   t Tasks   "
             }
             .dim(),
-            "b Board".cyan().bold(),
+            "b Shared Board".set_style(crate::style::accent_style()),
         ];
         if let Some(control) = state.team_control {
             let summary = if compact {
@@ -145,6 +146,12 @@ impl Renderable for BoardView {
             Paragraph::new("Topics · conversations and recent activity".bold())
                 .render(row(area, 1, 1), buffer);
         } else {
+            let mut tabs = row(area, 1, 1);
+            if state.filters_focused && tabs.width > 2 {
+                Paragraph::new("› ".set_style(crate::style::accent_style())).render(tabs, buffer);
+                tabs.x += 2;
+                tabs.width -= 2;
+            }
             render_filled_tab_bar(
                 &["All posts", "Following", "Mentions"],
                 match state.filter {
@@ -152,7 +159,7 @@ impl Renderable for BoardView {
                     Filter::Following => 1,
                     Filter::Mentions => 2,
                 },
-                row(area, 1, 1),
+                tabs,
                 buffer,
             );
         }
@@ -186,8 +193,10 @@ impl Renderable for BoardView {
             }
         } else if state.followers {
             key_hints(&[("v/h/←/Esc", "close"), ("F", "manage agents")])
-        } else if state.opened.is_some() {
-            key_hints(&[("j/k ↑/↓", "scroll"), ("PgUp/PgDn", ""), ("Home/End", "")])
+        } else if state.filters_focused {
+            key_hints(&[("j/k ↑/↓", "filter"), ("Tab", "focus"), ("Enter", "posts")])
+        } else if state.opened.is_some() && state.conversation_focused {
+            key_hints(&[("j/k ↑/↓", "scroll"), ("PgUp/PgDn", ""), ("Tab", "focus")])
         } else if let Some(topic) = &state.topic_filter {
             format!("#{topic} · h back to topics · l/Enter read · j/k move")
                 .dim()
@@ -203,7 +212,7 @@ impl Renderable for BoardView {
             key_hints(&[
                 ("j/k ↑/↓", "move"),
                 ("l/→/Enter", "open"),
-                ("Tab", "filter"),
+                ("Tab", "focus"),
                 ("/", &search),
                 ("#", "set post topic"),
                 ("o", "topics"),
@@ -217,23 +226,51 @@ impl Renderable for BoardView {
             area.bottom().saturating_sub(1)
         };
         let body = row(area, 3, body_end.saturating_sub(area.y + 3));
+        let body = if body.width >= 140 && !state.hosts.is_empty() {
+            let [hosts, gap, body] = Layout::horizontal([
+                Constraint::Length(26),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .areas(body);
+            let counts = state.hosts.iter().map(|host| state.snapshot.members.iter().filter(|member| matches!(&member.author.identity, TeamBoardIdentity::Agent { address } if address.machine_id == host.key.machine_id && address.server_id == host.key.server_id)).count()).collect::<Vec<_>>();
+            super::super::hosts::render_hosts(
+                &state.hosts,
+                &counts,
+                super::super::hosts::HostCount::Agents,
+                None,
+                false,
+                hosts,
+                buffer,
+            );
+            super::super::hosts::divider(gap, buffer);
+            body
+        } else {
+            body
+        };
         if state.topics_open {
+            state.split_visible = false;
             super::topics::render_topics(&mut state, body, buffer);
         } else {
             let wide = body.width >= 100;
             let (feed, conversation) = if wide {
-                let [feed, _, conversation] = Layout::horizontal([
+                let [feed, gap, conversation] = Layout::horizontal([
                     Constraint::Percentage(40),
-                    Constraint::Length(2),
+                    Constraint::Length(3),
                     Constraint::Min(0),
                 ])
                 .areas(body);
+                super::super::hosts::divider(gap, buffer);
                 (feed, conversation)
             } else if state.opened.is_some() || state.followers {
                 (Rect::default(), body)
             } else {
                 (body, Rect::default())
             };
+            state.split_visible = !feed.is_empty() && !conversation.is_empty();
+            if feed.is_empty() && state.opened.is_some() {
+                state.conversation_focused = true;
+            }
             state.page_height = usize::from(conversation.height.saturating_sub(2)).max(1);
             if !feed.is_empty() {
                 render_feed(&mut state, feed, buffer);
@@ -280,17 +317,17 @@ impl Renderable for BoardView {
                 .dim()
                 .into()
         } else if area.width < 80 && state.opened.is_some() {
-            key_hints(&[("h/←/Esc", "feed"), ("r", "reply"), ("v", "followers")])
+            key_hints(&[("h/←/Esc", "feed"), ("Ctrl+D", "quit"), ("r", "reply")])
         } else if area.width < 80 {
             key_hints(&[
+                ("Esc", "Tasks"),
+                ("Ctrl+D", "quit"),
                 ("n", "post"),
-                ("f", "follow"),
-                ("v", "followers"),
                 ("/", "find"),
-                ("o", "topics"),
             ])
         } else {
             let mut items = vec![
+                ("Ctrl+D", "quit"),
                 ("n", "post"),
                 ("r", "reply"),
                 ("f", "follow"),
@@ -303,6 +340,8 @@ impl Renderable for BoardView {
             if state.opened.is_some() {
                 items.insert(0, ("h/←/Esc", "feed"));
                 items.push(("[/]", "entry"));
+            } else {
+                items.insert(0, ("Esc", "Tasks"));
             }
             key_hints(&items)
         };
@@ -311,6 +350,14 @@ impl Renderable for BoardView {
 }
 
 fn render_feed(state: &mut BoardState, area: Rect, buffer: &mut Buffer) {
+    let focused = !state.filters_focused && !state.conversation_focused;
+    Paragraph::new(if focused {
+        "Posts · all hosts".bold().underlined()
+    } else {
+        "Posts · all hosts".bold()
+    })
+    .render(row(area, 0, 1), buffer);
+    let area = row(area, 1, area.height.saturating_sub(1));
     let roots = state.roots();
     if roots.is_empty() {
         Paragraph::new(if state.query.is_empty() {
@@ -353,7 +400,7 @@ fn render_feed(state: &mut BoardState, area: Rect, buffer: &mut Buffer) {
             if unread { "● ".cyan() } else { "  ".into() },
             title.to_string().bold(),
         ]);
-        if selected {
+        if selected && focused {
             headline = headline.style(crate::bottom_pane::active_tab_style());
         }
         lines.push(headline);
@@ -398,7 +445,10 @@ fn render_feed(state: &mut BoardState, area: Rect, buffer: &mut Buffer) {
 }
 
 fn render_conversation(state: &mut BoardState, area: Rect, buffer: &mut Buffer) {
-    let focused = state.opened.is_some() && state.composing.is_none();
+    let focused = state.opened.is_some()
+        && state.conversation_focused
+        && !state.filters_focused
+        && state.composing.is_none();
     let Some(id) = state.opened.clone().or_else(|| state.selected.clone()) else {
         return;
     };

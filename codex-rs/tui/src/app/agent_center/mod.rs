@@ -2,6 +2,7 @@
 
 pub(crate) mod board;
 mod hints;
+pub(crate) mod hosts;
 mod input;
 mod navigation;
 mod render;

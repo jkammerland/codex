@@ -26,6 +26,7 @@ pub(crate) struct TranscriptOverlay {
     notice: Option<String>,
     pub(crate) key_chord_hint: Option<Vec<(String, String)>>,
     pub(crate) browsing_footer: Option<Line<'static>>,
+    pub(crate) escape_closes: bool,
     is_done: bool,
 }
 
@@ -63,6 +64,7 @@ impl TranscriptOverlay {
             notice: None,
             key_chord_hint: None,
             browsing_footer: None,
+            escape_closes: false,
             is_done: false,
         }
     }
@@ -479,7 +481,14 @@ impl TranscriptOverlay {
                 "find",
             ));
         }
-        pairs.push((vec![key_hint::plain(KeyCode::Esc).into()], "browse prompts"));
+        pairs.push((
+            vec![key_hint::plain(KeyCode::Esc).into()],
+            if self.escape_closes {
+                "back"
+            } else {
+                "browse prompts"
+            },
+        ));
         if self.highlight_cell.is_some() {
             pairs.push((vec![key_hint::plain(KeyCode::Right).into()], "to edit next"));
             pairs.push((

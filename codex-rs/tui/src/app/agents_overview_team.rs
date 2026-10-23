@@ -76,6 +76,7 @@ pub(super) fn append_enrolled_rows(
             pin_rank: None,
             pins_supported: false,
             details: AgentsOverviewDetails {
+                availability: Some(agent.discovery.availability.clone()),
                 lines: vec!["History metadata: unknown (enrollment only)".into()],
                 environment_lines: Vec::new(),
                 usage_lines: Vec::new(),
@@ -126,6 +127,7 @@ pub(super) fn append_enrolled_rows(
 
 #[derive(Default)]
 pub(super) struct TaskDetailLines {
+    pub(super) availability: Option<TeamAvailability>,
     pub(super) status: Vec<Line<'static>>,
     pub(super) environment: Vec<Line<'static>>,
 }
@@ -207,6 +209,7 @@ pub(super) fn task_lines(
         environment.extend(environment_lines(&agent.discovery));
     }
     TaskDetailLines {
+        availability: agent.map(|agent| agent.discovery.availability.clone()),
         status: lines,
         environment,
     }

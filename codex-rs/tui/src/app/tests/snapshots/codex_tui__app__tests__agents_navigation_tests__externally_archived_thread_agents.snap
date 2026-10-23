@@ -4,7 +4,7 @@ assertion_line: 138
 expression: "render_bottom_popup(&app.chat_widget, 96)"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 0   Needs you 0   Working 0   Idle 0   Inactive 0                       tab/⇧tab filter
+   All 0   Needs you 0   Working 0   Idle 0   Inactive 0                        tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────
   Loading tasks…                                      │
                                                       │
@@ -26,4 +26,4 @@ expression: "render_bottom_popup(&app.chat_widget, 96)"
                                                       │
                                                       │
                                                       │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

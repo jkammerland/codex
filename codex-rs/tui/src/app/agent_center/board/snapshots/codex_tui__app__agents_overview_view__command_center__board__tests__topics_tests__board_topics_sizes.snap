@@ -1,10 +1,10 @@
 ---
 source: tui/src/app/agent_center/board/topics_tests.rs
-assertion_line: 244
+assertion_line: 246
 expression: "frames.join(\"\\n\\n\")"
 ---
 120x24
-Agent command center   t Tasks   b Board
+Agent command center   t Tasks   b Shared Board
 Topics · conversations and recent activity
 j/k move · l/Enter open · Tab preview · h/Esc posts · / search
 › #release · Off                                       #release · topic preview
@@ -30,7 +30,7 @@ j/k move · l/Enter open · Tab preview · h/Esc posts · / search
 f watch/unwatch · F agent subscriptions · n post · t Tasks
 
 60x16
-Agent command center   t Tasks   b Board
+Agents  t Tasks  b Shared Board
 Topics · conversations and recent activity
 j/k move · l/Enter open · Tab preview · h/Esc posts · / sear
 › #release · Off
@@ -48,7 +48,7 @@ j/k move · l/Enter open · Tab preview · h/Esc posts · / sear
 f watch/unwatch · F agent subscriptions · n post · t Tasks
 
 36x7
-Agent command center   t Tasks   b B
+Agents  t Tasks  b Shared Board
 Topics · conversations and recent ac
 j/k move · l/Enter open · Tab previe
 › #release · Off

@@ -157,7 +157,14 @@ pub(super) struct AgentsOverviewViewState {
     pub(super) team_notice: Option<String>,
     pub(super) machines_enabled: bool,
     pub(super) overview_required: bool,
+    /// Chats opened from the command center retain its cancellation/navigation contract.
+    pub(super) session_navigation: bool,
     pub(super) machine_notices: Vec<String>,
+    pub(super) hosts: Vec<command_center::hosts::HostSummary>,
+    pub(super) host_filter: Option<super::agents_hosts::HostKey>,
+    pub(super) hosts_focused: bool,
+    pub(super) hosts_visible: bool,
+    pub(super) filters_focused: bool,
     scroll: usize,
     page_height: usize,
     status_filter: usize,
@@ -460,6 +467,7 @@ impl AgentsOverviewView {
             .selected_row()
             .filter(|_| self.state().rename_target.is_none())
         {
+            self.state().session_navigation = true;
             self.send_row_action(AppEvent::SelectAgentsOverviewThread {
                 thread_id: row.thread_id,
             });
@@ -489,13 +497,33 @@ impl AgentsOverviewView {
     }
 
     fn status(row: &AgentsOverviewRow) -> (&'static str, Span<'static>) {
+        use crate::style::StatusTone;
+        use crate::style::status_style;
+        use codex_app_server_protocol::TeamReadiness;
+        use codex_app_server_protocol::TeamSynchronization;
+
+        if let Some(availability) = &row.details.availability {
+            if availability.synchronization == TeamSynchronization::Disconnected {
+                return ("Offline", "○".dim());
+            }
+            if availability.readiness == TeamReadiness::Held {
+                return ("Held", "●".set_style(status_style(StatusTone::Attention)));
+            }
+        }
         match row.group {
             AgentsOverviewGroup::NeedsYou if row.thread.status == ThreadStatus::SystemError => {
-                ("Error", "!".red())
+                ("Error", "!".set_style(status_style(StatusTone::Failure)))
             }
-            AgentsOverviewGroup::NeedsYou => ("Needs input", "●".red()),
-            AgentsOverviewGroup::Working => ("Working", "●".green()),
-            AgentsOverviewGroup::Ready => ("Idle", "○".cyan()),
+            AgentsOverviewGroup::NeedsYou => (
+                "Needs input",
+                "●".set_style(status_style(StatusTone::Attention)),
+            ),
+            AgentsOverviewGroup::Working => {
+                ("Working", "●".set_style(status_style(StatusTone::Working)))
+            }
+            AgentsOverviewGroup::Ready => {
+                ("Idle", "○".set_style(status_style(StatusTone::Success)))
+            }
             AgentsOverviewGroup::Finished => ("Inactive", "○".dim()),
         }
     }
@@ -504,19 +532,19 @@ impl AgentsOverviewView {
         let Some(row) = self.selected_row() else {
             return;
         };
-        let (status, mut dot) = Self::status(row);
-        let secondary = crate::style::secondary_text_style();
-        let status_style = match row.group {
-            AgentsOverviewGroup::NeedsYou if row.thread.status == ThreadStatus::SystemError => {
-                crate::style::status_style(crate::style::StatusTone::Failure)
-            }
-            AgentsOverviewGroup::NeedsYou => {
-                crate::style::status_style(crate::style::StatusTone::Attention)
-            }
-            AgentsOverviewGroup::Working => crate::style::accent_style().bold(),
-            AgentsOverviewGroup::Ready | AgentsOverviewGroup::Finished => secondary,
+        let host = self
+            .state()
+            .hosts
+            .iter()
+            .find(|host| Some(&host.key) == row.host.as_ref())
+            .cloned();
+        let (status, dot) = if host.as_ref().is_some_and(|host| !host.connected) {
+            ("Offline", "○".dim())
+        } else {
+            Self::status(row)
         };
-        dot.style = status_style;
+        let secondary = crate::style::secondary_text_style();
+        let status_style = dot.style;
         let width = usize::from(area.width);
         let model = crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
             Line::from(vec![
@@ -554,6 +582,12 @@ impl AgentsOverviewView {
             model,
             reasoning,
         ];
+        if let Some(host) = host {
+            lines.insert(
+                4,
+                Line::from(vec!["Host: ".set_style(secondary), host.label.into()]),
+            );
+        }
         lines.extend(row.details.usage_lines.clone());
         // Availability and holds should be visible before potentially long project paths.
         if self.state().connection_notice.is_none() {
@@ -686,6 +720,10 @@ impl BottomPaneView for AgentsOverviewView {
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         let mut state = self.state();
+        if state.help {
+            state.help = false;
+            return CancellationEvent::Handled;
+        }
         if state.editing_metadata() {
             state.searching = false;
             state.rename_target = None;
@@ -698,7 +736,8 @@ impl BottomPaneView for AgentsOverviewView {
         if state.removal.is_some() {
             return CancellationEvent::Handled;
         }
-        CancellationEvent::NotHandled
+        // The command center owns cancellation even at its root. Quitting is explicit.
+        CancellationEvent::Handled
     }
 
     fn handle_paste(&mut self, pasted: String) -> bool {
@@ -943,21 +982,12 @@ impl BottomPaneView for AgentsOverviewView {
                     self.selected = self.visible_indices().last().copied().unwrap_or(0);
                 }
                 ListAction::Accept => self.activate(),
-                ListAction::Cancel => {
-                    if matches!(self.on_ctrl_c(), CancellationEvent::NotHandled) {
-                        if self.state().overview_required {
-                            self.app_event_tx
-                                .send(AppEvent::Exit(crate::app_event::ExitMode::Immediate));
-                            return;
-                        }
-                        self.state().completion = Some(ViewCompletion::Cancelled);
-                    }
-                }
+                ListAction::Cancel | ListAction::MoveLeft => self.center_back(),
                 ListAction::PageUp | ListAction::PageDown => {
                     self.page_selection(action);
                 }
                 ListAction::MoveRight if !self.state().editing_metadata() => self.activate(),
-                ListAction::MoveLeft | ListAction::MoveRight => {}
+                ListAction::MoveRight => {}
             }
         } else if key.code == KeyCode::Backspace {
             self.edit_input(|input| {

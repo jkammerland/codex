@@ -1,44 +1,44 @@
 ---
 source: tui/src/app/agent_center_tests.rs
-assertion_line: 96
+assertion_line: 103
 expression: "format!(\"Initial display:\\n{before}\\n\\nAfter progress updates:\\n{after}\")"
 ---
 Initial display:
   Agent command center   t Tasks   b Board  Group: Status  g
-   All 5   Needs you 1   Working 3   Idle 1   Inactive 0                           tab/⇧tab filter
+   All 5   Needs you 1   Working 3   Idle 1   Inactive 0                            tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
+      Tasks                                  Status       │ Task details
   Needs input  1                                          │
-    ! Needs input                                         │ Alpha
+    ! Needs input                            Error        │ Alpha
                                                           │ ● Working
   Working  3                                              │
-    ● Bravo                                               │ Model:  Unknown
-    ● Charlie                                             │ Effort: Unknown
-  › ● Alpha                                               │
+    ● Bravo                                  Working      │ Model:  Unknown
+    ● Charlie                                Working      │ Effort: Unknown
+  › ● Alpha                                  Working      │
                                                           │ Project
   Idle  1                                                 │ /tmp/project
-    ○ Ready task                                          │
+    ○ Ready task                             Idle         │
                                                           │ Prompt
                                                           │ Alpha
                                                           │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new
 
 After progress updates:
   Agent command center   t Tasks   b Board  Group: Status  g
-   All 5   Needs you 1   Working 3   Idle 1   Inactive 0                           tab/⇧tab filter
+   All 5   Needs you 1   Working 3   Idle 1   Inactive 0                            tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
+      Tasks                                  Status       │ Task details
   Needs input  1                                          │
-    ! Needs input                                         │ Alpha
+    ! Needs input                            Error        │ Alpha
                                                           │ ● Working
   Working  3                                              │
-    ● Bravo                                               │ Model:  Unknown
-    ● Charlie                                             │ Effort: Unknown
-  › ● Alpha                                               │
+    ● Bravo                                  Working      │ Model:  Unknown
+    ● Charlie                                Working      │ Effort: Unknown
+  › ● Alpha                                  Working      │
                                                           │ Project
   Idle  1                                                 │ /tmp/project
-    ○ Ready task                                          │
+    ○ Ready task                             Idle         │
                                                           │ Prompt
                                                           │ Progress update 3
                                                           │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

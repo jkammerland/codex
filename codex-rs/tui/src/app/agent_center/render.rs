@@ -39,24 +39,76 @@ fn visible_suffix(input: &str, available: usize) -> &str {
     &input[start..]
 }
 
+fn center_notice(state: &AgentsOverviewViewState) -> Option<String> {
+    if state.help || state.key_chord_hint.is_some() {
+        return None;
+    }
+    state
+        .connection_notice
+        .map(str::to_owned)
+        .or_else(|| state.team_notice.clone())
+        .or_else(|| {
+            state
+                .creating_worktree
+                .then(|| "Creating worktree…".to_owned())
+        })
+        .or_else(|| {
+            state.removal.map(|action| match action {
+                AgentsOverviewAction::Archive => {
+                    "Archiving task…  You can still browse.".to_owned()
+                }
+                AgentsOverviewAction::Delete => "Deleting task…  You can still browse.".to_owned(),
+            })
+        })
+        .or_else(|| {
+            (state.refresh_failed && !state.loading).then(|| "Error loading tasks".to_owned())
+        })
+        .or_else(|| state.server_version_notice.clone())
+}
+
 struct CenterLayout {
     header: Rect,
+    hosts: Rect,
+    host_gap: Rect,
     list: Rect,
     gap: Rect,
     details: Rect,
     search: Rect,
+    notice: Rect,
     footer: Rect,
 }
 
 impl AgentsOverviewView {
     fn center_layout(&self, area: Rect) -> CenterLayout {
-        let state = self.state();
+        let mut state = self.state();
+        // Persistent team status must not replace navigation and quit hints.
         let footer_height = u16::from(area.height >= 2);
+        let notice_height = u16::from(area.height >= 6 && center_notice(&state).is_some());
         let header_height = if area.height >= 6 { 3 } else { 0 };
         let footer = row(area, area.height - footer_height, footer_height);
+        let notice = row(
+            area,
+            area.height - footer_height - notice_height,
+            notice_height,
+        );
         let header = row(area, /*offset*/ 0, header_height);
-        let body = row(area, header_height, footer.y - header.bottom())
+        let body = row(area, header_height, notice.y - header.bottom())
             .inner(Margin::new(/*horizontal*/ 2, /*vertical*/ 0));
+        state.hosts_visible = area.width >= 128 && !body.is_empty() && !state.hosts.is_empty();
+        if !state.hosts_visible {
+            state.hosts_focused = false;
+        }
+        let (hosts, host_gap, body) = if state.hosts_visible {
+            let [hosts, gap, body] = Layout::horizontal([
+                Constraint::Length(26),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .areas(body);
+            (hosts, gap, body)
+        } else {
+            (Rect::default(), Rect::default(), body)
+        };
         let [list, gap, details] = if body.width >= 90 {
             // Give details room to breathe on wide terminals while keeping the task list usable.
             let details_width = (body.width / 5 * 2).clamp(38, 64);
@@ -77,10 +129,13 @@ impl AgentsOverviewView {
         );
         CenterLayout {
             header,
+            hosts,
+            host_gap,
             list,
             gap,
             details,
             search,
+            notice,
             footer,
         }
     }
@@ -167,13 +222,24 @@ impl Renderable for AgentsOverviewView {
                 let count = self
                     .rows
                     .iter()
-                    .filter(|row| group.is_none_or(|group| group == row.group))
+                    .filter(|row| {
+                        state
+                            .host_filter
+                            .as_ref()
+                            .is_none_or(|host| row.host.as_ref() == Some(host))
+                            && group.is_none_or(|group| group == row.group)
+                    })
                     .count();
                 format!("{label} {count}")
             })
             .collect::<Vec<_>>();
         let mut tabs = inset(row(layout.header, /*offset*/ 1, /*height*/ 1));
-        let filter_hint = hint_line(&[(filter_keys, "filter".into())]);
+        if state.filters_focused && tabs.width > 2 {
+            line("› ".set_style(crate::style::accent_style()), tabs, buf);
+            tabs.x += 2;
+            tabs.width -= 2;
+        }
+        let filter_hint = hint_line(&[(filter_keys, "focus".into())]);
         if tabs.width >= 80 && filter_hint.width() > 0 {
             let hint_width = filter_hint.width() as u16;
             filter_hint.render(
@@ -188,13 +254,29 @@ impl Renderable for AgentsOverviewView {
             tabs,
             buf,
         );
-        line(
-            "─"
-                .repeat(usize::from(area.width.saturating_sub(/*rhs*/ 4)))
-                .dim(),
-            inset(row(layout.header, /*offset*/ 2, /*height*/ 1)),
-            buf,
-        );
+        let scope = if !state.hosts.is_empty() && layout.hosts.is_empty() {
+            let host = state
+                .host_filter
+                .as_ref()
+                .and_then(|key| state.hosts.iter().find(|host| &host.key == key));
+            host.map_or_else(
+                || format!("Hosts: All {} · F9 machines", state.hosts.len()),
+                |host| {
+                    format!(
+                        "Host: {} · {}",
+                        host.label,
+                        if host.connected {
+                            "Connected"
+                        } else {
+                            "Offline"
+                        }
+                    )
+                },
+            )
+        } else {
+            "─".repeat(usize::from(area.width.saturating_sub(4)))
+        };
+        line(scope.dim(), inset(row(layout.header, 2, 1)), buf);
         if state.editing_metadata() {
             buf.set_style(layout.search, crate::bottom_pane::active_tab_style());
             if state.rename_target.is_some() {
@@ -217,35 +299,33 @@ impl Renderable for AgentsOverviewView {
                 );
             }
         }
-        let notice = state
-            .connection_notice
-            .map(str::to_owned)
-            .or_else(|| state.team_notice.clone())
-            .or_else(|| {
-                state
-                    .creating_worktree
-                    .then(|| "Creating worktree…".to_owned())
-            })
-            .or_else(|| {
-                state.removal.map(|action| match action {
-                    AgentsOverviewAction::Archive => {
-                        "Archiving task…  You can still browse.".to_owned()
-                    }
-                    AgentsOverviewAction::Delete => {
-                        "Deleting task…  You can still browse.".to_owned()
-                    }
-                })
-            })
-            .or_else(|| {
-                (state.refresh_failed && !state.loading).then(|| "Error loading tasks".to_owned())
-            })
-            .or_else(|| state.server_version_notice.clone());
-        if let Some(notice) = notice.filter(|_| !state.help && state.key_chord_hint.is_none()) {
-            line(notice.dim(), inset(layout.footer), buf);
-        } else {
-            line(hint_line(&footer_hints), inset(layout.footer), buf);
+        if let Some(notice) = center_notice(&state) {
+            line(notice.dim(), inset(layout.notice), buf);
         }
+        line(hint_line(&footer_hints), inset(layout.footer), buf);
         let help = state.help;
+        if !help && !layout.hosts.is_empty() {
+            let counts = state
+                .hosts
+                .iter()
+                .map(|host| {
+                    self.rows
+                        .iter()
+                        .filter(|row| row.host.as_ref() == Some(&host.key))
+                        .count()
+                })
+                .collect::<Vec<_>>();
+            super::hosts::render_hosts(
+                &state.hosts,
+                &counts,
+                super::hosts::HostCount::Tasks,
+                state.host_filter.as_ref(),
+                state.hosts_focused,
+                layout.hosts,
+                buf,
+            );
+            super::hosts::divider(layout.host_gap, buf);
+        }
         drop(state);
         if help {
             let body = row(
@@ -263,13 +343,7 @@ impl Renderable for AgentsOverviewView {
             Paragraph::new(lines).render(body, buf);
             return;
         }
-        for y in layout.gap.y..layout.gap.bottom() {
-            if layout.gap.width > 1 {
-                buf[(layout.gap.x + 1, y)]
-                    .set_symbol("│")
-                    .set_style(Style::default().dim());
-            }
-        }
+        super::hosts::divider(layout.gap, buf);
         self.render_center_rows(layout.list, buf);
         if !layout.details.is_empty() {
             self.render_details(layout.details, buf);

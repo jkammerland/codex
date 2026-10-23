@@ -482,6 +482,7 @@ impl App {
                         .and_then(|ids| ids.iter().position(|candidate| candidate == id)),
                     pins_supported: host.state.agents_overview.pinned_thread_ids.is_some(),
                     details: super::agents_overview_details::AgentsOverviewDetails {
+                        availability: None,
                         lines: Vec::new(),
                         environment_lines: Vec::new(),
                         usage_lines: host
@@ -547,6 +548,7 @@ impl App {
                 ));
             let team_lines =
                 super::agents_overview_team::task_lines(row, self.agents_hosts.snapshot.as_ref());
+            row.details.availability = team_lines.availability;
             row.details.lines.extend(team_lines.status);
             row.details.environment_lines = team_lines.environment;
         }
@@ -557,6 +559,28 @@ impl App {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.machines_enabled = self.agents_hosts.enabled();
+            state.hosts = self
+                .agents_hosts
+                .hosts
+                .iter()
+                .filter(|(key, host)| {
+                    **key != super::agents_hosts::HostKey::default() || host.connected
+                })
+                .map(|(key, host)| {
+                    super::agents_overview_view::command_center::hosts::HostSummary {
+                        key: key.clone(),
+                        label: host.label.clone(),
+                        connected: host.connected,
+                    }
+                })
+                .collect();
+            if state
+                .host_filter
+                .as_ref()
+                .is_some_and(|selected| !state.hosts.iter().any(|host| &host.key == selected))
+            {
+                state.host_filter = None;
+            }
             state.overview_required = self.agents_hosts.enabled()
                 && self.primary_thread_id.is_none()
                 && self.agents_hosts.foreground == super::agents_hosts::HostKey::default();

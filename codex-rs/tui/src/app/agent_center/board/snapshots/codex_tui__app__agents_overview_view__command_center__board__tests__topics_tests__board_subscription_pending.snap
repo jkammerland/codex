@@ -1,10 +1,10 @@
 ---
 source: tui/src/app/agent_center/board/topics_tests.rs
-assertion_line: 277
+assertion_line: 279
 expression: "format!(\"Pending\\n{pending}\\n\\nUnknown\\n{unknown}\")"
 ---
 Pending
-Agent command center   t Tasks   b Board
+Agent command center   t Tasks   b Shared Board
 Topics · conversations and recent activity
 j/k move · l/Enter open · Tab preview · h/Esc posts · / search
 › #release · Off · Watch pending              #release · topic preview
@@ -24,7 +24,7 @@ j/k move · l/Enter open · Tab preview · h/Esc posts · / search
 f watch/unwatch · F agent subscriptions · n post · t Tasks
 
 Unknown
-Agent command center   t Tasks   b Board
+Agent command center   t Tasks   b Shared Board
 Topics · conversations and recent activity
 j/k move · l/Enter open · Tab preview · h/Esc posts · / search
 › #release · Off · Watch unconfirmed          #release · topic preview

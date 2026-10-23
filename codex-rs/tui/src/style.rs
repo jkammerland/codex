@@ -29,6 +29,7 @@ pub(crate) const UI_ACCENT: (u8, u8, u8) = CHATGPT_BLUE_200;
 #[derive(Clone, Copy)]
 pub(crate) enum StatusTone {
     Success,
+    Working,
     Attention,
     Failure,
 }
@@ -47,6 +48,7 @@ fn status_style_for(
     let color = match (tone, color_level) {
         (_, StdoutColorLevel::Unknown) => Color::Reset,
         (StatusTone::Success, _) => Color::Green,
+        (StatusTone::Working, _) => Color::Cyan,
         (StatusTone::Failure, _) => Color::Red,
         // Yellow can disappear on light themes; use it only with a known dark background.
         (StatusTone::Attention, _) if light || terminal_bg.is_none() => Color::Reset,
@@ -280,6 +282,7 @@ mod tests {
             for bg in [(255, 255, 255), (130, 130, 130), (220, 210, 180)] {
                 for (tone, color) in [
                     (StatusTone::Success, Color::Green),
+                    (StatusTone::Working, Color::Cyan),
                     (StatusTone::Attention, Color::Reset),
                     (StatusTone::Failure, Color::Red),
                 ] {
@@ -306,6 +309,7 @@ mod tests {
     fn status_colors_preserve_ansi16_and_no_color_fallbacks() {
         for (tone, light, dark) in [
             (StatusTone::Success, Color::Green, Color::Green),
+            (StatusTone::Working, Color::Cyan, Color::Cyan),
             (StatusTone::Attention, Color::Reset, Color::Yellow),
             (StatusTone::Failure, Color::Red, Color::Red),
         ] {

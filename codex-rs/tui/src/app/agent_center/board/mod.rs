@@ -70,9 +70,13 @@ pub(crate) struct BoardState {
     pub(crate) active: bool,
     pub(crate) snapshot: TeamBoardSnapshot,
     pub(crate) team_control: Option<TeamControlSummary>,
+    pub(crate) hosts: Vec<super::hosts::HostSummary>,
     pub(crate) selected: Option<String>,
     pub(crate) opened: Option<String>,
     pub(crate) filter: Filter,
+    pub(crate) filters_focused: bool,
+    pub(crate) conversation_focused: bool,
+    pub(crate) split_visible: bool,
     pub(crate) query: String,
     pub(crate) searching: bool,
     pub(crate) editing_topic: bool,
@@ -112,9 +116,30 @@ pub(crate) struct BoardState {
 }
 
 impl BoardState {
+    /// Board actions address the region that owns keyboard focus.
+    pub(crate) fn focused_conversation(&self) -> Option<&String> {
+        if self.conversation_focused && !self.filters_focused {
+            self.opened.as_ref()
+        } else {
+            self.selected.as_ref()
+        }
+    }
+
     pub(crate) fn update_team(&mut self, snapshot: &codex_team::TeamSnapshot) {
         // Control and host acknowledgments can change without a new Board revision.
         self.team_control = Some(TeamControlSummary::from(snapshot));
+        self.hosts = snapshot
+            .servers
+            .iter()
+            .map(|server| super::hosts::HostSummary {
+                key: crate::app::agents_hosts::HostKey {
+                    machine_id: server.machine_id.clone(),
+                    server_id: server.server_id.clone(),
+                },
+                label: format!("{} / {}", server.machine_label, server.server_label),
+                connected: server.connected,
+            })
+            .collect();
         self.update(snapshot.board.clone());
     }
 
@@ -135,6 +160,7 @@ impl BoardState {
                 .any(|entry| &entry.conversation_id == opened)
         }) {
             self.opened = None;
+            self.conversation_focused = false;
             self.scroll = 0;
             self.scroll_anchor = None;
         }
@@ -257,6 +283,8 @@ impl BoardState {
             self.viewed_lines
                 .retain(|(conversation, _), _| conversation != &id);
             self.opened = Some(id);
+            self.conversation_focused = true;
+            self.filters_focused = false;
             self.scroll = 0;
             self.scroll_width = 0;
             self.scroll_anchor = None;

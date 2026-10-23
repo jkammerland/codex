@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agent_center_tests.rs
-assertion_line: 565
+assertion_line: 588
 expression: "screen(&view, width, height)"
 ---
   Agents   t Tasks   b Board
@@ -14,7 +14,8 @@ expression: "screen(&view, width, height)"
   enter  Open
   pgup   Page up
   pgdn   Page down
-  ⌃c     Quit
+  ⌃d     Quit
+  esc    Back
 
   Tasks
   n          New
@@ -24,14 +25,13 @@ expression: "screen(&view, width, height)"
   r          Rename
   x          Stop
   a          Archive
-  h          Hide
+  ⇧h         Hide
   backspace  Delete
 
   View
-  tab/⇧tab  Filter
+  tab/⇧tab  Focus
   f3        Search
   g         Group
-
 
 
   esc back

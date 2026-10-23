@@ -1,21 +1,21 @@
 ---
 source: tui/src/app/agents_overview_tests.rs
-assertion_line: 1255
+assertion_line: 1260
 expression: "render_bottom_popup(&app.chat_widget,\n100).replace(&test_path_display(\"/tmp/project\"),\n\"/tmp/project\").replace(\"fwd del\", \"del\")"
 ---
   Agent command center   t Tasks   b Board  Group: Model  g
-   All 4   Needs you 0   Working 0   Idle 4   Inactive 0                           tab/⇧tab filter
+   All 4   Needs you 0   Working 0   Idle 4   Inactive 0                            tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
+      Tasks                                  Status       │ Task details
   Unknown  1                                              │
-  › ○ Legacy task                                         │ Legacy task
+  › ○ Legacy task                            Idle         │ Legacy task
                                                           │ ○ Idle
   model-a  2                                              │
-    ○ Recent task                                         │ Model:  Unknown
-    ○ Older task                                          │ Effort: Unknown
+    ○ Recent task                            Idle         │ Model:  Unknown
+    ○ Older task                             Idle         │ Effort: Unknown
                                                           │
   model-b  1                                              │ Project
-    ○ Other model                                         │ /tmp/project
+    ○ Other model                            Idle         │ /tmp/project
                                                           │
                                                           │ Prompt
                                                           │ Legacy task
@@ -26,4 +26,4 @@ expression: "render_bottom_popup(&app.chat_widget,\n100).replace(&test_path_disp
                                                           │
                                                           │
                                                           │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

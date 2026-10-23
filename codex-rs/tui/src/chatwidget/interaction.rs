@@ -15,6 +15,68 @@ pub(crate) enum KeyEventAction {
 }
 
 impl ChatWidget {
+    /// Cancel the focused command-center input or work without arming a quit shortcut.
+    pub(crate) fn cancel_agent_center_input(&mut self) {
+        self.quit_shortcut_expires_at = None;
+        self.quit_shortcut_key = None;
+        self.bottom_pane.clear_quit_shortcut_hint();
+
+        // This menu owns input outside BottomPane's popup stack.
+        if self.quick_dial_menu {
+            self.cancel_quick_dial_menu();
+            return;
+        }
+        // A read-only attachment may retain a writable draft from before the switch.
+        if self.external_writer_view && self.bottom_pane.no_modal_or_popup_active() {
+            return;
+        }
+        // Cancel startup intent only once input reaches the ordinary composer owner.
+        if self.bottom_pane.no_modal_or_popup_active()
+            && self.handle_startup_submission_key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))
+        {
+            return;
+        }
+        // Image preparation owns its retained input and recovery queue before the composer.
+        if self.pending_image_submission.is_some() && self.bottom_pane.no_modal_or_popup_active() {
+            self.handle_key_event_with_activation_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                /*activation_key*/ None,
+            );
+            return;
+        }
+        let had_modal = self.bottom_pane.has_active_modal();
+        let pauses_goal = self
+            .bottom_pane
+            .active_view_will_interrupt_turn_on_key_event(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ));
+        if !self.bottom_pane.has_active_modal() && !self.bottom_pane.no_modal_or_popup_active() {
+            self.bottom_pane.handle_key_event(KeyCode::Esc.into());
+            if self.bottom_pane.no_modal_or_popup_active() {
+                self.on_modal_or_popup_closed();
+            }
+        } else if self.bottom_pane.on_ctrl_c() == CancellationEvent::Handled {
+            self.refresh_startup_recovery();
+            if pauses_goal {
+                self.pause_active_goal_for_interrupt();
+            }
+            if had_modal && self.bottom_pane.no_modal_or_popup_active() {
+                self.on_modal_or_popup_closed();
+            }
+        } else if !self.blocks_direct_input
+            && !self.external_writer_view
+            && self.is_cancellable_work_active()
+            && self.submit_op(AppCommand::interrupt())
+        {
+            self.pause_active_goal_for_interrupt();
+        }
+        self.bottom_pane.clear_quit_shortcut_hint();
+    }
+
     pub(crate) fn clear_composer_selection(&mut self) {
         self.bottom_pane.clear_composer_selection();
     }

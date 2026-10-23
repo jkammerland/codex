@@ -4,11 +4,11 @@ assertion_line: 45
 expression: rendered
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 1   Needs you 0   Working 0   Idle 1   Inactive 0                           tab/⇧tab filter
+   All 1   Needs you 0   Working 0   Idle 1   Inactive 0                            tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
+      Tasks                                  Status       │ Task details
   C:\Pilot\project  1                                     │
-  › ○ Review [the source](C:\Pilot\project\src\main.rs#…  │ Review [the source](C:\Pilot\project\…
+  › ○ Review [the source](C:\Pilot\project…  Idle         │ Review [the source](C:\Pilot\project\…
                                                           │ ○ Idle
                                                           │
                                                           │ Model:  Unknown
@@ -30,4 +30,4 @@ expression: rendered
                                                           │
                                                           │
                                                           │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

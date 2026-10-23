@@ -1,0 +1,17 @@
+---
+source: tui/src/app/agents_hosts_tests.rs
+assertion_line: 990
+expression: short_end
+---
+
+
+  Shared team
+  F6 Pause · F7 Resume · F8 Stop. Controls apply to enrolled task families.
+
+↑
+  14. Choose task model and effort            Use this machine's catalog; leave saved defaults
+                                              unchanged
+  15. Reset task effort to model default
+› 16. Reset task model to configured default
+
+  enter select · esc back

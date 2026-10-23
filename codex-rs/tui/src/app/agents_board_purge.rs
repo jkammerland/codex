@@ -40,7 +40,7 @@ impl App {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A topic browser selection must not expose deletion of a hidden feed selection.
         let conversation = (!state.topics_open)
-            .then(|| state.opened.clone().or_else(|| state.selected.clone()))
+            .then(|| state.focused_conversation().cloned())
             .flatten();
         let topic = if state.topics_open {
             state.selected_topic.clone()

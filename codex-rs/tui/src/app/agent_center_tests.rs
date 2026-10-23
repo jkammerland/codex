@@ -23,6 +23,13 @@ fn screen(view: &AgentsOverviewView, width: u16, height: u16) -> String {
     )
 }
 
+// Filters are a focusable region; changing focus alone must preserve the result set.
+fn move_filter(view: &mut AgentsOverviewView, direction: KeyCode) {
+    view.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    view.handle_key_event(direction.into());
+    view.handle_key_event(KeyCode::Enter.into());
+}
+
 #[tokio::test]
 async fn live_center_keeps_status_order_across_progress_refreshes() {
     let mut app = make_test_app().await;
@@ -214,14 +221,14 @@ async fn live_center_stable_order_preserves_filters_and_pins() {
     view.handle_key_event(KeyCode::Esc.into());
     assert_eq!(view.thread_ids(), ids.to_vec());
     // A refresh while another status tab is empty must not discard the Working order.
-    view.handle_key_event(KeyCode::Tab.into());
+    move_filter(&mut view, KeyCode::Down);
     assert!(rendered_titles(&view).is_empty());
     threads[1].updated_at += 200;
     view = app.agents_overview_view(threads.clone(), /*selected_thread_id*/ None);
-    view.handle_key_event(KeyCode::Tab.into());
+    move_filter(&mut view, KeyCode::Down);
     assert_eq!(rendered_titles(&view), vec!["Alpha", "Bravo", "Charlie"]);
-    view.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    view.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    move_filter(&mut view, KeyCode::Up);
+    move_filter(&mut view, KeyCode::Up);
     app.agents_overview.pinned_thread_ids = Some(vec![ids[2], ids[0]]);
     view = app.agents_overview_view(threads.clone(), Some(ids[1]));
     assert_eq!(rendered_titles(&view), vec!["Charlie", "Alpha", "Bravo"]);
@@ -302,9 +309,22 @@ async fn live_center_columns() {
             .iter()
             .position(|cell| cell.symbol() == "›")
             .unwrap();
+        let status_style = match view.rows[view.selected_index().unwrap()].thread.status {
+            ThreadStatus::SystemError => {
+                crate::style::status_style(crate::style::StatusTone::Failure)
+            }
+            ThreadStatus::Active { ref active_flags } if !active_flags.is_empty() => {
+                crate::style::status_style(crate::style::StatusTone::Attention)
+            }
+            ThreadStatus::Active { .. } => {
+                crate::style::status_style(crate::style::StatusTone::Working)
+            }
+            ThreadStatus::Idle => crate::style::status_style(crate::style::StatusTone::Success),
+            ThreadStatus::NotLoaded => Style::default().dim(),
+        };
         assert_eq!(
             selected_row[marker + 2].style(),
-            selected_row[marker].style()
+            selected_row[marker].style().patch(status_style)
         );
         selected_status_styles.push(format!(
             "{} | {:?}",
@@ -318,6 +338,9 @@ async fn live_center_columns() {
         selected_status_styles.join("\n")
     );
 }
+
+#[path = "agent_center_visual_tests.rs"]
+mod visual_tests;
 
 #[tokio::test]
 async fn live_center_pages_visible_rows_without_wrapping() {
@@ -448,7 +471,7 @@ async fn live_center_rename_retains_target_when_status_leaves_filter() -> Result
         // Reuse the Ready tab after the first iteration.
         if key == KeyCode::Esc {
             for _ in 0..3 {
-                view.handle_key_event(KeyCode::Tab.into());
+                move_filter(&mut view, KeyCode::Down);
             }
         }
         view.handle_key_event(KeyCode::Char('r').into());
@@ -541,16 +564,16 @@ async fn live_center_navigation_and_complete_hints() {
         Some(ready),
     );
     let selected = |view: &AgentsOverviewView| view.rows[view.selected_index().unwrap()].thread_id;
-    view.handle_key_event(KeyCode::Tab.into());
+    move_filter(&mut view, KeyCode::Down);
     assert_eq!(selected(&view), needs_you);
-    view.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    view.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+    move_filter(&mut view, KeyCode::Up);
+    move_filter(&mut view, KeyCode::Up);
     assert_eq!(selected(&view), unloaded);
     insta::assert_snapshot!(
         "live_center_status_filter",
         screen(&view, /*width*/ 40, /*height*/ 12)
     );
-    view.handle_key_event(KeyCode::Tab.into());
+    move_filter(&mut view, KeyCode::Down);
 
     let repeat_help =
         KeyEvent::new_with_kind(KeyCode::Char('?'), KeyModifiers::NONE, KeyEventKind::Repeat);
@@ -725,7 +748,14 @@ async fn live_center_search_row_appears_only_while_editing() {
         .collect::<String>();
     let styles =
         ["Tasks", "Status", "Updated"].map(|label| header[text.find(label).unwrap()].style());
-    assert_eq!(styles, [styles[0]; 3]);
+    assert_eq!(
+        styles.map(|style| style.add_modifier),
+        [
+            ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED,
+            ratatui::style::Modifier::DIM,
+            ratatui::style::Modifier::DIM,
+        ]
+    );
     let idle = screen(&view, area.width, area.height);
     for key in [KeyCode::Char('/'), KeyCode::F(3)] {
         view.handle_key_event(key.into());
@@ -842,3 +872,6 @@ async fn live_center_show_more_navigation_search_and_loading() {
     view.handle_key_event(KeyCode::Enter.into());
     assert_matches!(rx.try_recv(), Ok(AppEvent::ShowMoreAgentsOverview));
 }
+
+#[path = "agent_center_navigation_tests.rs"]
+mod navigation_tests;

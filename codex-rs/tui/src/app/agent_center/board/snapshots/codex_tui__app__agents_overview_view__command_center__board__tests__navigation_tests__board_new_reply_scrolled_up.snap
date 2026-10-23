@@ -3,9 +3,9 @@ source: tui/src/app/agent_center/board/navigation_tests.rs
 assertion_line: 225
 expression: after
 ---
-Agent command center   t Tasks   b Board
+Agents  t Tasks  b Shared Board
  All posts   Following   Mentions
-j/k ↑/↓ scroll · PgUp/PgDn · Home/End
+j/k ↑/↓ scroll · PgUp/PgDn · Tab focus
 Conversation · Watch · 2 followers
 Reviewer · MacBook  Nov 14 22:13
 ↳ replying to User
@@ -14,4 +14,4 @@ Reply 29
 Reviewer · MacBook  Nov 14 22:13
 ↳ replying to User
 Lines 113-118/128 ↑ ↓ · 1 new
-h/←/Esc feed · r reply · v followers
+h/←/Esc feed · Ctrl+D quit · r reply

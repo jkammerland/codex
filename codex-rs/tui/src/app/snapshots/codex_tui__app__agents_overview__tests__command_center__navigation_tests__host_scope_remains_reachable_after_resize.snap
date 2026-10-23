@@ -1,0 +1,29 @@
+---
+source: tui/src/app/agent_center_navigation_tests.rs
+assertion_line: 130
+expression: narrow
+---
+  Agent command center   t Tasks   b Board  Group: Project  g
+   All 1   Needs you 0   Working 0   Idle 1   Inactive 0
+  Host: Second · Offline
+      Tasks                                            Status         Updated
+  Second · Offline · 1 tasks
+  /tmp/project  1
+  › ○ Second server                                    Offline         2m ago
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ? help  esc all hosts  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

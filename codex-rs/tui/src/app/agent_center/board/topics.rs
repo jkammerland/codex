@@ -53,6 +53,8 @@ impl BoardState {
             );
         }
         self.topics_open = true;
+        self.filters_focused = false;
+        self.conversation_focused = false;
         self.topic_preview_focused = false;
         self.opened = None;
         self.followers = false;

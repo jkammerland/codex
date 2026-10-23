@@ -448,7 +448,7 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             let hide_key = if filtered {
                 KeyCode::F(7)
             } else {
-                KeyCode::Char('h')
+                KeyCode::Char('H')
             };
             if filtered {
                 keymap.agents.hide = Some(KeybindingsSpec::One(KeybindingSpec("f7".into())));
@@ -600,7 +600,7 @@ async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resum
     let view = app.agents_overview_view(vec![thread.clone()], Some(id));
     app.chat_widget.show_bottom_pane_view(Box::new(view));
     app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        .handle_key_event(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE));
     let hide = std::iter::from_fn(|| rx.try_recv().ok())
         .find(|event| matches!(event, AppEvent::HideAgentsOverviewThread { .. }))
         .expect("shortcut requests hiding the task");

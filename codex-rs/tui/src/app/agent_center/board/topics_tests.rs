@@ -120,7 +120,9 @@ fn topic_watch_includes_reply_unread_without_direct_follow() {
             append_seq: 1,
         });
     }
-    key(&mut view, KeyCode::Tab);
+    key(&mut view, KeyCode::BackTab);
+    key(&mut view, KeyCode::Down);
+    key(&mut view, KeyCode::Enter);
     assert!(!view.state().following("root"));
     assert_eq!(view.state().roots().len(), 1);
     assert!(view.state().unread("root"));

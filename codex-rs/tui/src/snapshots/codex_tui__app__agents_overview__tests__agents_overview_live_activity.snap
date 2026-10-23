@@ -1,14 +1,14 @@
 ---
 source: tui/src/app/agents_overview_tests.rs
-assertion_line: 1072
+assertion_line: 1077
 expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{project}  1\"),\n&normalized_group).replace(&project, \"/tmp/project\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 1   Needs you 0   Working 1   Idle 0   Inactive 0                       tab/⇧tab filter
+   All 1   Needs you 0   Working 1   Idle 0   Inactive 0                        tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                           │ Task details
+      Tasks                              Status       │ Task details
   /tmp/project  1                                     │
-  › ● Check startup performance                       │ Check startup performance
+  › ● Check startup performance          Working      │ Check startup performance
                                                       │ ● Working
                                                       │
                                                       │ Model:  Unknown
@@ -26,4 +26,4 @@ expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{proj
                                                       │
                                                       │
                                                       │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

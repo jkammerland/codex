@@ -26,13 +26,8 @@ impl AgentsOverviewView {
                 continue;
             }
             if self.rows[index].host.is_some()
-                && previous.is_none_or(|previous: usize| {
-                    self.rows[previous]
-                        .host
-                        .as_ref()
-                        .map(|host| &host.machine_id)
-                        != self.rows[index].host.as_ref().map(|host| &host.machine_id)
-                })
+                && previous
+                    .is_none_or(|previous: usize| self.rows[previous].host != self.rows[index].host)
             {
                 entries.push(CenterRow::Machine(index));
             }

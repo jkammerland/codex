@@ -43,7 +43,7 @@ fn new_agents_defaults_preserve_existing_custom_bindings() {
     for (action, alias) in [
         ("archive", "a"),
         ("delete", "backspace"),
-        ("hide", "h"),
+        ("hide", "shift-h"),
         ("new_worktree", "w"),
         ("fork", "f"),
     ] {
@@ -85,6 +85,25 @@ fn new_agents_defaults_preserve_existing_custom_bindings() {
             );
         }
     }
+}
+
+#[test]
+fn configured_lowercase_h_remains_distinct_from_shifted_hide_default() {
+    use crate::key_hint::KeyBindingListExt;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
+
+    // Config key names are case insensitive; a shifted letter must say `shift-h`.
+    let keymap: TuiKeymap = serde_json::from_value(json!({"agents": {"stop": "H"}})).unwrap();
+    let runtime = RuntimeKeymap::from_config(&keymap).unwrap();
+    let lowercase = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+    let uppercase = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE);
+
+    assert!(runtime.agents.stop.is_pressed(lowercase));
+    assert!(!runtime.agents.stop.is_pressed(uppercase));
+    assert!(!runtime.agents.hide.is_pressed(lowercase));
+    assert!(runtime.agents.hide.is_pressed(uppercase));
 }
 
 #[test]

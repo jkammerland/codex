@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/agents_overview_tests.rs
-assertion_line: 36
+assertion_line: 39
 expression: "normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widget, 80,))"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
@@ -25,5 +25,5 @@ expression: "normalize_agent_center_snapshot(render_bottom_popup(&app.chat_widge
 
 
 
-
   Creating worktree…
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

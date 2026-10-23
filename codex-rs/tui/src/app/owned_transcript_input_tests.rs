@@ -986,3 +986,119 @@ async fn modified_arrows_and_editor_chords_resume_composer_movement() -> Result<
     tui.set_owned_screen(/*owned*/ false)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn command_center_ctrl_c_cancels_only_focused_input_or_work() -> Result<()> {
+    for (running, read_only) in [(false, false), (true, false), (true, true)] {
+        let (mut app, mut events, mut operations) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        attach_thread(&mut app, thread_id);
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .session_navigation = true;
+        if running {
+            app.chat_widget.handle_server_notification(
+                ServerNotification::TurnStarted(TurnStartedNotification {
+                    thread_id: thread_id.to_string(),
+                    turn: Turn {
+                        id: "turn".into(),
+                        root_turn_id: None,
+                        items_view: TurnItemsView::Full,
+                        items: Vec::new(),
+                        status: TurnStatus::InProgress,
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                    },
+                }),
+                /*replay_kind*/ None,
+            );
+        }
+        if read_only {
+            app.chat_widget
+                .apply_external_edit("Retained read-only draft".into());
+            app.chat_widget.show_external_writer_thread();
+        }
+        let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        while events.try_recv().is_ok() {}
+        while operations.try_recv().is_ok() {}
+        let cancel = TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        if !read_only {
+            app.chat_widget
+                .apply_external_edit("Keep until cancelled".into());
+            assert!(!app.agent_center_back_key(KeyCode::Esc.into()));
+            app.handle_tui_event(&mut tui, &mut server, cancel.clone())
+                .await?;
+            assert_eq!(app.chat_widget.composer_text_with_pending(), "");
+            assert!(operations.try_recv().is_err());
+        }
+        app.handle_tui_event(&mut tui, &mut server, cancel).await?;
+        let emitted = std::iter::from_fn(|| operations.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(emitted.len(), usize::from(running && !read_only));
+        assert!(
+            emitted
+                .iter()
+                .all(|operation| matches!(operation, Op::Interrupt))
+        );
+        assert!(!app.chat_widget.has_active_view());
+        if read_only {
+            assert_eq!(
+                app.chat_widget.composer_text_with_pending(),
+                "Retained read-only draft"
+            );
+        }
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, AppEvent::Exit(_) | AppEvent::OpenAgentsOverview))
+        );
+        server.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_center_escape_keeps_transcript_search_then_returns_from_scrolled_chat()
+-> Result<()> {
+    for read_only in [false, true] {
+        let mut app = crate::app::test_support::make_test_app().await;
+        attach_thread(&mut app, ThreadId::new());
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .session_navigation = true;
+        app.app_server_target = AppServerTarget::Remote {
+            endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+        };
+        if read_only {
+            app.chat_widget.show_external_writer_thread();
+        }
+        let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        tui.set_owned_screen(/*owned*/ true)?;
+        app.transcript_cells = vec![Arc::new(PlainHistoryCell::new(
+            (0..30).map(|row| format!("row {row}").into()).collect(),
+        ))];
+        app.render_owned_transcript(&mut tui, Size::new(/*width*/ 80, /*height*/ 12))?;
+        app.transcript_view
+            .scroll(&app.transcript_cells, /*rows*/ -10);
+        app.transcript_view.begin_search();
+        app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
+            .await?;
+        assert!(!app.transcript_view.has_active_interaction());
+        assert!(!app.chat_widget.has_active_view());
+        assert!(!app.transcript_view.is_following());
+        app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
+            .await?;
+        assert!(app.chat_widget.has_active_view());
+        assert!(!app.backtrack.primed);
+        server.shutdown().await?;
+        tui.set_owned_screen(/*owned*/ false)?;
+    }
+    Ok(())
+}

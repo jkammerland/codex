@@ -326,20 +326,24 @@ fn enrolled_row_renders_unknown_history_and_discovery_at_wide_and_narrow_widths(
         let area = ratatui::layout::Rect::new(0, 0, width, 18);
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         view.render(area, &mut buffer);
-        screens.push(
-            buffer
-                .content
-                .chunks(usize::from(width))
-                .map(|row| {
-                    row.iter()
-                        .map(ratatui::buffer::Cell::symbol)
-                        .collect::<String>()
-                        .trim_end()
-                        .to_owned()
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        let screen = buffer
+            .content
+            .chunks(usize::from(width))
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let host_heading = screen
+            .lines()
+            .find(|line| line.contains("machine / server"))
+            .expect("the host identity remains visible without inventory metadata");
+        assert!(host_heading.contains("Unknown"), "{screen}");
+        screens.push(screen);
     }
     insta::assert_snapshot!(screens.join("\n---\n"));
 

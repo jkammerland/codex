@@ -1,21 +1,21 @@
 ---
 source: tui/src/app/agent_center_tests.rs
-assertion_line: 698
+assertion_line: 721
 expression: "screen(&view, 100, 24)"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 1   Needs you 0   Working 0   Idle 1   Inactive 0                           tab/⇧tab filter
+   All 1   Needs you 0   Working 0   Idle 1   Inactive 0                            tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────
   Task shortcuts
 
   Navigate            Tasks                      View
-  k      Up           n          New             tab/⇧tab  Filter
+  k      Up           n          New             tab/⇧tab  Focus
   j      Down         w          New worktree    f3        Search
   enter  Open         o          Resume          g         Group
   pgdn   Page down    f          Fork
-  ⌃c     Quit         z r        Rename
-                      x          Stop
-                      h          Hide
+  ⌃d     Quit         z r        Rename
+  esc    Back         x          Stop
+                      ⇧h         Hide
                       backspace  Delete
                       z p        Pin/unpin
 

@@ -4,12 +4,12 @@ assertion_line: 135
 expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{project}  2\"),\n&group).replace(&project, \"/tmp/project\").replace(\"fwd del\", \"del\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 2   Needs you 1   Working 0   Idle 1   Inactive 0                       tab/⇧tab filter
+   All 2   Needs you 1   Working 0   Idle 1   Inactive 0                        tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                           │ Task details
+      Tasks                              Status       │ Task details
   /tmp/project  2                                     │
-  › ● Review parser                                   │ Review parser
-    ○ Other task                                      │ ● Needs input
+  › ● Review parser                      Needs input  │ Review parser
+    ○ Other task                         Idle         │ ● Needs input
                                                       │
                                                       │ Model:  Unknown
                                                       │ Effort: Unknown
@@ -26,4 +26,4 @@ expression: "render_bottom_popup(&app.chat_widget,\n96).replace(&format!(\"{proj
                                                       │ Prompt
                                                       │ Review parser
                                                       │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

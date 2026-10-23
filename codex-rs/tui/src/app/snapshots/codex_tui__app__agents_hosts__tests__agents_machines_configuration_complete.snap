@@ -1,15 +1,16 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 993
+assertion_line: 1121
 expression: render(&view)
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 1   Needs you 0   Working 0   Idle 0   Inactive 1                           tab/⇧tab filter
-  ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
-  Alpha                                                   │
-  Unknown · main  1                                       │ release leader
-  › ○ release leader                                      │ ○ Inactive
+   All 1   Needs you 0   Working 0   Idle 0   Inactive 1                            tab/⇧tab focus
+  Hosts: All 1 · F9 machines
+      Tasks                                  Status       │ Task details
+  Alpha / main · 1 · Connected                            │
+  Unknown  1                                              │ release leader
+  › ○ release leader                         Inactive     │ ○ Inactive
+                                                          │ Host: Alpha / main
                                                           │
                                                           │ Model:  host-applied-model
                                                           │ Effort: Unknown
@@ -23,7 +24,6 @@ expression: render(&view)
                                                           │ Server    main · Control  applied 4
                                                           │
                                                           │ Execution
-                                                          │ Current   previous-model / medium
-                                                          │ Next      host-applied-model / default
                                                           │ …
   Team Stopped · 1/1 hosts applied · F6 pause · F7 resume · F8 stop · F9 team
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open

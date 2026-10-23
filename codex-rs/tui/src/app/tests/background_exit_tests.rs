@@ -2,7 +2,8 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
-async fn external_writer_view_quits_with_escape_ctrl_c_or_q() -> Result<()> {
+async fn external_writer_view_quits_only_with_explicit_quit_keys_or_embedded_escape() -> Result<()>
+{
     let (mut app, mut events, _operations) = make_test_app_with_channels().await;
     app.chat_widget.show_external_writer_thread();
     let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
@@ -28,7 +29,7 @@ async fn external_writer_view_quits_with_escape_ctrl_c_or_q() -> Result<()> {
 
     for key in [
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
         KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
     ] {
         app.handle_key_event(&mut tui, &mut app_server, key).await;

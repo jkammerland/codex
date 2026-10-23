@@ -72,7 +72,8 @@ impl AgentsOverviewView {
         }
         navigate
             .entries
-            .push(Shortcut::new(key_hint::ctrl(KeyCode::Char('c')), "Quit"));
+            .push(Shortcut::new(key_hint::ctrl(KeyCode::Char('d')), "Quit"));
+        navigate.push(self.center_list_hint(ListAction::Cancel), "Back");
         let mut tasks = Group {
             title: "Tasks",
             entries: Vec::new(),
@@ -109,7 +110,7 @@ impl AgentsOverviewView {
         if !filter.is_empty() {
             view.entries.push(Shortcut {
                 key: filter,
-                action: "Filter",
+                action: "Focus",
             });
         }
         for (action, bindings, label) in [
@@ -155,12 +156,30 @@ impl AgentsOverviewView {
             self.center_list_hint(ListAction::Cancel)
         };
         if let Some(hint) = cancel {
-            hints.push((hint.display_label(), "back".into()));
+            hints.push((
+                hint.display_label(),
+                if state.host_filter.is_some()
+                    && !state.hosts_focused
+                    && !state.filters_focused
+                    && !state.editing_metadata()
+                    && !state.help
+                {
+                    "all hosts"
+                } else {
+                    "back"
+                }
+                .into(),
+            ));
         }
         if state.help {
             return hints;
         }
         if !state.editing_metadata() {
+            hints.push((
+                key_hint::ctrl(KeyCode::Char('d')).display_label(),
+                "quit".into(),
+            ));
+            hints.push((self.center_filter_hint(), "focus".into()));
             let navigation = [ListAction::MoveUp, ListAction::MoveDown]
                 .into_iter()
                 .filter_map(|action| self.center_list_hint(action))

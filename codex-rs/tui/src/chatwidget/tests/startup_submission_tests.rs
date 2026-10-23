@@ -269,6 +269,43 @@ async fn startup_submission_waits_for_session_and_sends_exactly_once() {
 }
 
 #[tokio::test]
+async fn command_center_cancel_clears_startup_intent_only_after_protected_input() {
+    let (mut source, _events, _operations) = make_chatwidget_manual(/*model_override*/ None).await;
+    source.bottom_pane.insert_str("confirmed before startup");
+    let mut draft = Some(source.bottom_pane.composer_draft_snapshot());
+    let mut confirmed = true;
+    let (mut chat, _events, mut operations) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.restore_startup_input_when_ready(&mut draft, &mut confirmed);
+    assert!(chat.input_queue.startup_submission.is_some());
+
+    // Model selection is unavailable before startup; use a real protected picker directly.
+    chat.bottom_pane
+        .show_selection_view(crate::bottom_pane::SelectionViewParams {
+            title: Some("Startup options".into()),
+            items: vec![crate::bottom_pane::SelectionItem {
+                name: "Keep editing".into(),
+                ..Default::default()
+            }],
+            ..crate::bottom_pane::SelectionViewParams::picker()
+        });
+    assert!(chat.bottom_pane.has_active_modal());
+    chat.cancel_agent_center_input();
+    assert!(chat.bottom_pane.no_modal_or_popup_active());
+    assert!(chat.input_queue.startup_submission.is_some());
+    assert_eq!(chat.bottom_pane.composer_text(), "confirmed before startup");
+
+    chat.cancel_agent_center_input();
+    assert!(chat.input_queue.startup_submission.is_none());
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+    assert!(!render_bottom_popup(&chat, /*width*/ 80).contains("Waiting for startup"));
+
+    // Becoming ready cannot resurrect the canceled intent after the draft was cleared.
+    chat.thread_id = Some(ThreadId::new());
+    chat.restore_startup_input_when_ready(&mut draft, &mut confirmed);
+    assert_no_submit_op(&mut operations);
+}
+
+#[tokio::test]
 async fn startup_submission_escape_restores_editing_without_submitting() {
     for rejected_startup in [false, true] {
         let (mut source, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;

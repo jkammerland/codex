@@ -1,29 +1,28 @@
 ---
 source: tui/src/app/agents_hosts_history_tests.rs
+assertion_line: 143
 expression: "render_with_height(&view, 52)"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 12   Needs you 0   Working 0   Idle 1   Inactive 11                         tab/⇧tab filter
-  ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
-  History host                                            │
-  Pinned · main  1                                        │ Loaded teammate
-    ○ Saved task 23                                       │ ○ Idle
-                                                          │
-  /tmp/project · main  11                                 │ Model:  Unknown
-    ○ Saved task 00                                       │ Effort: Unknown
-    ○ Saved task 01                                       │
-    ○ Saved task 02                                       │ Connection
-    ○ Saved task 03                                       │ Server    main
-    ○ Saved task 04                                       │
-    ○ Saved task 05                                       │ Project
-    ○ Saved task 06                                       │ /tmp/project
-    ○ Saved task 07                                       │
-    ○ Saved task 08                                       │ Prompt
-    ○ Saved task 09                                       │ No prompt available.
-  › ○ Loaded teammate                                     │
-                                                          │
-                                                          │
+   All 12   Needs you 0   Working 0   Idle 1   Inactive 11                          tab/⇧tab focus
+  Hosts: All 1 · F9 machines
+      Tasks                                  Status       │ Task details
+  History host / main · 12 · Connected                    │
+  Pinned  1                                               │ Loaded teammate
+    ○ Saved task 23                          Inactive     │ ○ Idle
+                                                          │ Host: History host / main
+  /tmp/project  11                                        │
+    ○ Saved task 00                          Inactive     │ Model:  Unknown
+    ○ Saved task 01                          Inactive     │ Effort: Unknown
+    ○ Saved task 02                          Inactive     │
+    ○ Saved task 03                          Inactive     │ Connection
+    ○ Saved task 04                          Inactive     │ Server    main
+    ○ Saved task 05                          Inactive     │
+    ○ Saved task 06                          Inactive     │ Project
+    ○ Saved task 07                          Inactive     │ /tmp/project
+    ○ Saved task 08                          Inactive     │
+    ○ Saved task 09                          Inactive     │ Prompt
+  › ○ Loaded teammate                        Idle         │ No prompt available.
                                                           │
                                                           │
                                                           │
@@ -53,4 +52,6 @@ expression: "render_with_height(&view, 52)"
                                                           │
                                                           │
                                                           │
-  ? help  esc back  ↑/↓ move  enter open  n new
+                                                          │
+                                                          │
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

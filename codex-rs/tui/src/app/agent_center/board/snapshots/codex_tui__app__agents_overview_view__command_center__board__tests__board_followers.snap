@@ -1,9 +1,9 @@
 ---
 source: tui/src/app/agent_center/board/tests.rs
-assertion_line: 222
+assertion_line: 249
 expression: "render(&view, 90, 12)"
 ---
-Agent command center   t Tasks   b Board
+Agent command center   t Tasks   b Shared Board
  All posts   Following   Mentions
 v/h/←/Esc close · F manage agents
 Following this conversation · F manage agents

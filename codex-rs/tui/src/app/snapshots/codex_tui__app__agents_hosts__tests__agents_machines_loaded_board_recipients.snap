@@ -1,17 +1,18 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 1175
+assertion_line: 1307
 expression: render(&view)
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 3   Needs you 0   Working 1   Idle 1   Inactive 1                           tab/⇧tab filter
-  ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
-  Board host                                              │
-  /tmp/project · main  3                                  │ Board builder
-  › ● Board builder                                       │ ● Working
-    ○ Board reviewer                                      │
-    ○ Prompt task                                         │ Model:  Unknown
+   All 3   Needs you 0   Working 1   Idle 1   Inactive 1                            tab/⇧tab focus
+  Hosts: All 1 · F9 machines
+      Tasks                                  Status       │ Task details
+  Board host / main · 3 · Connected                       │
+  /tmp/project  3                                         │ Board builder
+  › ● Board builder                          Working      │ ● Working
+    ○ Board reviewer                         Idle         │ Host: Board host / main
+    ○ Prompt task                            Inactive     │
+                                                          │ Model:  Unknown
                                                           │ Effort: Unknown
                                                           │
                                                           │ Connection
@@ -25,5 +26,4 @@ expression: render(&view)
                                                           │
                                                           │
                                                           │
-                                                          │
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

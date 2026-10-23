@@ -1,15 +1,16 @@
 ---
 source: tui/src/app/agents_hosts_tests.rs
-assertion_line: 416
+assertion_line: 420
 expression: output
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
-   All 1   Needs you 0   Working 0   Idle 1   Inactive 0                           tab/⇧tab filter
-  ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                               │ Task details
-  Alpha                                                   │
-  /tmp/project · main  1                                  │ Saved task title
-  › ○ Saved task title                                    │ ○ Idle
+   All 1   Needs you 0   Working 0   Idle 1   Inactive 0                            tab/⇧tab focus
+  Hosts: All 1 · F9 machines
+      Tasks                                  Status       │ Task details
+  Alpha · 1 · Connected                                   │
+  /tmp/project  1                                         │ Saved task title
+  › ○ Saved task title                       Idle         │ ○ Idle
+                                                          │ Host: Alpha
                                                           │
                                                           │ Model:  Unknown
                                                           │ Effort: Unknown
@@ -40,6 +41,5 @@ expression: output
                                                           │ Saved task title
                                                           │
                                                           │
-                                                          │
-                                                          │
   Team Stopped · 1/1 hosts applied · F6 pause · F7 resume · F8 stop · F9 team
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

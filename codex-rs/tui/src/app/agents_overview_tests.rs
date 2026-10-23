@@ -74,7 +74,11 @@ async fn overview_thread_colors_match_footer_and_respect_color_suppression() {
                 let x = text[..x].chars().count();
                 let dot = row.iter().find(|cell| cell.symbol() == "○").unwrap();
                 let mut expected = ratatui::buffer::Cell::default();
-                expected.set_symbol("○").set_style(Style::default().cyan());
+                expected
+                    .set_symbol("○")
+                    .set_style(crate::style::status_style(
+                        crate::style::StatusTone::Success,
+                    ));
                 assert_eq!(dot, &expected);
                 snapshot.push(format!(
                     "{} | title style: {:?}",
@@ -94,7 +98,12 @@ async fn older_server_notice_is_visible_in_agents_overview() {
     let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
     app.chat_widget.show_bottom_pane_view(Box::new(view));
     let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
-    insta::assert_snapshot!(rendered.lines().last().unwrap());
+    insta::assert_snapshot!(
+        rendered
+            .lines()
+            .find(|line| line.contains("Service v0.152.1"))
+            .expect("the service version notice remains visible above navigation hints")
+    );
 }
 
 #[tokio::test]
@@ -105,7 +114,10 @@ async fn server_version_overview_notice_updates_and_clears() {
     let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
     app.chat_widget.show_bottom_pane_view(Box::new(view));
     let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
-    insta::assert_snapshot!(rendered.lines().last().unwrap(), @"  Service v0.151.0 < Codex CLI v0.153.0");
+    insta::assert_snapshot!(
+        rendered.lines().find(|line| line.contains("Service v0.151.0")).expect("the updated service version notice remains visible"),
+        @"  Service v0.151.0 < Codex CLI v0.153.0"
+    );
 
     app.update_server_version_overview_notice("0.153.0", /*server_version*/ None);
     let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
@@ -2733,8 +2745,8 @@ async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Res
     }
     let notice = render_bottom_popup(&app.chat_widget, /*width*/ 32)
         .lines()
-        .last()
-        .unwrap()
+        .find(|line| line.contains("Error loading tasks"))
+        .expect("refresh failures remain visible above navigation hints")
         .to_owned();
     insta::assert_snapshot!(notice, @r"
   Error loading tasks

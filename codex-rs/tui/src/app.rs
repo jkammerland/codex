@@ -969,6 +969,26 @@ impl App {
             }
             _ => false,
         };
+        if (self.overlay.is_none() || matches!(&self.overlay, Some(Overlay::Transcript(_))))
+            && !transcript_owns_input
+            && (self.agent_center_session_navigation()
+                || self
+                    .chat_widget
+                    .active_view_is(agents_overview::AGENTS_OVERVIEW_VIEW_ID))
+            && let TuiEvent::Key(key) = &event
+            && crate::key_hint::ctrl(KeyCode::Char('c')).is_press(*key)
+        {
+            if self.key_chord_matcher.is_pending() {
+                self.cancel_pending_key_chord();
+                return Ok(AppRunControl::Continue);
+            }
+            // A transcript reader has no focused draft or work to cancel.
+            if self.overlay.is_none() {
+                self.chat_widget.cancel_agent_center_input();
+                self.refresh_agent_center_offline_hint();
+            }
+            return Ok(AppRunControl::Continue);
+        }
         if self.reconnect.offline
             && !transcript_owns_input
             && !self.chat_widget.keymap_contexts().is_warnings()
@@ -1107,10 +1127,11 @@ impl App {
         {
             if self.overlay.is_none()
                 && self.chat_widget.no_modal_or_popup_active()
-                && self.chat_widget.is_external_writer_view()
-                && (crate::key_hint::plain(KeyCode::Esc).is_press(*key)
-                    || (crate::key_hint::plain(KeyCode::Left).is_press(*key)
-                        && self.chat_widget.agents_navigation_key_available()))
+                && (self.agent_center_back_key(*key)
+                    || self.chat_widget.is_external_writer_view()
+                        && (crate::key_hint::plain(KeyCode::Esc).is_press(*key)
+                            || (crate::key_hint::plain(KeyCode::Left).is_press(*key)
+                                && self.chat_widget.agents_navigation_key_available())))
             {
                 self.open_agents_overview(app_server);
             } else if self
@@ -1138,6 +1159,7 @@ impl App {
                 }
                 self.chat_widget
                     .handle_restricted_key(*key, RestrictedInputMode::Disconnected);
+                self.refresh_agent_center_offline_hint();
             }
             return Ok(AppRunControl::Continue);
         }

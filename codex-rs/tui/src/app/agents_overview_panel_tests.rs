@@ -81,19 +81,32 @@ async fn held_task_details_prioritize_status_and_wrap_at_both_panel_widths() {
                 let area = Rect::new(0, 0, width, height);
                 let mut buffer = Buffer::empty(area);
                 view.render(area, &mut buffer);
+
+                // Host guides share the divider glyph; locate the details boundary by its header.
+                let divider = buffer
+                    .content
+                    .chunks(usize::from(width))
+                    .find_map(|row| {
+                        let line = row
+                            .iter()
+                            .map(ratatui::buffer::Cell::symbol)
+                            .collect::<String>();
+                        line.contains("Task details")
+                            .then(|| row.iter().rposition(|cell| cell.symbol() == "│"))
+                            .flatten()
+                    })
+                    .expect("the details pane has a labeled divider");
                 let details = buffer
                     .content
                     .chunks(usize::from(width))
-                    .filter_map(|row| {
-                        let divider = row.iter().position(|cell| cell.symbol() == "│")?;
-                        Some(
-                            row[divider + 1..]
-                                .iter()
-                                .map(ratatui::buffer::Cell::symbol)
-                                .collect::<String>()
-                                .trim()
-                                .to_owned(),
-                        )
+                    .filter(|row| row[divider].symbol() == "│")
+                    .map(|row| {
+                        row[divider + 1..]
+                            .iter()
+                            .map(ratatui::buffer::Cell::symbol)
+                            .collect::<String>()
+                            .trim()
+                            .to_owned()
                     })
                     .collect::<Vec<_>>()
                     .join("\n");

@@ -1,0 +1,122 @@
+---
+source: tui/src/app/agent_center_visual_tests.rs
+assertion_line: 140
+expression: "frames.join(\"\\n\\n\")"
+---
+80×36
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5
+  Hosts: All 6 · F9 machines
+        Tasks                                          Status         Updated
+  Archive / Private worker · Connected · 1 task
+  │ Inactive  1
+  │ › ○ Archived review                                Inactive           now
+  ───────────────────────────────────────────────────────────────────────────
+  Local / Normal daemon · Connected · 3 tasks
+  │ Working  1
+  │   ● Build library                                  Working            now
+  │
+  │ Idle  1
+  │   ○ Review results                                 Idle               now
+  │
+  │ Inactive  1
+  │   ○ Prior task                                     Inactive           now
+  ───────────────────────────────────────────────────────────────────────────
+  Local / Private worker · Connected · 1 task
+  │ Inactive  1
+  │   ○ Team backlog                                   Inactive           now
+  ───────────────────────────────────────────────────────────────────────────
+  Laptop / Private worker · Connected · 1 task
+  │ Inactive  1
+  │   ○ Laptop backlog                                 Inactive           now
+  ───────────────────────────────────────────────────────────────────────────
+  Builder / Private worker · Connected · 1 task
+  │ Inactive  1
+  │   ○ Builder backlog                                Inactive           now
+
+
+
+
+
+
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new
+
+120×36
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5                                                tab/⇧tab focus
+  Hosts: All 6 · F9 machines
+        Tasks                                 Status         Updated  │ Task details
+  Archive / Private worker · Connected · 1 task                       │
+  │ Inactive  1                                                       │ Archived review
+  │ › ○ Archived review                       Inactive           now  │ ○ Inactive
+  ──────────────────────────────────────────────────────────────────  │ Host: Archive / Private worker
+  Local / Normal daemon · Connected · 3 tasks                         │
+  │ Working  1                                                        │ Model:  Unknown
+  │   ● Build library                         Working            now  │ Effort: Unknown
+  │                                                                   │
+  │ Idle  1                                                           │ Project
+  │   ○ Review results                        Idle               now  │ /tmp/project
+  │                                                                   │
+  │ Inactive  1                                                       │ Prompt
+  │   ○ Prior task                            Inactive           now  │ Archived review
+  ──────────────────────────────────────────────────────────────────  │
+  Local / Private worker · Connected · 1 task                         │
+  │ Inactive  1                                                       │
+  │   ○ Team backlog                          Inactive           now  │
+  ──────────────────────────────────────────────────────────────────  │
+  Laptop / Private worker · Connected · 1 task                        │
+  │ Inactive  1                                                       │
+  │   ○ Laptop backlog                        Inactive           now  │
+  ──────────────────────────────────────────────────────────────────  │
+  Builder / Private worker · Connected · 1 task                       │
+  │ Inactive  1                                                       │
+  │   ○ Builder backlog                       Inactive           now  │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+                                                                      │
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new
+
+160×40
+  Agent command center   t Tasks   b Board  Group: Status  g
+   All 7   Needs you 0   Working 1   Idle 1   Inactive 5                                                                                        tab/⇧tab focus
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Hosts                      │       Tasks                                        Status         Updated  │ Task details
+  › All hosts · 6            │ Archive / Private worker · Connected · 1 task                              │
+    Archive / Private worker │ │ Inactive  1                                                              │ Archived review
+    primary · 1 tasks        │ │ › ○ Archived review                              Inactive           now  │ ○ Inactive
+    ● Connected              │ ─────────────────────────────────────────────────────────────────────────  │ Host: Archive / Private worker
+    Local / Normal daemon    │ Local / Normal daemon · Connected · 3 tasks                                │
+    normal · 3 tasks         │ │ Working  1                                                               │ Model:  Unknown
+    ● Connected              │ │   ● Build library                                Working            now  │ Effort: Unknown
+    Local / Private worker   │ │                                                                          │
+    primary · 1 tasks        │ │ Idle  1                                                                  │ Project
+    ● Connected              │ │   ○ Review results                               Idle               now  │ /tmp/project
+    Laptop / Private worker  │ │                                                                          │
+    primary · 1 tasks        │ │ Inactive  1                                                              │ Prompt
+    ● Connected              │ │   ○ Prior task                                   Inactive           now  │ Archived review
+    Builder / Private worker │ ─────────────────────────────────────────────────────────────────────────  │
+    primary · 1 tasks        │ Local / Private worker · Connected · 1 task                                │
+    ● Connected              │ │ Inactive  1                                                              │
+    Offline / Private worker │ │   ○ Team backlog                                 Inactive           now  │
+    primary · 0 tasks        │ ─────────────────────────────────────────────────────────────────────────  │
+    ○ Offline                │ Laptop / Private worker · Connected · 1 task                               │
+                             │ │ Inactive  1                                                              │
+                             │ │   ○ Laptop backlog                               Inactive           now  │
+                             │ ─────────────────────────────────────────────────────────────────────────  │
+                             │ Builder / Private worker · Connected · 1 task                              │
+                             │ │ Inactive  1                                                              │
+                             │ │   ○ Builder backlog                              Inactive           now  │
+                             │                                                                            │
+                             │                                                                            │
+                             │                                                                            │
+                             │                                                                            │
+                             │                                                                            │
+                             │                                                                            │
+                             │                                                                            │
+                             │                                                                            │
+                             │                                                                            │
+                             │                                                                            │
+  ? help  esc back  ⌃d quit  tab/⇧tab focus  ↑/↓ move  enter open  n new

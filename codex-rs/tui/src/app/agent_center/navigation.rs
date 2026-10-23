@@ -4,6 +4,7 @@
 use super::*;
 
 pub(super) enum CenterRow {
+    HostSeparator,
     Machine(usize),
     Group(usize),
     Task(usize),
@@ -25,14 +26,19 @@ impl AgentsOverviewView {
                 entries.push(CenterRow::ShowMore);
                 continue;
             }
-            if self.rows[index].host.is_some()
-                && previous
-                    .is_none_or(|previous: usize| self.rows[previous].host != self.rows[index].host)
-            {
+            let new_host = self.rows[index].host.is_some()
+                && previous.is_none_or(|previous: usize| {
+                    self.rows[previous].host != self.rows[index].host
+                });
+            if new_host {
+                // Separate hosts before their headings, keeping the first subgroup attached.
+                if previous.is_some() {
+                    entries.push(CenterRow::HostSeparator);
+                }
                 entries.push(CenterRow::Machine(index));
             }
             if previous.is_none_or(|previous| !self.same_group(grouping, previous, index)) {
-                if previous.is_some() {
+                if previous.is_some() && !new_host {
                     entries.push(CenterRow::Gap);
                 }
                 entries.push(CenterRow::Group(index));

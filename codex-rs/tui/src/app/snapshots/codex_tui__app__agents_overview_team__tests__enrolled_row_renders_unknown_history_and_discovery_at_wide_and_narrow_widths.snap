@@ -1,15 +1,15 @@
 ---
 source: tui/src/app/agents_overview_team_tests.rs
-assertion_line: 345
+assertion_line: 348
 expression: "screens.join(\"\\n---\\n\")"
 ---
   Agent command center   t Tasks   b Board  Group: Project  g
    All 1   Needs you 0   Working 0   Idle 0   Inactive 1                            tab/⇧tab focus
   ────────────────────────────────────────────────────────────────────────────────────────────────
-      Tasks                                  Status       │ Task details
+        Tasks                                Status       │ Task details
   machine / server · 1 · Unknown                          │
-  Unknown  1                                              │ Board reviewer
-  › ○ Board reviewer                         Inactive     │ ○ Inactive
+  │ Unknown  1                                            │ Board reviewer
+  │ › ○ Board reviewer                       Inactive     │ ○ Inactive
                                                           │
                                                           │ Model:  Unknown
                                                           │ Effort: Unknown
@@ -25,10 +25,10 @@ expression: "screens.join(\"\\n---\\n\")"
   Agents   t Tasks   b Board
    All 1   Needs you 0   Working 0   Idle 0  ›
   ────────────────────────────────────────────
-      Tasks                       Status
+        Tasks                     Status
   machine / server · 1 · Unknown
-  Unknown  1
-  › ○ Board reviewer              Inactive
+  │ Unknown  1
+  │ › ○ Board reviewer            Inactive
 
 
 

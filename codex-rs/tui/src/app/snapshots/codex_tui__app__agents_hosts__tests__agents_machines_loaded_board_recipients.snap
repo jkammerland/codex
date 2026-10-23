@@ -6,12 +6,12 @@ expression: render(&view)
   Agent command center   t Tasks   b Board  Group: Project  g
    All 3   Needs you 0   Working 1   Idle 1   Inactive 1                            tab/⇧tab focus
   Hosts: All 1 · F9 machines
-      Tasks                                  Status       │ Task details
+        Tasks                                Status       │ Task details
   Board host / main · 3 · Connected                       │
-  /tmp/project  3                                         │ Board builder
-  › ● Board builder                          Working      │ ● Working
-    ○ Board reviewer                         Idle         │ Host: Board host / main
-    ○ Prompt task                            Inactive     │
+  │ /tmp/project  3                                       │ Board builder
+  │ › ● Board builder                        Working      │ ● Working
+  │   ○ Board reviewer                       Idle         │ Host: Board host / main
+  │   ○ Prompt task                          Inactive     │
                                                           │ Model:  Unknown
                                                           │ Effort: Unknown
                                                           │

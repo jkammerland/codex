@@ -645,6 +645,30 @@ impl InputQueue {
         }
     }
 
+    /// Close team steering in the same critical section as the final pending check.
+    /// Rejected deliveries remain with the host for the next eligible turn.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the final input check must serialize with team steering admission"
+    )]
+    pub(crate) async fn close_team_input_if_idle(
+        &self,
+        active_turn: &Mutex<Option<ActiveTurn>>,
+    ) -> bool {
+        let active = active_turn.lock().await;
+        let Some(active_turn) = active.as_ref() else {
+            return true;
+        };
+        let mut state = active_turn.turn_state.lock().await;
+        if state.accepts_mailbox_delivery_for_current_turn()
+            && (!state.pending_input.is_empty() || self.has_pending_mailbox_items().await)
+        {
+            return false;
+        }
+        state.team_input_closed = true;
+        true
+    }
+
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state reads must remain atomic"

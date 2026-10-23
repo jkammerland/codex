@@ -364,5 +364,9 @@ impl TeamHostService {
 mod control_worker_tests;
 
 #[cfg(test)]
+#[path = "delivery_tests.rs"]
+mod delivery_tests;
+
+#[cfg(test)]
 #[path = "member_create_recovery_tests.rs"]
 mod member_create_recovery_tests;

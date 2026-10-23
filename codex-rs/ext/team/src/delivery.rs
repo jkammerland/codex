@@ -125,7 +125,7 @@ impl TeamHostService {
                 (DeliveryBoundary::TurnStart { turn_id }, _, _, _) => TurnInputMode::Steer {
                     expected_turn_id: turn_id.to_owned(),
                 },
-                (_, Some(expected_turn_id), TeamDeliveryMode::SafeBoundary, _) => {
+                (_, Some(expected_turn_id), TeamDeliveryMode::SafeBoundary, true) => {
                     TurnInputMode::Steer { expected_turn_id }
                 }
                 (_, None, _, true) => TurnInputMode::StartIfIdle,

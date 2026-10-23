@@ -101,6 +101,111 @@ async fn user_turn(app: &mut TestAppServer, thread_id: &str) -> Result<TurnStart
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passive_safe_boundary_note_waits_for_the_next_ordinary_turn() -> Result<()> {
+    const NOTE: &str = "passive status update from an older client";
+    let (release, blocked) = oneshot::channel();
+    let (follow_up_release, follow_up_blocked) = oneshot::channel();
+    let (model, _) = start_streaming_sse_server(vec![
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created("working")]),
+            },
+            StreamingSseChunk {
+                gate: Some(blocked),
+                body: create_final_assistant_message_sse_response("original work finished")?,
+            },
+        ],
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created("follow-up")]),
+            },
+            StreamingSseChunk {
+                gate: Some(follow_up_blocked),
+                body: create_final_assistant_message_sse_response("ordinary work finished")?,
+            },
+        ],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: create_final_assistant_message_sse_response("passive note handled")?,
+        }],
+    ])
+    .await;
+    let home = tempfile::tempdir()?;
+    MockResponsesConfig::new(model.uri()).write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .without_managed_config()
+        .build_initialized()
+        .await?;
+    let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
+    let address = enroll(&mut app, &thread.id).await?;
+    let first = user_turn(&mut app, &thread.id).await?.turn;
+    model.wait_for_request_count(/*count*/ 1).await;
+
+    // Already persisted older envelopes still have to honor passive delivery.
+    let response: TeamDeliverResponse = app
+        .request(|request_id| ClientRequest::TeamDeliver {
+            request_id,
+            params: TeamDeliverParams {
+                coordinator_id: "coordinator".into(),
+                delivery: TeamDelivery {
+                    id: "passive-delivery".into(),
+                    thread_id: thread.id.clone(),
+                    mode: TeamDeliveryMode::SafeBoundary,
+                    wake: false,
+                    message: TeamMessage {
+                        id: "passive-message".into(),
+                        sender: TeamAddress {
+                            thread_id: "sender".into(),
+                            ..address.clone()
+                        },
+                        recipient: Some(address),
+                        kind: TeamMessageKind::Note,
+                        body: NOTE.into(),
+                        reply_to: None,
+                        topic: None,
+                        created_at: 1,
+                    },
+                },
+            },
+        })
+        .await?;
+    assert_eq!(response.receipt.state, TeamReceiptState::Pending);
+    release.send(()).unwrap();
+    let completed: TurnCompletedNotification = app.read_notification("turn/completed").await?;
+    assert_eq!(completed.turn.id, first.id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    assert_eq!(model.requests().await.len(), 1);
+
+    // Ordinary input is sampled first. Pending team input is then consumed at
+    // the next boundary within that same user turn, without starting a new turn.
+    let second = user_turn(&mut app, &thread.id).await?.turn;
+    model.wait_for_request_count(/*count*/ 2).await;
+    assert_eq!(accepted(&mut app).await?.turn_id, Some(second.id.clone()));
+    follow_up_release.send(()).unwrap();
+    let completed: TurnCompletedNotification = app.read_notification("turn/completed").await?;
+    assert_eq!(completed.turn.id, second.id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    let requests = model
+        .requests()
+        .await
+        .iter()
+        .map(|body| serde_json::from_slice::<Value>(body))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["input"].to_string().matches(NOTE).count())
+            .collect::<Vec<_>>(),
+        vec![0, 0, 1]
+    );
+    model.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn team_discovery_reports_local_executor_before_any_turn() -> Result<()> {
     let model = responses::start_mock_server().await;
     let home = tempfile::tempdir()?;

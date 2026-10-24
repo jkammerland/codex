@@ -18,11 +18,10 @@ separately from `installedVersion` and `runningDaemonVersion`. When a candidate
 changes the team protocol, activate the coordinator and enrolled workers together
 after preserving their ledgers; staging alone does not migrate live state.
 
-The team.8 candidate uses team protocol 7 and adds explicit recovery for historical
-deliveries that block member retirement. See the [recovery command](../codex-rs/team/README.md#recover-a-retiring-member)
-before resolving an inspected delivery. Installed components remain team.7 /
-protocol 6 until a separate coordinated activation; consult the inventory for
-each target's staged state.
+The active team.8 release uses team protocol 7 and adds explicit recovery for
+historical deliveries that block member retirement. See the [recovery command](../codex-rs/team/README.md#recover-a-retiring-member)
+before resolving an inspected delivery. Activation does not abandon historical
+deliveries; no such recovery action was performed during this upgrade.
 
 `release.json` and the controller instructions below describe the historical
 MCP.20 raw-binary workflow, not the current complete-package deployment process.
@@ -44,18 +43,28 @@ version probe can therefore return a null `managedCodexVersion` even when the
 live daemon reports its version successfully. Verify the managed package from
 a local console or its physical release path; do not loosen its ACLs.
 
-The team.7 activation completed all normal daemons and private workers, including
-both Windows accounts through their local-console handoffs. The protocol 6 coordinator
-has all five servers connected and its prior Running mode restored. Board,
-enrollments, reads, subscriptions and message receipts were preserved; no
-terminated work was replayed.
+The team.8 activation completed all five normal daemons and four private workers.
+Both Windows normal daemons used local-console handoffs. The protocol 7
+coordinator has all five servers across four machines connected, with Running
+mode restored at control revision 46. Saved sessions, complete previous packages,
+and SQLite-consistent pre-upgrade backups were retained. No terminated work was
+replayed. Restart older terminal clients with the matching CLI and resume saved
+sessions with `codex resume`.
+
+The local private worker still reports its pre-existing `token_revoked`
+authentication error and requires reauthentication for model work. Its daemon and
+team protocol checks pass. Model verification fields record `model/list`
+availability and supported reasoning efforts; they do not prove inference
+authorization. Credentials were preserved during activation.
 
 The SSH activation restrictions still apply: the worker account's updater can
 fail to traverse the managed `current` junction under RedirectionGuard, and the
 administrator account's elevated SSH token is rejected by the updater. These
 are launcher-context restrictions; both normal daemons are now healthy on
-team.7. Stage physical release directories remotely, and use a local,
-non-elevated console when activation cannot pass the supported remote checks.
+team.8. SSH and InteractiveToken scheduled-task launches also rejected persistent
+background startup with OS error 5, so this activation used local consoles.
+Stage physical release directories remotely, and use a local, non-elevated
+console when activation cannot pass the supported remote checks.
 
 Qualify both junction traversal and detached process creation before stopping
 a healthy Windows normal daemon. InteractiveToken scheduled tasks previously

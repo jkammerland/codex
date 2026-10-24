@@ -9,7 +9,7 @@ activation work. Consult each inventory entry for its installed and staged
 state; registration alone does not imply qualification or installation.
 
 The inventory records the exact source commit embedded in the staged packages,
-which may precede documentation-only tracking commits. It is tracking data;
+which may precede documentation or snapshot-only tracking commits. It is tracking data;
 the historical controller does not consume it or automatically update hosts.
 
 Staging creates a separate package and leaves launchers, managed daemons, team
@@ -17,6 +17,12 @@ workers, and the coordinator on their installed versions. Check `stagedVersion`
 separately from `installedVersion` and `runningDaemonVersion`. When a candidate
 changes the team protocol, activate the coordinator and enrolled workers together
 after preserving their ledgers; staging alone does not migrate live state.
+
+The team.8 candidate uses team protocol 7 and adds explicit recovery for historical
+deliveries that block member retirement. See the [recovery command](../codex-rs/team/README.md#recover-a-retiring-member)
+before resolving an inspected delivery. Installed components remain team.7 /
+protocol 6 until a separate coordinated activation; consult the inventory for
+each target's staged state.
 
 `release.json` and the controller instructions below describe the historical
 MCP.20 raw-binary workflow, not the current complete-package deployment process.
@@ -38,22 +44,18 @@ version probe can therefore return a null `managedCodexVersion` even when the
 live daemon reports its version successfully. Verify the managed package from
 a local console or its physical release path; do not loosen its ACLs.
 
-The team.7 activation completed the local, Mac and Dnarb normal daemons and
-private workers, plus the Windows private worker. The protocol 6 coordinator
+The team.7 activation completed all normal daemons and private workers, including
+both Windows accounts through their local-console handoffs. The protocol 6 coordinator
 has all five servers connected and its prior Running mode restored. Board,
 enrollments, reads, subscriptions and message receipts were preserved; no
 terminated work was replayed.
 
-Both Windows normal components still require local-console activation. The
-worker account passed a suspended breakaway-process probe, but its supported
-updater then failed to traverse the managed `current` junction under SSH
-(RedirectionGuard, OS error 448). It published the complete candidate before
-that failure, without selecting it. The normal daemon is stopped; its managed
-selection and normal launchers remain team.6. Its existing foreground Scheduled
-Task successfully runs the separate team.7 private worker. The administrator's
-SSH token is elevated, so the updater rejects it; its healthy team.6 normal
-daemon and launchers remain matched. Retained, per-account console handoffs
-cover both cases without changing security policy.
+The SSH activation restrictions still apply: the worker account's updater can
+fail to traverse the managed `current` junction under RedirectionGuard, and the
+administrator account's elevated SSH token is rejected by the updater. These
+are launcher-context restrictions; both normal daemons are now healthy on
+team.7. Stage physical release directories remotely, and use a local,
+non-elevated console when activation cannot pass the supported remote checks.
 
 Qualify both junction traversal and detached process creation before stopping
 a healthy Windows normal daemon. InteractiveToken scheduled tasks previously

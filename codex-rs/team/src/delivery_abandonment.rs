@@ -10,6 +10,10 @@ use crate::coordinator::request_id;
 use crate::model::*;
 
 impl Coordinator {
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "reserve and publish operator recovery atomically with other coordinator mutations"
+    )]
     pub(crate) async fn abandon_delivery(
         &self,
         address: TeamAddress,

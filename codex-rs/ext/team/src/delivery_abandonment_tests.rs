@@ -109,6 +109,10 @@ fn params(thread_id: ThreadId) -> TeamDeliveryAbandonParams {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "exercise retirement transitions under their required host operations fence"
+)]
 async fn abandonment_resolves_stuck_retirement_without_rewriting_failed_or_legacy_evidence()
 -> anyhow::Result<()> {
     // Accepted legacy input has no dispatch/terminal proof. Both this uncertainty
@@ -240,6 +244,10 @@ async fn abandonment_resolves_stuck_retirement_without_rewriting_failed_or_legac
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "fixture evidence updates serialize with recovery under the host operations fence"
+)]
 async fn abandonment_rejects_wrong_ownership_address_nonadmitted_input_and_unsettled_work()
 -> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
@@ -486,6 +494,10 @@ impl TurnLifecycleContributor for FinishingGate {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "exercise retirement transitions under their required host operations fence"
+)]
 async fn abandonment_and_retirement_wait_for_active_and_finishing_turns() -> anyhow::Result<()> {
     let (release_response, response_gate) = oneshot::channel();
     let (model, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
@@ -569,6 +581,10 @@ async fn abandonment_and_retirement_wait_for_active_and_finishing_turns() -> any
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "replay the worker terminal handler while holding its required host operations fence"
+)]
 async fn pending_family_terminal_evidence_must_settle_before_abandonment() -> anyhow::Result<()> {
     for outcome in [
         AttemptOutcome::Completed,

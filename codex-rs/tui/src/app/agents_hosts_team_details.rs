@@ -334,7 +334,7 @@ fn message_status_lines(status: &TeamMessageStatus) -> Vec<Line<'static>> {
         if let Some(abandonment) = &recipient.abandonment {
             lines.push(
                 format!("Operator reason: {}", abandonment.reason)
-                    .yellow()
+                    .magenta()
                     .into(),
             );
         }

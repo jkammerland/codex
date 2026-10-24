@@ -5489,6 +5489,16 @@ class TeamCleanupParams(
     root: PreviewTeamCleanupParams | ApplyTeamCleanupParams | StatusTeamCleanupParams
 
 
+class TeamDeliveryAbandonment(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    delivery_id: Annotated[str, Field(alias="deliveryId")]
+    operation_id: Annotated[str, Field(alias="operationId")]
+    reason: str
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
 class TeamDeliveryMode(Enum):
     next_turn = "nextTurn"
     safe_boundary = "safeBoundary"
@@ -11069,6 +11079,7 @@ class TeamRecipientMessageStatus(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    abandonment: TeamDeliveryAbandonment | None = None
     address: TeamAddress
     freshness: TeamObservationFreshness
     name: str

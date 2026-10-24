@@ -52,6 +52,10 @@ pub fn message_statuses(snapshot: &TeamSnapshot) -> Vec<TeamMessageStatus> {
                         };
                         TeamRecipientMessageStatus {
                             name: name(&address),
+                            abandonment: record
+                                .abandonments
+                                .get(&format!("{}:{}", record.message.id, address_key(&address)))
+                                .cloned(),
                             address,
                             progress: receipt
                                 .as_ref()

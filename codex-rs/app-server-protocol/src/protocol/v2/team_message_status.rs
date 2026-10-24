@@ -97,6 +97,8 @@ pub struct TeamRecipientMessageStatus {
     pub name: String,
     pub progress: TeamMessageProgress,
     pub receipt: Option<TeamReceipt>,
+    #[serde(default)]
+    pub abandonment: Option<super::TeamDeliveryAbandonment>,
     pub freshness: TeamObservationFreshness,
 }
 

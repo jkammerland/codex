@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
+use codex_app_server_protocol::TeamDeliveryAbandonment;
 use codex_app_server_protocol::TeamReceiptState;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnModelRequestInput;
@@ -54,6 +55,13 @@ impl TeamHostService {
         let runtime = runtime_attempt(input.turn_store);
         let _update = self.delivery_updates.lock().await;
         for (delivery, _) in store.deliveries(input.thread_store.level_id()).await? {
+            if store
+                .get::<TeamDeliveryAbandonment>("delivery_abandonment", &delivery.id)
+                .await?
+                .is_some()
+            {
+                continue;
+            }
             let marker = format!("msg_team-{}", delivery.id);
             if !input
                 .input
@@ -89,6 +97,13 @@ impl TeamHostService {
         let runtime = runtime_attempt(input.turn_store);
         let _update = self.delivery_updates.lock().await;
         for (delivery, _) in store.deliveries(input.thread_store.level_id()).await? {
+            if store
+                .get::<TeamDeliveryAbandonment>("delivery_abandonment", &delivery.id)
+                .await?
+                .is_some()
+            {
+                continue;
+            }
             if let Some(mut attempt) = store
                 .get::<DeliveryAttempt>("delivery_attempt", &delivery.id)
                 .await?
@@ -118,14 +133,20 @@ impl TeamHostService {
         };
         let _update = self.delivery_updates.lock().await;
         for (delivery, mut receipt) in store.deliveries(thread_id).await? {
-            if receipt.turn_id.as_deref() != Some(turn_id) {
+            if store
+                .get::<TeamDeliveryAbandonment>("delivery_abandonment", &delivery.id)
+                .await?
+                .is_some()
+            {
                 continue;
             }
             let Some(mut attempt) = store
                 .get::<DeliveryAttempt>("delivery_attempt", &delivery.id)
                 .await?
             else {
-                if receipt.state != TeamReceiptState::Completed {
+                if receipt.turn_id.as_deref() == Some(turn_id)
+                    && receipt.state != TeamReceiptState::Completed
+                {
                     receipt.state = TeamReceiptState::NeedsReconciliation;
                     receipt.detail =
                         Some("Legacy delivery has no model-request participation evidence.".into());
@@ -134,9 +155,9 @@ impl TeamHostService {
                 continue;
             };
             if !attempt.participation.contains_key(runtime) {
-                // A reused turn ID does not give an earlier runtime ownership
-                // of input queued for a later runtime. Reconcile its live copy
-                // separately; only participation can establish an outcome.
+                // Turn IDs do not establish ownership: a later turn may sample
+                // the original marker, while a runtime sharing its turn may not.
+                // Only request participation can establish an outcome.
                 continue;
             }
             attempt

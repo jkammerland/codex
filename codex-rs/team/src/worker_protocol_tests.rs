@@ -44,7 +44,7 @@ async fn legacy_worker_is_rejected_before_control_sync_or_subscription_delivery(
                     json!({"userAgent":"fixture/1", "codexHome":"/fixture", "platformFamily":"unix", "platformOs":"linux"})
                 }
                 "team/hostRead" => {
-                    json!({"installationId":"legacy", "protocolVersion":5, "control":null, "data":[], "runtime":[], "nextCursor":null})
+                    json!({"installationId":"legacy", "protocolVersion":6, "control":null, "data":[], "runtime":[], "nextCursor":null})
                 }
                 method => anyhow::bail!("legacy worker received forbidden request {method}"),
             };
@@ -92,13 +92,13 @@ async fn legacy_worker_is_rejected_before_control_sync_or_subscription_delivery(
     let error = coordinator
         .reconcile(&machine, &server, &peer)
         .await
-        .expect_err("v5 cannot apply member retirement");
+        .expect_err("v6 cannot ingest delivery abandonment");
     client.shutdown().await?;
     assert_eq!(server_task.await??, vec!["initialize", "team/hostRead"]);
     assert!(
         error
             .to_string()
-            .contains("worker team protocol 5 is incompatible with coordinator protocol 6")
+            .contains("worker team protocol 6 is incompatible with coordinator protocol 7")
     );
     assert!(!peer.verified.load(Ordering::Acquire));
     assert!(

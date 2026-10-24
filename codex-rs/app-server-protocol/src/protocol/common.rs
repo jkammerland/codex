@@ -694,6 +694,12 @@ client_request_definitions! {
         serialization: global("team"),
         response: v2::TeamLeaveResponse,
     },
+    #[experimental("team/deliveryAbandon")]
+    TeamDeliveryAbandon => "team/deliveryAbandon" {
+        params: v2::TeamDeliveryAbandonParams,
+        serialization: global("team"),
+        response: v2::TeamDeliveryAbandonResponse,
+    },
     #[experimental("team/control")]
     TeamControl => "team/control" {
         params: v2::TeamControlParams,

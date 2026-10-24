@@ -137,6 +137,16 @@ impl TeamRequestProcessor {
         Ok(response)
     }
 
+    pub(crate) async fn abandon_delivery(
+        &self,
+        params: codex_app_server_protocol::TeamDeliveryAbandonParams,
+    ) -> Result<codex_app_server_protocol::TeamDeliveryAbandonResponse, JSONRPCErrorError> {
+        self.service
+            .abandon_delivery(params)
+            .await
+            .map_err(|error| invalid_request(error.to_string()))
+    }
+
     pub(crate) async fn enroll(
         &self,
         params: TeamEnrollParams,

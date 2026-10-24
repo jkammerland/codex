@@ -6,7 +6,7 @@ host. The coordinator stores the directory, messages, receipts and control histo
 Idle agents wait for events; messaging does not spend model turns on polling.
 
 This is an experimental protocol. Use matching builds of the coordinator and
-workers (team protocol version 6). Machines and team actions extend the existing `codex agents` overview.
+workers (team protocol version 7). Machines and team actions extend the existing `codex agents` overview.
 Ordinary sessions are visible without joining the team; enrollment is explicit.
 
 Version 6 adds agent member management, graceful removal, and paged Board reads
@@ -14,6 +14,10 @@ with explicit acknowledgement. The version 5 ledger migration for member creatio
 and permanent cleanup prevents older binaries from reopening incompatible state.
 Use matching coordinator and worker builds. Restoring a pre-upgrade backup is a
 separate rollback action; purged content has no restore operation in the Board.
+
+Version 7 adds an explicit operator disposition for unresolved historical
+deliveries that prevent a retiring member from being removed. Activate matching
+coordinator and worker builds together before using this recovery command.
 
 ## Start a team
 
@@ -71,6 +75,24 @@ retrying an uncertain submission with identical arguments. Reconnection resumes
 the same reserved session, including creation completed before a response was
 lost. Closing the UI does not cancel accepted work. Created describes successful
 enrollment; a member can still be held by Pause, Stop, or a manual restriction.
+
+## Recover a retiring member
+
+Unenrollment waits for admitted work and its delivery evidence to settle. If a
+historical delivery has an uncertain outcome after the family becomes inactive,
+an operator can explicitly abandon its processing obligation:
+
+```sh
+codex agents --operation-id OPERATION_UUID abandon-delivery \
+  worker/primary/THREAD_UUID MESSAGE_UUID --reason "Historical authentication failure"
+```
+
+Retain the operation UUID and identical arguments when retrying a lost response.
+The command requires an already retiring family with no active work or pending
+terminal evidence. It refuses deliveries with known completion evidence. The
+original receipt and execution evidence remain unchanged; diagnostics show a
+separate **Processing abandoned** disposition with the reason. Remaining work
+and other unresolved deliveries can still prevent retirement.
 
 ## Permanently clear Board content
 

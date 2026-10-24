@@ -16,6 +16,7 @@ fn message_evidence_uses_named_recipients_and_does_not_claim_fulfillment() {
         recipients: vec![TeamRecipientMessageStatus {
             address,
             name: "Reviewer".into(),
+            abandonment: None,
             progress: TeamMessageProgress::TurnEnded,
             receipt: Some(TeamReceipt {
                 delivery_id: "delivery".into(),
@@ -30,8 +31,51 @@ fn message_evidence_uses_named_recipients_and_does_not_claim_fulfillment() {
         detail: None,
         freshness: TeamObservationFreshness::Current,
     };
+    assert_message_evidence_snapshots(&status, "message_processing_evidence");
+}
+
+#[test]
+fn abandoned_delivery_shows_operator_reason_and_preserves_failed_turn_evidence() {
+    let address = TeamAddress {
+        machine_id: "worker".into(),
+        server_id: "main".into(),
+        thread_id: "agent".into(),
+    };
+    let status = TeamMessageStatus {
+        message_id: "message".into(),
+        sender: address.clone(),
+        sender_name: "Author".into(),
+        created_at: Some(1),
+        intake: TeamMessageIntake::AcceptedAtCoordinator,
+        recipients: vec![TeamRecipientMessageStatus {
+            address,
+            name: "Reviewer".into(),
+            progress: TeamMessageProgress::ProcessingUncertain,
+            receipt: Some(TeamReceipt {
+                delivery_id: "delivery".into(),
+                thread_id: "agent".into(),
+                state: TeamReceiptState::NeedsReconciliation,
+                turn_id: Some("failed-review-turn".into()),
+                detail: Some("The turn failed; processing remains uncertain.".into()),
+            }),
+            abandonment: Some(TeamDeliveryAbandonment {
+                operation_id: "operator-decision".into(),
+                delivery_id: "delivery".into(),
+                thread_id: "agent".into(),
+                reason: "Operator accepted the incomplete result and removed the teammate.".into(),
+            }),
+            freshness: TeamObservationFreshness::Current,
+        }],
+        related_replies: Vec::new(),
+        detail: None,
+        freshness: TeamObservationFreshness::Current,
+    };
+    assert_message_evidence_snapshots(&status, "message_processing_abandoned");
+}
+
+fn assert_message_evidence_snapshots(status: &TeamMessageStatus, name: &str) {
     for width in [48, 100] {
-        let header = MessageHeader(message_status_lines(&status));
+        let header = MessageHeader(message_status_lines(status));
         let area = Rect::new(0, 0, width, header.desired_height(width));
         let mut buffer = Buffer::empty(area);
         header.render(area, &mut buffer);
@@ -47,7 +91,7 @@ fn message_evidence_uses_named_recipients_and_does_not_claim_fulfillment() {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        insta::assert_snapshot!(format!("message_processing_evidence_{width}"), text);
+        insta::assert_snapshot!(format!("{name}_{width}"), text);
     }
 }
 

@@ -322,11 +322,22 @@ fn message_status_lines(status: &TeamMessageStatus) -> Vec<Line<'static>> {
             format!(
                 "{}: {} · {}",
                 recipient.name,
-                recipient.progress.label(),
+                if recipient.abandonment.is_some() {
+                    "Processing abandoned"
+                } else {
+                    recipient.progress.label()
+                },
                 recipient.freshness.label()
             )
             .into(),
         );
+        if let Some(abandonment) = &recipient.abandonment {
+            lines.push(
+                format!("Operator reason: {}", abandonment.reason)
+                    .yellow()
+                    .into(),
+            );
+        }
         if let Some(receipt) = &recipient.receipt {
             if let Some(turn_id) = &receipt.turn_id {
                 lines.push(format!("Turn {turn_id}").dim().into());

@@ -171,6 +171,7 @@ async fn synchronized_status_scopes_recipients_and_related_replies_before_pagina
     let recipient = |address: TeamAddress| TeamRecipientMessageStatus {
         name: address.thread_id.clone(),
         address,
+        abandonment: None,
         progress: TeamMessageProgress::AdmittedToTurn,
         receipt: None,
         freshness: TeamObservationFreshness::Current,

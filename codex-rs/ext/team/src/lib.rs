@@ -13,6 +13,7 @@ mod context;
 mod control;
 mod control_worker;
 mod delivery;
+mod delivery_abandonment;
 mod delivery_evidence;
 mod discovery;
 mod jobs;

@@ -38,12 +38,33 @@ version probe can therefore return a null `managedCodexVersion` even when the
 live daemon reports its version successfully. Verify the managed package from
 a local console or its physical release path; do not loosen its ACLs.
 
-InteractiveToken scheduled tasks can install the package, but their launch
-context rejected persistent daemon startup. Complete that step from a local,
-non-elevated console. When changing versions, stop with the old executable
-before running the new packaged executable's
-`app-server daemon update --from-cli --yes`, then start the new daemon.
-Preserve the complete previous package and any pre-migration team ledgers.
+The team.7 activation completed the local, Mac and Dnarb normal daemons and
+private workers, plus the Windows private worker. The protocol 6 coordinator
+has all five servers connected and its prior Running mode restored. Board,
+enrollments, reads, subscriptions and message receipts were preserved; no
+terminated work was replayed.
+
+Both Windows normal components still require local-console activation. The
+worker account passed a suspended breakaway-process probe, but its supported
+updater then failed to traverse the managed `current` junction under SSH
+(RedirectionGuard, OS error 448). It published the complete candidate before
+that failure, without selecting it. The normal daemon is stopped; its managed
+selection and normal launchers remain team.6. Its existing foreground Scheduled
+Task successfully runs the separate team.7 private worker. The administrator's
+SSH token is elevated, so the updater rejects it; its healthy team.6 normal
+daemon and launchers remain matched. Retained, per-account console handoffs
+cover both cases without changing security policy.
+
+Qualify both junction traversal and detached process creation before stopping
+a healthy Windows normal daemon. InteractiveToken scheduled tasks previously
+installed packages but rejected persistent normal-daemon startup; a process
+launch probe alone does not qualify managed-package access. Complete the normal
+activation from a local, non-elevated PowerShell console. Stop with the old
+executable before running a verified, complete private copy of the new package's
+`app-server daemon update --from-cli --yes`, then start the new daemon. The
+private copy needs writable package metadata; preserve the staged release.
+Retain complete previous packages and SQLite-consistent pre-upgrade ledgers
+outside installer pruning. Never automatically downgrade a migrated database.
 
 ## Historical controller
 

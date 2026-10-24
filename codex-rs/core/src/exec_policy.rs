@@ -800,13 +800,20 @@ fn render_decision_for_unmatched_command_for_platform(
         && windows_sandbox_level == WindowsSandboxLevel::Disabled
         && profile_has_managed_filesystem_restrictions(permission_profile);
 
-    // If the command is flagged as dangerous or we have no sandbox protection,
-    // we should never allow it to run without approval.
+    // --yolo resolves to Never + Disabled, explicitly bypassing built-in command
+    // review. Equivalent configured permissions have the same semantics. This
+    // fallback does not override matching exec-policy rules.
+    let bypass_dangerous_command_heuristics = approval_policy == AskForApproval::Never
+        && matches!(permission_profile, PermissionProfile::Disabled);
+
+    // Other modes still require approval for dangerous commands or managed
+    // Windows restrictions without a sandbox backend.
     //
     // We prefer to prompt the user rather than outright forbid the command,
     // but if the user has explicitly disabled prompts, we must
     // forbid the command.
-    if dangerous_command_match.is_some() || windows_managed_fs_restrictions_without_sandbox_backend
+    if (dangerous_command_match.is_some() && !bypass_dangerous_command_heuristics)
+        || windows_managed_fs_restrictions_without_sandbox_backend
     {
         return match approval_policy {
             AskForApproval::Never => Decision::Forbidden,

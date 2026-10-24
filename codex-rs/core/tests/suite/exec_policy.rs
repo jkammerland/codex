@@ -417,7 +417,7 @@ async fn deeply_nested_forced_rm_is_rejected_before_execution_when_approvals_are
         &test,
         "run the deeply nested forced rm",
         AskForApproval::Never,
-        PermissionProfile::Disabled,
+        PermissionProfile::read_only(),
         /*collaboration_mode*/ None,
     )
     .await?;
@@ -579,7 +579,14 @@ async fn powershell_independent_literal_commands_preserve_url_launch_checks() ->
         )
         .await;
 
-        test.submit_turn("run the PowerShell command").await?;
+        // Exercise the classifier outside the complete --yolo bypass.
+        test.submit_turn_with_permission_profile(
+            "run the PowerShell command",
+            PermissionProfile::External {
+                network: codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+            },
+        )
+        .await?;
         let output = results_mock
             .single_request()
             .function_call_output_text(call_id)

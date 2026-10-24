@@ -21,3 +21,4 @@ mod sandbox;
 mod seatbelt;
 mod server_error_exit;
 mod worktree;
+mod yolo_command_policy;

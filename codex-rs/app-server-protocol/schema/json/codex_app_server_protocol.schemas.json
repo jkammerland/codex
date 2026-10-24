@@ -23019,6 +23019,30 @@
         ],
         "type": "object"
       },
+      "TeamDeliveryAbandonment": {
+        "description": "An operator's decision to stop pursuing a delivery, retaining its outcome evidence.",
+        "properties": {
+          "deliveryId": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deliveryId",
+          "operationId",
+          "reason",
+          "threadId"
+        ],
+        "type": "object"
+      },
       "TeamDeliveryMode": {
         "enum": [
           "nextTurn",
@@ -23682,6 +23706,17 @@
       },
       "TeamRecipientMessageStatus": {
         "properties": {
+          "abandonment": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/TeamDeliveryAbandonment"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "address": {
             "$ref": "#/definitions/v2/TeamAddress"
           },

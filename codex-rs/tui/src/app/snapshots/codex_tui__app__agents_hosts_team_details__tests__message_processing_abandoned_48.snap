@@ -1,0 +1,15 @@
+---
+source: tui/src/app/agents_hosts_team_details_tests.rs
+assertion_line: 94
+expression: text
+---
+From Author · Current observation
+Reviewer: Processing abandoned · Current
+observation
+Operator reason: Operator accepted the
+incomplete result and removed the teammate.
+Turn failed-review-turn
+The turn failed; processing remains uncertain.
+0 related replies · replying is optional
+Admitted input may not have reached the model.
+Turn ended does not mean task fulfilled.

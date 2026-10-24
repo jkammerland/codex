@@ -228,7 +228,9 @@ impl Coordinator {
     )]
     pub async fn execute(&self, request: TeamRequest) -> Result<TeamResponse> {
         match request {
-            TeamRequest::CreateMember { .. } | TeamRequest::BoardPurge { .. } => {
+            TeamRequest::CreateMember { .. }
+            | TeamRequest::BoardPurge { .. }
+            | TeamRequest::AbandonDelivery { .. } => {
                 // A durable operation identity is required even for older HTTP
                 // clients which submit an unwrapped request.
                 Box::pin(self.execute_operation(TeamOperation::new(request))).await

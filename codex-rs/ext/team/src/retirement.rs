@@ -107,7 +107,7 @@ impl TeamHostService {
                     }
                     members.insert(id.to_string());
                     let thread = manager.get_thread(id).await?;
-                    if thread.team_active_turn_id().await.is_some() {
+                    if thread.team_has_active_or_finishing_turn().await {
                         waiting.get_or_insert_with(|| {
                             "Waiting for the current turn to finish.".into()
                         });
@@ -142,15 +142,19 @@ impl TeamHostService {
                 if !unsettled_jobs.is_empty() {
                     waiting.get_or_insert_with(|| format!("Waiting for tracked external jobs: {}. Natural completion is not tracked by these adapters; the operator can resolve them through existing Stop/cancellation controls.", unsettled_jobs.join(", ")));
                 }
-                if store.deliveries(id).await?.iter().any(|(_, receipt)| {
-                    matches!(
+                for (delivery, receipt) in store.deliveries(id).await? {
+                    if matches!(
                         receipt.state,
                         TeamReceiptState::Accepted | TeamReceiptState::NeedsReconciliation
-                    )
-                }) {
-                    waiting.get_or_insert_with(|| {
-                        "Waiting for admitted delivery evidence to settle.".into()
-                    });
+                    ) && store
+                        .get::<TeamDeliveryAbandonment>("delivery_abandonment", &delivery.id)
+                        .await?
+                        .is_none()
+                    {
+                        waiting.get_or_insert_with(|| {
+                            "Waiting for admitted delivery evidence to settle.".into()
+                        });
+                    }
                 }
             }
             if waiting.is_none() {
@@ -222,7 +226,7 @@ impl TeamHostService {
                                 break;
                             }
                             let thread = manager.get_thread(id).await?;
-                            if thread.team_active_turn_id().await.is_some()
+                            if thread.team_has_active_or_finishing_turn().await
                                 || !thread.list_background_terminals().await.is_empty()
                             {
                                 waiting = Some("Waiting for recovered work to finish.".into());

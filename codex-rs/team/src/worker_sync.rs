@@ -31,8 +31,8 @@ impl Coordinator {
             })
             .await?;
         ensure!(
-            host.protocol_version == 6,
-            "worker team protocol {} is incompatible with coordinator protocol 6; install matching coordinator and worker builds",
+            host.protocol_version == 7,
+            "worker team protocol {} is incompatible with coordinator protocol 7; install matching coordinator and worker builds",
             host.protocol_version
         );
         if let Some(expected) = self.store.get::<String>("installation", &key).await? {

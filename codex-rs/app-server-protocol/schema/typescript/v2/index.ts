@@ -508,6 +508,7 @@ export type { TeamChangedNotification } from "./TeamChangedNotification";
 export type { TeamCleanupParams } from "./TeamCleanupParams";
 export type { TeamControlState } from "./TeamControlState";
 export type { TeamDelivery } from "./TeamDelivery";
+export type { TeamDeliveryAbandonment } from "./TeamDeliveryAbandonment";
 export type { TeamDeliveryMode } from "./TeamDeliveryMode";
 export type { TeamDirectoryEntry } from "./TeamDirectoryEntry";
 export type { TeamDirectorySnapshot } from "./TeamDirectorySnapshot";

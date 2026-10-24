@@ -61,6 +61,14 @@ impl Coordinator {
             return Ok(response);
         }
         match operation.request {
+            TeamRequest::AbandonDelivery {
+                address,
+                message_id,
+                reason,
+            } => {
+                self.abandon_delivery(address, message_id, reason, &id, &digest)
+                    .await
+            }
             TeamRequest::Board { request } => {
                 self.execute_board(request, Some((&id, &digest))).await
             }
@@ -289,6 +297,21 @@ impl Coordinator {
                 .await?
             {
                 return Err(rejection.into());
+            }
+            // The host may have committed abandonment before its RPC reply was
+            // lost. Keep that operation's identity reserved while it is retried.
+            if self
+                .store
+                .get::<serde_json::Value>("operator_result", id)
+                .await?
+                .is_none()
+                && self
+                    .store
+                    .get::<TeamDeliveryAbandonParams>("delivery_abandon_request", id)
+                    .await?
+                    .is_some()
+            {
+                return Ok(None);
             }
             return Ok(Some(
                 self.store

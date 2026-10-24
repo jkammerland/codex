@@ -11,6 +11,7 @@ mod cli;
 mod client;
 mod config;
 mod coordinator;
+mod delivery_abandonment;
 mod discovery;
 mod enrollment;
 #[cfg(test)]

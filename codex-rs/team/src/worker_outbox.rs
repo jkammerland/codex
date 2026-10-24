@@ -87,6 +87,12 @@ impl Coordinator {
         }
         let prepared: Result<crate::board::BoardWrites> = async {
             match entry.kind.as_str() {
+                "delivery_abandonment" => {
+                    let abandonment: TeamDeliveryAbandonment =
+                        serde_json::from_value(entry.payload.clone())?;
+                    self.prepare_delivery_abandonment(&machine.id, &server.id, &abandonment)
+                        .await
+                }
                 "administration" => {
                     let operation: TeamAdministrationOperation =
                         serde_json::from_value(entry.payload.clone())?;

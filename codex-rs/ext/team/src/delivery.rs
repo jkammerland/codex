@@ -267,6 +267,16 @@ impl TeamHostService {
         let history = thread.team_execution_history().await?;
         let _update = self.delivery_updates.lock().await;
         for (delivery, mut receipt) in store.deliveries(thread_id).await? {
+            if store
+                .get::<codex_app_server_protocol::TeamDeliveryAbandonment>(
+                    "delivery_abandonment",
+                    &delivery.id,
+                )
+                .await?
+                .is_some()
+            {
+                continue;
+            }
             if !matches!(
                 receipt.state,
                 TeamReceiptState::Accepted

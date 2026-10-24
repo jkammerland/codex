@@ -355,6 +355,7 @@ async fn board_backfill_retains_legacy_receipts_and_isolates_invalid_chains() ->
             message,
             delivery: TeamDeliveryMode::NextTurn,
             targets: Some(Vec::new()),
+            abandonments: Default::default(),
             receipts: Default::default(),
             published: true,
             error: None,

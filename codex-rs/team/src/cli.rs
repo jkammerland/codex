@@ -28,6 +28,14 @@ pub struct TeamCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TeamAction {
+    /// Abandon an inspected failed delivery so an idle retiring family can leave.
+    AbandonDelivery {
+        #[arg(value_parser = address)]
+        address: TeamAddress,
+        message_id: String,
+        #[arg(long)]
+        reason: String,
+    },
     /// Create a persistent member of the existing shared team.
     Member(crate::MemberCommand),
     /// Inspect durable member creation or Board cleanup progress.
@@ -275,6 +283,15 @@ pub(crate) async fn run(command: TeamCommand) -> Result<()> {
             } else {
                 TeamDeliveryMode::NextTurn
             },
+        },
+        TeamAction::AbandonDelivery {
+            address,
+            message_id,
+            reason,
+        } => TeamRequest::AbandonDelivery {
+            address,
+            message_id,
+            reason,
         },
         TeamAction::AgentCredential { address } => TeamRequest::AgentCredential { address },
         TeamAction::GiteaInspect { repository } => TeamRequest::GiteaInspect { repository },

@@ -1448,6 +1448,11 @@ impl MessageProcessor {
                 .read(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::TeamDeliveryAbandon { params, .. } => self
+                .team_processor
+                .abandon_delivery(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::TeamMemberCreate { params, .. } => {
                 self.thread_processor
                     .team_member_create(

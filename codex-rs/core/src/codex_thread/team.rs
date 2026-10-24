@@ -137,6 +137,17 @@ impl CodexThread {
             .map(|task| task.turn_context.sub_id.clone())
     }
 
+    /// Final persistence and lifecycle callbacks still own the turn after its
+    /// task is removed. Destructive host recovery must wait for both phases.
+    pub async fn team_has_active_or_finishing_turn(&self) -> bool {
+        self.session
+            .active_turn
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|turn| turn.task.is_some() || turn.finishing.is_some())
+    }
+
     /// Capture waits with their owning turn so refreshes do not retain stale status events.
     #[expect(
         clippy::await_holding_invalid_type,

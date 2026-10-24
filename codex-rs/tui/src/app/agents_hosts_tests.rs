@@ -366,6 +366,7 @@ fn team_snapshot(id: ThreadId) -> TeamSnapshot {
             published: true,
             error: None,
             external_url: None,
+            abandonments: Default::default(),
             receipts: BTreeMap::from([(
                 format!("request-one:alpha/main/{id}"),
                 TeamReceipt {

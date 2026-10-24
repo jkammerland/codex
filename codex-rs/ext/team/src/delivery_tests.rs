@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,7 +6,9 @@ use codex_app_server_protocol::*;
 use codex_core::StartIfIdleSubmission;
 use codex_core::TurnInputRequest;
 use codex_extension_api::ExecutionControl;
+use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::TurnModelRequestInput;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use core_test_support::ThreadIdle;
@@ -21,7 +24,9 @@ use tokio::time::timeout;
 use super::PreparedTeamHost;
 use super::TeamHostService;
 use crate::delivery::DeliveryBoundary;
+use crate::delivery_evidence::AttemptOutcome;
 use crate::delivery_evidence::DeliveryAttempt;
+use crate::delivery_evidence::runtime_attempt;
 
 fn user_input(text: &str) -> TurnInputRequest {
     TurnInputRequest::user_input(vec![UserInput::Text {
@@ -227,5 +232,170 @@ async fn passive_safe_boundary_note_waits_for_ordinary_turn_while_waking_note_st
 
     fixture.codex.shutdown_and_wait().await?;
     model.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn later_turn_outcomes_require_the_exact_participating_runtime() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let config = core_test_support::load_default_config_for_test(&home).await;
+    let prepared = PreparedTeamHost::load(&config, "installation".into()).await?;
+    let service = TeamHostService::new(prepared, std::sync::Weak::new());
+    service.enable().await?;
+    let store = service.store.get().unwrap();
+    let thread_id = codex_protocol::ThreadId::new().to_string();
+    let thread = ExtensionData::new(&thread_id);
+    let address = TeamAddress {
+        machine_id: "machine".into(),
+        server_id: "server".into(),
+        thread_id: thread_id.clone(),
+    };
+
+    for (index, initial_state, outcome, expected_state, expected_detail) in [
+        (
+            0,
+            TeamReceiptState::Interrupted,
+            AttemptOutcome::Completed,
+            TeamReceiptState::Completed,
+            None,
+        ),
+        (
+            1,
+            TeamReceiptState::Interrupted,
+            AttemptOutcome::Interrupted,
+            TeamReceiptState::Interrupted,
+            None,
+        ),
+        (
+            2,
+            TeamReceiptState::Interrupted,
+            AttemptOutcome::Failed("provider rejected request".into()),
+            TeamReceiptState::NeedsReconciliation,
+            Some("Participating turn failed: provider rejected request".into()),
+        ),
+        (
+            3,
+            TeamReceiptState::Completed,
+            AttemptOutcome::Interrupted,
+            TeamReceiptState::Completed,
+            None,
+        ),
+    ] {
+        let delivery = TeamDelivery {
+            id: format!("cross-turn-{index}"),
+            thread_id: thread_id.clone(),
+            mode: TeamDeliveryMode::SafeBoundary,
+            wake: true,
+            message: TeamMessage {
+                id: format!("message-{index}"),
+                sender: address.clone(),
+                recipient: Some(address.clone()),
+                kind: TeamMessageKind::Request,
+                body: "input retained from an interrupted turn".into(),
+                reply_to: None,
+                topic: None,
+                created_at: 1,
+            },
+        };
+        let initial = TeamReceipt {
+            state: initial_state,
+            turn_id: Some("original-turn".into()),
+            ..store.receive(&delivery).await?
+        };
+        store.update_receipt(&initial).await?;
+        let original_outcome = if initial_state == TeamReceiptState::Completed {
+            AttemptOutcome::Completed
+        } else {
+            AttemptOutcome::Interrupted
+        };
+        let mut expected_attempt = DeliveryAttempt {
+            id: "original-dispatch".into(),
+            generation: "original-history".into(),
+            admission_revision: 1,
+            turn_id: "original-turn".into(),
+            acknowledged: true,
+            participation: BTreeMap::from([(
+                "original-runtime".into(),
+                Some(original_outcome.clone()),
+            )]),
+            provider_acknowledgements: BTreeMap::new(),
+            terminal_outcomes: BTreeMap::from([("original-runtime".into(), original_outcome)]),
+        };
+        store
+            .put("delivery_attempt", &delivery.id, &expected_attempt)
+            .await?;
+
+        // A later request may include the original marker repeatedly without
+        // creating another dispatch or replacing the original runtime's result.
+        let later = ExtensionData::new("later-turn");
+        let runtime = runtime_attempt(&later);
+        let marker = serde_json::from_value(serde_json::json!({
+            "type": "message",
+            "id": format!("msg_team-{}", delivery.id),
+            "role": "user",
+            "content": [{"type": "input_text", "text": delivery.message.body}],
+        }))?;
+        for _ in 0..2 {
+            service
+                .journal_model_request(TurnModelRequestInput {
+                    turn_id: "later-turn",
+                    input: std::slice::from_ref(&marker),
+                    thread_store: &thread,
+                    turn_store: &later,
+                })
+                .await?;
+        }
+        expected_attempt.participation.insert(runtime.clone(), None);
+
+        // Sharing the later turn ID does not grant an unrelated runtime
+        // ownership of another request's delivery participation.
+        service
+            .finish_deliveries(
+                &thread_id,
+                "later-turn",
+                "unrelated-runtime",
+                AttemptOutcome::Completed,
+            )
+            .await?;
+        assert_eq!(store.deliveries(&thread_id).await?[index].1, initial);
+        assert_eq!(
+            store
+                .get::<serde_json::Value>("delivery_attempt", &delivery.id)
+                .await?,
+            Some(serde_json::to_value(&expected_attempt)?)
+        );
+
+        service
+            .finish_deliveries(&thread_id, "later-turn", &runtime, outcome.clone())
+            .await?;
+        expected_attempt
+            .participation
+            .insert(runtime.clone(), Some(outcome.clone()));
+        expected_attempt.terminal_outcomes.insert(runtime, outcome);
+
+        // Repeated evidence after completion must not erase a known outcome.
+        service
+            .journal_model_request(TurnModelRequestInput {
+                turn_id: "later-turn",
+                input: std::slice::from_ref(&marker),
+                thread_store: &thread,
+                turn_store: &later,
+            })
+            .await?;
+        assert_eq!(
+            store
+                .get::<serde_json::Value>("delivery_attempt", &delivery.id)
+                .await?,
+            Some(serde_json::to_value(expected_attempt)?)
+        );
+        assert_eq!(
+            store.deliveries(&thread_id).await?[index].1,
+            TeamReceipt {
+                state: expected_state,
+                detail: expected_detail,
+                ..initial
+            }
+        );
+    }
     Ok(())
 }

@@ -81,6 +81,7 @@ impl TeamHostService {
                             name: name(address),
                             progress: TeamMessageProgress::QueuedOnSenderHost,
                             receipt: None,
+                            abandonment: None,
                             freshness: TeamObservationFreshness::Current,
                         })
                         .into_iter()
@@ -145,6 +146,7 @@ impl TeamHostService {
                 name: name(sender),
                 progress: receipt.state.into(),
                 receipt: Some(receipt),
+                abandonment: store.get("delivery_abandonment", &delivery.id).await?,
                 freshness: TeamObservationFreshness::Current,
             });
         }

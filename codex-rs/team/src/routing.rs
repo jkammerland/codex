@@ -170,6 +170,7 @@ impl Coordinator {
             message,
             delivery,
             targets: None,
+            abandonments: Default::default(),
             receipts: BTreeMap::new(),
             published: false,
             error: None,

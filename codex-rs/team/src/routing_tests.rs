@@ -28,6 +28,7 @@ fn record(id: &str, kind: TeamMessageKind) -> (String, MessageRecord) {
             },
             delivery: TeamDeliveryMode::NextTurn,
             targets: Some(Vec::new()),
+            abandonments: Default::default(),
             receipts: BTreeMap::new(),
             published: true,
             error: None,

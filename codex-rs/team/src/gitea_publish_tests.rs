@@ -248,6 +248,7 @@ async fn queued_publication_retains_its_original_instance_and_legacy_origins_are
             .await?,
         delivery: TeamDeliveryMode::NextTurn,
         targets: Some(Vec::new()),
+        abandonments: Default::default(),
         receipts: Default::default(),
         published: true,
         error: None,

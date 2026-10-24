@@ -257,7 +257,7 @@ impl TeamHostService {
         let runtime = self.runtime(&data).await?;
         Ok(TeamHostReadResponse {
             installation_id: self.installation_id.clone(),
-            protocol_version: 6,
+            protocol_version: 7,
             control,
             data,
             runtime,
@@ -424,3 +424,7 @@ mod delivery_tests;
 #[cfg(test)]
 #[path = "member_create_recovery_tests.rs"]
 mod member_create_recovery_tests;
+
+#[cfg(test)]
+#[path = "delivery_abandonment_tests.rs"]
+mod delivery_abandonment_tests;

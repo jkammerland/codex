@@ -75,6 +75,8 @@ pub struct MessageRecord {
     pub delivery: TeamDeliveryMode,
     pub targets: Option<Vec<TeamAddress>>,
     pub receipts: BTreeMap<String, TeamReceipt>,
+    #[serde(default)]
+    pub abandonments: BTreeMap<String, codex_app_server_protocol::TeamDeliveryAbandonment>,
     pub published: bool,
     pub error: Option<String>,
     #[serde(default)]
@@ -146,6 +148,11 @@ pub enum TeamRequest {
     Leave {
         address: TeamAddress,
     },
+    AbandonDelivery {
+        address: TeamAddress,
+        message_id: String,
+        reason: String,
+    },
     Enroll {
         address: TeamAddress,
         alias: String,
@@ -192,6 +199,9 @@ pub enum TeamRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum TeamResponse {
+    DeliveryAbandoned {
+        abandonment: codex_app_server_protocol::TeamDeliveryAbandonment,
+    },
     Operation {
         operation: crate::TeamOperatorOperation,
     },

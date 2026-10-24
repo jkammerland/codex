@@ -155,6 +155,35 @@ pub struct TeamLeaveResponse {
     pub thread_id: String,
 }
 
+/// An operator's decision to stop pursuing a delivery, retaining its outcome evidence.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamDeliveryAbandonment {
+    pub operation_id: String,
+    pub delivery_id: String,
+    pub thread_id: String,
+    pub reason: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamDeliveryAbandonParams {
+    pub operation_id: String,
+    pub coordinator_id: String,
+    pub thread_id: String,
+    pub delivery_id: String,
+    pub reason: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TeamDeliveryAbandonResponse {
+    pub abandonment: TeamDeliveryAbandonment,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

@@ -16,6 +16,7 @@ mod board_purge;
 mod board_purge_content;
 mod board_purge_worker;
 mod board_query;
+mod delivery_abandonment;
 mod host;
 mod outbox;
 

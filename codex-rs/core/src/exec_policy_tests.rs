@@ -2068,6 +2068,220 @@ fn derive_requested_execpolicy_amendment_returns_none_when_policy_matches() {
 }
 
 #[tokio::test]
+async fn yolo_skips_dangerous_command_heuristics_but_preserves_explicit_rules() {
+    for (platform, command, prefix, amendment_command) in [
+        (
+            DangerousCommandPlatform::Posix,
+            vec_str(&["rm", "-rf", "diagnostic"]),
+            "rm",
+            vec_str(&["rm", "-rf", "diagnostic"]),
+        ),
+        (
+            DangerousCommandPlatform::Posix,
+            vec_str(&["bash", "-lc", "rm -rf diagnostic"]),
+            "rm",
+            vec_str(&["rm", "-rf", "diagnostic"]),
+        ),
+        (
+            DangerousCommandPlatform::Posix,
+            vec_str(&[
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "rm",
+                "-rf",
+                "diagnostic",
+            ]),
+            "env",
+            vec_str(&[
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "env",
+                "rm",
+                "-rf",
+                "diagnostic",
+            ]),
+        ),
+        (
+            DangerousCommandPlatform::Windows,
+            vec_str(&["pwsh", "-Command", "Remove-Item diagnostic -Force"]),
+            "Remove-Item",
+            vec_str(&["Remove-Item", "diagnostic", "-Force"]),
+        ),
+        (
+            DangerousCommandPlatform::Windows,
+            vec_str(&[
+                "powershell.exe",
+                "-NonInteractive",
+                "-Command",
+                "Remove-Item diagnostic -Force",
+            ]),
+            "powershell.exe",
+            // The generic parser keeps unsupported wrapper flags opaque.
+            vec_str(&[
+                "powershell.exe",
+                "-NonInteractive",
+                "-Command",
+                "Remove-Item diagnostic -Force",
+            ]),
+        ),
+        (
+            DangerousCommandPlatform::Windows,
+            vec_str(&[
+                "pwsh",
+                "-Command",
+                "Start-Process 'https://example.invalid/diagnostic'",
+            ]),
+            "Start-Process",
+            vec_str(&["Start-Process", "https://example.invalid/diagnostic"]),
+        ),
+    ] {
+        for (rule, expected) in [
+            (
+                None,
+                ExecApprovalRequirement::Skip {
+                    bypass_sandbox: false,
+                    proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(
+                        amendment_command,
+                    )),
+                },
+            ),
+            (
+                Some("prompt"),
+                ExecApprovalRequirement::Forbidden {
+                    reason: PROMPT_CONFLICT_REASON.to_string(),
+                },
+            ),
+            (
+                Some("forbidden"),
+                ExecApprovalRequirement::Forbidden {
+                    reason: format!(
+                        "`{}` rejected: policy forbids commands starting with `{prefix}`",
+                        render_shlex_command(&command)
+                    ),
+                },
+            ),
+        ] {
+            let policy_src = rule.map(|decision| {
+                format!("prefix_rule(pattern=['{prefix}'], decision='{decision}')")
+            });
+            let manager = ExecPolicyManager::new(policy_from_src(policy_src.as_deref()));
+            let actual = manager
+                .create_exec_approval_requirement_for_command_platform(
+                    ExecApprovalRequest {
+                        command: &command,
+                        approval_policy: AskForApproval::Never,
+                        permission_profile: PermissionProfile::Disabled,
+                        environment_policy: None,
+                        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                        sandbox_permissions: SandboxPermissions::UseDefault,
+                        prefix_rule: None,
+                        allow_prefix_rules: AllowPrefixRules::Honor,
+                    },
+                    platform,
+                )
+                .await;
+
+            assert_eq!(actual, expected, "{command:?}; rule: {rule:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn dangerous_command_heuristics_remain_enforced_outside_yolo() {
+    for (platform, command) in [
+        (
+            DangerousCommandPlatform::Posix,
+            vec_str(&["rm", "-rf", "diagnostic"]),
+        ),
+        (
+            DangerousCommandPlatform::Windows,
+            vec_str(&["pwsh", "-Command", "Remove-Item diagnostic -Force"]),
+        ),
+    ] {
+        // Filesystem access alone must not select the complete sandbox bypass.
+        for permission_profile in [
+            PermissionProfile::read_only(),
+            PermissionProfile::workspace_write(),
+            PermissionProfile::External {
+                network: NetworkSandboxPolicy::Enabled,
+            },
+            PermissionProfile::Managed {
+                file_system: codex_protocol::models::ManagedFileSystemPermissions::Unrestricted,
+                network: NetworkSandboxPolicy::Enabled,
+            },
+        ] {
+            let requirement = ExecPolicyManager::default()
+                .create_exec_approval_requirement_for_command_platform(
+                    ExecApprovalRequest {
+                        command: &command,
+                        approval_policy: AskForApproval::Never,
+                        permission_profile: permission_profile.clone(),
+                        environment_policy: None,
+                        windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
+                        sandbox_permissions: SandboxPermissions::UseDefault,
+                        prefix_rule: None,
+                        allow_prefix_rules: AllowPrefixRules::Honor,
+                    },
+                    platform,
+                )
+                .await;
+
+            assert!(
+                matches!(requirement, ExecApprovalRequirement::Forbidden { .. }),
+                "{command:?}; {permission_profile:?}: {requirement:?}"
+            );
+        }
+
+        // Full access with interactive approval retains the heuristic review.
+        for approval_policy in [
+            AskForApproval::OnRequest,
+            AskForApproval::UnlessTrusted,
+            AskForApproval::Granular(GranularApprovalConfig {
+                sandbox_approval: true,
+                rules: true,
+                skill_approval: true,
+                request_permissions: true,
+                mcp_elicitations: true,
+            }),
+        ] {
+            let requirement = ExecPolicyManager::default()
+                .create_exec_approval_requirement_for_command_platform(
+                    ExecApprovalRequest {
+                        command: &command,
+                        approval_policy,
+                        permission_profile: PermissionProfile::Disabled,
+                        environment_policy: None,
+                        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                        sandbox_permissions: SandboxPermissions::UseDefault,
+                        prefix_rule: None,
+                        allow_prefix_rules: AllowPrefixRules::Honor,
+                    },
+                    platform,
+                )
+                .await;
+
+            assert!(
+                matches!(requirement, ExecApprovalRequirement::NeedsApproval { .. }),
+                "{command:?}; {approval_policy:?}: {requirement:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn dangerous_rm_rf_requires_approval_in_danger_full_access() {
     let command = vec_str(&["rm", "-rf", "/tmp/nonexistent"]);
 
@@ -2540,9 +2754,9 @@ async fn windows_powershell_policy_classifies_only_independent_literal_commands(
                         ExecApprovalRequest {
                             command: &command,
                             approval_policy: AskForApproval::Never,
-                            permission_profile: PermissionProfile::Disabled,
+                            permission_profile: PermissionProfile::read_only(),
                             environment_policy: None,
-                            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                            windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
                             sandbox_permissions: SandboxPermissions::UseDefault,
                             prefix_rule: None,
                             allow_prefix_rules: AllowPrefixRules::Honor,

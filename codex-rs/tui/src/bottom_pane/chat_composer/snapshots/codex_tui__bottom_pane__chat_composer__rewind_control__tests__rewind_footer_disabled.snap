@@ -27,3 +27,15 @@ expression: "frames.join(\"\\n\\n\")"
 
   MODEL STATUS
   esc Agents · [Rewind…] /rewind · f3 Details · ? Help
+
+
+› Viewing sub-agent — direct input is disabled
+
+  MODEL STATUS
+  esc Agents · [Rewind…] /rewind · f3 Details · ? Help
+
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  esc Agents · [Rewind…] /rewind · f3 Details · ? Help

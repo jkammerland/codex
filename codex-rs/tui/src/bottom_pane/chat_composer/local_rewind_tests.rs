@@ -4,7 +4,7 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn rewind_enter_and_queue_keys_dispatch_locally() {
+fn rewind_enter_and_queue_keys_defer_consuming_the_local_command() {
     for key in [KeyCode::Enter, KeyCode::Tab] {
         for queue_submissions in [false, true] {
             let (mut composer, _rx) = new_test_composer();
@@ -16,7 +16,7 @@ fn rewind_enter_and_queue_keys_dispatch_locally() {
                 composer.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE)),
                 (InputResult::Command(SlashCommand::Rewind), true)
             );
-            assert_eq!(composer.current_text(), "");
+            assert_eq!(composer.current_text(), "/rewind ");
             assert!(composer.attachments.is_empty());
         }
     }
@@ -42,7 +42,7 @@ fn rewind_popup_completion_and_enter_are_local() {
         composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         (InputResult::Command(SlashCommand::Rewind), true)
     );
-    assert_eq!(composer.current_text(), "");
+    assert_eq!(composer.current_text(), "/rewi");
 
     composer.set_text_content("/rewind".into(), Vec::new(), Vec::new());
     composer.queue_keys = vec![key_hint::ctrl(KeyCode::Char('q'))];
@@ -51,7 +51,7 @@ fn rewind_popup_completion_and_enter_are_local() {
         composer.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         (InputResult::Command(SlashCommand::Rewind), true)
     );
-    assert_eq!(composer.current_text(), "");
+    assert_eq!(composer.current_text(), "/rewind");
 }
 
 #[test]
@@ -97,7 +97,11 @@ fn rewind_full_slash_menu_selection_preserves_attachment_validation() {
                 assert!(rx.try_recv().is_err());
             } else {
                 assert_eq!(result, (InputResult::Command(SlashCommand::Rewind), true));
-                assert_eq!(composer.current_text(), "");
+                assert_eq!(
+                    (composer.current_text(), composer.current_cursor()),
+                    (before.text, before.cursor)
+                );
+                assert!(!composer.popup_active());
                 assert!(rx.try_recv().is_err());
             }
         }
@@ -204,7 +208,7 @@ async fn rewind_buffered_paste_is_local_on_modified_queue_binding() {
                     true
                 )
             );
-            assert_eq!(composer.current_text(), if accepted { "" } else { text });
+            assert_eq!(composer.current_text(), text);
             assert!(!composer.is_in_paste_burst());
         }
     }

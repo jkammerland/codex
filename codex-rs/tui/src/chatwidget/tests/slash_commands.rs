@@ -1621,15 +1621,12 @@ async fn slash_rewind_enter_and_tab_never_enqueue_or_submit_model_input() {
                 );
                 let opened = events
                     .iter()
-                    .filter(|event| matches!(event, AppEvent::OpenRewind))
+                    .filter(|event| matches!(event, AppEvent::OpenRewindFromComposer { .. }))
                     .count();
                 assert_eq!(opened, usize::from(!busy && text == "/rewind"));
                 assert!(chat.input_queue.queued_user_messages.is_empty());
                 assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
-                assert_eq!(
-                    chat.bottom_pane.composer_text(),
-                    if opened == 1 { "" } else { text }
-                );
+                assert_eq!(chat.bottom_pane.composer_text(), text);
             }
         }
     }

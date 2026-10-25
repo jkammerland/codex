@@ -760,7 +760,13 @@ async fn reverted_notification_uses_normal_intake_and_does_not_edit_another_visi
             }),
             request_id: Uuid::new_v4(),
             error: None,
-            nth_user_message: 0,
+            selected_cell: Arc::new(crate::history_cell::UserHistoryCell {
+                spoken: false,
+                message: "Restored prompt".into(),
+                text_elements: Vec::new(),
+                local_image_paths: Vec::new(),
+                remote_image_urls: Vec::new(),
+            }),
             notified: false,
         },
     );
@@ -846,8 +852,21 @@ async fn prompt_revert_preparation_returns_to_the_loop_before_its_rpc_finishes()
         text_elements: Vec::new(),
         mention_bindings: Vec::new(),
     };
-    app.start_host_prompt_revert(&session, id, 0, prompt)
-        .await?;
+    let selected_cell = Arc::new(crate::history_cell::UserHistoryCell {
+        spoken: false,
+        message: prompt.text.clone(),
+        text_elements: Vec::new(),
+        local_image_paths: Vec::new(),
+        remote_image_urls: Vec::new(),
+    });
+    app.start_host_prompt_revert(
+        &session,
+        id,
+        /*nth_user_message*/ 0,
+        selected_cell,
+        prompt,
+    )
+    .await?;
     // The current-thread task has not run its failing transport read yet.
     assert!(app.pending_host_prompt_reverts.contains_key(&id));
     app.handle_tui_event(&mut tui, &mut session, TuiEvent::Key(KeyCode::Esc.into()))

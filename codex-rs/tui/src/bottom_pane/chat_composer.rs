@@ -135,6 +135,8 @@
 //! running, `Tab` submits just like Enter so input is never dropped.
 //! `/rewind` is local-only: submission and queue keys validate it before ordinary slash parsing or
 //! queue creation. Arguments, attachments, and unavailable states retain the draft on rejection.
+//! Its selected popup closes, but the exact draft and local recall remain unchanged until the app
+//! validates the conversation and accepts the command; a stale request cannot consume newer input.
 //! Vim Replace shares Insert's composer actions; only textarea editing differs.
 //! Literal completion/paste edits discard stale Replace recovery; subsequent typing records anew.
 //! Token markers added during Replace are removed when restoring overwritten characters.

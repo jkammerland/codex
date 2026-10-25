@@ -1,9 +1,29 @@
 //! Activate passive footer controls only after the selection owner releases a stationary click.
 
 use super::*;
+use crate::bottom_pane::ComposerDraftSnapshot;
 use crate::tui::TuiEvent;
 
 impl ChatWidget {
+    pub(crate) fn rewind_input_unavailable_reason(&self) -> Option<&'static str> {
+        if self.blocks_direct_input {
+            Some("'/rewind' is unavailable in a parent-owned thread.")
+        } else if self.team_execution_held() {
+            Some("'/rewind' is disabled while a task is in progress or paused.")
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn rewind_command_matches(&self, draft: &ComposerDraftSnapshot) -> bool {
+        !self.bottom_pane.is_in_paste_burst()
+            && self.bottom_pane.composer_draft_snapshot() == *draft
+    }
+
+    pub(crate) fn accept_rewind_command(&mut self) {
+        self.bottom_pane.accept_rewind_command();
+    }
+
     pub(crate) fn rewind_draft_is_empty(&self) -> bool {
         self.composer_is_empty() && self.bottom_pane.composer_pending_pastes().is_empty()
     }

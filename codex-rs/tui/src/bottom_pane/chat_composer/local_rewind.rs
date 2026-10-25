@@ -1,4 +1,4 @@
-//! Keep rewind invocations local and validate the whole draft before consuming its command.
+//! Keep rewind invocations local and retain the whole draft until app validation accepts it.
 
 use super::*;
 
@@ -59,11 +59,27 @@ impl ChatComposer {
             return self.reject_local_rewind(message);
         }
 
-        // Only the accepted command is consumed; the shared app action requires an empty editor.
-        self.stage_selected_slash_command_history(&CommandItem::Builtin(SlashCommand::Rewind));
-        self.draft.textarea.set_text_clearing_elements("");
-        self.draft.prompt_prefix = PromptPrefix::None;
+        // App-only restrictions can still reject this command. Dismiss its popup without
+        // completing or clearing the original text, including a partial name or the full menu.
+        let text = self.current_text();
+        self.popups.dismissed_command_token = slash_input::command_popup_filter_text(
+            text.lines().next().unwrap_or(""),
+            /*cursor*/ 0,
+        );
+        self.popups.active = ActivePopup::None;
         InputResult::Command(SlashCommand::Rewind)
+    }
+}
+
+impl super::super::BottomPane {
+    pub(crate) fn accept_rewind_command(&mut self) {
+        self.composer
+            .stage_selected_slash_command_history(&CommandItem::Builtin(SlashCommand::Rewind));
+        self.composer.record_pending_slash_command_history();
+        self.composer.draft.textarea.set_text_clearing_elements("");
+        self.composer.draft.prompt_prefix = PromptPrefix::None;
+        self.composer.sync_popups();
+        self.request_redraw();
     }
 }
 

@@ -105,6 +105,8 @@ fn rewind_footer_disables_for_draft_attachments_pending_paste_and_unavailable_hi
                 .push(("pending".into(), "paste".into()))
         },
         |composer: &mut ChatComposer| composer.set_rewind_available(/*available*/ false),
+        ChatComposer::set_parent_owned_thread,
+        |composer: &mut ChatComposer| composer.set_team_execution_held(/*held*/ true),
     ] {
         let mut composer = composer();
         setup(&mut composer);
@@ -146,6 +148,32 @@ fn rewind_footer_disables_for_draft_attachments_pending_paste_and_unavailable_hi
         frames.push(text(&buffer));
     }
     insta::assert_snapshot!("rewind_footer_disabled", frames.join("\n\n"));
+}
+
+#[test]
+fn rewind_footer_rechecks_parent_and_team_restrictions_before_repaint() {
+    for setup in [
+        ChatComposer::set_parent_owned_thread,
+        |composer: &mut ChatComposer| composer.set_team_execution_held(/*held*/ true),
+    ] {
+        let mut composer = composer();
+        render(
+            &composer,
+            /*width*/ 80,
+            ComposerRenderOptions {
+                separate_status_line: true,
+                ..Default::default()
+            },
+        );
+        let position = composer
+            .footer
+            .rewind_area
+            .get()
+            .expect("enabled control")
+            .as_position();
+        setup(&mut composer);
+        assert!(!composer.rewind_contains(position));
+    }
 }
 
 #[test]

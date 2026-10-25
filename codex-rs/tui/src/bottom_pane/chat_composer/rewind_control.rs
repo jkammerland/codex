@@ -44,6 +44,8 @@ impl ChatComposer {
             && self.draft.pending_pastes.is_empty()
             && !self.is_in_paste_burst()
             && !self.is_task_running
+            && !self.team_execution_held
+            && !self.blocks_direct_input
     }
 
     pub(super) fn rewind_control_layout(

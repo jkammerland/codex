@@ -8647,16 +8647,90 @@ async fn remembered_current_cwd_stays_at_launch_across_in_app_resumes() -> Resul
 #[tokio::test]
 async fn prompt_edit_reverts_earlier_and_first_visible_prompts_in_place() -> Result<()> {
     // Allocate the whole scenario before Tokio polls it on the test thread.
-    boxed_future!(prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario()).await
+    boxed_future!(
+        prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario(
+            PromptEditAgents::Disabled,
+        )
+    )
+    .await
 }
 
-async fn prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario() -> Result<()> {
+#[tokio::test]
+async fn prompt_edit_before_agents_discovery_restores_the_prompt_and_accepts_input() -> Result<()> {
+    boxed_future!(
+        prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario(
+            PromptEditAgents::BeforeDiscovery,
+        )
+    )
+    .await
+}
+
+enum PromptEditAgents {
+    Disabled,
+    BeforeDiscovery,
+}
+
+async fn finish_embedded_prompt_edit(
+    app: &mut App,
+    tui: &mut tui::Tui,
+    server: &mut AppServerSession,
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> Result<()> {
+    let mut prepared = !app.agents_hosts.enabled();
+    let mut notified = false;
+
+    // Direct startup owns the backend intake until Agents discovery starts it.
+    // Observe both real completion signals before testing the pending state.
+    while !prepared || !notified {
+        tokio::select! {
+            event = events.recv() => {
+                let event = event.expect("prompt edit app event");
+                if let AppEvent::AgentsHostUpdate(update) = &event
+                    && let agents_hosts::HostUpdate::PromptRevertPrepared { result, .. } = update.as_ref()
+                {
+                    assert!(result.is_ok(), "the backend revert must succeed");
+                    prepared = true;
+                }
+                notified |= matches!(&event, AppEvent::CompleteHostPromptRevert { .. });
+                Box::pin(app.handle_event(tui, server, event)).await?;
+            }
+            event = server.next_event() => {
+                app.handle_backend_event(server, event.expect("embedded backend event")).await;
+            }
+        }
+    }
+    assert!(
+        app.pending_host_prompt_reverts.is_empty(),
+        "a successful revert and its notification must release the pending prompt edit",
+    );
+
+    // The final transcript trim clears the input barrier in the normal dispatcher.
+    while app.pending_thread_switch_resets > 0 {
+        let event = events.recv().await.expect("prompt edit transcript reset");
+        Box::pin(app.handle_event(tui, server, event)).await?;
+    }
+    while let Ok(event) = events.try_recv() {
+        Box::pin(app.handle_event(tui, server, event)).await?;
+    }
+    assert_eq!(app.pending_thread_switch_resets, 0);
+    Ok(())
+}
+
+async fn prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario(
+    agents: PromptEditAgents,
+) -> Result<()> {
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
     use codex_protocol::models::ImageReference;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::user_input::UserInput;
-    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    if let PromptEditAgents::BeforeDiscovery = agents {
+        app.agents_hosts.manifest = Some(PathBuf::from("manifest.toml"));
+    }
+    assert!(app.agents_hosts.hosts.is_empty());
+    assert!(!app.agents_hosts.started);
+
     let config = app.chat_widget.config_ref().clone();
     let filename_ts = "2025-01-05T12-00-00";
     let source_thread_id = app_test_support::create_fake_paginated_rollout(
@@ -8753,7 +8827,10 @@ async fn prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario
     let mut local_settings = crate::local_settings::LocalSettings::from(&config);
     local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Terminal;
     local_settings.tui.alternate_screen = codex_config::types::AltScreenMode::Never;
-    local_settings.tui.terminal_resize_reflow_max_rows = Some(2);
+    local_settings.tui.terminal_resize_reflow_max_rows = match agents {
+        PromptEditAgents::Disabled => Some(2),
+        PromptEditAgents::BeforeDiscovery => None,
+    };
     let started = app_server
         .resume_thread(
             &local_settings,
@@ -8762,10 +8839,98 @@ async fn prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario
             crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
         )
         .await?;
-    assert!(app_server.has_older_history(source_thread_id));
     let selected_turn = started.turns[3].clone();
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
+
+    // Exercise host ownership without an unrelated in-flight history page.
+    if let PromptEditAgents::BeforeDiscovery = agents {
+        assert!(!app_server.has_older_history(source_thread_id));
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        while let Ok(event) = app_event_rx.try_recv() {
+            Box::pin(app.handle_event(&mut tui, &mut app_server, event)).await?;
+        }
+        assert_eq!(crate::app_backtrack::user_count(&app.transcript_cells), 4);
+
+        Box::pin(app.handle_event(
+            &mut tui,
+            &mut app_server,
+            AppEvent::RevertSessionForPromptEdit {
+                thread_id: source_thread_id,
+                selected_cell: Arc::clone(
+                    &app.transcript_cells
+                        [nth_user_position(&app.transcript_cells, /*nth*/ 1).unwrap()],
+                ),
+                prompt: "retained prompt".into(),
+            },
+        ))
+        .await?;
+        finish_embedded_prompt_edit(&mut app, &mut tui, &mut app_server, &mut app_event_rx).await?;
+
+        assert_eq!(app.chat_widget.thread_id(), Some(source_thread_id));
+        assert_eq!(
+            app.chat_widget.composer_text_with_pending(),
+            "retained prompt"
+        );
+        assert_eq!(crate::app_backtrack::user_count(&app.transcript_cells), 1);
+        assert_eq!(
+            app_server
+                .thread_read(source_thread_id, /*include_turns*/ true)
+                .await?
+                .turns
+                .iter()
+                .map(|turn| turn.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["turn-0"],
+        );
+        assert_eq!(
+            lines_to_single_string(
+                &app.transcript_cells
+                    .last()
+                    .unwrap()
+                    .display_lines(/*width*/ 120)
+            ),
+            "• Conversation reverted to this point. File changes are unchanged.",
+        );
+
+        // Input must reach the fixture's submission channel, not remain behind the revert barrier.
+        app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Draw)
+            .await?;
+        app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Paste(" edited".into()))
+            .await?;
+        assert_eq!(
+            app.chat_widget.composer_text_with_pending(),
+            "retained prompt edited"
+        );
+        app.handle_tui_event(
+            &mut tui,
+            &mut app_server,
+            TuiEvent::Key(KeyCode::Enter.into()),
+        )
+        .await?;
+        assert!(app.chat_widget.queued_user_message_texts().is_empty());
+        let Op::UserTurn { items, .. } = next_user_turn_op(&mut op_rx) else {
+            panic!("expected the edited prompt submission");
+        };
+        assert_eq!(
+            items,
+            vec![AppServerUserInput::Text {
+                text: "retained prompt edited".into(),
+                text_elements: Vec::new(),
+            }],
+        );
+        assert_eq!(
+            app.agents_hosts.hosts.keys().collect::<Vec<_>>(),
+            vec![&app.agents_hosts.foreground]
+        );
+        assert!(!app.agents_hosts.started);
+        assert!(app.agents_hosts.client.is_none());
+        assert_eq!(app.agents_hosts.configuration_generation, 0);
+        app_server.shutdown().await?;
+        return Ok(());
+    }
+
+    assert!(app_server.has_older_history(source_thread_id));
     app.scrollback_has_older_history = app_server.has_older_history(source_thread_id);
     {
         let mut store = app
@@ -9099,6 +9264,7 @@ async fn prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario
         app_server.thread_goal_get(source_thread_id).await?.goal,
         Some(goal)
     );
+
     tui.set_owned_screen(/*owned*/ false)?;
     app_server.shutdown().await?;
 

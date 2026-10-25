@@ -16,19 +16,16 @@ use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 
 impl App {
-    pub(super) fn ensure_agents_hosts(&mut self, foreground: &AppServerSession) {
-        if self.agents_hosts.started {
+    pub(super) fn ensure_initial_agents_host(&mut self, foreground: &AppServerSession) {
+        if self.agents_hosts.started || !self.agents_hosts.enabled() {
             return;
         }
-        let Some(path) = self.agents_hosts.manifest.clone() else {
-            return;
-        };
-        self.agents_hosts.started = true;
-        self.agents_hosts.configuration_generation += 1;
-        let generation = self.agents_hosts.configuration_generation;
+
+        // A direct chat can finish host-scoped work before the Agents screen is opened.
+        // Register its owner without starting discovery or resetting a reconnected host.
         self.agents_hosts
             .hosts
-            .entry(HostKey::default())
+            .entry(self.agents_hosts.initial_host.clone())
             .or_insert(AgentHost {
                 label: if foreground.is_discovery_placeholder() {
                     "Overview"
@@ -53,6 +50,19 @@ impl App {
                 refreshing: false,
                 refresh_metadata: Vec::new(),
             });
+    }
+
+    pub(super) fn ensure_agents_hosts(&mut self, foreground: &AppServerSession) {
+        if self.agents_hosts.started {
+            return;
+        }
+        let Some(path) = self.agents_hosts.manifest.clone() else {
+            return;
+        };
+        self.ensure_initial_agents_host(foreground);
+        self.agents_hosts.started = true;
+        self.agents_hosts.configuration_generation += 1;
+        let generation = self.agents_hosts.configuration_generation;
         let foreground_target = self.app_server_target.clone();
         let executable = self
             .daemon_cli_executable

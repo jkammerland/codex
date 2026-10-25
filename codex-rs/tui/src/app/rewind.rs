@@ -47,3 +47,7 @@ impl App {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rewind_tests.rs"]
+mod tests;

@@ -1,0 +1,29 @@
+---
+source: tui/src/bottom_pane/chat_composer/rewind_control_tests.rs
+expression: "frames.join(\"\\n\\n\")"
+---
+
+› keep draft
+
+  MODEL STATUS
+  [Rewind…] /rewind · f3 Details · ? Help
+
+
+  [Image #1]
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  [Rewind…] /rewind · f3 Details · ? Help
+
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  esc Agents · [Rewind…] /rewind · f3 Details · ? Help
+
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  esc Agents · [Rewind…] /rewind · f3 Details · ? Help

@@ -41,3 +41,7 @@ impl ChatWidget {
         false
     }
 }
+
+#[cfg(test)]
+#[path = "footer_actions_tests.rs"]
+mod tests;

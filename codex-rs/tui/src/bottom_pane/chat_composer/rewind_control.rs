@@ -152,3 +152,7 @@ fn hint(key: ShortcutHint, description: &'static str) -> Line<'static> {
     line.push_span(description);
     line
 }
+
+#[cfg(test)]
+#[path = "rewind_control_tests.rs"]
+mod tests;

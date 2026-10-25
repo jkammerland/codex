@@ -1,0 +1,73 @@
+---
+source: tui/src/bottom_pane/chat_composer/rewind_control_tests.rs
+expression: "frames.join(\"\\n\\n\")"
+---
+width 90, warnings 0, hit Some(Rect { x: 15, y: 4, width: 9, height: 1 })
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  esc Agents · [Rewind…] /rewind · f3 Details · ? Help
+
+width 60, warnings 0, hit Some(Rect { x: 15, y: 4, width: 9, height: 1 })
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  esc Agents · [Rewind…] /rewind · f3 Details · ? Help
+
+width 48, warnings 0, hit Some(Rect { x: 15, y: 4, width: 9, height: 1 })
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  esc Agents · [Rewind…] /rewind · ? Help
+
+width 35, warnings 0, hit Some(Rect { x: 2, y: 4, width: 9, height: 1 })
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  [Rewind…] /rewind · ? Help
+
+width 19, warnings 0, hit Some(Rect { x: 2, y: 4, width: 7, height: 1 })
+
+› Ask Codex to do
+
+  MODEL STATUS
+  /rewind · ? Help
+
+width 12, warnings 0, hit Some(Rect { x: 2, y: 4, width: 7, height: 1 })
+
+› Ask Codex
+
+  MODEL STA…
+  /rewind
+
+width 8, warnings 0, hit None
+
+› Ask C
+
+  MODEL…
+
+
+width 90, warnings 3, hit Some(Rect { x: 15, y: 4, width: 9, height: 1 })
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  esc Agents · [Rewind…] /rewind · f3 Details · ? Help          ⚠ 3 warnings · f2 to view
+
+width 48, warnings 3, hit Some(Rect { x: 2, y: 4, width: 9, height: 1 })
+
+› Ask Codex to do anything
+
+  MODEL STATUS
+  [Rewind…] /rewind · ? Help           ⚠ 3 · f2
+
+width 19, warnings 3, hit None
+
+› Ask Codex to do
+
+  MODEL STATUS
+          ⚠ 3 · f2

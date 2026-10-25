@@ -1,13 +1,12 @@
 {
   "schemaVersion": 1,
   "candidate": {
-    "version": "0.163.0+jkammerland.mcp.25.team.8",
-    "stagedSourceCommit": "b1fe7ef4e995ddb4309ac9c07f8f2f80cc7b83f6",
-    "sourceRef": "integration/upstream-20261021",
-    "activation": "active",
+    "version": "0.163.0+jkammerland.mcp.25.team.9",
+    "stagedSourceCommit": "4878105baa4c1b5388bae925ce41955f91204850",
+    "sourceRef": "fix/team8-rewind-escape",
+    "activation": "pending",
     "teamProtocolVersion": 7,
-    "stagingCheckedAt": "2026-10-24T08:46:23+00:00",
-    "activationCheckedAt": "2026-10-24T16:25:10+00:00"
+    "stagingCheckedAt": "2026-10-25T19:12:53+00:00"
   },
   "hosts": [
     {
@@ -20,18 +19,20 @@
       "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.8",
       "daemonRestart": "verified",
       "previousPackageRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.8",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.9",
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.8",
       "teamProtocolVersion": 7,
       "teamLedgerBackupRetained": true,
       "activation": "active",
       "gpt61SolVerified": true,
-      "stagedSourceCommit": "b1fe7ef4e995ddb4309ac9c07f8f2f80cc7b83f6",
+      "stagedSourceCommit": "4878105baa4c1b5388bae925ce41955f91204850",
       "stagedTeamProtocolVersion": 7,
       "stagedGpt61SolVerified": true,
       "wakeOnAgentMessagesVerified": true,
       "preUpgradeLedgerBackupsRetained": true,
-      "teamWorkerAuthentication": "reauthentication_required_token_revoked"
+      "teamWorkerAuthentication": "reauthentication_required_token_revoked",
+      "stagedPackagePath": "~/.codex/packages/standalone/releases/0.163.0+jkammerland.mcp.25.team.9-x86_64-unknown-linux-gnu",
+      "stagedBuildProfile": "dev"
     },
     {
       "name": "mac",
@@ -45,15 +46,17 @@
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.8",
       "teamProtocolVersion": 7,
       "teamLedgerBackupRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.8",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.9",
       "activation": "active",
       "daemonRestart": "verified",
       "gpt61SolVerified": true,
-      "stagedSourceCommit": "b1fe7ef4e995ddb4309ac9c07f8f2f80cc7b83f6",
+      "stagedSourceCommit": "4878105baa4c1b5388bae925ce41955f91204850",
       "stagedTeamProtocolVersion": 7,
       "stagedGpt61SolVerified": true,
       "wakeOnAgentMessagesVerified": true,
-      "preUpgradeLedgerBackupsRetained": true
+      "preUpgradeLedgerBackupsRetained": true,
+      "stagedPackagePath": "~/.codex/packages/standalone/releases/0.163.0+jkammerland.mcp.25.team.9-aarch64-apple-darwin",
+      "stagedBuildProfile": "dev"
     },
     {
       "name": "windows-admin",
@@ -68,16 +71,18 @@
       "runningDaemonVersion": "0.163.0+jkammerland.mcp.25.team.8",
       "daemonLaunchContext": "local_non_elevated_console",
       "sshDaemonQualification": "elevated_ssh_token_rejected_non_elevated_console_required",
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.8",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.9",
       "activation": "active",
       "daemonRestart": "verified",
       "gpt61SolVerified": true,
-      "stagedSourceCommit": "b1fe7ef4e995ddb4309ac9c07f8f2f80cc7b83f6",
+      "stagedSourceCommit": "4878105baa4c1b5388bae925ce41955f91204850",
       "stagedTeamProtocolVersion": 7,
       "stagedGpt61SolVerified": true,
       "wakeOnAgentMessagesVerified": true,
       "preUpgradeLedgerBackupsRetained": true,
-      "teamProtocolVersion": 7
+      "teamProtocolVersion": 7,
+      "stagedPackagePath": "~/.codex/packages/standalone/releases/0.163.0+jkammerland.mcp.25.team.9-x86_64-pc-windows-msvc",
+      "stagedBuildProfile": "dev-small"
     },
     {
       "name": "windows-worker",
@@ -95,18 +100,20 @@
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.8",
       "teamProtocolVersion": 7,
       "teamLedgerBackupRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.8",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.9",
       "activation": "active",
       "daemonRestart": "verified",
       "teamWorkerActivation": "active",
       "teamWorkerGpt61SolVerified": true,
       "gpt61SolVerified": true,
-      "stagedSourceCommit": "b1fe7ef4e995ddb4309ac9c07f8f2f80cc7b83f6",
+      "stagedSourceCommit": "4878105baa4c1b5388bae925ce41955f91204850",
       "stagedTeamProtocolVersion": 7,
       "stagedGpt61SolVerified": true,
       "normalCandidateGpt61SolVerified": true,
       "wakeOnAgentMessagesVerified": true,
-      "preUpgradeLedgerBackupsRetained": true
+      "preUpgradeLedgerBackupsRetained": true,
+      "stagedPackagePath": "~/.codex/packages/standalone/releases/0.163.0+jkammerland.mcp.25.team.9-x86_64-pc-windows-msvc",
+      "stagedBuildProfile": "dev-small"
     },
     {
       "name": "dnarb",
@@ -122,15 +129,17 @@
       "teamWorkerVersion": "0.163.0+jkammerland.mcp.25.team.8",
       "teamProtocolVersion": 7,
       "teamLedgerBackupRetained": true,
-      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.8",
+      "stagedVersion": "0.163.0+jkammerland.mcp.25.team.9",
       "activation": "active",
       "daemonRestart": "verified",
       "gpt61SolVerified": true,
-      "stagedSourceCommit": "b1fe7ef4e995ddb4309ac9c07f8f2f80cc7b83f6",
+      "stagedSourceCommit": "4878105baa4c1b5388bae925ce41955f91204850",
       "stagedTeamProtocolVersion": 7,
       "stagedGpt61SolVerified": true,
       "wakeOnAgentMessagesVerified": true,
-      "preUpgradeLedgerBackupsRetained": true
+      "preUpgradeLedgerBackupsRetained": true,
+      "stagedPackagePath": "~/.local/share/codex-board-staged/4878105baa4c1b5388bae925ce41955f91204850",
+      "stagedBuildProfile": "dev"
     }
   ],
   "sharedTeam": {

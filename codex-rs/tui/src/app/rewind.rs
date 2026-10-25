@@ -4,6 +4,13 @@ use super::*;
 
 impl App {
     pub(crate) fn rewind_unavailable_reason(&self) -> Option<&'static str> {
+        self.rewind_conversation_unavailable_reason().or_else(|| {
+            (!self.chat_widget.rewind_draft_is_empty())
+                .then_some("Clear the current draft and attachments before rewinding.")
+        })
+    }
+
+    pub(crate) fn rewind_conversation_unavailable_reason(&self) -> Option<&'static str> {
         let Some(thread_id) = self.chat_widget.thread_id() else {
             return Some("Start a conversation before rewinding.");
         };
@@ -12,6 +19,9 @@ impl App {
         }
         if self.chat_widget.is_external_writer_view() {
             return Some("Rewind is unavailable in a read-only conversation.");
+        }
+        if let Some(reason) = self.chat_widget.rewind_input_unavailable_reason() {
+            return Some(reason);
         }
         if self.chat_widget.side_conversation_active() {
             return Some(crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE);
@@ -24,9 +34,6 @@ impl App {
             || self.chat_widget.fork_in_progress
         {
             return Some("Wait for the current conversation change to finish before rewinding.");
-        }
-        if !self.chat_widget.rewind_draft_is_empty() {
-            return Some("Clear the current draft and attachments before rewinding.");
         }
         if !self.chat_widget.is_normal_backtrack_mode()
             || self

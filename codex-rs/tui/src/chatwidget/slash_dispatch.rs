@@ -47,6 +47,14 @@ impl ChatWidget {
     /// that staged entry after dispatch so slash-command recall follows the same "submitted input"
     /// rule as normal text.
     pub(super) fn handle_slash_command_dispatch(&mut self, cmd: SlashCommand) {
+        // Rewind retains its exact draft until app-only eligibility checks have passed.
+        if cmd == SlashCommand::Rewind {
+            self.app_event_tx.send(AppEvent::OpenRewindFromComposer {
+                thread_id: self.thread_id,
+                draft: Box::new(self.bottom_pane.composer_draft_snapshot()),
+            });
+            return;
+        }
         self.dispatch_command(cmd);
         if cmd == SlashCommand::Goal {
             self.bottom_pane.drain_pending_submission_state();

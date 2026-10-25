@@ -8,7 +8,7 @@ pub(super) struct PendingHostPromptRevert {
     pub(super) reverted: Option<codex_app_server_protocol::ThreadRevertResponse>,
     pub(super) request_id: Uuid,
     pub(super) error: Option<super::agents_hosts_revert_preparation::PromptRevertFailure>,
-    pub(super) nth_user_message: usize,
+    pub(super) selected_cell: Arc<dyn HistoryCell>,
     pub(super) notified: bool,
 }
 
@@ -28,7 +28,7 @@ impl App {
             clippy::expect_used,
             reason = "The guard checked this pending entry and no mutation or await intervenes."
         )]
-        let pending = self
+        let mut pending = self
             .pending_host_prompt_reverts
             .remove(&thread_id)
             .expect("pending revert was checked");
@@ -72,16 +72,34 @@ impl App {
                 }
             }
         }
-        let mut session = self
-            .thread_event_channels
-            .get(&thread_id)
-            .ok_or_else(|| color_eyre::eyre::eyre!("reverted thread is no longer available"))?
-            .store
-            .lock()
-            .await
-            .session
-            .clone()
-            .ok_or_else(|| color_eyre::eyre::eyre!("reverted thread has no session"))?;
+        let mut session = {
+            let store = self
+                .thread_event_channels
+                .get(&thread_id)
+                .ok_or_else(|| color_eyre::eyre::eyre!("reverted thread is no longer available"))?
+                .store
+                .lock()
+                .await;
+
+            // Older pages may complete after preparation captured the visible window.
+            // Merge only the retained prefix, never the selected turn or later events.
+            if let Some(last_retained) = store.turns.iter().rposition(|turn| {
+                pending
+                    .retained_turns
+                    .iter()
+                    .any(|retained| retained.id == turn.id)
+            }) {
+                super::history_pagination::merge_older_turns(
+                    &mut pending.retained_turns,
+                    store.turns[..=last_retained].to_vec(),
+                );
+            }
+
+            store
+                .session
+                .clone()
+                .ok_or_else(|| color_eyre::eyre::eyre!("reverted thread has no session"))?
+        };
         session.rollout_path = reverted.thread.path.clone();
         if self.primary_thread_id == Some(thread_id) {
             self.primary_session_configured = Some(session.clone());
@@ -106,7 +124,7 @@ impl App {
         self.pending_thread_switch_resets += 1;
         self.app_event_tx.send(AppEvent::FinishPromptRevert {
             thread_id,
-            nth_user_message: pending.nth_user_message,
+            selected_cell: pending.selected_cell,
         });
         Ok(())
     }

@@ -22,6 +22,7 @@ impl App {
         server: &AppServerSession,
         thread_id: ThreadId,
         nth_user_message: usize,
+        selected_cell: Arc<dyn HistoryCell>,
         prompt: crate::chatwidget::UserMessage,
     ) -> Result<()> {
         let Some(channel) = self.thread_event_channels.get(&thread_id) else {
@@ -54,7 +55,7 @@ impl App {
                 retained_turns: Vec::new(),
                 reverted: None,
                 error: None,
-                nth_user_message,
+                selected_cell,
                 notified: false,
             },
         );

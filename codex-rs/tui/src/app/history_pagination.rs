@@ -409,7 +409,7 @@ fn hidden_transcript_indices(
 }
 
 /// Preserve events received while the request was in flight and deduplicate overlapping pages.
-fn merge_older_turns(current_turns: &mut Vec<Turn>, mut older_turns: Vec<Turn>) {
+pub(super) fn merge_older_turns(current_turns: &mut Vec<Turn>, mut older_turns: Vec<Turn>) {
     older_turns.retain_mut(|turn| {
         let Some(current) = current_turns
             .iter_mut()

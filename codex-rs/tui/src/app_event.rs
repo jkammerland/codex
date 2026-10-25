@@ -537,6 +537,11 @@ pub(crate) enum AppEvent {
     OpenWarnings,
     /// Choose an earlier prompt without changing conversation history until confirmation.
     OpenRewind,
+    /// Validate a local slash request before consuming its unchanged command draft.
+    OpenRewindFromComposer {
+        thread_id: Option<ThreadId>,
+        draft: Box<crate::bottom_pane::ComposerDraftSnapshot>,
+    },
     /// Copy a diagnostic and acknowledge in the footer, without appending history.
     CopyWarning(String),
     /// Apply the user's decisions for the frozen warning details, in viewer-close order.
@@ -716,7 +721,7 @@ pub(crate) enum AppEvent {
     },
     FinishPromptRevert {
         thread_id: ThreadId,
-        nth_user_message: usize,
+        selected_cell: Arc<dyn HistoryCell>,
     },
 
     /// Request to exit the application.

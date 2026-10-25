@@ -115,6 +115,7 @@ impl App {
                 AppEvent::OpenDaemonMenu
                     | AppEvent::OpenWarnings
                     | AppEvent::OpenRewind
+                    | AppEvent::OpenRewindFromComposer { .. }
                     | AppEvent::StatusLineSetup { .. }
                     | AppEvent::StatusLineSetupCancelled
                     | AppEvent::TerminalTitleSetup { .. }
@@ -500,6 +501,9 @@ impl App {
             }
             AppEvent::OpenWarnings => self.chat_widget.open_warnings(&self.transcript_cells),
             AppEvent::OpenRewind => self.open_rewind(tui),
+            AppEvent::OpenRewindFromComposer { thread_id, draft } => {
+                self.open_rewind_from_composer(tui, thread_id, &draft);
+            }
             AppEvent::UpdateWarnings { transcript, dismissed, kept } => {
                 if !Arc::ptr_eq(&transcript, &self.chat_widget.warning_display_state.transcript) {
                     return Ok(AppRunControl::Continue);
@@ -830,7 +834,7 @@ impl App {
                 };
                 let nth_user_message = crate::app_backtrack::user_count(&self.transcript_cells[..index]);
                 if self.agents_hosts.enabled() {
-                    self.start_host_prompt_revert(app_server, thread_id, nth_user_message, prompt).await?;
+                    self.start_host_prompt_revert(app_server, thread_id, nth_user_message, selected_cell, prompt).await?;
                     return Ok(AppRunControl::Continue);
                 }
                 let selection: Result<(String, Vec<Turn>)> = async {
@@ -933,7 +937,7 @@ impl App {
                 }).await
                     .wrap_err("history was reverted, but refreshing the session timed out; resume this session to reload it")??;
                 self.pending_host_prompt_reverts.insert(thread_id, agents_hosts_revert::PendingHostPromptRevert {
-                    prompt, retained_turns, reverted: Some(reverted), nth_user_message, notified: true, request_id: Uuid::new_v4(), error: None,
+                    prompt, retained_turns, reverted: Some(reverted), selected_cell, notified: true, request_id: Uuid::new_v4(), error: None,
                 });
                 self.complete_host_prompt_revert(thread_id).await?;
             }
@@ -941,12 +945,21 @@ impl App {
                 if let Some(pending) = self.pending_host_prompt_reverts.get_mut(&thread_id) { pending.notified = true; }
                 self.complete_host_prompt_revert(thread_id).await?;
             }
-            AppEvent::FinishPromptRevert { thread_id, nth_user_message } => {
+            AppEvent::FinishPromptRevert { thread_id, selected_cell } => {
                 self.pending_thread_switch_resets -= 1;
                 if self.chat_widget.thread_id() == Some(thread_id) {
-                    if let Some(index) = crate::app_backtrack::nth_user_position(&self.transcript_cells, nth_user_message) {
+                    // A queued older page may have shifted the selected prompt's ordinal.
+                    if let Some(index) = self.transcript_cells.iter().position(|cell| Arc::ptr_eq(cell, &selected_cell)) {
                         self.transcript_cells.truncate(index);
                 self.native_history.retain(&self.transcript_cells);
+                    } else {
+                        // Reattachment rebuilds cell identities. Replay the confirmed retained
+                        // store instead of leaving the pre-revert transcript visible.
+                        let mut snapshot = self.thread_event_channels.get(&thread_id)
+                            .ok_or_else(|| color_eyre::eyre::eyre!("reverted thread is no longer available"))?
+                            .store.lock().await.snapshot();
+                        snapshot.input_state = self.chat_widget.capture_thread_input_state();
+                        self.render_thread_snapshot(tui, app_server, thread_id, snapshot, /*resume_restored_queue*/ false)?;
                     }
                     self.transcript_view = Default::default();
                     self.scrollback_has_older_history = app_server.has_older_history(thread_id);

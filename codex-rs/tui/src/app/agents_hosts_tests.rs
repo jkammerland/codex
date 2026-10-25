@@ -59,6 +59,60 @@ fn render_with_height(view: &impl Renderable, height: u16) -> String {
 }
 
 #[tokio::test]
+async fn initial_host_registration_preserves_reconnected_ownership_before_discovery() {
+    let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
+    let session = AppServerSession::discovery_placeholder();
+    app.agents_hosts.manifest = Some(PathBuf::from("manifest.toml"));
+    let initial = app.agents_hosts.initial_host.clone();
+    let mut existing = host("Reconnected");
+    existing.epoch = 3;
+    existing.revision = 7;
+    existing.connected = false;
+    app.agents_hosts.hosts.insert(initial.clone(), existing);
+
+    app.ensure_initial_agents_host(&session);
+
+    let retained = &app.agents_hosts.hosts[&initial];
+    assert_eq!(
+        (
+            retained.label.as_str(),
+            retained.epoch,
+            retained.revision,
+            retained.connected
+        ),
+        ("Reconnected", 3, 7, false),
+    );
+    assert!(app.agents_hosts.accepts(&ConnectionScope {
+        host: initial.clone(),
+        epoch: 3
+    }));
+    assert!(!app.agents_hosts.accepts(&ConnectionScope {
+        host: initial,
+        epoch: 0
+    }));
+    assert!(!app.agents_hosts.started);
+    assert!(app.agents_hosts.client.is_none());
+    assert_eq!(app.agents_hosts.configuration_generation, 0);
+}
+
+#[tokio::test]
+async fn initial_host_registration_does_not_recreate_an_owner_after_discovery() {
+    let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
+    let session = AppServerSession::discovery_placeholder();
+    app.agents_hosts.manifest = Some(PathBuf::from("manifest.toml"));
+    let canonical = key("configured");
+    app.agents_hosts.initial_host = canonical.clone();
+    app.agents_hosts.foreground = canonical;
+    app.agents_hosts.started = true;
+
+    app.ensure_initial_agents_host(&session);
+
+    // Once discovery owns the registry, missing entries must remain missing.
+    assert!(app.agents_hosts.hosts.is_empty());
+    assert!(!app.agents_hosts.accepts(&app.agents_hosts.scope()));
+}
+
+#[tokio::test]
 async fn overview_groups_machines_and_routes_equal_thread_ids_to_the_selected_host() {
     let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
     let id = ThreadId::from_u128(42);

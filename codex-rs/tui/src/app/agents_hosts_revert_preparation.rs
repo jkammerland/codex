@@ -43,6 +43,7 @@ impl App {
                 store.latest_turn_id.clone(),
             )
         };
+        self.ensure_initial_agents_host(server);
         let scope = self.agents_hosts.scope();
         let request_id = Uuid::new_v4();
         self.pending_host_prompt_reverts.insert(

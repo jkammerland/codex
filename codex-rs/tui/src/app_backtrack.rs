@@ -181,8 +181,10 @@ impl App {
                 self.local_settings.tui.copy_on_select_clear_selection,
             ),
         );
-        let escape_closes =
-            self.agent_center_session_navigation() || self.chat_widget.is_external_writer_view();
+        // Agent navigation must not hide prompt selection in an idle editable transcript.
+        let escape_closes = self.chat_widget.is_external_writer_view()
+            || self.agent_center_session_navigation()
+                && (self.is_offline() || !self.should_handle_backtrack_esc(KeyCode::Esc.into()));
         if let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut() {
             overlay.escape_closes = escape_closes;
             if self.scrollback_has_older_history {

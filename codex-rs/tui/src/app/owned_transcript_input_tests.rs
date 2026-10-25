@@ -1062,7 +1062,7 @@ async fn command_center_ctrl_c_cancels_only_focused_input_or_work() -> Result<()
 }
 
 #[tokio::test]
-async fn command_center_escape_keeps_transcript_search_then_returns_from_scrolled_chat()
+async fn command_center_escape_keeps_transcript_search_then_routes_to_prompt_or_agents()
 -> Result<()> {
     for read_only in [false, true] {
         let mut app = crate::app::test_support::make_test_app().await;
@@ -1095,8 +1095,217 @@ async fn command_center_escape_keeps_transcript_search_then_returns_from_scrolle
         assert!(!app.transcript_view.is_following());
         app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
             .await?;
-        assert!(app.chat_widget.has_active_view());
-        assert!(!app.backtrack.primed);
+        assert_eq!(
+            (app.chat_widget.has_active_view(), app.backtrack.primed),
+            (read_only, !read_only),
+        );
+        server.shutdown().await?;
+        tui.set_owned_screen(/*owned*/ false)?;
+    }
+    Ok(())
+}
+
+async fn assert_command_center_prompt_rewind(entry: &[KeyEvent]) -> Result<()> {
+    for owned in [true, false] {
+        let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        attach_thread(&mut app, thread_id);
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .session_navigation = true;
+        app.app_server_target = AppServerTarget::Remote {
+            endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+        };
+        app.transcript_cells = vec![
+            super::tests::user_cell("First prompt"),
+            super::tests::user_cell("Second prompt"),
+        ];
+        let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        tui.set_owned_screen(owned)?;
+
+        // Route physical keys through App, including agent navigation and transcript ownership.
+        for key in entry {
+            app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(*key))
+                .await?;
+        }
+        assert_eq!(
+            (
+                app.backtrack.overlay_preview_active,
+                app.backtrack.nth_user_message,
+                app.chat_widget.has_active_view(),
+            ),
+            (true, 1, false),
+            "owned={owned}, entry={entry:?}",
+        );
+        app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Left.into()))
+            .await?;
+        assert_eq!(app.backtrack.nth_user_message, 0);
+        if owned && entry[0].code == KeyCode::Esc {
+            insta::assert_snapshot!(
+                "command_center_prompt_rewind",
+                app.prompt_navigation_footer(80)
+                    .expect("prompt navigation footer")
+                    .text
+                    .to_string(),
+            );
+        }
+
+        // Confirming requests the selected earlier prompt, never the agents menu.
+        app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Enter.into()))
+            .await?;
+        let requests = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::RevertSessionForPromptEdit {
+                    thread_id,
+                    selected_cell,
+                    prompt,
+                } => Some((
+                    thread_id,
+                    Arc::ptr_eq(&selected_cell, &app.transcript_cells[0]),
+                    prompt,
+                )),
+                AppEvent::OpenAgentsOverview => panic!("rewind opened the agents menu"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requests,
+            vec![(
+                thread_id,
+                true,
+                crate::chatwidget::UserMessage::from("First prompt")
+            )],
+        );
+        server.shutdown().await?;
+        tui.set_owned_screen(/*owned*/ false)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_center_double_escape_rewinds_selected_prompt() -> Result<()> {
+    assert_command_center_prompt_rewind(&[KeyCode::Esc.into(), KeyCode::Esc.into()]).await
+}
+
+#[tokio::test]
+async fn command_center_transcript_escape_rewinds_selected_prompt() -> Result<()> {
+    assert_command_center_prompt_rewind(&[
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        KeyCode::Esc.into(),
+    ])
+    .await
+}
+
+#[tokio::test]
+async fn command_center_escape_interrupts_work_with_empty_composer() -> Result<()> {
+    for owned in [true, false] {
+        let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        attach_thread(&mut app, thread_id);
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .session_navigation = true;
+        app.app_server_target = AppServerTarget::Remote {
+            endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+        };
+        app.transcript_cells = vec![super::tests::user_cell("Historical prompt")];
+        app.chat_widget.handle_server_notification(
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: thread_id.to_string(),
+                turn: Turn {
+                    id: "active-turn".into(),
+                    root_turn_id: None,
+                    items_view: TurnItemsView::Full,
+                    items: Vec::new(),
+                    status: TurnStatus::InProgress,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            }),
+            /*replay_kind*/ None,
+        );
+        let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        tui.set_owned_screen(owned)?;
+        assert!(app.chat_widget.composer_is_empty());
+
+        // Empty-composer Escape still interrupts the producer, rather than leaving its view.
+        app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
+            .await?;
+        let interrupts = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| matches!(event, AppEvent::CodexOp(Op::Interrupt)))
+            .count();
+        assert_eq!(
+            (
+                interrupts,
+                app.chat_widget.has_active_view(),
+                app.backtrack.primed,
+                app.backtrack.overlay_preview_active,
+            ),
+            (1, false, false, false),
+            "owned={owned}",
+        );
+        server.shutdown().await?;
+        tui.set_owned_screen(/*owned*/ false)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_center_unavailable_thread_escape_returns_to_agents() -> Result<()> {
+    for (owned, detailed) in [(true, false), (true, true), (false, false), (false, true)] {
+        let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        attach_thread(&mut app, thread_id);
+        app.agents_overview
+            .view_state
+            .lock()
+            .unwrap()
+            .session_navigation = true;
+        app.app_server_target = AppServerTarget::Remote {
+            endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+        };
+        app.ensure_thread_channel(thread_id).mark_replay_only();
+        app.chat_widget.pause_unavailable_thread();
+        app.transcript_cells = vec![super::tests::user_cell("Unavailable prompt")];
+        let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        tui.set_owned_screen(owned)?;
+        assert!(!app.is_offline());
+        if detailed {
+            app.open_transcript_overlay(&mut tui);
+        }
+
+        // A connected server can still have an unavailable cached conversation.
+        app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
+            .await?;
+        if detailed && !owned {
+            assert!(app.overlay.is_none());
+            assert!(!app.backtrack.overlay_preview_active);
+            app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
+                .await?;
+        }
+        assert_eq!(
+            (
+                app.chat_widget
+                    .active_view_is(agents_overview::AGENTS_OVERVIEW_VIEW_ID),
+                app.backtrack.primed,
+                app.backtrack.overlay_preview_active,
+            ),
+            (true, false, false),
+            "owned={owned}, detailed={detailed}",
+        );
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, AppEvent::RevertSessionForPromptEdit { .. }))
+        );
         server.shutdown().await?;
         tui.set_owned_screen(/*owned*/ false)?;
     }

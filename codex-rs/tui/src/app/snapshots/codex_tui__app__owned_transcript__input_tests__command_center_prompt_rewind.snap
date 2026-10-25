@@ -1,0 +1,5 @@
+---
+source: tui/src/app/owned_transcript_input_tests.rs
+expression: "app.prompt_navigation_footer(80).expect(\"prompt navigation footer\").text.to_string()"
+---
+Browsing · ↑↓/jk scroll · ←→/hl prompts · ⌃t details · ↵ rewind · esc back

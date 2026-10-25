@@ -135,6 +135,8 @@
 //! Multiline pastes continue blockquote prefixes.
 //! `Enter` submits immediately. `Tab` requests queuing while a task is running; if no task is
 //! running, `Tab` submits just like Enter so input is never dropped.
+//! `/rewind` is local-only: submission and queue keys validate it before ordinary slash parsing or
+//! queue creation. Arguments, attachments, and unavailable states retain the draft on rejection.
 //! Vim Replace shares Insert's composer actions; only textarea editing differs.
 //! Literal completion/paste edits discard stale Replace recovery; subsequent typing records anew.
 //! Token markers added during Replace are removed when restoring overwritten characters.
@@ -400,7 +402,9 @@ mod draft_state;
 mod footer_state;
 mod history_search;
 mod inline_input;
+mod local_rewind;
 mod mouse;
+mod rewind_control;
 pub(crate) use mouse::ClipboardPasteTarget;
 mod paste_input;
 mod popup_state;
@@ -786,6 +790,9 @@ impl ChatComposer {
                 external_editor_key: default_keymap
                     .primary_hint(KeymapContext::Global, "open_external_editor"),
                 warning_notice_area: std::cell::Cell::default(),
+                rewind_available: None,
+                agent_navigation_available: false,
+                rewind_area: std::cell::Cell::default(),
                 selection_revision: std::cell::Cell::default(),
                 show_warnings_key: default_keymap
                     .primary_hint(KeymapContext::Global, "open_warnings"),
@@ -3318,6 +3325,10 @@ impl ChatComposer {
             return (InputResult::None, true);
         }
 
+        if let Some(result) = self.try_dispatch_local_rewind() {
+            return (result, true);
+        }
+
         if self.team_execution_held && !self.team_command_allowed() {
             return (InputResult::None, true);
         }
@@ -3327,6 +3338,9 @@ impl ChatComposer {
         if should_queue {
             if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
                 self.apply_paste(pasted);
+            }
+            if let Some(result) = self.try_dispatch_local_rewind() {
+                return (result, true);
             }
             let visible_shell_command = self.is_bang_shell_command();
             let original_input = self.current_text();
@@ -4704,6 +4718,7 @@ impl ChatComposer {
         mask_char: Option<char>,
         options: ComposerRenderOptions<'_>,
     ) {
+        self.clear_footer_hit_targets();
         let ComposerLayout {
             status,
             composer: composer_rect,
@@ -4756,17 +4771,22 @@ impl ChatComposer {
         let transcript_hint_area = inset_footer_hint_area(footer_rect);
         let warning_notice = self.warning_notice_layout(transcript_hint_area, options);
         let warning_area = warning_notice.as_ref().map(|(area, _)| *area);
-        match options.footer {
-            Some(footer) => {
+        let rewind = self.rewind_control_layout(transcript_hint_area, options, warning_area);
+        match (options.footer, rewind) {
+            (Some(footer), _) => {
                 self.render_transcript_footer(transcript_hint_area, buf, footer, warning_area);
             }
-            None if self.shortcuts_above_composer(options) => {
+            (None, Some(rewind)) => {
+                rewind.line.render(transcript_hint_area, buf);
+                self.footer.rewind_area.set(rewind.hit_area);
+            }
+            (None, None) if self.shortcuts_above_composer(options) => {
                 let props = self.hint_footer_props(options);
                 super::shortcut_overlay::render(&props, inset_footer_hint_area(popup_rect), buf);
                 super::shortcut_overlay::close_hint(&props, transcript_hint_area.width)
                     .render(transcript_hint_area, buf);
             }
-            None => {
+            (None, None) => {
                 let footer_props = self.hint_footer_props(options);
                 let show_cycle_hint = self.status_surface_height(options) == 0
                     && !footer_props.is_task_running
@@ -5021,7 +5041,13 @@ impl ChatComposer {
             && !self.popup_active()
             && options.footer.is_none_or(|footer| !footer.is_interactive)
         {
-            let revision = (options.warning_count, self.footer_props().is_task_running);
+            let revision = (
+                options.warning_count,
+                self.footer_props().is_task_running,
+                self.footer
+                    .rewind_available
+                    .map(|available| available && self.is_empty()),
+            );
             let changed = self.footer.selection_revision.replace(revision) != revision;
             let mut selection = selection.borrow_mut();
             selection.register(status.intersection(buf.area), changed);

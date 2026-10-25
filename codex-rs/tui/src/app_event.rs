@@ -535,6 +535,8 @@ pub(crate) enum AppEvent {
     OpenTranscriptExportFilePrompt,
     /// Open retained warnings without changing the draft or transcript position.
     OpenWarnings,
+    /// Choose an earlier prompt without changing conversation history until confirmation.
+    OpenRewind,
     /// Copy a diagnostic and acknowledge in the footer, without appending history.
     CopyWarning(String),
     /// Apply the user's decisions for the frozen warning details, in viewer-close order.

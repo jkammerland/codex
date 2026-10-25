@@ -1,6 +1,5 @@
 ---
 source: tui/src/app/owned_transcript_tests.rs
-assertion_line: 1600
 expression: "normalize_snapshot_paths(frames.join(\"\\n\\n\"))"
 ---
 Following caret
@@ -27,7 +26,7 @@ History 40
   Prompt 35 界
 
   GPT-5.6-Sol default · /tmp/project
-
+  [Rewind…] /rewind · ⌃t Details · ? Help
 
 Wheel up
 History 34
@@ -53,7 +52,7 @@ History 40
   Prompt 26 界                                              ↓
 
   GPT-5.6-Sol default · /tmp/project
-
+  [Rewind…] /rewind · ⌃t Details · ? Help
 
 Edit at caret
 History 34
@@ -79,7 +78,7 @@ History 40
   Prompt 35 界
 
   GPT-5.6-Sol default · /tmp/project
-
+  [Rewind…] /rewind · ⌃t Details · ? Help
 
 Paste at caret
 History 34
@@ -105,7 +104,7 @@ History 40
   Edited 35 界  pasted here
 
   GPT-5.6-Sol default · /tmp/project
-
+  [Rewind…] /rewind · ⌃t Details · ? Help
 
 Short screen
 History 40
@@ -117,3 +116,4 @@ History 40
   Edited 35 界  pasted here
 
   GPT-5.6-Sol default · /tmp/project
+  [Rewind…] /rewind · ? Help

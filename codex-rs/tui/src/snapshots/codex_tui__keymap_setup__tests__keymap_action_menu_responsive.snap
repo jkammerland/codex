@@ -8,7 +8,7 @@ expression: snapshot
   Open Transcript · Global
   Current ctrl-t · Default keymap
   Config `tui.keymap.global.open_transcript`
-  Open the transcript overlay.
+  Show the detailed transcript.
 
 
 › 1. Replace binding
@@ -29,7 +29,7 @@ expression: snapshot
   Open Transcript · Global
   Current ctrl-t · Default keymap
   Config `tui.keymap.global.open_transcript`
-  Open the transcript overlay.
+  Show the detailed transcript.
 
 
 › 1. Replace binding                   Capture a replacement key
@@ -57,7 +57,7 @@ expression: snapshot
   Open Transcript · Global
   Current ctrl-t · Default keymap
   Config `tui.keymap.global.open_transcript`
-  Open the transcript overlay.
+  Show the detailed transcript.
 
 
 › 1. Replace binding                   Capture a replacement key for `ctrl-t`

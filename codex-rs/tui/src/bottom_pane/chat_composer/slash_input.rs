@@ -15,6 +15,7 @@ use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::bottom_pane::slash_commands::has_slash_command_prefix;
+use crate::key_hint::KeyBindingListExt;
 use crate::slash_command::SlashCommand;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
@@ -252,6 +253,14 @@ impl ChatComposer {
             self.popups.active = ActivePopup::None;
             return (InputResult::None, true);
         }
+        if ((matches!(key_event.code, KeyCode::Enter | KeyCode::Tab)
+            && key_event.modifiers.is_empty())
+            || self.submit_keys.is_pressed(key_event)
+            || self.queue_keys.is_pressed(key_event))
+            && let Some(result) = self.try_dispatch_local_rewind()
+        {
+            return (result, true);
+        }
         self.footer.mode = reset_mode_after_activity(self.footer.mode);
         let current_text = self.current_text();
         let current_cursor = self.current_cursor();
@@ -296,6 +305,11 @@ impl ChatComposer {
                 let selected_item = popup.selected_item();
                 let has_selectable_item = selected_item.is_some();
                 if let Some(selected_cmd) = selected_item {
+                    if selected_cmd == CommandItem::Builtin(SlashCommand::Rewind)
+                        && let Some(message) = self.local_rewind_rejection()
+                    {
+                        return (self.reject_local_rewind(message), true);
+                    }
                     if selected_command_dispatches_immediately_on_tab(&selected_cmd)
                         && let CommandItem::Builtin(cmd) = &selected_cmd
                     {
@@ -349,6 +363,11 @@ impl ChatComposer {
                     .unwrap_or_else(|| first_line.to_owned());
                 popup.on_composer_text_change(filter_text);
                 if let Some(selected_cmd) = popup.selected_item() {
+                    if selected_cmd == CommandItem::Builtin(SlashCommand::Rewind)
+                        && let Some(message) = self.local_rewind_rejection()
+                    {
+                        return (self.reject_local_rewind(message), true);
+                    }
                     if self
                         .complete_selected_slash_command_preserving_existing_draft_tail_as_inline_args(
                             &selected_cmd,
@@ -377,6 +396,9 @@ impl ChatComposer {
                 ..
             } => {
                 if let Some(sel) = popup.selected_item() {
+                    if sel == CommandItem::Builtin(SlashCommand::Rewind) {
+                        return (self.dispatch_local_rewind(), true);
+                    }
                     if self.team_execution_held && !self.team_popup_command_allowed(&sel) {
                         return (InputResult::None, true);
                     }

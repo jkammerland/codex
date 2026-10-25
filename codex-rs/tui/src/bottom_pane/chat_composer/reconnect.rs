@@ -59,6 +59,13 @@ impl ChatComposer {
         if mode == RestrictedInputMode::UnavailableThread && self.handle_agents_navigation(key) {
             return InputResult::None;
         }
+        // Rewind never becomes deferred input, and blocked submission must retain paste metadata.
+        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && (self.submit_keys.is_pressed(key) || self.queue_keys.is_pressed(key))
+            && self.is_local_rewind()
+        {
+            return InputResult::None;
+        }
         self.cancel_history_search();
         self.attachments.clear_remote_image_selection();
         self.popups.active = ActivePopup::None;

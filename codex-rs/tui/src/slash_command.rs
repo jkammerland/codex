@@ -34,6 +34,7 @@ pub enum SlashCommand {
     Archive,
     Delete,
     Resume,
+    Rewind,
     Fork,
     Worktree,
     App,
@@ -101,6 +102,7 @@ impl SlashCommand {
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Rename => "rename the current thread",
             SlashCommand::Resume => "resume a saved chat",
+            SlashCommand::Rewind => "Choose an earlier prompt to edit",
             SlashCommand::Archive => "archive this session",
             SlashCommand::Delete => "permanently delete this session",
             SlashCommand::Clear => "clear the terminal and start a new chat",
@@ -264,6 +266,7 @@ impl SlashCommand {
             | SlashCommand::Memories
             | SlashCommand::Import
             | SlashCommand::Review
+            | SlashCommand::Rewind
             | SlashCommand::Plan
             | SlashCommand::Cd
             | SlashCommand::Clear

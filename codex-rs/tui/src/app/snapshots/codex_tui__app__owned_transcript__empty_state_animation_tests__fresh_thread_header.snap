@@ -1,6 +1,5 @@
 ---
 source: tui/src/app/empty_state_animation_tests.rs
-assertion_line: 208
 expression: "format!(\"enabled:\\n{}\\n---\\ndisabled:\\n{}\", text(after), text(&before))"
 ---
 enabled:
@@ -47,7 +46,7 @@ enabled:
 › Ask Codex to do anything
 
   GPT-5.6-Sol default · /tmp/project
-  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+  [Rewind…] /rewind · ⌃t Details · ? Help                                                      ⚠ 1 warning · f2 to view
 ---
 disabled:
 
@@ -93,4 +92,4 @@ disabled:
 › Ask Codex to do anything
 
   GPT-5.6-Sol default · /tmp/project
-  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view
+  [Rewind…] /rewind · ⌃t Details · ? Help                                                      ⚠ 1 warning · f2 to view

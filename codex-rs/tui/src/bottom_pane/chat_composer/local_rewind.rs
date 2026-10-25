@@ -66,3 +66,7 @@ impl ChatComposer {
         InputResult::Command(SlashCommand::Rewind)
     }
 }
+
+#[cfg(test)]
+#[path = "local_rewind_tests.rs"]
+mod tests;

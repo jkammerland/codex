@@ -1062,8 +1062,7 @@ async fn command_center_ctrl_c_cancels_only_focused_input_or_work() -> Result<()
 }
 
 #[tokio::test]
-async fn command_center_escape_keeps_transcript_search_then_routes_to_prompt_or_agents()
--> Result<()> {
+async fn command_center_escape_keeps_transcript_search_then_returns_to_agents() -> Result<()> {
     for read_only in [false, true] {
         let mut app = crate::app::test_support::make_test_app().await;
         attach_thread(&mut app, ThreadId::new());
@@ -1097,7 +1096,7 @@ async fn command_center_escape_keeps_transcript_search_then_routes_to_prompt_or_
             .await?;
         assert_eq!(
             (app.chat_widget.has_active_view(), app.backtrack.primed),
-            (read_only, !read_only),
+            (true, false),
         );
         server.shutdown().await?;
         tui.set_owned_screen(/*owned*/ false)?;
@@ -1105,8 +1104,8 @@ async fn command_center_escape_keeps_transcript_search_then_routes_to_prompt_or_
     Ok(())
 }
 
-async fn assert_command_center_prompt_rewind(entry: &[KeyEvent]) -> Result<()> {
-    for owned in [true, false] {
+async fn assert_command_center_prompt_rewind(detailed: bool) -> Result<()> {
+    for (owned, manifest) in [(true, false), (true, true), (false, false), (false, true)] {
         let (mut app, mut events, _operations) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
         attach_thread(&mut app, thread_id);
@@ -1114,7 +1113,10 @@ async fn assert_command_center_prompt_rewind(entry: &[KeyEvent]) -> Result<()> {
             .view_state
             .lock()
             .unwrap()
-            .session_navigation = true;
+            .session_navigation = !manifest;
+        if manifest {
+            app.agents_hosts.manifest = Some(PathBuf::from("test-manifest.toml"));
+        }
         app.app_server_target = AppServerTarget::Remote {
             endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
         };
@@ -1126,11 +1128,12 @@ async fn assert_command_center_prompt_rewind(entry: &[KeyEvent]) -> Result<()> {
         let mut tui = crate::tui::test_support::make_test_tui()?;
         tui.set_owned_screen(owned)?;
 
-        // Route physical keys through App, including agent navigation and transcript ownership.
-        for key in entry {
-            app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(*key))
-                .await?;
+        if detailed {
+            app.open_transcript_overlay(&mut tui);
         }
+        // Both controls use the same semantic event, not a synthetic Escape sequence.
+        app.handle_event(&mut tui, &mut server, AppEvent::OpenRewind)
+            .await?;
         assert_eq!(
             (
                 app.backtrack.overlay_preview_active,
@@ -1138,12 +1141,12 @@ async fn assert_command_center_prompt_rewind(entry: &[KeyEvent]) -> Result<()> {
                 app.chat_widget.has_active_view(),
             ),
             (true, 1, false),
-            "owned={owned}, entry={entry:?}",
+            "owned={owned}, manifest={manifest}, detailed={detailed}",
         );
         app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Left.into()))
             .await?;
         assert_eq!(app.backtrack.nth_user_message, 0);
-        if owned && entry[0].code == KeyCode::Esc {
+        if owned && !detailed {
             insta::assert_snapshot!(
                 "command_center_prompt_rewind",
                 app.prompt_navigation_footer(80)
@@ -1186,17 +1189,13 @@ async fn assert_command_center_prompt_rewind(entry: &[KeyEvent]) -> Result<()> {
 }
 
 #[tokio::test]
-async fn command_center_double_escape_rewinds_selected_prompt() -> Result<()> {
-    assert_command_center_prompt_rewind(&[KeyCode::Esc.into(), KeyCode::Esc.into()]).await
+async fn command_center_rewind_action_selects_prompt() -> Result<()> {
+    assert_command_center_prompt_rewind(/*detailed*/ false).await
 }
 
 #[tokio::test]
-async fn command_center_transcript_escape_rewinds_selected_prompt() -> Result<()> {
-    assert_command_center_prompt_rewind(&[
-        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
-        KeyCode::Esc.into(),
-    ])
-    .await
+async fn command_center_rewind_action_from_details_selects_prompt() -> Result<()> {
+    assert_command_center_prompt_rewind(/*detailed*/ true).await
 }
 
 #[tokio::test]

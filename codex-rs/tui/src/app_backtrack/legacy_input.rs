@@ -211,9 +211,7 @@ impl App {
         }
         match (key.code, key.kind) {
             (KeyCode::Enter, KeyEventKind::Press) if self.backtrack.base_id.is_some() => {
-                if !self.is_offline() {
-                    self.overlay_confirm_backtrack(tui);
-                }
+                self.overlay_confirm_backtrack(tui);
             }
             (KeyCode::Esc, KeyEventKind::Press) => {
                 self.cancel_transcript_browsing(tui);

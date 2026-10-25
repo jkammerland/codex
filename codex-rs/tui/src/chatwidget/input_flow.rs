@@ -4,7 +4,7 @@
 //! effects around taking composer input, submitting user turns, draining queued
 //! follow-ups, and restoring draft state across interrupts or thread switches.
 //! Composer submissions resume transcript following before dispatch or startup queueing,
-//! except for reversible settings pickers that preserve the reading position.
+//! except for reversible settings pickers and rewind, which preserve the reading position.
 
 use super::*;
 use crate::bottom_pane::prompt_args::parse_slash_name;
@@ -27,7 +27,8 @@ impl ChatWidget {
             // Opening settings is not a request to leave the current reading anchor.
             // Inline commands still follow so their output (including usage errors) is visible.
             InputResult::Command(
-                SlashCommand::Model
+                SlashCommand::Rewind
+                | SlashCommand::Model
                 | SlashCommand::Presets
                 | SlashCommand::Keymap
                 | SlashCommand::Memories
@@ -98,7 +99,10 @@ impl ChatWidget {
             InputResult::Command(cmd) => {
                 self.handle_slash_command_dispatch(cmd);
                 // A settings command can instead report why it is unavailable.
-                if !follow_transcript && self.bottom_pane.no_modal_or_popup_active() {
+                if !follow_transcript
+                    && cmd != SlashCommand::Rewind
+                    && self.bottom_pane.no_modal_or_popup_active()
+                {
                     self.app_event_tx.send(AppEvent::FollowTranscript);
                 }
             }

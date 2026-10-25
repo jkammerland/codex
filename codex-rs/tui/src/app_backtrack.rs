@@ -8,7 +8,8 @@
 //! the selected turn and restores its prompt in the composer.
 //!
 //! Backtrack operates as a small state machine:
-//! - The first `Esc` in the main view "primes" the feature and captures a base thread id.
+//! - `Rewind…` and `/rewind` enter selection directly. In Agents mode, idle `Esc` is Back.
+//! - Outside Agents mode, the first `Esc` "primes" the feature and captures a base thread id.
 //! - A subsequent `Esc` starts compact transcript browsing and highlights the latest user prompt.
 //! - Left/Right choose prompts, Ctrl+T toggles details, and Esc restores the browsing origin.
 //! - `Enter` requests a revert before the selected prompt and reopens it for editing.
@@ -24,6 +25,7 @@
 mod browsing;
 mod legacy_input;
 mod prompt_navigation;
+mod rewind;
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -75,6 +77,8 @@ pub(crate) struct BacktrackState {
     pub(crate) nth_user_message: usize,
     /// True when the transcript overlay is showing a backtrack preview.
     pub(crate) overlay_preview_active: bool,
+    /// Explicit controls require an empty draft; legacy transcript browsing keeps its behavior.
+    explicit_rewind: bool,
     origin: Option<browsing::BrowsingOrigin>,
 }
 
@@ -181,10 +185,9 @@ impl App {
                 self.local_settings.tui.copy_on_select_clear_selection,
             ),
         );
-        // Agent navigation must not hide prompt selection in an idle editable transcript.
-        let escape_closes = self.chat_widget.is_external_writer_view()
-            || self.agent_center_session_navigation()
-                && (self.is_offline() || !self.should_handle_backtrack_esc(KeyCode::Esc.into()));
+        // Explicit Rewind opens selection; Escape in the ordinary reader remains Back.
+        let escape_closes =
+            self.agent_center_session_navigation() || self.chat_widget.is_external_writer_view();
         if let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut() {
             overlay.escape_closes = escape_closes;
             if self.scrollback_has_older_history {
@@ -440,6 +443,17 @@ impl App {
 
     /// Handle Enter in overlay backtrack preview: confirm selection and reset state.
     fn overlay_confirm_backtrack(&mut self, tui: &mut tui::Tui) {
+        // Recheck changing state without discarding the selection or an intervening draft.
+        if self.backtrack.explicit_rewind
+            && let Some(reason) = self.rewind_unavailable_reason()
+        {
+            self.chat_widget
+                .add_info_message(reason.to_string(), /*hint*/ None);
+            return;
+        }
+        if self.is_offline() {
+            return;
+        }
         let nth_user_message = self.backtrack.nth_user_message;
         let Some(selection) = self.backtrack_selection(nth_user_message) else {
             return;
@@ -462,6 +476,7 @@ impl App {
         self.backtrack.origin = None;
         self.backtrack.primed = false;
         self.backtrack.overlay_preview_active = false;
+        self.backtrack.explicit_rewind = false;
         self.backtrack.base_id = None;
         self.backtrack.nth_user_message = usize::MAX;
         self.transcript_view.set_highlight(/*index*/ None);

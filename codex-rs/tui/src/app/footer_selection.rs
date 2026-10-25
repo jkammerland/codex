@@ -13,11 +13,15 @@ impl App {
         tui: &mut tui::Tui,
         event: &TuiEvent,
     ) -> Result<bool> {
+        if matches!(event, TuiEvent::Resize(_)) {
+            self.chat_widget.clear_footer_hit_targets();
+        }
         if !tui.is_owned_screen()
             || self.overlay.is_some()
             || !self.chat_widget.no_modal_or_popup_active()
             || self.chat_widget.is_external_writer_view()
         {
+            self.chat_widget.clear_footer_hit_targets();
             *self.chat_widget.rendered_selection.borrow_mut() = RenderedSelection::default();
             return Ok(false);
         }
@@ -44,7 +48,7 @@ impl App {
         match action {
             RegionAction::Click(mouse) => {
                 self.chat_widget
-                    .handle_warning_event(&TuiEvent::Mouse(mouse), &self.transcript_cells);
+                    .handle_footer_event(&TuiEvent::Mouse(mouse), &self.transcript_cells);
             }
             RegionAction::Selection(action) => {
                 self.transcript_view.end_selection(&self.transcript_cells);

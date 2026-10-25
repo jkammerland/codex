@@ -1588,6 +1588,76 @@ async fn no_op_stub_slash_command_is_available_from_local_recall() {
 }
 
 #[tokio::test]
+async fn slash_rewind_emits_only_the_local_open_action() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.dispatch_command(SlashCommand::Rewind);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenRewind));
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(chat.input_queue.queued_user_messages.is_empty());
+}
+
+#[tokio::test]
+async fn slash_rewind_enter_and_tab_never_enqueue_or_submit_model_input() {
+    for text in ["/rewind", "/rewind arguments"] {
+        for key in [KeyCode::Enter, KeyCode::Tab] {
+            for busy in [false, true] {
+                let (mut chat, mut rx, mut op_rx) =
+                    make_chatwidget_manual(/*model_override*/ None).await;
+                chat.thread_id = Some(ThreadId::new());
+                if busy {
+                    handle_turn_started(&mut chat, "turn-1");
+                }
+                chat.bottom_pane
+                    .set_composer_text(text.into(), Vec::new(), Vec::new());
+                chat.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
+
+                let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, AppEvent::FollowTranscript))
+                );
+                let opened = events
+                    .iter()
+                    .filter(|event| matches!(event, AppEvent::OpenRewind))
+                    .count();
+                assert_eq!(opened, usize::from(!busy && text == "/rewind"));
+                assert!(chat.input_queue.queued_user_messages.is_empty());
+                assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+                assert_eq!(
+                    chat.bottom_pane.composer_text(),
+                    if opened == 1 { "" } else { text }
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn slash_rewind_rejects_direct_arguments_and_legacy_queued_input() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.dispatch_command_with_args(SlashCommand::Rewind, "earlier".into(), Vec::new());
+    for text in ["/rewind", "/rewind earlier"] {
+        assert_eq!(
+            chat.submit_queued_slash_prompt(UserMessage::from(text).into()),
+            QueueDrain::Continue
+        );
+    }
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(events.len(), 3);
+    assert!(
+        events
+            .iter()
+            .all(|event| matches!(event, AppEvent::InsertHistoryCell(_)))
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(chat.input_queue.queued_user_messages.is_empty());
+}
+
+#[tokio::test]
 async fn slash_exit_aliases_request_exit() {
     for command in [SlashCommand::Quit, SlashCommand::Exit] {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;

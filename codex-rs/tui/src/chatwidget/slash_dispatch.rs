@@ -188,6 +188,7 @@ impl ChatWidget {
         }
 
         match cmd {
+            SlashCommand::Rewind => self.app_event_tx.send(AppEvent::OpenRewind),
             SlashCommand::Daybreak => {
                 if !self.config.features.enabled(Feature::CliDaybreak) {
                     return;
@@ -673,6 +674,10 @@ impl ChatWidget {
         args: String,
         text_elements: Vec<TextElement>,
     ) {
+        if cmd == SlashCommand::Rewind && (!args.trim().is_empty() || !text_elements.is_empty()) {
+            self.add_error_message("Use /rewind without arguments or attachments.".to_string());
+            return;
+        }
         if cmd != SlashCommand::Copy {
             self.transcript.last_status_copy_targets = None;
         }
@@ -1169,6 +1174,12 @@ impl ChatWidget {
             return QueueDrain::Stop;
         };
 
+        // Rewind must be an immediate UI action, never a replayed queued prompt.
+        if name == SlashCommand::Rewind.command() {
+            self.add_error_message("Invoke /rewind directly, not from queued input.".to_string());
+            return QueueDrain::Continue;
+        }
+
         if name.contains('/') {
             self.submit_user_message(UserMessage {
                 text,
@@ -1335,6 +1346,7 @@ impl ChatWidget {
             | SlashCommand::Delete
             | SlashCommand::Clear
             | SlashCommand::Resume
+            | SlashCommand::Rewind
             | SlashCommand::Fork
             | SlashCommand::Init
             | SlashCommand::Compact

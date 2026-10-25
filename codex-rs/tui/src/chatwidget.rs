@@ -438,6 +438,7 @@ use self::user_messages::remap_placeholders_for_message;
 use self::user_messages::user_message_display_for_history;
 use self::user_messages::user_message_for_restore;
 use self::user_messages::user_message_preview_text;
+mod footer_actions;
 mod warnings;
 use self::warnings::WarningDisplayState;
 pub(crate) use crate::branch_summary::StatusLineGitSummary;

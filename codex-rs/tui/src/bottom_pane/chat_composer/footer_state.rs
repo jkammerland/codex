@@ -367,7 +367,11 @@ pub(super) struct FooterState {
     pub(super) show_transcript_key: Option<ShortcutHint>,
     pub(super) show_warnings_key: Option<ShortcutHint>,
     pub(super) warning_notice_area: std::cell::Cell<Option<Rect>>,
-    pub(super) selection_revision: std::cell::Cell<(usize, bool)>,
+    /// None keeps independent plain-text composers outside the app's rewind surface.
+    pub(super) rewind_available: Option<bool>,
+    pub(super) agent_navigation_available: bool,
+    pub(super) rewind_area: std::cell::Cell<Option<Rect>>,
+    pub(super) selection_revision: std::cell::Cell<(usize, bool, Option<bool>)>,
     pub(super) find_transcript_key: Option<ShortcutHint>,
     pub(super) focus_activity_key: Option<ShortcutHint>,
     pub(super) insert_newline_key: Option<ShortcutHint>,

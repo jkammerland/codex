@@ -136,7 +136,7 @@ async fn command_center_transcript_escape_closes_innermost_interaction_then_view
                 .any(|event| matches!(event, AppEvent::Exit(_)))
         );
 
-        // Empty editable chat primes rewind; offline chat still returns to Tasks.
+        // Empty chat returns to Agents; explicit Rewind owns prompt selection.
         app.chat_widget.apply_external_edit(String::new());
         press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
         assert_eq!(
@@ -145,7 +145,7 @@ async fn command_center_transcript_escape_closes_innermost_interaction_then_view
                     .active_view_is(agents_overview::AGENTS_OVERVIEW_VIEW_ID),
                 app.backtrack.primed,
             ),
-            (offline, !offline),
+            (true, false),
         );
         app_server.shutdown().await?;
     }

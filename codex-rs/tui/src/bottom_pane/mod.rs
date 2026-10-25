@@ -153,6 +153,7 @@ mod effort_status_line;
 mod experimental_features_view;
 mod file_search_popup;
 mod footer;
+mod footer_actions;
 mod list_selection_view;
 mod memories_settings_view;
 mod mention_usage;
@@ -2424,6 +2425,9 @@ impl BottomPane {
         mut options: ComposerRenderOptions<'a>,
         views: &'a [Box<dyn BottomPaneView>],
     ) -> RenderableItem<'a> {
+        if !self.no_modal_or_popup_active() {
+            self.clear_footer_hit_targets();
+        }
         if self.warnings_active()
             && let Some(warnings) = &self.warnings_view
         {

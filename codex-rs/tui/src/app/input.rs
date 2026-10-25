@@ -45,14 +45,16 @@ impl App {
 
     pub(super) fn agent_center_back_key(&self, key: KeyEvent) -> bool {
         self.agent_center_session_navigation()
+            && !self.backtrack.overlay_preview_active
             && self.chat_widget.no_modal_or_popup_active()
             && !self.chat_widget.shortcut_overlay_visible()
             && !self.chat_widget.should_handle_vim_insert_escape(key)
-            // Available editable sessions keep Escape for interruption and prompt rewind.
+            // Idle chat returns to Agents; working turns retain Escape interruption.
             && (crate::key_hint::plain(KeyCode::Esc).is_press(key)
                 && (self.chat_widget.is_external_writer_view()
                     || self.chat_widget.composer_is_empty()
-                        && (self.reconnect.offline
+                        && (self.chat_widget.is_normal_backtrack_mode()
+                            || self.reconnect.offline
                             || self
                                 .current_displayed_thread_id()
                                 .is_some_and(|id| self.thread_unavailable(id))))

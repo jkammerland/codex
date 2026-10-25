@@ -1,12 +1,11 @@
 ---
 source: tui/src/status/tests.rs
-assertion_line: 1151
 expression: sanitized
 ---
 /status
 
   >_ OpenAI Codex
-  (v0.163.0+jkammerland.mcp.25.team.8)
+  (v0.163.0+jkammerland.mcp.25.team.9)
 
   Visit https://chatgpt.com/settings/usage for
   up-to-date

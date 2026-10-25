@@ -136,12 +136,16 @@ async fn command_center_transcript_escape_closes_innermost_interaction_then_view
                 .any(|event| matches!(event, AppEvent::Exit(_)))
         );
 
-        // Closing a reader does not consume the draft; empty chat Escape then returns to Tasks.
+        // Empty editable chat primes rewind; offline chat still returns to Tasks.
         app.chat_widget.apply_external_edit(String::new());
         press_key(&mut app, &mut tui, &mut app_server, KeyCode::Esc).await?;
-        assert!(
-            app.chat_widget
-                .active_view_is(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
+        assert_eq!(
+            (
+                app.chat_widget
+                    .active_view_is(agents_overview::AGENTS_OVERVIEW_VIEW_ID),
+                app.backtrack.primed,
+            ),
+            (offline, !offline),
         );
         app_server.shutdown().await?;
     }

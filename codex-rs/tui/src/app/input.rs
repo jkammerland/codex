@@ -48,9 +48,14 @@ impl App {
             && self.chat_widget.no_modal_or_popup_active()
             && !self.chat_widget.shortcut_overlay_visible()
             && !self.chat_widget.should_handle_vim_insert_escape(key)
+            // Available editable sessions keep Escape for interruption and prompt rewind.
             && (crate::key_hint::plain(KeyCode::Esc).is_press(key)
-                && (self.chat_widget.composer_is_empty()
-                    || self.chat_widget.is_external_writer_view())
+                && (self.chat_widget.is_external_writer_view()
+                    || self.chat_widget.composer_is_empty()
+                        && (self.reconnect.offline
+                            || self
+                                .current_displayed_thread_id()
+                                .is_some_and(|id| self.thread_unavailable(id))))
                 || self.chat_widget.is_external_writer_view()
                     && (crate::key_hint::plain(KeyCode::Char('h')).is_press(key)
                         || crate::key_hint::plain(KeyCode::Left).is_press(key)
@@ -839,6 +844,9 @@ impl App {
 
     pub(crate) fn should_handle_backtrack_esc(&self, key_event: KeyEvent) -> bool {
         !self.chat_widget.is_external_writer_view()
+            && !self
+                .current_displayed_thread_id()
+                .is_some_and(|id| self.thread_unavailable(id))
             && !self.chat_widget.side_conversation_active()
             && !self.chat_widget.shortcut_overlay_visible()
             && self.chat_widget.is_normal_backtrack_mode()

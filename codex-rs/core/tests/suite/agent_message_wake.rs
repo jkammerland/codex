@@ -1,4 +1,4 @@
-//! Agent-message wakes preserve stop, Plan-mode, and turn-completion boundaries.
+//! Agent-message wakes retain current settings and preserve stop/completion boundaries.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -18,6 +18,7 @@ use codex_login::ExternalAuthFuture;
 use codex_login::ExternalAuthRefreshContext;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -105,7 +106,7 @@ enum AgentMessageWake {
 }
 
 #[test_case(WakeBoundary::Interrupt, AgentMessageWake::Enabled; "interrupt_during_discovery")]
-#[test_case(WakeBoundary::Plan, AgentMessageWake::Enabled; "plan_mode_during_discovery")]
+#[test_case(WakeBoundary::Plan, AgentMessageWake::Enabled; "plan_mode_continues_during_discovery")]
 #[test_case(WakeBoundary::Interrupt, AgentMessageWake::Disabled; "disabled_interrupt_preserves_status_and_explicit_followup")]
 #[test_case(WakeBoundary::Plan, AgentMessageWake::Disabled; "disabled_plan_allows_explicit_followup")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -116,13 +117,14 @@ async fn pending_agent_message_wake_respects_control_changes(
     skip_if_no_network!(Ok(()));
 
     let wakes_on_agent_messages = matches!(setting, AgentMessageWake::Enabled);
+    let held_by_interrupt = wakes_on_agent_messages && matches!(boundary, WakeBoundary::Interrupt);
     let server = responses::start_mock_server().await;
     let mut answer = responses::ev_assistant_message("answer", "Finished.");
     answer["item"]["phase"] = json!("final_answer");
     let response = responses::sse(vec![answer, responses::ev_completed("response")]);
-    // The third response also lets a regressed wake finish, so the turn-count
-    // assertion below fails instead of waiting for that unwanted turn.
-    let expected_requests = if wakes_on_agent_messages { 3 } else { 2 };
+    // The interrupted automatic-wake case uses two explicit follow-ups. Plan
+    // keeps its reserved continuation and needs no explicit user input.
+    let expected_requests = if held_by_interrupt { 3 } else { 2 };
     let mock = responses::mount_sse_sequence(&server, vec![response; expected_requests]).await;
     let barriers = Arc::new(WakeBarriers::default());
     let release_completion = barriers.completion.arm();
@@ -202,7 +204,8 @@ async fn pending_agent_message_wake_respects_control_changes(
         ThreadIdle::wait(&test.codex).await;
     }
 
-    let expected_mail = match boundary {
+    let plan_instructions = "Use the Plan instructions selected while wake discovery was paused.";
+    let (expected_mail, selected_plan_mode) = match boundary {
         WakeBoundary::Interrupt => {
             let previous_status = test.codex.agent_status().await;
             test.codex.submit(Op::Interrupt).await?;
@@ -216,29 +219,31 @@ async fn pending_agent_message_wake_respects_control_changes(
             test.codex
                 .update_thread_settings(ThreadSettingsOverrides::default())
                 .await?;
-            vec![first_mail, second_mail]
+            (vec![first_mail, second_mail], None)
         }
         WakeBoundary::Plan => {
             let mut collaboration_mode = test.codex.config_snapshot().await.collaboration_mode;
             collaboration_mode.mode = ModeKind::Plan;
+            collaboration_mode.settings.reasoning_effort = Some(ReasoningEffort::High);
+            collaboration_mode.settings.developer_instructions = Some(plan_instructions.to_owned());
             test.codex
                 .update_thread_settings(ThreadSettingsOverrides {
-                    collaboration_mode: Some(collaboration_mode),
+                    collaboration_mode: Some(collaboration_mode.clone()),
                     ..Default::default()
                 })
                 .await?;
             assert_eq!(
-                test.codex.config_snapshot().await.collaboration_mode.mode,
-                ModeKind::Plan
+                test.codex.config_snapshot().await.collaboration_mode,
+                collaboration_mode
             );
-            vec![first_mail]
+            (vec![first_mail], Some(collaboration_mode))
         }
     };
     release_discovery
         .send(())
         .expect("control change must complete while wake discovery is paused");
 
-    let (mail_request_index, final_turn_id) = if wakes_on_agent_messages {
+    let (mail_request_index, final_turn_id) = if held_by_interrupt {
         // StartIfIdle cannot replace the reserved wake. Acceptance is the barrier
         // proving that the pending wake relinquished admission; no sleep is needed.
         let user_turn_id = timeout(Duration::from_secs(10), async {
@@ -296,15 +301,15 @@ async fn pending_agent_message_wake_respects_control_changes(
         ThreadIdle::wait(&test.codex).await;
         (2, next_user_turn_id)
     } else {
-        // With the feature disabled, explicit follow-ups still run. In the
-        // interrupt case, the second follow-up also delivers the preserved first.
+        // Plan continues automatically using its newly selected settings. With
+        // wakes disabled, explicit follow-ups still deliver preserved mail.
         let EventMsg::TurnComplete(completed) = wait_for_event(
             &test.codex,
             |event| matches!(event, EventMsg::TurnComplete(done) if done.turn_id != initial_turn_id),
         )
         .await
         else {
-            unreachable!("waited for the explicit follow-up to complete");
+            unreachable!("waited for the mail continuation to complete");
         };
         ThreadIdle::wait(&test.codex).await;
         (1, completed.turn_id)
@@ -313,10 +318,30 @@ async fn pending_agent_message_wake_respects_control_changes(
 
     let requests = responses::received_responses_requests(&server).await;
     assert_eq!(requests.len(), expected_requests);
+    assert!(requests[0].inputs_of_type("agent_message").is_empty());
     assert_eq!(
         requests[mail_request_index].body_json()["client_metadata"]["turn_id"],
         final_turn_id
     );
+    if let Some(selected_plan_mode) = selected_plan_mode {
+        assert_eq!(
+            test.codex.config_snapshot().await.collaboration_mode,
+            selected_plan_mode
+        );
+        assert_eq!(
+            requests[mail_request_index].body_json()["reasoning"]["effort"],
+            "high"
+        );
+        assert_eq!(
+            requests[mail_request_index]
+                .message_input_texts("developer")
+                .iter()
+                .filter(|text| text.contains(plan_instructions))
+                .count(),
+            1
+        );
+    }
+
     let messages = requests[mail_request_index].inputs_of_type("agent_message");
     let actual_mail = messages
         .iter()

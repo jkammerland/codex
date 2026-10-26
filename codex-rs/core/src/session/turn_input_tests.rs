@@ -908,6 +908,77 @@ async fn agent_message_wake_reservation_preserves_existing_boundaries(
     );
 }
 
+#[tokio::test]
+async fn reserved_agent_message_wake_uses_new_plan_configuration_without_consuming_mail() {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    session
+        .features
+        .enable(Feature::WakeOnAgentMessages)
+        .expect("enable agent-message wakes");
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "worker update reserved before Plan selection".to_string(),
+        /*trigger_turn*/ false,
+    );
+    session
+        .input_queue
+        .enqueue_mailbox_communication(communication.clone().into(), Default::default())
+        .await;
+    let (turn_state, _) = session
+        .reserve_pending_work_turn()
+        .await
+        .expect("mail should reserve a wake before discovery");
+
+    // Settings can change while discovery is pending. The same reservation must
+    // continue with the selected Plan settings, leaving delivery to the caller.
+    let mut collaboration_mode = session.collaboration_mode().await;
+    collaboration_mode.mode = ModeKind::Plan;
+    collaboration_mode.settings.reasoning_effort = Some(ReasoningEffort::High);
+    collaboration_mode.settings.developer_instructions =
+        Some("Use the newly selected planning instructions.".to_string());
+    session
+        .update_settings(SessionSettingsUpdate {
+            step_settings: StepSettingsUpdate {
+                collaboration_mode: Some(collaboration_mode),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .expect("select Plan while the wake is reserved");
+    let expected_settings = session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .step_settings
+        .clone();
+    let configuration = session
+        .pending_work_turn_configuration(&turn_state)
+        .await
+        .expect("Plan selection must preserve the reserved mail continuation");
+
+    assert_eq!(configuration.step_settings, expected_settings);
+    assert!(
+        session
+            .active_turn
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|turn| Arc::ptr_eq(&turn.turn_state, &turn_state))
+    );
+    assert_eq!(
+        session.input_queue.drain_mailbox_input_items().await.0,
+        vec![TurnInput::InterAgentCommunication(communication.into())]
+    );
+    assert_eq!(
+        session.input_queue.drain_mailbox_input_items().await.0,
+        Vec::<TurnInput>::new()
+    );
+}
+
 #[test_case(codex_extension_api::ExecutionMode::Paused; "paused")]
 #[test_case(codex_extension_api::ExecutionMode::Stopped; "stopped")]
 #[tokio::test]

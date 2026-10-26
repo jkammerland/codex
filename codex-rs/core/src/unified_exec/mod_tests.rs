@@ -227,11 +227,17 @@ async fn wait_process_for_test(
     process_id: i32,
     activity_rx: &mut watch::Receiver<InputQueueActivity>,
 ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+    let terminal = session
+        .services
+        .unified_exec_manager
+        .resolve_terminal(process_id)
+        .await?;
+
     session
         .services
         .unified_exec_manager
         .wait_process(WaitProcessRequest {
-            process_id,
+            terminal: &terminal,
             max_output_tokens: None,
             truncation_policy: TruncationPolicy::Tokens(10_000),
             interaction_event: None,

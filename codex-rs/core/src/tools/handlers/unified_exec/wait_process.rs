@@ -1,9 +1,11 @@
 use crate::function_tool::FunctionCallError;
+use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::CoreToolRuntime;
+use crate::tools::registry::LiveEnvironmentResolver;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
@@ -19,7 +21,9 @@ use super::post_unified_exec_tool_use_payload;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WaitProcessArgs {
-    session_id: i32,
+    // The live resolver captures the terminal; retain strict argument validation here.
+    #[serde(rename = "session_id")]
+    _session_id: i32,
     #[serde(default)]
     max_output_tokens: Option<usize>,
 }
@@ -49,8 +53,14 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
                 turn,
                 step_context,
                 payload,
+                environments,
                 ..
             } = invocation;
+            let ToolEnvironments::Terminal(terminal) = environments else {
+                return Err(FunctionCallError::Fatal(
+                    "wait_process requires a terminal session".to_string(),
+                ));
+            };
             let ToolPayload::Function { arguments } = payload else {
                 return Err(FunctionCallError::RespondToModel(
                     "wait_process handler received unsupported payload".to_string(),
@@ -70,7 +80,7 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
                 .services
                 .unified_exec_manager
                 .wait_process(WaitProcessRequest {
-                    process_id: args.session_id,
+                    terminal: &terminal,
                     max_output_tokens: args.max_output_tokens,
                     truncation_policy: step_context.settings.model_info.truncation_policy.into(),
                     interaction_event: Some(UnifiedExecInteractionEvent {
@@ -91,6 +101,10 @@ impl ToolExecutor<ToolInvocation> for WaitProcessHandler {
 }
 
 impl CoreToolRuntime for WaitProcessHandler {
+    fn live_environment_resolver(&self) -> Option<LiveEnvironmentResolver> {
+        Some(super::terminal_session_for_input)
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

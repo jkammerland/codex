@@ -9,7 +9,7 @@ impl UnifiedExecProcessManager {
         request: WaitProcessRequest<'_>,
     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
         let WaitProcessRequest {
-            process_id,
+            terminal,
             max_output_tokens,
             truncation_policy,
             interaction_event,
@@ -17,14 +17,9 @@ impl UnifiedExecProcessManager {
             pending_activity,
         } = request;
 
-        let locked_process = {
-            let store = self.process_store.lock().await;
-            let entry = store
-                .processes
-                .get(&process_id)
-                .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
-            Arc::clone(&entry.process)
-        };
+        let process_id = terminal.process_id;
+        let locked_process = &terminal.process;
+
         // A single event-driven waiter owns the next observable process event.
         // Reject duplicates instead of letting one drain the event and strand another.
         let _wait_process_guard = locked_process
@@ -44,7 +39,7 @@ impl UnifiedExecProcessManager {
             process_id,
             tty,
         } = self
-            .prepare_process_handles(process_id, &locked_process)
+            .prepare_process_handles(process_id, locked_process)
             .await?;
         let start = Instant::now();
         let mut state_rx = process.subscribe_state();

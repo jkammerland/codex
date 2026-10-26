@@ -15,6 +15,7 @@ use codex_features::Feature;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
@@ -66,6 +67,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use test_case::test_case;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use wiremock::Mock;
@@ -580,6 +582,179 @@ async fn pre_tool_use_hook_runs_only_on_the_executor_that_owns_the_command() -> 
     assert!(
         !input_files["other"].try_exists()?,
         "the other executor also received the hook"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_process_post_tool_use_hook_runs_only_on_the_original_executor() -> Result<()> {
+    let server = start_mock_server().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let shell_type = if cfg!(windows) {
+        ShellType::PowerShell
+    } else {
+        ShellType::Bash
+    };
+    let shell = get_shell(shell_type).context("test shell should be installed")?;
+    let shell_path = shell.derive_exec_args("", /*use_login_shell*/ false)[0].clone();
+    let test = test_codex()
+        .with_config(|config| {
+            for feature in [Feature::CodexHooks, Feature::UnifiedExec] {
+                config.features.enable(feature).expect("enable feature");
+            }
+        })
+        .with_user_shell(shell)
+        .build(&server)
+        .await?;
+    let manager = test.thread_manager.environment_manager();
+
+    // Use native executors with private homes so each hook records where it ran.
+    let mut executors = Vec::new();
+    let mut selections = Vec::new();
+    let mut input_files = HashMap::new();
+    for id in ["other", "owner"] {
+        let executor = ExecServerProcess::start().await?;
+        manager.upsert_environment(
+            id.into(),
+            executor.websocket_url.clone(),
+            /*connect_timeout*/ None,
+        )?;
+        executors.push(executor);
+        let environment = manager
+            .get_environment(id)
+            .context("executor should be registered")?;
+        let mut selection = test.executor_environment().selection().clone();
+        selection.environment_id = id.into();
+        let reported = environment
+            .read_environment_config(EnvironmentConfigReadParams {
+                cwd: selection.cwd.clone(),
+                config_paths: Vec::new(),
+                requirements_paths: vec![vec!["hooks".into()]],
+            })
+            .await?;
+        input_files.insert(
+            id,
+            reported
+                .codex_home_dir
+                .to_abs_path()?
+                .join("post-tool-use-input.json"),
+        );
+        let mut config = environment_config_for_selection(&test.config, &selection);
+        // Ready environments retain their own permissions, independently of turn settings.
+        config.permission_profile = PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
+        config.environment_hooks = toml::from_str(
+            r#"
+            [[PostToolUse]]
+            matcher = '^Bash$'
+            [[PostToolUse.hooks]]
+            type = 'command'
+            command = 'cat >> "$CODEX_HOME/post-tool-use-input.json"'
+            command_windows = 'ForEach-Object { [IO.File]::AppendAllText("$env:CODEX_HOME/post-tool-use-input.json", $_ + [Environment]::NewLine) }'
+        "#,
+        )?;
+        selection.config = EnvironmentConfigState::Ready(config);
+        selections.push(selection);
+    }
+
+    // Hold the original producer until wait_process is listening, without a timing race.
+    let command = if cfg!(windows) {
+        format!(
+            "$ErrorActionPreference = 'Stop'; $client = [Net.Sockets.TcpClient]::new('127.0.0.1', {port}); $reader = [IO.StreamReader]::new($client.GetStream()); $null = $reader.ReadLine(); Write-Output 'owner-post-hook-output'"
+        )
+    } else {
+        format!(
+            "read -r release < /dev/tcp/127.0.0.1/{port} || exit; printf owner-post-hook-output"
+        )
+    };
+    let start_call_id = "command-in-owner";
+    let start_args = json!({
+        "environment_id": "owner",
+        "cmd": command,
+        "shell": shell_path,
+        "login": false,
+        "tty": false,
+        "yield_time_ms": 250,
+    });
+    let responses = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(sse(vec![
+                ev_response_created("start"),
+                ev_function_call(start_call_id, "exec_command", &start_args.to_string()),
+                ev_completed("start"),
+            ])),
+            completed_turn_response("started"),
+            sse_response(sse(vec![
+                ev_response_created("wait"),
+                ev_function_call("wait-for-owner", "wait_process", r#"{"session_id":1000}"#),
+                ev_completed("wait"),
+            ])),
+            completed_turn_response("finished"),
+        ],
+    )
+    .await;
+    test.submit_turn_with_environments("run the command in owner", Some(selections))
+        .await?;
+    let start_output = responses
+        .function_call_output_text(start_call_id)
+        .context("missing exec_command result")?;
+    assert!(
+        start_output.contains("Process running with session ID 1000"),
+        "{start_output}"
+    );
+    let (mut producer, _) = listener.accept().await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait for the original command".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TerminalInteraction(interaction) if interaction.call_id == start_call_id)
+    })
+    .await;
+    producer.write_all(b"release\n").await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let output = responses
+        .function_call_output_text("wait-for-owner")
+        .context("missing wait_process result")?;
+    assert!(output.contains("Process exited with code 0"), "{output}");
+    assert!(output.contains("owner-post-hook-output"), "{output}");
+    let owner_input =
+        std::fs::read_to_string(&input_files["owner"]).context("owner did not receive the hook")?;
+    let inputs = serde_json::Deserializer::from_str(&owner_input)
+        .into_iter::<Value>()
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    let observed: Vec<_> = inputs
+        .iter()
+        .map(|input| {
+            json!({
+                "event": input["hook_event_name"],
+                "tool": input["tool_name"],
+                "call_id": input["tool_use_id"],
+                "input": input["tool_input"],
+                "output": input["tool_response"].as_str().map(str::trim),
+            })
+        })
+        .collect();
+    assert_eq!(
+        observed,
+        vec![json!({
+            "event": "PostToolUse",
+            "tool": "Bash",
+            "call_id": start_call_id,
+            "input": {"command": command},
+            "output": "owner-post-hook-output",
+        })]
+    );
+    assert!(
+        !input_files["other"].try_exists()?,
+        "the unrelated executor also received the original command and output"
     );
     Ok(())
 }

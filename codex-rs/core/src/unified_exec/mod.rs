@@ -148,7 +148,7 @@ pub(crate) struct WriteStdinRequest<'a> {
 
 #[derive(Debug)]
 pub(crate) struct WaitProcessRequest<'a> {
-    pub process_id: i32,
+    pub terminal: &'a TerminalSession,
     pub max_output_tokens: Option<usize>,
     pub truncation_policy: TruncationPolicy,
     pub interaction_event: Option<UnifiedExecInteractionEvent<'a>>,

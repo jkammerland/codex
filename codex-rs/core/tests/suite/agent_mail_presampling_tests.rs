@@ -183,6 +183,9 @@ async fn pre_sampling_compaction_failure_settles_only_selected_assignment(
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
+            // Keep fixed task IDs isolated even when the host overrides SQLite home.
+            config.sqlite = codex_state::SqliteConfig::from_sqlite_home(config.codex_home.clone());
+
             config
                 .features
                 .enable(Feature::Collab)

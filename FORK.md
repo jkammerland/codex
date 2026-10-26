@@ -1,10 +1,12 @@
 # Maintained MCP lifecycle fork
 
 This integration candidate rebases the MCP.25 multi-machine team trial onto
-upstream main `d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4`. It uses
-`0.163.0+jkammerland.mcp.25.team.4` for CLI, app-server, and package manifests,
-and retains the `0.163.0`
-Cargo workspace version used by model discovery. Build the client and server
+upstream main `970111f6cb62cc02fe36a82ea7d71b37a2889c97`. It uses
+`0.164.0+jkammerland.mcp.25.team.10` for CLI, app-server, and package manifests,
+and stamps `0.164.0` into the Cargo workspace version used by model discovery.
+This is a source candidate, not an activated fleet release; the existing host
+inventory continues to describe the retained installations and staged packages.
+Build the client and server
 from this branch together; changing package metadata alone does not update the
 model catalog request.
 
@@ -40,8 +42,9 @@ queued and reconciled mail. Durable wake receipts remain separate and are
 cleared only when the model accepts the selected request. Restarted mail
 recovers its persisted payload without recreating live extension callbacks.
 
-Qualification includes the default Linux suite, focused native checks, real
-terminal trials, and complete staged packages.
+Release qualification requires the default Linux suite, focused native checks,
+real terminal trials, and complete staged packages. Focused rebase checks do not
+substitute for that later qualification.
 Staging does not authorize installation, selection, daemon changes, or pushes.
 The retained fleet controller and installer are historical tooling; their raw
 pair activation flow is not the package staging procedure for this candidate.

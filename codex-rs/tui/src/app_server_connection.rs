@@ -70,7 +70,7 @@ pub(crate) async fn connect(target: &AppServerTarget) -> color_eyre::Result<AppS
     if matches!(target, AppServerTarget::LocalDaemon { .. }) {
         let reported_version = match &app_server {
             AppServerClient::Remote(client) => client.server_version(),
-            AppServerClient::InProcess(_) => None,
+            AppServerClient::Cloud(_) | AppServerClient::InProcess(_) => None,
         };
         if reported_version != Some(CODEX_CLI_VERSION) {
             let error = IncompatibleLocalDaemon {

@@ -295,7 +295,15 @@ impl AgentsOverviewView {
             .collect();
         let directory_group_keys = rows
             .iter()
-            .map(|row| directory_group_key(row.thread.cwd.as_path(), worktrees_enabled))
+            .map(|row| {
+                // Only native local rows may resolve aliases against this client's filesystem.
+                let local_filesystem =
+                    row.host.is_none() && row.thread.cwd.to_inferred_abs_path().is_some();
+                directory_group_key(
+                    Path::new(row.thread.cwd.as_str()),
+                    worktrees_enabled && local_filesystem,
+                )
+            })
             .collect();
         let center_shortcut_keys = crate::keymap::keymap_action_ids()
             .filter(|action| matches!(action.context, KeymapContext::List | KeymapContext::Agents))

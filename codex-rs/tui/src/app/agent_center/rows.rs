@@ -269,10 +269,15 @@ impl AgentsOverviewView {
                                 /*max_width*/ None,
                             )
                         }
-                        AgentsOverviewGrouping::Directory => format_directory_display(
-                            self.rows[index].thread.cwd.as_path(),
-                            /*max_width*/ None,
-                        ),
+                        AgentsOverviewGrouping::Directory => {
+                            if task.host.is_none()
+                                && let Some(cwd) = task.thread.cwd.to_inferred_abs_path()
+                            {
+                                format_directory_display(cwd.as_path(), /*max_width*/ None)
+                            } else {
+                                task.thread.cwd.render_for_ui()
+                            }
+                        }
                         AgentsOverviewGrouping::Status => task.group.label().to_owned(),
                         AgentsOverviewGrouping::Model => model_name(&task.thread).to_owned(),
                     }

@@ -4,6 +4,23 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
+fn shell_text_does_not_dispatch_local_rewind() {
+    let (mut composer, _rx) = new_test_composer();
+    composer.set_text_content("!/rewind".into(), Vec::new(), Vec::new());
+    let before = composer.draft_snapshot();
+
+    assert_eq!(composer.try_dispatch_local_rewind(), None);
+    assert_eq!(composer.draft_snapshot(), before);
+
+    composer.set_text_content("/rewind".into(), Vec::new(), Vec::new());
+    assert_eq!(
+        composer.try_dispatch_local_rewind(),
+        Some(InputResult::Command(SlashCommand::Rewind))
+    );
+    assert_eq!(composer.current_text(), "/rewind");
+}
+
+#[test]
 fn rewind_enter_and_queue_keys_defer_consuming_the_local_command() {
     for key in [KeyCode::Enter, KeyCode::Tab] {
         for queue_submissions in [false, true] {

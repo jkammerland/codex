@@ -1299,9 +1299,9 @@ See the Codex keymap documentation for supported actions and examples."
         let initial_owner = app_server.backend_id();
         let mut backends =
             super::backend_sessions::BackendSessions::from_initial(app_server, other_backends);
-        let displayed_session = backends.slot(initial_owner).ok_or_else(|| {
-            color_eyre::eyre::eyre!("the initial backend is not registered")
-        })?;
+        let displayed_session = backends
+            .slot(initial_owner)
+            .ok_or_else(|| color_eyre::eyre::eyre!("the initial backend is not registered"))?;
         let mut displayed_owner = initial_owner;
 
         let exit_reason_result = if let Some(exit_reason) = pre_loop_exit_reason {

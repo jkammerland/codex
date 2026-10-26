@@ -339,6 +339,7 @@ impl AppServerBootstrap {
             has_chatgpt_account: false,
             available_models: Vec::new(),
             collaboration_modes: Vec::new(),
+            allowed_approval_policies: None,
         }
     }
 }

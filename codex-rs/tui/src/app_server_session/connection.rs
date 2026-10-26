@@ -63,7 +63,7 @@ impl Connection {
                 remote.server_version().map(str::to_owned),
                 remote.codex_home().map(str::to_owned),
             ),
-            AppServerClient::InProcess(_) => (None, None),
+            AppServerClient::Cloud(_) | AppServerClient::InProcess(_) => (None, None),
         };
         let home = remote_home.clone().map(AppServerPath::from_app_server);
         let (sender, events) = mpsc::unbounded_channel();

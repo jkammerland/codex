@@ -4,7 +4,7 @@ expression: terminal.backend()
 ---
 "› /rewind  Choose an earlier prompt to edit                                     "
 "                                                                                "
-"/ rewi                                                                          "
+"› /rewi                                                                         "
 "                                                                                "
 "                                                                                "
 "                                                                                "

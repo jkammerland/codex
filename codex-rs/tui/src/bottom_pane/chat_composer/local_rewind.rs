@@ -5,7 +5,7 @@ use super::*;
 impl ChatComposer {
     pub(super) fn is_local_rewind(&self) -> bool {
         self.slash_commands_enabled()
-            && self.draft.prompt_prefix != PromptPrefix::Shell
+            && !self.draft.is_bash_mode
             && parse_slash_name(&self.current_text_with_pending())
                 .is_some_and(|(name, _, _)| name == SlashCommand::Rewind.command())
     }
@@ -77,7 +77,7 @@ impl super::super::BottomPane {
             .stage_selected_slash_command_history(&CommandItem::Builtin(SlashCommand::Rewind));
         self.composer.record_pending_slash_command_history();
         self.composer.draft.textarea.set_text_clearing_elements("");
-        self.composer.draft.prompt_prefix = PromptPrefix::None;
+        self.composer.draft.is_bash_mode = false;
         self.composer.sync_popups();
         self.request_redraw();
     }

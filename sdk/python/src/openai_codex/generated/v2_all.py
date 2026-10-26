@@ -4193,7 +4193,9 @@ class WorkspaceWriteSandboxPolicy(BaseModel):
     exclude_tmpdir_env_var: Annotated[bool | None, Field(alias="excludeTmpdirEnvVar")] = False
     network_access: Annotated[bool | None, Field(alias="networkAccess")] = False
     type: Annotated[Literal["workspaceWrite"], Field(title="WorkspaceWriteSandboxPolicyType")]
-    writable_roots: Annotated[list[LegacyAppPathString] | None, Field(alias="writableRoots")] = []
+    writable_roots: Annotated[
+        list[LegacyAppPathString] | None, Field(alias="writableRoots", validate_default=True)
+    ] = []
 
 
 class SandboxPolicy(
@@ -5053,9 +5055,6 @@ class SubscribeTeamAgentActionParams(BaseModel):
 
 
 class TeamAgentTarget(RootModel[TeamAddress | str]):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: TeamAddress | str
 
 
@@ -5082,9 +5081,6 @@ class AgentTeamBoardIdentity(BaseModel):
 
 
 class TeamBoardIdentity(RootModel[UserTeamBoardIdentity | AgentTeamBoardIdentity]):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: UserTeamBoardIdentity | AgentTeamBoardIdentity
 
 
@@ -5255,9 +5251,6 @@ class AllTeamBoardPurgeScope(BaseModel):
 class TeamBoardPurgeScope(
     RootModel[ConversationTeamBoardPurgeScope | TopicTeamBoardPurgeScope | AllTeamBoardPurgeScope]
 ):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: ConversationTeamBoardPurgeScope | TopicTeamBoardPurgeScope | AllTeamBoardPurgeScope
 
 
@@ -5303,9 +5296,6 @@ class TopicTeamBoardSubscriptionTarget(BaseModel):
 class TeamBoardSubscriptionTarget(
     RootModel[ConversationTeamBoardSubscriptionTarget | TopicTeamBoardSubscriptionTarget]
 ):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: ConversationTeamBoardSubscriptionTarget | TopicTeamBoardSubscriptionTarget
 
 
@@ -5378,9 +5368,6 @@ class StatusTeamCleanupParams(BaseModel):
 class TeamCleanupParams(
     RootModel[PreviewTeamCleanupParams | ApplyTeamCleanupParams | StatusTeamCleanupParams]
 ):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: PreviewTeamCleanupParams | ApplyTeamCleanupParams | StatusTeamCleanupParams
 
 
@@ -5532,9 +5519,6 @@ class TeamMemberActionParams(
         | StatusTeamMemberActionParams
     ]
 ):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: (
         CreateTeamMemberActionParams
         | EnrollTeamMemberActionParams
@@ -5653,9 +5637,6 @@ class InheritTeamSelection(BaseModel):
 class TeamSelection(
     RootModel[KeepTeamSelection | DefaultTeamSelection | ValueTeamSelection | InheritTeamSelection]
 ):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: KeepTeamSelection | DefaultTeamSelection | ValueTeamSelection | InheritTeamSelection
 
 
@@ -5668,9 +5649,6 @@ class TeamSelectionOriginValue(Enum):
 
 
 class TeamSelectionOrigin(RootModel[TeamSelectionOriginValue | Literal["legacy"]]):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: TeamSelectionOriginValue | Literal["legacy"]
 
 
@@ -10695,9 +10673,6 @@ class CleanupTeamAdministrationRequest(BaseModel):
 class TeamAdministrationRequest(
     RootModel[MemberTeamAdministrationRequest | CleanupTeamAdministrationRequest]
 ):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: MemberTeamAdministrationRequest | CleanupTeamAdministrationRequest
 
 
@@ -10768,14 +10743,20 @@ class TeamAgentRuntime(BaseModel):
     continuation_turn_id: Annotated[str | None, Field(alias="continuationTurnId")] = None
     current_effort: Annotated[str | None, Field(alias="currentEffort")] = None
     current_model: Annotated[str | None, Field(alias="currentModel")] = None
-    effort_origin: Annotated[TeamSelectionOrigin | None, Field(alias="effortOrigin")] = "legacy"
-    environments: list[TeamExecutionEnvironment] | None = []
+    effort_origin: Annotated[
+        TeamSelectionOrigin | None, Field(alias="effortOrigin", validate_default=True)
+    ] = "legacy"
+    environments: Annotated[
+        list[TeamExecutionEnvironment] | None, Field(validate_default=True)
+    ] = []
     in_flight: Annotated[int, Field(alias="inFlight", ge=0)]
     jobs: list[TeamTrackedJob]
     loaded: bool
     manually_held: Annotated[bool, Field(alias="manuallyHeld")]
     model_error: Annotated[str | None, Field(alias="modelError")] = None
-    model_origin: Annotated[TeamSelectionOrigin | None, Field(alias="modelOrigin")] = "legacy"
+    model_origin: Annotated[
+        TeamSelectionOrigin | None, Field(alias="modelOrigin", validate_default=True)
+    ] = "legacy"
     next_effort: Annotated[str | None, Field(alias="nextEffort")] = None
     next_model: Annotated[str | None, Field(alias="nextModel")] = None
     parent_thread_id: Annotated[str | None, Field(alias="parentThreadId")] = None
@@ -10883,9 +10864,6 @@ class TeamBoardParams(
         | TopicFollowTeamBoardParams
     ]
 ):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: (
         ListTeamBoardParams
         | ReadTeamBoardParams
@@ -12725,9 +12703,6 @@ class TeamAgentActionParams(
         | SubscribeTeamAgentActionParams
     ]
 ):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
     root: Annotated[
         MessageStatusTeamAgentActionParams
         | ExplainActionTeamAgentActionParams
